@@ -245,7 +245,7 @@ class AthenaApp:
         from memory import MemoryPlugin
         from skills import SkillManager
         from executors import ShellExecutor, DockerExecutor, BrowserExecutor
-        from gateways import CLIGateway, TelegramGateway, WebGateway
+        from gateways import CLIGateway, TelegramGateway, WeComGateway, WebGateway
         from scheduler import SchedulerPlugin
         from multimodal import MultimodalPlugin
         from api import RESTAPIGateway
@@ -269,6 +269,7 @@ class AthenaApp:
         self.scheduler = SchedulerPlugin()
         self.cli = CLIGateway()
         self.telegram = TelegramGateway()
+        self.wecom = WeComGateway()
         self.web = WebGateway()
         self.multimodal = MultimodalPlugin()
         self.rest_api = RESTAPIGateway()
@@ -280,7 +281,7 @@ class AthenaApp:
             self.llm, self.router, self.history, self.memory, self.skills,
             self.exec_shell, self.exec_docker, self.exec_browser,
             self.coordinator, self.scheduler,
-            self.cli, self.telegram, self.web,
+            self.cli, self.telegram, self.wecom, self.web,
             self.multimodal, self.rest_api, self.monitor, self.marketplace,
         ):
             self._pm.register(p)
@@ -297,7 +298,7 @@ class AthenaApp:
             self.llm, self.router, self.history, self.memory, self.skills,
             self.exec_shell, self.exec_docker, self.exec_browser,
             self.coordinator, self.scheduler,
-            self.cli, self.telegram, self.web,
+            self.cli, self.telegram, self.wecom, self.web,
             self.multimodal, self.rest_api, self.monitor, self.marketplace,
         ]
 

@@ -143,6 +143,24 @@ gateways:
     bot_token: "${TELEGRAM_BOT_TOKEN}"
     allowed_users: []  # 留空表示允许所有人
 
+  # 企业微信（WeCom）
+  wecom:
+    enabled: false
+    # 模式选择: webhook（群机器人推送）| app（自建应用收发消息）
+    mode: "webhook"
+    # --- webhook 模式（只需配置此项）---
+    # 在群聊中添加机器人后获取 Webhook Key
+    webhook_key: "${WECOM_WEBHOOK_KEY}"
+    # --- app 模式（需企业微信管理员配置）---
+    corp_id: "${WECOM_CORP_ID}"
+    agent_id: "${WECOM_AGENT_ID}"
+    secret: "${WECOM_SECRET}"
+    # 回调验证（企业微信后台配置）
+    callback_token: "${WECOM_CALLBACK_TOKEN}"
+    encoding_aes_key: "${WECOM_ENCODING_AES_KEY}"
+    callback_host: "0.0.0.0"
+    callback_port: 18794
+
   # Discord Bot
   discord:
     enabled: false
