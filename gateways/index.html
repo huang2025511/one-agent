@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Athena Agent</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --fg: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #a78bfa;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, sans-serif;
+      background: linear-gradient(180deg, #0f172a, #111827);
+      color: var(--fg);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 20px;
+      letter-spacing: 0.5px;
+    }
+    header h1 span { color: var(--accent); }
+    .status { color: var(--muted); font-size: 13px; }
+    main {
+      flex: 1;
+      max-width: 780px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 24px 20px 120px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .msg {
+      padding: 12px 16px;
+      border-radius: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      max-width: 90%;
+      word-wrap: break-word;
+      border: 1px solid var(--border);
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #0b1220;
+    }
+    .msg.bot { background: var(--panel); }
+    footer {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 14px 20px;
+      background: rgba(15, 23, 42, 0.9);
+      border-top: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+    }
+    .form {
+      max-width: 780px;
+      margin: 0 auto;
+      display: flex;
+      gap: 8px;
+    }
+    input[type="text"] {
+      flex: 1;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--fg);
+      font-size: 15px;
+      outline: none;
+    }
+    input[type="text"]:focus { border-color: var(--accent); }
+    button {
+      padding: 0 18px;
+      border-radius: 10px;
+      border: none;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #0b1220;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span>Athena</span> Agent</h1>
+    <div class="status" id="status">connecting…</div>
+  </header>
+  <main id="chat"></main>
+  <footer>
+    <form class="form" id="f">
+      <input id="input" autofocus placeholder="Ask anything…" autocomplete="off" />
+      <button type="submit" id="send">Send</button>
+    </form>
+  </footer>
+<script>
+  const chat = document.getElementById("chat");
+  const statusEl = document.getElementById("status");
+  const form = document.getElementById("f");
+  const input = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+  let sessionId = null;
+  fetch("/api/status").then(r => r.json()).then(d => {
+    statusEl.textContent = "ready · uptime " + d.uptime + "s";
+  }).catch(() => { statusEl.textContent = "offline"; });
+
+  function append(text, who) {
+    const div = document.createElement("div");
+    div.className = "msg " + who;
+    div.textContent = text;
+    chat.appendChild(div);
+    window.scrollTo(0, document.body.scrollHeight);
+  }
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    append(text, "user");
+    input.value = "";
+    sendBtn.disabled = true;
+    try {
+      const r = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, session_id: sessionId }),
+      });
+      const data = await r.json();
+      sessionId = data.session_id;
+      append(data.reply, "bot");
+    } catch (err) {
+      append(String(err), "bot");
+    } finally {
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,215 @@
+# ============================================
+# Athena Agent 主配置文件
+# 融合 OpenClaw + Hermes + OpenSquilla 的设计优势
+# ============================================
+
+# ---------- 全局设置 ----------
+agent:
+  name: "Athena"
+  description: "Token-efficient self-evolving microkernel AI agent"
+  version: "1.0.0"
+  data_dir: "./data"
+  log_level: "INFO"
+  timezone: "Asia/Shanghai"
+
+# ---------- LLM 提供商配置（支持20+模型） ----------
+llm:
+  # 默认主模型（复杂推理用）
+  primary_provider: "openrouter"
+  primary_model: "anthropic/claude-3.5-sonnet"
+
+  # 轻量模型（简单问答用）
+  lightweight_model: "gpt-4o-mini"
+
+  # 本地模型（可选）
+  local_endpoint: "http://localhost:11434"
+  local_model: "qwen2.5:7b"
+
+  # API Keys（通过环境变量覆盖更安全）
+  api_keys:
+    openrouter: "${OPENROUTER_API_KEY}"
+    openai: "${OPENAI_API_KEY}"
+    anthropic: "${ANTHROPIC_API_KEY}"
+    deepseek: "${DEEPSEEK_API_KEY}"
+    dashscope: "${DASHSCOPE_API_KEY}"
+
+  # 通用参数
+  default_temperature: 0.3
+  default_max_tokens: 2048
+  timeout: 60
+  retries: 3
+
+# ---------- 四层 Token 智能调度 ----------
+router:
+  enabled: true
+  # 任务难度分类阈值
+  task_complexity_thresholds:
+    trivial: 0.2    # < 0.2 → 轻量模型
+    simple: 0.5     # 0.2-0.5 → 中等模型
+    complex: 0.8    # 0.5-0.8 → 主模型
+    expert: 1.0     # > 0.8 → 专家模型
+
+  # 上下文压缩
+  context_compression:
+    enabled: true
+    min_tokens_before_compress: 2000
+    compression_ratio: 0.4
+    strategy: "semantic-ranking"  # semantic-ranking | summarization | hybrid
+
+  # 技能按需加载（避免所有技能常驻）
+  skill_lazy_loading:
+    enabled: true
+    max_skills_per_turn: 5
+    ttl_seconds: 300
+
+  # 自进化开关
+  self_evolution:
+    enabled: true
+    min_samples_before_adjust: 50
+    review_interval_hours: 24
+
+# ---------- 三层记忆系统 ----------
+memory:
+  # 第一层：短期记忆（当前会话）
+  short_term:
+    max_turns: 20
+    max_tokens: 8000
+
+  # 第二层：长期记忆（FTS5 全文检索）
+  long_term:
+    enabled: true
+    storage: "sqlite-fts5"  # sqlite-fts5 | chroma | faiss
+    max_results: 5
+    relevance_threshold: 0.6
+    decay_enabled: true     # 旧记忆权重衰减
+
+  # 第三层：技能/程序记忆（自动生成的 Skill）
+  procedural:
+    enabled: true
+    auto_create_skills: true
+    min_usage_before_skill: 3
+    skill_storage: "markdown"  # SKILL.md 格式
+
+# ---------- MetaSkill + MCP 技能编排 ----------
+skills:
+  # 内置技能目录
+  builtin_skills_dir: "./data/skills/builtin"
+  # 用户技能目录
+  user_skills_dir: "./data/skills/user"
+  # 社区技能目录
+  community_skills_dir: "./data/skills/community"
+
+  # 技能执行安全策略
+  security:
+    sandbox_code: true
+    allow_network: true
+    allow_file_write: true
+    file_write_root: "./data/workspace"
+    require_human_approval_for:
+      - "shell:rm"
+      - "shell:sudo"
+      - "file:delete"
+
+  # MCP 服务器配置（Model Context Protocol）
+  mcp_servers:
+    - name: "filesystem"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "./data/workspace"]
+    - name: "github"
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-github"]
+      env:
+        GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
+# ---------- 多平台消息网关 ----------
+gateways:
+  # 命令行（总是启用）
+  cli:
+    enabled: true
+    prompt: "athena> "
+
+  # Web 管理界面
+  web:
+    enabled: true
+    host: "127.0.0.1"
+    port: 18791
+    auth_required: false
+
+  # Telegram Bot
+  telegram:
+    enabled: false
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    allowed_users: []  # 留空表示允许所有人
+
+  # Discord Bot
+  discord:
+    enabled: false
+    bot_token: "${DISCORD_BOT_TOKEN}"
+    allowed_channels: []
+
+  # Slack
+  slack:
+    enabled: false
+    bot_token: "${SLACK_BOT_TOKEN}"
+    signing_secret: "${SLACK_SIGNING_SECRET}"
+
+  # 跨平台会话继续（Hermes 特性）
+  cross_platform_continue: true
+
+# ---------- 执行环境 ----------
+execution:
+  # 本地 Shell 执行
+  local_shell:
+    enabled: true
+    default_timeout: 60
+    allowed_commands: ["ls", "cat", "grep", "find", "python", "node"]
+
+  # Docker 沙箱（推荐生产环境）
+  docker:
+    enabled: false
+    image: "python:3.12-slim"
+    memory_limit_mb: 512
+    timeout: 120
+
+  # SSH 远程执行
+  ssh:
+    enabled: false
+    hosts: []
+
+  # 浏览器自动化
+  browser:
+    enabled: false
+    playwright_headless: true
+
+# ---------- 主动式调度器 ----------
+scheduler:
+  enabled: true
+  # 内置任务
+  builtin_jobs:
+    - name: "memory_housekeeping"
+      cron: "0 3 * * *"  # 每天凌晨3点
+      enabled: true
+    - name: "skill_pattern_mining"
+      cron: "0 4 * * 0"  # 每周日凌晨4点
+      enabled: true
+    - name: "router_statistics"
+      cron: "*/30 * * * *"  # 每30分钟
+      enabled: true
+
+  # 用户自定义任务（通过 Web UI 添加）
+  user_jobs_file: "./data/scheduler/jobs.yaml"
+
+# ---------- 安全与审计 ----------
+security:
+  audit_log:
+    enabled: true
+    path: "./data/logs/audit.log"
+    retention_days: 90
+
+  conversation_persistence:
+    enabled: true
+    path: "./data/logs/conversations"
+
+  data_encryption:
+    enabled: false
+    key_env: "ATHENA_ENCRYPTION_KEY"
