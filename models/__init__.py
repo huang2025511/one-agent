@@ -233,6 +233,16 @@ class LLMProvider(Plugin):
         base = self._provider_base_urls.get(provider, self._provider_base_urls["openrouter"])
         api_key = self._api_keys.get(provider) or self._api_keys.get("openrouter")
 
+        # If no API key is available, fail fast instead of retrying 3 times
+        if not api_key:
+            return {
+                "text": f"[no API key configured for provider '{provider}']",
+                "tool_calls": [],
+                "tokens_used": 0,
+                "model": model,
+                "failed": True,
+            }
+
         last_err: Optional[Exception] = None
         for attempt in range(1, self._retry_count + 1):
             try:
@@ -334,6 +344,9 @@ class LLMProvider(Plugin):
                 "model": data.get("model", model),
             }
             self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
+            # Cap stats to prevent unbounded memory growth
+            if len(self._call_stats) > 1000:
+                self._call_stats = self._call_stats[-500:]
             return result
 
         # Default — OpenAI compatible
@@ -366,6 +379,9 @@ class LLMProvider(Plugin):
             })
         tokens_used = (data.get("usage") or {}).get("total_tokens", 0)
         self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
+        # Cap stats to prevent unbounded memory growth
+        if len(self._call_stats) > 1000:
+            self._call_stats = self._call_stats[-500:]
         return {
             "text": text.strip(),
             "tool_calls": tool_calls,

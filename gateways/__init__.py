@@ -150,20 +150,23 @@ class TelegramGateway(Plugin):
                     await self._send(chat_id, "Sorry, you're not in the allowed list.")
                     continue
                 session_id = f"tg-{chat_id}"
+                # Use per-message key to avoid race when multiple messages
+                # from the same chat arrive in the same poll batch.
+                msg_key = f"{session_id}-{u.get('update_id')}"
                 event = asyncio.Event()
-                self._sessions[session_id] = event
+                self._sessions[msg_key] = event
                 # dispatch — we rely on something to call into the agent
                 if self.bus is not None:
                     self.bus.publish({
                         "type": "external_message",
                         "source": "telegram",
-                        "session_id": session_id,
+                        "session_id": msg_key,
                         "text": text,
                         "chat_id": chat_id,
                     })
                 try:
                     await asyncio.wait_for(event.wait(), 120)
-                    await self._send(chat_id, self._replies.get(session_id, "[no reply]"))
+                    await self._send(chat_id, self._replies.get(msg_key, "[no reply]"))
                 except asyncio.TimeoutError:
                     try:
                         await self._send(chat_id, "[timeout]")
@@ -173,8 +176,8 @@ class TelegramGateway(Plugin):
                     logger.exception("telegram send error for chat %s", chat_id)
                 finally:
                     # always clean up to prevent memory leak regardless of outcome
-                    self._sessions.pop(session_id, None)
-                    self._replies.pop(session_id, None)
+                    self._sessions.pop(msg_key, None)
+                    self._replies.pop(msg_key, None)
 
     async def _send(self, chat_id: int, text: str) -> None:
         if not self._client or not self._token:

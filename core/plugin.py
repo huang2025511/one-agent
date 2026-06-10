@@ -83,8 +83,11 @@ def _collect_from_module(
             and attr.__name__ not in exclude_set
         ):
             seen.add(attr)
-            pm.register(attr())
-            logger.debug("auto-discovered plugin: %s", attr.__name__)
+            try:
+                pm.register(attr())
+                logger.debug("auto-discovered plugin: %s", attr.__name__)
+            except Exception:
+                logger.exception("failed to instantiate plugin %s — skipping", attr.__name__)
 
 
 class PluginManager:

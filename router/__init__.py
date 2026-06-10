@@ -92,7 +92,7 @@ class SmartRouter(Plugin):
         turn.estimated_complexity = self._classify(turn.input_text)
         tier = self._tier_for_complexity(turn.estimated_complexity)
         model = self._llm.model_for_tier(tier) if self._llm else None
-        turn.model = model or tier
+        turn.model = model  # None is fine — chat_completion falls back to default model
         # 2) build messages + compress history
         turn.messages = self._build_messages(turn)
         # 3) cap token budget
@@ -210,7 +210,9 @@ class SmartRouter(Plugin):
 
 
 class HistoryRecorder(Plugin):
-    """Keeps per-session tails so the router can include recent turns."""
+    """DEPRECATED: kept for backwards-compat with auto-discovery.
+    SmartRouter now handles per-session history directly via _session_history.
+    """
 
     name = "router_history"
     depends_on = ["router"]
@@ -232,5 +234,4 @@ class HistoryRecorder(Plugin):
             "reply": turn.result,
             "t": time.time(),
         })
-        # cap per-session history
         self._sessions[turn.session_id] = self._sessions[turn.session_id][-20:]

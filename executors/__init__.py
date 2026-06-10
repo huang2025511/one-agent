@@ -194,11 +194,29 @@ class DockerExecutor(Plugin):
             self._enabled, self._image, self._mem_limit_mb, self._cpu_quota,
         )
 
+    def can_run(self, command: str) -> bool:
+        """Validate command before executing in Docker container."""
+        if not self._enabled:
+            return False
+        import re
+        # Basic safety: only allow printable ASCII with common shell-safe chars
+        if not re.fullmatch(r"[0-9a-zA-Z\s_./:@#\-='\"\\-]+", command.strip()):
+            return False
+        for name, pattern in ALLOWED_PATTERNS.items():
+            if re.fullmatch(pattern, command.strip()):
+                return True
+        return False
+
     def run(self, command: str) -> Dict:
         if not self._enabled:
             return {
                 "stdout": "", "stderr": "docker executor disabled",
                 "returncode": -1, "blocked": False,
+            }
+        if not self.can_run(command):
+            return {
+                "stdout": "", "stderr": f"[security] command blocked: {command[:100]}",
+                "returncode": -1, "blocked": True,
             }
         # Use exec-form (argv) instead of shell-form to avoid container-internal
         # shell interpretation.  The container is already heavily sandboxed
@@ -207,7 +225,10 @@ class DockerExecutor(Plugin):
         try:
             cmd_parts = shlex.split(command, posix=True)
         except ValueError:
-            cmd_parts = ["/bin/sh", "-c", command]
+            return {
+                "stdout": "", "stderr": f"[parse error: cannot split command]",
+                "returncode": -3, "blocked": True,
+            }
         args = [
             "docker", "run", "--rm",
             f"--memory={self._mem_limit_mb}m",

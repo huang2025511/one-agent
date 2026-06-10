@@ -79,15 +79,17 @@ class LongTermMemory:
         """Paginated FTS5 search with optional decay weighting."""
         c = self._conn.cursor()
         try:
-            # FTS5 rank function used for relevance scoring
+            # FTS5 rank(): bm25 returns negative values; more negative = more relevant.
+            # We drop the weight subquery because FTS5 virtual tables have no weight column.
             c.execute(
-                "SELECT content, source, tags, timestamp, rank, "
-                "(SELECT weight FROM memory WHERE content = memory.content LIMIT 1) as w "
+                "SELECT content, source, tags, timestamp, rank "
                 "FROM memory WHERE memory MATCH ? "
                 "ORDER BY rank LIMIT ? OFFSET ?",
                 (query, limit, offset),
             )
             rows = c.fetchall()
+            # Normalize: (content, source, tags, timestamp, rank, weight=1.0)
+            normalized = [(r[0], r[1], r[2], r[3], r[4], 1.0) for r in rows]
         except sqlite3.OperationalError:
             c.execute(
                 "SELECT content, source, tags, timestamp FROM memory "
@@ -102,10 +104,9 @@ class LongTermMemory:
                 rank = r[4] if len(r) > 4 else 0
                 weight = r[5] if len(r) > 5 else 1.0
                 normalized.append((content, source, tags, timestamp, rank, weight))
-            rows = normalized
 
         results = []
-        for row in rows:
+        for row in normalized:
             content, source, tags, timestamp = row[0], row[1], row[2], row[3]
             rank = row[4]
             w = row[5] if len(row) > 5 else 1.0
@@ -113,7 +114,9 @@ class LongTermMemory:
             if self._decay_enabled:
                 age_hours = (time.time() - timestamp) / 3600
                 w *= self._decay_factor ** min(age_hours / 24, 30)  # cap at 30 days
-            if rank <= relevance_threshold or not query:
+            # FTS5 bm25 rank is negative (more negative = more relevant).
+            # A match always has rank < 0; filter by negative threshold.
+            if rank < 0 or not query:
                 results.append({
                     "content": content,
                     "source": source,
