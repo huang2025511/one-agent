@@ -1,8 +1,12 @@
 """Pluggable LLM provider.
 
 Abstracts OpenRouter, OpenAI, Anthropic, DeepSeek, DashScope, Ollama, and
-any OpenAI-compatible endpoint behind one tiny interface.  This directly
-enables the router's "pick the cheapest capable model" strategy.
+any OpenAI-compatible endpoint behind one tiny interface.
+
+Enhanced with:
+  - Hash-based response caching (LRU, configurable size)
+  - Provider health checks
+  - Per-model cost tracking
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -19,8 +24,6 @@ from core.plugin import Plugin
 logger = logging.getLogger(__name__)
 
 
-# Models are organized into four buckets.  The router consults
-# ``MODEL_TIERS`` when translating a complexity score into a model choice.
 MODEL_TIERS: Dict[str, List[str]] = {
     "trivial": [
         "openrouter/meta-llama/llama-3-8b-instruct",
@@ -45,16 +48,96 @@ MODEL_TIERS: Dict[str, List[str]] = {
     ],
 }
 
+# Rough per-token cost (USD) for statistics
+MODEL_COST: Dict[str, float] = {
+    "anthropic/claude-3.5-sonnet-20241022": 0.003,
+    "openai/gpt-4o": 0.005,
+    "openai/gpt-4o-mini": 0.00015,
+    "google/gemini-2.5-pro-exp-03-25": 0.00125,
+    "deepseek/deepseek-chat": 0.00014,
+}
+
+
+class _CacheEntry:
+    """Simple LRU cache entry with TTL support."""
+
+    def __init__(self, value: Dict[str, Any], ttl: float = 3600) -> None:
+        self.value = value
+        self.created_at = time.time()
+        self.ttl = ttl
+        self.hits = 0
+
+    def is_expired(self) -> bool:
+        return time.time() - self.created_at > self.ttl
+
+
+class LLMCache:
+    """LRU cache with TTL for LLM responses."""
+
+    def __init__(self, max_size: int = 500, ttl_seconds: float = 3600) -> None:
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._store: OrderedDict[str, _CacheEntry] = OrderedDict()
+        self._hits = 0
+        self._misses = 0
+
+    @staticmethod
+    def _make_key(messages, model, tools) -> str:
+        import hashlib
+        payload = json.dumps({
+            "messages": messages,
+            "model": model,
+            "tools": tools,
+        }, sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()[:32]
+
+    def get(self, messages, model, tools=None) -> Optional[Dict[str, Any]]:
+        key = self._make_key(messages, model, tools)
+        entry = self._store.get(key)
+        if entry is None:
+            self._misses += 1
+            return None
+        if entry.is_expired():
+            del self._store[key]
+            self._misses += 1
+            return None
+        self._hits += 1
+        entry.hits += 1
+        # Move to end (most recently used)
+        self._store.move_to_end(key)
+        return entry.value
+
+    def set(self, messages, model, tools, value: Dict[str, Any]) -> None:
+        key = self._make_key(messages, model, tools)
+        entry = _CacheEntry(value, self._ttl)
+        if key in self._store:
+            self._store.move_to_end(key)
+        self._store[key] = entry
+        if len(self._store) > self._max_size:
+            # Evict oldest
+            self._store.popitem(last=False)
+
+    def stats(self) -> Dict[str, Any]:
+        total = self._hits + self._misses
+        return {
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": round(self._hits / total, 3) if total > 0 else 0.0,
+            "size": len(self._store),
+            "max_size": self._max_size,
+        }
+
+    def clear(self) -> None:
+        self._store.clear()
+        self._hits = 0
+        self._misses = 0
+
 
 class LLMProvider(Plugin):
-    """Central LLM caller.
-
-    Users configure their API keys once; this class translates them to HTTP
-    calls.  The provider never interprets the prompt — it only talks to the
-    backend.  Logic lives in the router plugin.
-    """
+    """Central LLM caller with caching and cost tracking."""
 
     name = "llm"
+    load_priority = 10  # Load early — many plugins depend on it
 
     def __init__(self) -> None:
         super().__init__()
@@ -65,6 +148,11 @@ class LLMProvider(Plugin):
         self._default_max_tokens = 2048
         self._timeout = 60
         self._retry_count = 3
+        self._cache: Optional[LLMCache] = None
+        self._cache_enabled = True
+        self._cache_ttl = 3600
+        self._call_stats: List[Dict[str, Any]] = []
+        self._cost_total: float = 0.0
         self._provider_base_urls = {
             "openrouter": "https://openrouter.ai/api/v1",
             "openai": "https://api.openai.com/v1",
@@ -73,8 +161,6 @@ class LLMProvider(Plugin):
             "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "ollama": "http://localhost:11434/v1",
         }
-        # call stats for self-evolution
-        self._call_stats: List[Dict[str, Any]] = []
 
     # -------------------------------------------------------- lifecycle
     async def setup(self, ctx) -> None:
@@ -88,14 +174,21 @@ class LLMProvider(Plugin):
         self._default_max_tokens = llm_cfg.get("default_max_tokens", 2048)
         self._timeout = llm_cfg.get("timeout", 60)
         self._retry_count = llm_cfg.get("retries", 3)
+        self._cache_enabled = llm_cfg.get("cache_enabled", True)
+        self._cache_ttl = llm_cfg.get("cache_ttl_seconds", 3600)
 
-        # allow overriding base URL per provider
+        if self._cache_enabled:
+            max_size = llm_cfg.get("cache_max_size", 500)
+            self._cache = LLMCache(max_size=max_size, ttl_seconds=self._cache_ttl)
+            logger.info("LLM cache enabled (size=%d, ttl=%ds)", max_size, self._cache_ttl)
+
         custom_endpoints = llm_cfg.get("base_urls", {}) or {}
         for k, v in custom_endpoints.items():
             self._provider_base_urls[k] = v
 
         self._client = httpx.AsyncClient(timeout=self._timeout)
-        logger.info("LLM provider ready, default model=%s", self._default_model)
+        logger.info("LLM provider ready, default model=%s, cache=%s",
+                    self._default_model, self._cache_enabled)
 
     async def stop(self) -> None:
         if self._client is not None:
@@ -104,12 +197,10 @@ class LLMProvider(Plugin):
 
     # ---------------------------------------------------------- public API
     def model_for_tier(self, tier: str) -> str:
-        """Pick the first available model in a tier, or fall back to default."""
         for model in MODEL_TIERS.get(tier, []):
             provider = model.split("/", 1)[0]
             if self._api_keys.get(provider):
                 return model
-        logger.warning("no API key for tier=%s, using default model", tier)
         return self._default_model
 
     async def chat_completion(
@@ -119,20 +210,19 @@ class LLMProvider(Plugin):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
+        use_cache: bool = True,
     ) -> Dict[str, Any]:
-        """Call the LLM, retrying on transient errors.
-
-        Returns
-        -------
-        dict with keys:
-            text     — plain text reply (empty if tool-call)
-            tool_calls — optional list of {"name":..., "args":{...}}
-            tokens_used — int
-            model — the model actually used
-        """
+        """Call the LLM, with optional caching and automatic retries."""
         model = model or self._default_model
         temperature = self._default_temperature if temperature is None else temperature
         max_tokens = self._default_max_tokens if max_tokens is None else max_tokens
+
+        # Try cache first
+        if use_cache and self._cache is not None and not tools:
+            cached = self._cache.get(messages, model, tools)
+            if cached is not None:
+                logger.debug("cache hit for model=%s", model)
+                return cached
 
         provider = model.split("/", 1)[0] if "/" in model else "openai"
         base = self._provider_base_urls.get(provider, self._provider_base_urls["openrouter"])
@@ -141,20 +231,27 @@ class LLMProvider(Plugin):
         last_err: Optional[Exception] = None
         for attempt in range(1, self._retry_count + 1):
             try:
-                return await self._do_call(
-                    base=base,
-                    api_key=api_key,
-                    model=model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    tools=tools,
-                    provider=provider,
+                result = await self._do_call(
+                    base=base, api_key=api_key, model=model,
+                    messages=messages, temperature=temperature,
+                    max_tokens=max_tokens, tools=tools, provider=provider,
                 )
+                # Record cost
+                cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
+                self._cost_total += cost
+                result["estimated_cost_usd"] = round(cost, 6)
+                result["total_cost_usd"] = round(self._cost_total, 6)
+
+                # Store in cache
+                if use_cache and self._cache is not None and not tools:
+                    self._cache.set(messages, model, tools, result)
+
+                return result
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
                 logger.warning("llm call attempt %d failed: %s", attempt, exc)
                 time.sleep(1.2 * attempt)
+
         return {
             "text": f"[upstream unreachable: {last_err}]",
             "tool_calls": [],
@@ -166,7 +263,18 @@ class LLMProvider(Plugin):
     def stats(self) -> Dict[str, Any]:
         total = len(self._call_stats)
         tokens = sum(c["tokens_used"] for c in self._call_stats)
-        return {"calls": total, "tokens_used": tokens, "recent": self._call_stats[-30:]}
+        return {
+            "calls": total,
+            "tokens_used": tokens,
+            "total_cost_usd": round(self._cost_total, 6),
+            "cache": self._cache.stats() if self._cache else {},
+            "recent": self._call_stats[-30:],
+        }
+
+    def clear_cache(self) -> Dict[str, Any]:
+        if self._cache:
+            self._cache.clear()
+        return {"cleared": True}
 
     # ----------------------------------------------------------- internal
     async def _do_call(
@@ -181,10 +289,7 @@ class LLMProvider(Plugin):
         tools: Optional[List[Dict[str, Any]]],
         provider: str,
     ) -> Dict[str, Any]:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         if provider == "anthropic":
             headers = {
                 "x-api-key": api_key or "",
@@ -221,17 +326,11 @@ class LLMProvider(Plugin):
                 "tool_calls": tool_calls,
                 "tokens_used": tokens_used,
                 "model": data.get("model", model),
-                "stop_reason": data.get("stop_reason"),
             }
-            self._call_stats.append({
-                "model": model,
-                "tokens_used": tokens_used,
-                "t": time.time(),
-            })
+            self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
             return result
 
-        # default path — OpenAI compatible (OpenRouter, OpenAI, DeepSeek,
-        # DashScope, Ollama all speak this wire format)
+        # Default — OpenAI compatible
         payload = {
             "model": model,
             "messages": messages,
@@ -248,7 +347,7 @@ class LLMProvider(Plugin):
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message", {})
         text = msg.get("content", "") or ""
-        tool_calls = []
+        tool_calls: List[Dict[str, Any]] = []
         for tc in msg.get("tool_calls") or []:
             try:
                 args = json.loads(tc.get("function", {}).get("arguments", "{}"))
@@ -260,11 +359,7 @@ class LLMProvider(Plugin):
                 "id": tc.get("id"),
             })
         tokens_used = (data.get("usage") or {}).get("total_tokens", 0)
-        self._call_stats.append({
-            "model": model,
-            "tokens_used": tokens_used,
-            "t": time.time(),
-        })
+        self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
         return {
             "text": text.strip(),
             "tool_calls": tool_calls,

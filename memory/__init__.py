@@ -1,12 +1,9 @@
 """Three-tier memory — short / long / procedural (Hermes-style).
 
-Tier 1 — short term: per-turn message list (lives in TurnContext.messages).
-Tier 2 — long term: sqlite + FTS5 (or pure-Python fallback), cross-session.
-Tier 3 — procedural memory: reusable skill documents created from past
-         successful turns — this is how the agent "grows with you".
-
-Design follows Hermes Agent's three-tier memory with OpenClaw's Markdown
-storage style for skills.
+Enhanced with:
+  - Paginated FTS5 search
+  - Memory weight decay for old entries
+  - Configurable relevance threshold
 """
 
 from __future__ import annotations
@@ -29,15 +26,14 @@ logger = logging.getLogger(__name__)
 
 # ---------- tier 2: long-term memory (cross-session FTS) ------------------
 class LongTermMemory:
-    """Very small FTS5-backed store.
+    """FTS5-backed store with pagination and weight decay."""
 
-    We keep the schema minimal so it works without external dependencies.
-    """
-
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, decay_enabled: bool = True, decay_factor: float = 0.95) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._path = path
         self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._decay_enabled = decay_enabled
+        self._decay_factor = decay_factor
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -48,46 +44,106 @@ class LongTermMemory:
                 "content, source, tags, timestamp UNINDEXED)"
             )
         except sqlite3.OperationalError:
-            # fallback: plain table if FTS5 is not compiled in
             c.execute(
                 "CREATE TABLE IF NOT EXISTS memory ("
-                "content TEXT, source TEXT, tags TEXT, timestamp REAL)"
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "content TEXT, source TEXT, tags TEXT, timestamp REAL, weight REAL DEFAULT 1.0)"
             )
             c.execute("CREATE INDEX IF NOT EXISTS idx_memory_ts ON memory(timestamp)")
         self._conn.commit()
 
-    def add(self, content: str, source: str = "user", tags: str = "") -> None:
+    def add(self, content: str, source: str = "user", tags: str = "", weight: float = 1.0) -> None:
         c = self._conn.cursor()
-        c.execute(
-            "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
-            (content, source, tags, time.time()),
-        )
+        # Check if weight column exists
+        c.execute("PRAGMA table_info(memory)")
+        columns = {row[1] for row in c.fetchall()}
+        if "weight" in columns:
+            c.execute(
+                "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
+                (content, source, tags, time.time(), weight),
+            )
+        else:
+            c.execute(
+                "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
+                (content, source, tags, time.time()),
+            )
         self._conn.commit()
 
-    def search(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        offset: int = 0,
+        relevance_threshold: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """Paginated FTS5 search with optional decay weighting."""
         c = self._conn.cursor()
         try:
+            # FTS5 rank function used for relevance scoring
             c.execute(
-                "SELECT content, source, tags, timestamp FROM memory "
-                "WHERE memory MATCH ? ORDER BY rank LIMIT ?",
-                (query, limit),
+                "SELECT content, source, tags, timestamp, rank, "
+                "(SELECT weight FROM memory WHERE content = memory.content LIMIT 1) as w "
+                "FROM memory WHERE memory MATCH ? "
+                "ORDER BY rank LIMIT ? OFFSET ?",
+                (query, limit, offset),
             )
+            rows = c.fetchall()
         except sqlite3.OperationalError:
-            # fallback scan
             c.execute(
                 "SELECT content, source, tags, timestamp FROM memory "
-                "ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
+                "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             )
-        return [
-            {"content": row[0], "source": row[1], "tags": row[2], "timestamp": row[3]}
-            for row in c.fetchall()
-        ]
+            rows = [(r[0], r[1], r[2], r[3], 0) + (r[4] if len(r) > 4 else 1.0,) for r in c.fetchall()]
+
+        results = []
+        for row in rows:
+            content, source, tags, timestamp = row[0], row[1], row[2], row[3]
+            rank = row[4]
+            w = row[5] if len(row) > 5 else 1.0
+            # Apply decay to old entries
+            if self._decay_enabled:
+                age_hours = (time.time() - timestamp) / 3600
+                w *= self._decay_factor ** min(age_hours / 24, 30)  # cap at 30 days
+            if rank <= relevance_threshold or not query:
+                results.append({
+                    "content": content,
+                    "source": source,
+                    "tags": tags,
+                    "timestamp": timestamp,
+                    "weight": w,
+                })
+        return results
+
+    def paginate(self, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        """Return paginated list of all memories."""
+        c = self._conn.cursor()
+        c.execute("SELECT COUNT(*) FROM memory")
+        total = c.fetchone()[0]
+        offset = (page - 1) * page_size
+        c.execute(
+            "SELECT content, source, tags, timestamp FROM memory "
+            "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (page_size, offset),
+        )
+        items = [{"content": r[0], "source": r[1], "tags": r[2], "timestamp": r[3]} for r in c.fetchall()]
+        return {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size,
+        }
 
     def stats(self) -> Dict[str, Any]:
         c = self._conn.cursor()
-        c.execute("SELECT COUNT(*) FROM memory")
-        return {"rows": c.fetchone()[0]}
+        try:
+            c.execute("SELECT COUNT(*), AVG(weight) FROM memory")
+            row = c.fetchone()
+            return {"rows": row[0] or 0, "avg_weight": round(row[1] or 1.0, 3)}
+        except sqlite3.OperationalError:
+            c.execute("SELECT COUNT(*) FROM memory")
+            return {"rows": c.fetchone()[0] or 0, "avg_weight": 1.0}
 
     def vacuum(self) -> None:
         self._conn.execute("VACUUM")
@@ -95,12 +151,7 @@ class LongTermMemory:
 
 # ---------- tier 3: procedural memory (auto-generated skills) --------------
 class ProceduralMemory:
-    """Reusable SKILL.md documents — the Hermes "grows with you" mechanism.
-
-    On turn success, if the pattern matches a known "teachable" shape
-    (repeated tool use, long reasoning chain), we write a SKILL.md so next
-    time we get the same prompt we can shortcut straight to the tool plan.
-    """
+    """Reusable SKILL.md documents — Hermes-style self-growth."""
 
     def __init__(self, directory: str) -> None:
         self._dir = Path(directory)
@@ -130,7 +181,6 @@ class ProceduralMemory:
         logger.info("saved skill %s (%d triggers)", safe, len(triggers))
 
     def lookup(self, text: str) -> Optional[Dict[str, Any]]:
-        """Scan trigger phrases; return best matching skill body or None."""
         best: Optional[Dict[str, Any]] = None
         best_hits = 0
         for skill_id, meta in self._index["skills"].items():
@@ -154,7 +204,7 @@ class ProceduralMemory:
 
 # ---------- public plugin --------------------------------------------------
 class MemoryPlugin(Plugin):
-    """Memory orchestrator — hooks into the bus."""
+    """Memory orchestrator — hooks into the event bus."""
 
     name = "memory"
 
@@ -170,21 +220,28 @@ class MemoryPlugin(Plugin):
         await super().setup(ctx)
         cfg = ctx.config.get("memory", {}) or {}
         data_dir = ctx.config.get("agent", {}).get("data_dir", "./data")
-        self._long = LongTermMemory(os.path.join(data_dir, "memory/longterm.sqlite"))
+
+        mem_cfg = cfg.get("long_term", {}) or {}
+        self._long = LongTermMemory(
+            path=os.path.join(data_dir, "memory/longterm.sqlite"),
+            decay_enabled=mem_cfg.get("decay_enabled", True),
+        )
         self._procedural = ProceduralMemory(os.path.join(data_dir, "memory/skills"))
-        self._max_results = (cfg.get("long_term") or {}).get("max_results", 5)
-        self._auto_create_skills = (cfg.get("procedural") or {}).get("auto_create_skills", True)
-        self._min_usage = (cfg.get("procedural") or {}).get("min_usage_before_skill", 3)
+        self._max_results = mem_cfg.get("max_results", 5)
+        self._auto_create_skills = cfg.get("procedural", {}).get("auto_create_skills", True)
+        self._min_usage = cfg.get("procedural", {}).get("min_usage_before_skill", 3)
 
         self.bus.subscribe("user_message", self._on_user_message)
         self.bus.subscribe("turn_completed", self._on_turn_completed)
+        logger.info("memory plugin ready: long_term=%s", self._long.stats())
 
-    # ------------------------------------------------------- handlers
     async def _on_user_message(self, event: Event) -> None:
         turn: TurnContext | None = event.get("turn")
         if turn is None or self._long is None:
             return
-        hits = self._long.search(turn.input_text, limit=self._max_results)
+        cfg = self.ctx.config.get("memory", {}) if self.ctx else {}
+        threshold = (cfg.get("long_term") or {}).get("relevance_threshold", 0.6)
+        hits = self._long.search(turn.input_text, limit=self._max_results, relevance_threshold=threshold)
         if hits:
             snippets = "\n".join(f"- {h['content'][:160]}" for h in hits)
             turn.meta["memory_snippets"] = snippets
@@ -194,35 +251,22 @@ class MemoryPlugin(Plugin):
         if turn is None or self._long is None:
             return
         if turn.result and not turn.error:
-            # store successful Q&A for future recall
             self._long.add(
                 content=f"Q: {turn.input_text}\nA: {turn.result}",
                 source=turn.source,
                 tags="interaction",
             )
-        # procedural memory — auto-create a skill if the turn pattern is
-        # "repeatable" and contains structured output we can template.
         if self._auto_create_skills and self._procedural and self._looks_teachable(turn):
             triggers = [w for w in re.findall(r"\w{4,}", turn.input_text)][:5]
             if triggers:
-                # only record once; the procedural memory plugin isn't meant
-                # to compete with community skills, just automate obvious
-                # routines.
                 existing = self._procedural.lookup(turn.input_text)
                 if existing is None:
                     body = f"# Skill: {triggers[0]}\n\n"
-                    body += f"When the user writes something like: "
-                    body += f"*{turn.input_text[:120]}*\n\n"
-                    body += "## Tool Plan\n\n"
-                    body += f"- You can reuse this reply as a template:\n\n"
-                    body += "```\n" + (turn.result or "")[:2000] + "\n```\n"
+                    body += f"When the user writes something like: *{turn.input_text[:120]}*\n\n"
+                    body += "## Tool Plan\n\n```\n" + (turn.result or "")[:2000] + "\n```\n"
                     self._procedural.save(triggers[0], triggers, body)
 
-    # --------------------------------------------------------- helpers
     def _looks_teachable(self, turn: TurnContext) -> bool:
-        """Heuristic: teachable if the reply is medium-long and uses tools
-        or contains structured sections (code blocks / bullet lists).
-        """
         if not turn.result:
             return False
         if "```" in turn.result and len(turn.result) > 200:
@@ -236,10 +280,10 @@ class MemoryPlugin(Plugin):
         if self._long is not None:
             self._long.add(text, source=source, tags=tags)
 
-    def search_facts(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def search_facts(self, query: str, limit: int = 5, offset: int = 0) -> List[Dict[str, Any]]:
         if self._long is None:
             return []
-        return self._long.search(query, limit=limit)
+        return self._long.search(query, limit=limit, offset=offset)
 
     def stats(self) -> Dict[str, Any]:
         return {

@@ -213,3 +213,33 @@ security:
   data_encryption:
     enabled: false
     key_env: "ATHENA_ENCRYPTION_KEY"
+
+# ---------- REST API ----------
+rest:
+  enabled: true
+  host: "0.0.0.0"
+  port: 18792
+  api_key: ""          # 留空则禁用认证；设置后请求需带 X-API-Key header
+
+# ---------- 监控仪表盘 ----------
+monitoring:
+  enabled: true
+  port: 18793
+
+# ---------- 多模态 ----------
+multimodal:
+  enabled: false      # 设为 true 并配置 API key 后启用
+  image_model: "openai/dall-e-3"
+  vision_model: "openai/gpt-4o"
+  tts_model: "openai/tts-1"
+
+# ---------- 插件市场 ----------
+marketplace:
+  community_hub: "https://raw.githubusercontent.com/huang2025511/agnet-skills/main/"
+  install_dir: "./data/skills/community"
+
+# ---------- LLM 缓存 ----------
+llm_cache:
+  enabled: true
+  max_size: 500
+  ttl_seconds: 3600

@@ -4,15 +4,23 @@ Each component (router, memory, gateways...) exposes itself as a Plugin so
 the microkernel can wire it into the bus at boot time and tear it down on
 shutdown.  The interface is intentionally small — we don't need dependency
 injection, just a lifecycle contract.
+
+Enhanced with:
+  - Auto-discovery from package directories
+  - Priority-based loading order
+  - Dependency graph validation
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
-from typing import List
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, List, Optional, Type
 
-from .context import AgentContext
-from .events import EventBus
+if TYPE_CHECKING:
+    from core.context import AgentContext
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +35,14 @@ class Plugin:
 
     name: str = "plugin"
     depends_on: List[str] = []
+    load_priority: int = 0  # Higher = loaded first
 
     def __init__(self) -> None:
-        self.ctx: AgentContext | None = None
-        self.bus: EventBus | None = None
+        self.ctx: Optional["AgentContext"] = None
+        self.bus: Optional[Any] = None
 
     # lifecycle -------------------------------------------------------------
-    async def setup(self, ctx: AgentContext) -> None:
+    async def setup(self, ctx: "AgentContext") -> None:
         self.ctx = ctx
         self.bus = ctx.bus
         logger.info("%s setup", self.name)
@@ -56,8 +65,29 @@ class Plugin:
         })
 
 
+def _collect_from_module(
+    module,
+    pkg_name: str,
+    pm: "PluginManager",
+    seen: set,
+    exclude_set: set,
+) -> None:
+    """Extract Plugin subclasses from a module and register them."""
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if (
+            isinstance(attr, type)
+            and issubclass(attr, Plugin)
+            and attr is not Plugin
+            and attr not in seen
+        ):
+            seen.add(attr)
+            pm.register(attr())
+            logger.debug("auto-discovered plugin: %s", attr.__name__)
+
+
 class PluginManager:
-    """Loads & orchestrates plugins in topological order."""
+    """Loads & orchestrates plugins with auto-discovery and topological ordering."""
 
     def __init__(self) -> None:
         self._plugins: List[Plugin] = []
@@ -65,12 +95,63 @@ class PluginManager:
     def register(self, plugin: Plugin) -> None:
         self._plugins.append(plugin)
 
-    async def setup_all(self, ctx: AgentContext) -> None:
-        # naive ordering — acceptable because plugins declare deps explicitly
+    @classmethod
+    def discover(
+
+        cls,
+        package_paths: List[str],
+        exclude: Optional[List[str]] = None,
+    ) -> "PluginManager":
+        """Auto-discover Plugin subclasses from given package directories.
+
+        For each package dir, we look for the package itself (for its __init__)
+        AND for each .py sub-module in the directory — both may define plugins.
+
+        Example:
+            pm = PluginManager.discover([
+                "router", "memory", "skills",
+                "executors", "gateways", "scheduler",
+            ])
+        """
+        pm = cls()
+        exclude_set = set(exclude or [])
+        seen: set[str] = set()
+
+        for pkg_name in package_paths:
+            # First, try to import the package __init__ (in case it defines plugins)
+            try:
+                pkg_module = importlib.import_module(pkg_name)
+                _collect_from_module(pkg_module, pkg_name, pm, seen, exclude_set)
+            except ImportError as exc:
+                logger.warning("could not import package %s: %s", pkg_name, exc)
+                continue
+
+            # Then scan the package directory for sub-modules
+            try:
+                pkg = importlib.import_module(pkg_name)
+                pkg_path = Path(pkg.__file__).parent
+            except Exception as exc:
+                logger.warning("could not resolve path for %s: %s", pkg_name, exc)
+                continue
+
+            for file in sorted(pkg_path.glob("*.py")):
+                stem = file.stem
+                if stem.startswith("_") or stem in exclude_set:
+                    continue
+                try:
+                    # e.g. "executors.shell" if pkg_name is "executors"
+                    module = importlib.import_module(f"{pkg_name}.{stem}")
+                    _collect_from_module(module, pkg_name, pm, seen, exclude_set)
+                except ImportError as exc:
+                    logger.warning("could not import %s.%s: %s", pkg_name, stem, exc)
+
+        return pm
+
+    async def setup_all(self, ctx: "AgentContext") -> None:
         ordered = self._topological(self._plugins)
         for plugin in ordered:
             await plugin.setup(ctx)
-        logger.info("%d plugins set up", len(ordered))
+        logger.info("%d plugins set up (priority-sorted)", len(ordered))
 
     async def start_all(self) -> None:
         for plugin in self._plugins:
@@ -83,9 +164,16 @@ class PluginManager:
             except Exception:
                 logger.exception("failed to stop %s", plugin.name)
 
+    def get_by_name(self, name: str) -> Optional[Plugin]:
+        for p in self._plugins:
+            if p.name == name:
+                return p
+        return None
+
     # ---------------------------------------------------------------- utils
     @staticmethod
     def _topological(plugins: List[Plugin]) -> List[Plugin]:
+        """Sort plugins by dependency order, then by load_priority descending."""
         name_to_plugin = {p.name: p for p in plugins}
         ordered: List[Plugin] = []
         visited = set()
@@ -105,4 +193,7 @@ class PluginManager:
 
         for p in plugins:
             visit(p, set())
+
+        # Secondary sort: load_priority descending
+        ordered.sort(key=lambda p: -p.load_priority)
         return ordered
