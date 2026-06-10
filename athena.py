@@ -287,9 +287,6 @@ class AthenaApp:
         self.ctx: Optional[AgentContext] = None
 
     async def start(self) -> None:
-        from core.events import EventBus
-        from core.coordinator import Coordinator
-
         self.ctx = AgentContext(
             config=self.config.model_dump(),
             bus=self.bus,

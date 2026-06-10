@@ -7,7 +7,7 @@
 agent:
   name: "Athena"
   description: "Token-efficient self-evolving microkernel AI agent"
-  version: "1.0.0"
+  version: "2.0.0"
   data_dir: "./data"
   log_level: "INFO"
   timezone: "Asia/Shanghai"
@@ -133,6 +133,8 @@ gateways:
     enabled: true
     host: "127.0.0.1"
     port: 18791
+    # WARNING: Set to true in production! Disabling auth exposes the chat UI
+    # to anyone with network access. Consider using API key or OAuth.
     auth_required: false
 
   # Telegram Bot

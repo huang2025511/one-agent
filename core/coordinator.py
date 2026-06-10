@@ -134,17 +134,21 @@ class Coordinator(Plugin):
                 else:
                     result = "[no skill manager bound]"
                 tool_results.append({"role": "tool", "name": name, "content": str(result)})
-                messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [tc],
-                })
-                # OpenAI wire format needs tool results to match the call id
+                
+                # OpenAI wire format requires explicit tool_calls message followed by tool result
+                # Claude/Anthropic uses tool_use blocks in content, no need for this format
+                if self._needs_openai_tool_format(turn.model):
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [tc],
+                    })
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id") or "call",
                     "content": str(result),
                 })
+
         else:
             # loop exhausted — force a plain text call
             resp = await self._llm.chat_completion(
@@ -159,3 +163,11 @@ class Coordinator(Plugin):
         self.publish("turn_completed", turn=turn)
         logger.info("reply produced (%d tokens, %.2fs)",
                     turn.tokens_used, turn.duration_seconds or 0)
+
+    def _needs_openai_tool_format(self, model: str) -> bool:
+        """Check if model requires OpenAI-style tool call formatting."""
+        # Claude/Anthropic uses tool_use blocks in content, not separate tool_calls messages
+        if model and ("claude" in model.lower() or "anthropic" in model.lower()):
+            return False
+        # Default to OpenAI format for all other models
+        return True

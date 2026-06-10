@@ -218,10 +218,13 @@ class LLMProvider(Plugin):
         max_tokens = self._default_max_tokens if max_tokens is None else max_tokens
 
         # Try cache first
-        if use_cache and self._cache is not None and not tools:
+        # Note: tools are included in cache key, so tool calls can also be cached
+        # This is useful for deterministic tools (calculator, echo) but may not be
+        # desired for stateful tools (weather, API calls)
+        if use_cache and self._cache is not None:
             cached = self._cache.get(messages, model, tools)
             if cached is not None:
-                logger.debug("cache hit for model=%s", model)
+                logger.debug("cache hit for model=%s (tools=%s)", model, bool(tools))
                 return cached
 
         provider = model.split("/", 1)[0] if "/" in model else "openai"
