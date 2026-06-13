@@ -251,6 +251,7 @@ class MemoryPlugin(Plugin):
 
         self.bus.subscribe("user_message", self._on_user_message)
         self.bus.subscribe("turn_completed", self._on_turn_completed)
+        self.bus.subscribe("cron", self._on_cron)
         logger.info("memory plugin ready: long_term=%s", self._long.stats())
 
     async def _on_user_message(self, event: Event) -> None:
@@ -283,6 +284,13 @@ class MemoryPlugin(Plugin):
                     body += f"When the user writes something like: *{turn.input_text[:120]}*\n\n"
                     body += "## Tool Plan\n\n```\n" + (turn.result or "")[:2000] + "\n```\n"
                     self._procedural.save(triggers[0], triggers, body)
+
+    async def _on_cron(self, event: Event) -> None:
+        """Handle scheduled maintenance tasks."""
+        job_name = event.get("name") or ""
+        if job_name == "memory_housekeeping" and self._long is not None:
+            self._long.vacuum()
+            logger.info("memory housekeeping: vacuum completed, stats=%s", self._long.stats())
 
     def _looks_teachable(self, turn: TurnContext) -> bool:
         if not turn.result:

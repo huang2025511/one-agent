@@ -53,7 +53,7 @@ class RESTAPIGateway(Plugin):
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
-        cfg = (ctx.config.get("gateways") or {}).get("rest") or {}
+        cfg = ctx.config.get("rest") or {}
         self._host = cfg.get("host", self._host)
         self._port = int(cfg.get("port", self._port))
         self._enabled = bool(cfg.get("enabled", True))

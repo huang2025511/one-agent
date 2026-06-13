@@ -125,6 +125,11 @@ class FullConfig(BaseModel):
     execution: Dict[str, Any] = Field(default_factory=dict)
     scheduler: Dict[str, Any] = Field(default_factory=dict)
     security: Dict[str, Any] = Field(default_factory=dict)
+    rest: Dict[str, Any] = Field(default_factory=dict)
+    monitoring: Dict[str, Any] = Field(default_factory=dict)
+    multimodal: Dict[str, Any] = Field(default_factory=dict)
+    marketplace: Dict[str, Any] = Field(default_factory=dict)
+    llm_cache: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ============================================================

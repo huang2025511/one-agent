@@ -75,6 +75,7 @@ class SmartRouter(Plugin):
         self.bus.subscribe("user_message", self._on_user_message)
         self.bus.subscribe("turn_completed", self._on_turn_completed)
         self.bus.subscribe("turn_completed", self._on_done)
+        self.bus.subscribe("cron", self._on_cron)
         logger.info("router configured (compression=%s, self_evo=%s)",
                     self._cfg.get("context_compression", {}).get("enabled", True),
                     self._cfg.get("self_evolution", {}).get("enabled", True))
@@ -135,6 +136,12 @@ class SmartRouter(Plugin):
         if len(self._session_history) > self._max_sessions:
             oldest_key = next(iter(self._session_history))
             del self._session_history[oldest_key]
+
+    async def _on_cron(self, event: Event) -> None:
+        """Handle router_statistics: log tier distribution summary."""
+        job_name = event.get("name") or ""
+        if job_name == "router_statistics":
+            logger.info("router statistics: tier distribution=%s", self._tier_stats)
 
     # --------------------------------------------------------- internal
     def _classify(self, text: str) -> float:

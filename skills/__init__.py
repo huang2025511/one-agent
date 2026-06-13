@@ -11,6 +11,7 @@ The SkillManager exposes them uniformly as tools consumable by the LLM.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.events import Event
 from core.plugin import Plugin
 
 logger = logging.getLogger(__name__)
@@ -85,6 +87,7 @@ class SkillManager(Plugin):
         self._max_loaded_per_turn = cfg.get("max_skills_per_turn", self._max_loaded_per_turn)
         # 保存 ctx 引用供 settings 技能使用
         self._ctx_ref = ctx
+        self.bus.subscribe("cron", self._on_cron)
         logger.info("skills loaded: %d", len(self._skills))
 
     # ---------------------------------------------------------- public
@@ -114,6 +117,15 @@ class SkillManager(Plugin):
         if skill is None:
             return f"[unknown skill: {skill_id}]"
         return await skill.run(args)
+
+    async def _on_cron(self, event: Event) -> None:
+        """Handle skill_pattern_mining: re-scan skill directories for new skills."""
+        job_name = event.get("name") or ""
+        if job_name == "skill_pattern_mining":
+            self._scan_directory(self._builtin_dir)
+            self._scan_directory(self._user_dir)
+            self._scan_directory(self._community_dir)
+            logger.info("skill pattern mining: %d skills loaded", len(self._skills))
 
     def register(self, skill: Skill) -> None:
         self._skills[skill.id] = skill

@@ -175,11 +175,13 @@ class LLMProvider(Plugin):
         self._default_max_tokens = llm_cfg.get("default_max_tokens", 2048)
         self._timeout = llm_cfg.get("timeout", 60)
         self._retry_count = llm_cfg.get("retries", 3)
-        self._cache_enabled = llm_cfg.get("cache_enabled", True)
-        self._cache_ttl = llm_cfg.get("cache_ttl_seconds", 3600)
+        # Cache config: read from dedicated llm_cache section first, fall back to llm inline
+        cache_cfg = ctx.config.get("llm_cache") or {}
+        self._cache_enabled = cache_cfg.get("enabled", llm_cfg.get("cache_enabled", True))
+        self._cache_ttl = cache_cfg.get("ttl_seconds", llm_cfg.get("cache_ttl_seconds", 3600))
 
         if self._cache_enabled:
-            max_size = llm_cfg.get("cache_max_size", 500)
+            max_size = cache_cfg.get("max_size", llm_cfg.get("cache_max_size", 500))
             self._cache = LLMCache(max_size=max_size, ttl_seconds=self._cache_ttl)
             logger.info("LLM cache enabled (size=%d, ttl=%ds)", max_size, self._cache_ttl)
 

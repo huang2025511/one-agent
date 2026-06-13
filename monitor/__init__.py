@@ -36,7 +36,7 @@ class MonitoringPlugin(Plugin):
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
-        cfg = (ctx.config.get("gateways") or {}).get("monitoring") or {}
+        cfg = ctx.config.get("monitoring") or {}
         self._port = int(cfg.get("port", self._port))
         self._enabled = bool(cfg.get("enabled", True))
         logger.info("monitoring configured on port %d", self._port)
