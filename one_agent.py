@@ -1,7 +1,7 @@
 """Top-level One-Agent bootstrap.
 
 Wires up every subsystem, then hands control to the CLI gateway or the web
-UI.  Run with ``python athena.py`` (or ``python -m athena``).
+UI.  Run with ``python one_agent.py`` (or ``python -m one_agent``).
 
 Enhanced with:
   - Unified structured logging
@@ -181,7 +181,7 @@ def load_config(path: str) -> FullConfig:
 
     # Try Fernet decryption if key is set
     cipher = None
-    enc_key = os.environ.get("ATHENA_ENCRYPTION_KEY")
+    enc_key = os.environ.get("ONE_AGENT_ENCRYPTION_KEY")
     if enc_key:
         try:
             from cryptography.fernet import Fernet
@@ -210,7 +210,7 @@ def setup_logging(config) -> None:
 
     # File handler with rotation
     file_handler = logging.handlers.RotatingFileHandler(
-        log_dir / "athena.log",
+        log_dir / "one_agent.log",
         maxBytes=10 * 1024 * 1024,  # 10 MB
         backupCount=5,
         encoding="utf-8",
@@ -236,10 +236,10 @@ def setup_logging(config) -> None:
 
 
 # ============================================================
-# AthenaApp
+# OneAgentApp
 # ============================================================
 
-class AthenaApp:
+class OneAgentApp:
     """Top-level assembly: builds plugin manager, coordinates plugins."""
 
     def __init__(self, config_path: str) -> None:
@@ -347,7 +347,7 @@ class AthenaApp:
 # Entry point
 # ============================================================
 
-async def _interactive(app: AthenaApp) -> None:
+async def _interactive(app: OneAgentApp) -> None:
     print()
     print("╔══════════════════════════════════════════════╗")
     print("║  One-Agent v2 — 自然语言即可操作，输入 '帮助'   ║")
@@ -408,7 +408,7 @@ async def _interactive(app: AthenaApp) -> None:
     session_id = "cli-session"
     while True:
         try:
-            line = input("athena> ").strip()
+            line = input("one-agent> ").strip()
         except EOFError:
             print()
             return
@@ -477,10 +477,10 @@ async def _interactive(app: AthenaApp) -> None:
 
 
 async def main() -> None:
-    cfg_path = os.environ.get("ATHENA_CONFIG", str(ROOT / "config" / "default_config.yaml"))
+    cfg_path = os.environ.get("ONE_AGENT_CONFIG", str(ROOT / "config" / "default_config.yaml"))
     if not Path(cfg_path).exists():
         sys.exit(f"config not found: {cfg_path}")
-    app = AthenaApp(cfg_path)
+    app = OneAgentApp(cfg_path)
     await app.start()
 
     # register graceful shutdown on SIGINT/SIGTERM

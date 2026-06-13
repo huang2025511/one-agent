@@ -59,7 +59,7 @@ class CLIGateway(Plugin):
 
     def __init__(self) -> None:
         super().__init__()
-        self._prompt = "athena> "
+        self._prompt = "one-agent> "
         self._session_id = uuid.uuid4().hex[:12]
         self._reply_available: asyncio.Event | None = None
         self._last_reply: str = ""

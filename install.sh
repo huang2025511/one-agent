@@ -43,7 +43,7 @@ if [[ "$LANG_CODE" == "zh" ]]; then
     T[lang_en]="Interface language set to English, timezone UTC."
     T[init_data]="[6/6] 初始化数据目录..."
     T[data_done]="数据目录已就绪。"
-    T[done]="\n✅ 安装完成！\n\n启动方式:\n  source venv/bin/activate   # 如果使用了虚拟环境\n  python athena.py\n\n服务地址:\n  Web UI:    http://127.0.0.1:18791\n  REST API:  http://127.0.0.1:18792\n  监控面板:  http://127.0.0.1:18793\n\n详细教程: cat TUTORIAL.md\n"
+    T[done]="\n✅ 安装完成！\n\n启动方式:\n  source venv/bin/activate   # 如果使用了虚拟环境\n  python one_agent.py\n\n服务地址:\n  Web UI:    http://127.0.0.1:18791\n  REST API:  http://127.0.0.1:18792\n  监控面板:  http://127.0.0.1:18793\n\n详细教程: cat TUTORIAL.md\n"
     T[smoke]="运行冒烟测试验证安装: python tests/smoke.py\n"
 else
     T[welcome]="\n  ╔══════════════════════════════════════╗"
@@ -71,7 +71,7 @@ else
     T[lang_en]="Interface language set to English, timezone UTC."
     T[init_data]="[6/6] Initializing data directories..."
     T[data_done]="Data directories ready."
-    T[done]="\n✅ Installation complete!\n\nTo start:\n  source venv/bin/activate   # if using virtual environment\n  python athena.py\n\nServices:\n  Web UI:    http://127.0.0.1:18791\n  REST API:  http://127.0.0.1:18792\n  Monitor:   http://127.0.0.1:18793\n\nFull tutorial: cat TUTORIAL.md\n"
+    T[done]="\n✅ Installation complete!\n\nTo start:\n  source venv/bin/activate   # if using virtual environment\n  python one_agent.py\n\nServices:\n  Web UI:    http://127.0.0.1:18791\n  REST API:  http://127.0.0.1:18792\n  Monitor:   http://127.0.0.1:18793\n\nFull tutorial: cat TUTORIAL.md\n"
     T[smoke]="Run smoke test to verify: python tests/smoke.py\n"
 fi
 

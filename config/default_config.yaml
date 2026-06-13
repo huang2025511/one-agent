@@ -126,7 +126,7 @@ gateways:
   # 命令行（总是启用）
   cli:
     enabled: true
-    prompt: "athena> "
+    prompt: "one-agent> "
 
   # Web 管理界面
   web:
@@ -267,7 +267,7 @@ security:
 
   data_encryption:
     enabled: false
-    key_env: "ATHENA_ENCRYPTION_KEY"
+    key_env: "ONE_AGENT_ENCRYPTION_KEY"
 
   # 是否允许通过聊天窗口修改敏感配置（如 API Key）
   # 默认 false — 敏感项只能通过编辑配置文件修改

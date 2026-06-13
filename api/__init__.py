@@ -13,7 +13,7 @@ Exposes:
   GET  /api/health         — health check
 
 All endpoints return JSON.  Authentication via X-API-Key header
-(configurable via ATHENA_API_KEY env var).
+(configurable via ONE_AGENT_API_KEY env var).
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ class RESTAPIGateway(Plugin):
         self._enabled = bool(cfg.get("enabled", True))
         self._api_key = cfg.get("api_key", "")
         import os as _os
-        self._api_key = _os.environ.get("ATHENA_API_KEY", self._api_key)
+        self._api_key = _os.environ.get("ONE_AGENT_API_KEY", self._api_key)
         logger.info("REST API configured on %s:%s auth=%s",
                     self._host, self._port, bool(self._api_key))
 

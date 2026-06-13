@@ -69,7 +69,7 @@ class SmartRouter(Plugin):
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         self._cfg = ctx.config.get("router", {}) or {}
-        # LLM will be bound via bind_llm() call in AthenaApp.start()
+        # LLM will be bound via bind_llm() call in OneAgentApp.start()
         self._session_history: Dict[str, Any] = {}
         self._max_sessions = 500  # cap total sessions to prevent unbounded growth
         self.bus.subscribe("user_message", self._on_user_message)

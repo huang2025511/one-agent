@@ -45,7 +45,7 @@ export OPENROUTER_API_KEY=sk-...
 # 或在 config/default_config.yaml 中直接指定
 
 # 3. 启动
-python athena.py
+python one_agent.py
 #  → 交互 CLI
 #  → 同时启动 Web UI:  http://127.0.0.1:18791/
 ```
@@ -72,8 +72,8 @@ python tests/smoke.py
 ## 目录结构
 
 ```
-athena_agent/
-├── athena.py                入口 & 插件装配
+one_agent/
+├── one_agent.py                入口 & 插件装配
 ├── config/default_config.yaml  主配置
 ├── core/                    微内核 (events / plugin / context / coordinator / agent)
 ├── models/                  LLM 提供商抽象

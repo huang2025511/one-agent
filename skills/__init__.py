@@ -615,7 +615,7 @@ def _process_settings_command(input_text: str, config: dict) -> str:
 def _save_config(config: dict) -> None:
     """将配置写回 YAML 文件。"""
     import yaml
-    config_path = os.environ.get("ATHENA_CONFIG", "config/default_config.yaml")
+    config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
     try:
         with open(config_path, "w", encoding="utf-8") as f:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)

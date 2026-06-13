@@ -162,7 +162,7 @@ def test_plugin_discovery():
 def test_coordinator():
     """Test full pipeline with stub LLM. Skipped if pydantic not installed."""
     try:
-        from athena import load_config
+        from one_agent import load_config
     except ModuleNotFoundError:
         print("  coordinator pipeline SKIPPED (pydantic not installed)")
         return True

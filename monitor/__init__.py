@@ -104,7 +104,7 @@ class MonitoringPlugin(Plugin):
 
             # Read last 50 log lines
             log_lines = []
-            log_path = Path(_ctx.config.get("agent", {}).get("data_dir", "./data")) / "logs" / "athena.log"
+            log_path = Path(_ctx.config.get("agent", {}).get("data_dir", "./data")) / "logs" / "one_agent.log"
             # Read last N log lines with size cap (avoid OOM on huge logs)
             MAX_LOG_READ = 256 * 1024  # 256 KB max
             if log_path.exists():
@@ -126,7 +126,7 @@ class MonitoringPlugin(Plugin):
 
         @app.get("/api/logs")
         async def logs(tail: int = 50):
-            log_path = Path(_ctx.config.get("agent", {}).get("data_dir", "./data")) / "logs" / "athena.log"
+            log_path = Path(_ctx.config.get("agent", {}).get("data_dir", "./data")) / "logs" / "one_agent.log"
             if not log_path.exists():
                 return {"lines": []}
             MAX_LOG_READ = 256 * 1024

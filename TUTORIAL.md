@@ -155,10 +155,10 @@ llm:
 
 ```bash
 # 使用默认配置
-python athena.py
+python one_agent.py
 
 # 指定配置文件
-ATHENA_CONFIG=./my_config.yaml python athena.py
+ONE_AGENT_CONFIG=./my_config.yaml python one_agent.py
 ```
 
 启动后会看到：
@@ -167,7 +167,7 @@ ATHENA_CONFIG=./my_config.yaml python athena.py
 ╔══════════════════════════════════════════╗
 ║  One-Agent v2 — enter a message, or 'exit'  ║
 ╚══════════════════════════════════════════╝
-athena>
+one-agent>
 ```
 
 同时自动启动的服务：
@@ -185,9 +185,9 @@ athena>
 CLI 是最直接的使用方式：
 
 ```
-athena> 你好，请介绍一下自己
-athena> 帮我写一个 Python 快速排序
-athena> exit
+one-agent> 你好，请介绍一下自己
+one-agent> 帮我写一个 Python 快速排序
+one-agent> exit
 ```
 
 ### 内置命令
@@ -237,7 +237,7 @@ REST API 适合外部程序集成，默认运行在 `http://0.0.0.0:18792`。
 
 ```bash
 # 方式一：环境变量
-export ATHENA_API_KEY="my-secret-key"
+export ONE_AGENT_API_KEY="my-secret-key"
 
 # 方式二：配置文件
 ```
@@ -1029,7 +1029,7 @@ print("enc:" + encrypted.decode())
 ### 22.3 配置
 
 ```bash
-export ATHENA_ENCRYPTION_KEY="你的Fernet密钥"
+export ONE_AGENT_ENCRYPTION_KEY="你的Fernet密钥"
 ```
 
 在配置文件中使用加密后的值：
@@ -1108,7 +1108,7 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 
 1. 确认 `gateways.telegram.enabled` 设为 `true`
 2. 确认 `bot_token` 正确
-3. 查看日志：`cat data/logs/athena.log | grep telegram`
+3. 查看日志：`cat data/logs/one_agent.log | grep telegram`
 
 ### Q: 如何使用本地模型（Ollama）
 
@@ -1161,7 +1161,7 @@ data/
 │   └── community/         # 社区安装的技能
 ├── workspace/             # 执行器工作目录
 ├── logs/
-│   ├── athena.log         # 主日志
+│   ├── one_agent.log         # 主日志
 │   └── executor_audit.log # 执行审计日志
 ├── marketplace/
 │   └── registry.json      # 插件市场注册表
@@ -1176,13 +1176,13 @@ data/
 1. 设置 API Key 认证：
 
 ```bash
-export ATHENA_API_KEY="强密码"
+export ONE_AGENT_API_KEY="强密码"
 ```
 
 2. 启用数据加密：
 
 ```bash
-export ATHENA_ENCRYPTION_KEY="Fernet密钥"
+export ONE_AGENT_ENCRYPTION_KEY="Fernet密钥"
 ```
 
 3. 使用 Docker 执行器替代 Shell：
