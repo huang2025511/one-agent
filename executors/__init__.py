@@ -277,7 +277,7 @@ class BrowserExecutor(Plugin):
             self._client = httpx.AsyncClient(
                 timeout=self._timeout,
                 follow_redirects=True,
-                headers={"User-Agent": "AthenaAgent/2.0 (+https://github.com/huang2025511/agnet)"},
+                headers={"User-Agent": "AthenaAgent/2.0 (+https://github.com/huang2025511/one-agent)"},
             )
         logger.info("browser executor enabled=%s", self._enabled)
 

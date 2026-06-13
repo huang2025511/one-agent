@@ -297,7 +297,7 @@ multimodal:
 
 # ---------- 插件市场 ----------
 marketplace:
-  community_hub: "https://raw.githubusercontent.com/huang2025511/agnet-skills/main/"
+  community_hub: "https://raw.githubusercontent.com/huang2025511/one-agent-skills/main/"
   install_dir: "./data/skills/community"
 
 # ---------- LLM 缓存 ----------

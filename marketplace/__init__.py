@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 # Official community hub base URL
-COMMUNITY_HUB_URL = "https://raw.githubusercontent.com/huang2025511/agnet-skills/main/"
+COMMUNITY_HUB_URL = "https://raw.githubusercontent.com/huang2025511/one-agent-skills/main/"
 
 
 class SkillSpec:

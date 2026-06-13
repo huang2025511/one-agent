@@ -1,4 +1,4 @@
-# Athena Agent — `agnet`
+# Athena Agent — `one-agent`
 
 > 融合 **OpenClaw** + **Hermes Agent** + **OpenSquilla** 三者设计优势的开源 AI Agent。
 > Token-efficient, 微内核事件驱动, 三层记忆, MetaSkill 生态。

@@ -50,8 +50,8 @@
 ### 2.1 克隆项目
 
 ```bash
-git clone https://github.com/huang2025511/agnet.git
-cd agnet
+git clone https://github.com/huang2025511/one-agent.git
+cd one-agent
 ```
 
 ### 2.2 创建虚拟环境（推荐）
@@ -1229,5 +1229,5 @@ gateways:
 
 ---
 
-> GitHub: https://github.com/huang2025511/agnet
+> GitHub: https://github.com/huang2025511/one-agent
 > License: MIT
