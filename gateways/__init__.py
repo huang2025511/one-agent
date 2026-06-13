@@ -397,7 +397,7 @@ class WeComGateway(Plugin):
             logger.warning("fastapi not installed — wecom callback disabled")
             return
 
-        app = FastAPI(title="Athena WeCom Callback")
+        app = FastAPI(title="One-Agent WeCom Callback")
         gateway = self  # closure reference
 
         @app.get("/wecom/callback")
@@ -860,7 +860,7 @@ class FeishuGateway(Plugin):
             logger.warning("fastapi not installed — feishu callback disabled")
             return
 
-        app = FastAPI(title="Athena Feishu Callback")
+        app = FastAPI(title="One-Agent Feishu Callback")
         gateway = self
 
         @app.post("/feishu/callback")
@@ -1230,7 +1230,7 @@ class WebGateway(Plugin):
         except Exception:
             logger.warning("fastapi/uvicorn not installed — web UI disabled")
             return
-        app = FastAPI(title="Athena")
+        app = FastAPI(title="One-Agent")
         ui_html = Path(__file__).with_name("index.html")
         if ui_html.exists():
             @app.get("/", response_class=HTMLResponse)

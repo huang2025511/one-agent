@@ -5,7 +5,7 @@
 
 # ---------- 全局设置 ----------
 agent:
-  name: "Athena"
+  name: "One-Agent"
   description: "Token-efficient self-evolving microkernel AI agent"
   version: "2.0.0"
   data_dir: "./data"

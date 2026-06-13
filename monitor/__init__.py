@@ -57,7 +57,7 @@ class MonitoringPlugin(Plugin):
         _memory = next((p for p in (_ctx._plugins if _ctx else []) if getattr(p, "name", "") == "memory"), None) if _ctx else None
         _skills = next((p for p in (_ctx._plugins if _ctx else []) if getattr(p, "name", "") == "skills"), None) if _ctx else None
 
-        app = FastAPI(title="Athena Monitor", version="2.0.0")
+        app = FastAPI(title="One-Agent Monitor", version="2.0.0")
 
         dashboard_html = self._build_dashboard_html()
 
@@ -157,7 +157,7 @@ class MonitoringPlugin(Plugin):
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
-<title>Athena Monitor v2</title>
+<title>One-Agent Monitor v2</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <style>
 :root{--bg:#0f172a;--p:#1e293b;--fg:#e2e8f0;--muted:#94a3b8;--a:#38bdf8;--a2:#a78bfa;--b:#334155;--g:#4ade80;--y:#fbbf24;--r:#f87171}
@@ -187,7 +187,7 @@ th{color:var(--muted);font-weight:500}
 </head>
 <body>
 <header>
-  <h1><span>Athena</span> Monitor</h1>
+  <h1>One-Agent Monitor</h1>
   <span class="uptime" id="uptime">—</span>
   <button class="refresh" onclick="refresh()">Refresh</button>
 </header>

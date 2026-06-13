@@ -99,7 +99,7 @@ pip install -r requirements.txt
 
 ## 3. 配置 API Key
 
-Athena 支持 6 个 LLM 提供商，至少配置一个即可使用。
+One-Agent 支持 6 个 LLM 提供商，至少配置一个即可使用。
 
 ### 3.1 通过环境变量（推荐，最安全）
 
@@ -165,7 +165,7 @@ ATHENA_CONFIG=./my_config.yaml python athena.py
 
 ```
 ╔══════════════════════════════════════════╗
-║  Athena v2 — enter a message, or 'exit'  ║
+║  One-Agent v2 — enter a message, or 'exit'  ║
 ╚══════════════════════════════════════════╝
 athena>
 ```
@@ -352,7 +352,7 @@ export TELEGRAM_BOT_TOKEN="123456789:ABCdefGHI..."
 
 ## 9. 企业微信接入
 
-Athena 支持通过**企业微信（WeCom）**连接微信生态，提供两种模式。
+One-Agent 支持通过**企业微信（WeCom）**连接微信生态，提供两种模式。
 
 ### 9.1 Webhook 模式（群机器人，最简单）
 
@@ -437,13 +437,13 @@ export WECOM_CALLBACK_TOKEN="你的Token"
 export WECOM_ENCODING_AES_KEY="你的AESKey"
 ```
 
-配置完成后，在企业微信中向应用发消息，Athena 会自动回复。
+配置完成后，在企业微信中向应用发消息，One-Agent 会自动回复。
 
 ---
 
 ## 10. 钉钉接入
 
-Athena 支持通过**钉钉（DingTalk）**连接钉钉生态，提供两种模式。
+One-Agent 支持通过**钉钉（DingTalk）**连接钉钉生态，提供两种模式。
 
 ### 10.1 Webhook 模式（群机器人）
 
@@ -513,13 +513,13 @@ export DINGTALK_CLIENT_ID="你的AppKey"
 export DINGTALK_CLIENT_SECRET="你的AppSecret"
 ```
 
-配置完成后，在钉钉中向机器人发消息，Athena 会自动回复。
+配置完成后，在钉钉中向机器人发消息，One-Agent 会自动回复。
 
 ---
 
 ## 11. 飞书接入
 
-Athena 支持通过**飞书（Lark）**连接飞书生态，提供两种模式。
+One-Agent 支持通过**飞书（Lark）**连接飞书生态，提供两种模式。
 
 ### 11.1 Webhook 模式（群机器人）
 
@@ -596,7 +596,7 @@ export FEISHU_VERIFICATION_TOKEN="你的VerificationToken"
 export FEISHU_ENCRYPT_KEY="你的EncryptKey"
 ```
 
-配置完成后，在飞书中向机器人发消息，Athena 会自动回复。
+配置完成后，在飞书中向机器人发消息，One-Agent 会自动回复。
 
 ---
 
@@ -670,7 +670,7 @@ export SLACK_APP_TOKEN="xapp-你的AppToken"
 
 ## 14. 四层智能路由详解
 
-Athena 的路由系统会自动根据问题难度选择最合适的模型，节省 Token 开销。
+One-Agent 的路由系统会自动根据问题难度选择最合适的模型，节省 Token 开销。
 
 ### 14.1 四个难度等级
 
@@ -775,7 +775,7 @@ memory:
 
 ### 16.1 内置技能
 
-Athena 自带 4 个内置技能：
+One-Agent 自带 4 个内置技能：
 
 | 技能 ID | 功能 | 示例 |
 |---------|------|------|
@@ -1007,7 +1007,7 @@ installed = app.marketplace.list_installed()
 
 ## 22. 数据加密
 
-Athena 支持用 Fernet 对称加密保护 API Key。
+One-Agent 支持用 Fernet 对称加密保护 API Key。
 
 ### 22.1 生成加密密钥
 

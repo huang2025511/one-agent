@@ -1,4 +1,4 @@
-"""Smoke test v2 — drives Athena end-to-end with a stub LLM.
+"""Smoke test v2 — drives One-Agent end-to-end with a stub LLM.
 
 Tests all new features:
   - EventBus with DLQ and tracking

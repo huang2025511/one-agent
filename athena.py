@@ -99,7 +99,7 @@ class MemoryConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    name: str = "Athena"
+    name: str = "One-Agent"
     description: str = "Token-efficient self-evolving microkernel AI agent"
     version: str = "2.0.0"
     data_dir: str = "./data"
@@ -350,7 +350,7 @@ class AthenaApp:
 async def _interactive(app: AthenaApp) -> None:
     print()
     print("╔══════════════════════════════════════════════╗")
-    print("║  Athena v2 — 自然语言即可操作，输入 '帮助'   ║")
+    print("║  One-Agent v2 — 自然语言即可操作，输入 '帮助'   ║")
     print("╚══════════════════════════════════════════════╝")
 
     # ---------- 自然语言意图匹配 ----------
