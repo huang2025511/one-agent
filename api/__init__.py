@@ -92,7 +92,7 @@ class RESTAPIGateway(Plugin):
 
         # Simple in-process rate limiter (per-IP, sliding window)
         _rate_buckets: Dict[str, list] = {}
-        _rate_limit = int((cfg if (cfg := ctx.config.get("rest") or {}) else {}).get("rate_limit_per_minute", 60))
+        _rate_limit = int((self.ctx.config or {}).get("rest", {}).get("rate_limit_per_minute", 60))
 
         @app.middleware("http")
         async def rate_limit_middleware(request, call_next):
