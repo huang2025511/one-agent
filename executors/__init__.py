@@ -12,9 +12,9 @@ Enhanced with:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shlex
-import subprocess
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -158,6 +158,7 @@ class ShellExecutor(Plugin):
             }
         except asyncio.TimeoutError:
             proc.kill()
+            await proc.wait()  # 等待进程终止，避免僵尸进程
             result = {
                 "stdout": "",
                 "stderr": f"[timeout after {timeout or self._timeout}s]",
@@ -271,6 +272,7 @@ class DockerExecutor(Plugin):
             }
         except asyncio.TimeoutError:
             proc.kill()
+            await proc.wait()  # 等待进程终止，避免僵尸进程
             return {"stdout": "", "stderr": "docker timeout", "returncode": -2}
         except FileNotFoundError:
             return {"stdout": "", "stderr": "docker binary not found", "returncode": -3}

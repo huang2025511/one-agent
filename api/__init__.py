@@ -18,6 +18,7 @@ All endpoints return JSON.  Authentication via X-API-Key header
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import time

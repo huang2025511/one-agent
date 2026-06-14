@@ -11,10 +11,10 @@ The SkillManager exposes them uniformly as tools consumable by the LLM.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -196,6 +196,7 @@ class SkillManager(Plugin):
                     return (stdout.decode() or "") + (stderr.decode() or "")
                 except asyncio.TimeoutError:
                     proc.kill()
+                    await proc.wait()  # 等待进程终止，避免僵尸进程
                     return "[timeout]"
                 except (FileNotFoundError, PermissionError, OSError) as exc:
                     return f"[command error: {exc}]"

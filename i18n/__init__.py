@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Dict
 
 logger = logging.getLogger(__name__)
+
+# Lock for thread-safe access to global state
+_lock = threading.Lock()
 
 # Current language (default: English)
 _current_lang = "en"
@@ -108,18 +112,20 @@ def set_language(lang: str) -> None:
         lang: Language code ('en' or 'zh')
     """
     global _current_lang, _auto_detected
-    if lang in _translations:
-        _current_lang = lang
-        _auto_detected = False  # Manual set, not auto-detected
-        logger.info("language set to: %s", lang)
-    else:
-        logger.warning("unsupported language: %s, falling back to English", lang)
-        _current_lang = "en"
+    with _lock:
+        if lang in _translations:
+            _current_lang = lang
+            _auto_detected = False  # Manual set, not auto-detected
+            logger.info("language set to: %s", lang)
+        else:
+            logger.warning("unsupported language: %s, falling back to English", lang)
+            _current_lang = "en"
 
 
 def get_language() -> str:
     """Get the current language code."""
-    return _current_lang
+    with _lock:
+        return _current_lang
 
 
 def detect_language(text: str) -> str:
@@ -171,11 +177,12 @@ def auto_detect_and_switch(text: str) -> str:
     detected_lang = detect_language(text)
     
     # Switch language if different from current
-    if detected_lang != _current_lang and detected_lang in _translations:
-        logger.info("auto-detected language: %s (switching from %s)", detected_lang, _current_lang)
-        _current_lang = detected_lang
+    with _lock:
+        if detected_lang != _current_lang and detected_lang in _translations:
+            logger.info("auto-detected language: %s (switching from %s)", detected_lang, _current_lang)
+            _current_lang = detected_lang
     
-    return _current_lang
+    return detected_lang
 
 
 def _(key: str, **kwargs) -> str:
@@ -195,7 +202,8 @@ def _(key: str, **kwargs) -> str:
         'request body too large (1000 > 500)'
     """
     # Get translation for current language, fall back to English
-    lang_dict = _translations.get(_current_lang, _translations["en"])
+    with _lock:
+        lang_dict = _translations.get(_current_lang, _translations["en"])
     message = lang_dict.get(key, _translations["en"].get(key, key))
     
     # Format with kwargs if provided

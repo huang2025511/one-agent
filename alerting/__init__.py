@@ -231,8 +231,13 @@ class AlertManager:
         while self._running:
             try:
                 await self._check_all_rules()
-            except Exception:
-                logger.exception("alert check loop error")
+            except asyncio.CancelledError:
+                # Graceful shutdown
+                logger.debug("alert check loop cancelled")
+                break
+            except Exception as exc:
+                # Log but continue - don't let one error stop the monitoring
+                logger.warning("alert check error (continuing): %s", exc)
             await asyncio.sleep(self._check_interval)
 
     async def _check_all_rules(self, metrics_getter: Optional[Callable] = None) -> None:

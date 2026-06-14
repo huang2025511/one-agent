@@ -25,27 +25,6 @@ def _post(url: str, data: bytes, timeout: int = 10):
     return r.status, body
 
 
-@pytest.fixture(scope="module")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="module")
-async def app():
-    """Start OneAgentApp, yield it, then stop."""
-    cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-    application = OneAgentApp(cfg_path)
-    # Remove CLI gateway to avoid input() blocking
-    application._pm._plugins = [p for p in application._pm._plugins if p.name != "gateway_cli"]
-    application.cli = None
-    await application.start()
-    await asyncio.sleep(2.5)
-    yield application
-    await application.stop()
-
-
 @pytest.mark.asyncio
 async def test_rest_api_health(app):
     status, body = await asyncio.to_thread(_get, "http://127.0.0.1:18792/api/health")
