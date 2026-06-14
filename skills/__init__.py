@@ -12,6 +12,7 @@ The SkillManager exposes them uniformly as tools consumable by the LLM.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -22,7 +23,12 @@ from typing import Any, Dict, List, Optional
 from core.events import Event
 from core.plugin import Plugin
 
+from .document_search import DocumentStore
+
 logger = logging.getLogger(__name__)
+
+# Module-level singleton — shared between skill handler and API
+_doc_store = DocumentStore()
 
 
 class Skill:
@@ -63,6 +69,7 @@ class SkillManager(Plugin):
         self._builtin_dir: Optional[str] = None
         self._user_dir: Optional[str] = None
         self._community_dir: Optional[str] = None
+        self._marketplace_dir: Optional[str] = None
         self._mcp_servers: List[Dict[str, Any]] = []
         self._max_loaded_per_turn = 6
 
@@ -74,12 +81,14 @@ class SkillManager(Plugin):
         self._builtin_dir = cfg.get("builtin_skills_dir") or os.path.join(data_dir, "skills/builtin")
         self._user_dir = cfg.get("user_skills_dir") or os.path.join(data_dir, "skills/user")
         self._community_dir = cfg.get("community_skills_dir") or os.path.join(data_dir, "skills/community")
-        for d in (self._builtin_dir, self._user_dir, self._community_dir):
+        self._marketplace_dir = cfg.get("marketplace_skills_dir") or os.path.join(data_dir, "skills/marketplace")
+        for d in (self._builtin_dir, self._user_dir, self._community_dir, self._marketplace_dir):
             Path(d).mkdir(parents=True, exist_ok=True)
         self._seed_builtins()
         self._scan_directory(self._builtin_dir)
         self._scan_directory(self._user_dir)
         self._scan_directory(self._community_dir)
+        self._scan_directory(self._marketplace_dir)
         # MCP server list — declared in config; started lazily
         self._mcp_servers = cfg.get("mcp_servers", []) or []
         self._max_loaded_per_turn = cfg.get("max_skills_per_turn", self._max_loaded_per_turn)
@@ -123,6 +132,7 @@ class SkillManager(Plugin):
             self._scan_directory(self._builtin_dir)
             self._scan_directory(self._user_dir)
             self._scan_directory(self._community_dir)
+            self._scan_directory(self._marketplace_dir)
             logger.info("skill pattern mining: %d skills loaded", len(self._skills))
 
     def register(self, skill: Skill) -> None:
@@ -461,6 +471,176 @@ class SkillManager(Plugin):
             handler=settings_handler,
         ))
 
+        # ---------- 语音转文字技能 ----------
+        self.register(Skill(
+            id="transcribe",
+            title="语音转文字",
+            description="将音频文件转换为文字（支持 Whisper）",
+            handler=make_transcribe_handler(),
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "transcribe",
+                    "description": "将音频文件转录为文字，支持 Whisper。参数 path 为音频文件路径。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "音频文件路径（支持 mp3、wav、m4a 等格式）",
+                            },
+                            "input": {
+                                "type": "string",
+                                "description": "音频文件路径的别名（与 path 等效）",
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+        ))
+
+        # ---------- 图片描述技能 ----------
+        self.register(Skill(
+            id="describe_image",
+            title="图片描述",
+            description="分析图片内容，回答关于图片的问题",
+            handler=make_image_handler(),
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "describe_image",
+                    "description": "分析图片内容，回答关于图片的问题。参数 path 为图片路径，question 为可选问题。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "图片文件路径",
+                            },
+                            "input": {
+                                "type": "string",
+                                "description": "图片文件路径的别名（与 path 等效）",
+                            },
+                            "question": {
+                                "type": "string",
+                                "description": "关于图片的问题（可选，默认为'请描述这张图片'）",
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+        ))
+
+        # ---------- 文档搜索技能 (RAG) ----------
+        self.register(Skill(
+            id="document_search",
+            title="文档搜索",
+            description="搜索用户已上传的文档，支持 PDF、Markdown、TXT。"
+                        "使用 action 参数控制操作：search（搜索）、list（列出文档）、ingest（摄入文档）。",
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "document_search",
+                    "description": "搜索已上传的文档内容，支持 PDF、Markdown、TXT 格式",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "description": "操作类型：search（搜索文档内容）、list（列出已上传文档）、ingest（摄入新文档）",
+                                "enum": ["search", "list", "ingest"],
+                            },
+                            "query": {
+                                "type": "string",
+                                "description": "搜索关键词（action=search 时使用）",
+                            },
+                            "input": {
+                                "type": "string",
+                                "description": "搜索关键词的别名（与 query 等效）",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "返回结果数量上限（默认 5）",
+                            },
+                            "path": {
+                                "type": "string",
+                                "description": "文档文件路径（action=ingest 时使用）",
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            handler=make_doc_search_handler(_doc_store),
+        ))
+
+
+def make_transcribe_handler():
+    """Return a handler that transcribes audio files to text using Whisper."""
+
+    async def handler(args):
+        path = args.get("path", args.get("input", ""))
+        if not path:
+            return "请提供音频文件路径（path 或 input 参数）"
+        import subprocess
+        import os
+        try:
+            result = subprocess.run(
+                ["whisper", path, "--language", "zh", "--model", "tiny",
+                 "--output_format", "txt", "--output_dir", "/tmp"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                out_path = os.path.splitext(path)[0] + ".txt"
+                if os.path.exists(out_path):
+                    with open(out_path, encoding="utf-8") as f:
+                        return f.read().strip()
+            return f"[whisper 失败: {result.stderr[:200]}]"
+        except FileNotFoundError:
+            return "[whisper 未安装。请运行: pip install openai-whisper]"
+        except subprocess.TimeoutExpired:
+            return "[whisper 超时：音频文件可能过大]"
+        except Exception as exc:
+            return f"[转录失败: {exc}]"
+
+    return handler
+
+
+def make_image_handler():
+    """Return a handler that encodes an image for vision model analysis."""
+
+    async def handler(args):
+        path = args.get("path", args.get("input", ""))
+        question = args.get("question", "请描述这张图片")
+        if not path:
+            return "请提供图片路径（path 或 input 参数）"
+        import os
+        import base64
+        if not os.path.exists(path):
+            return f"图片不存在: {path}"
+
+        ext = os.path.splitext(path)[1].lower()
+        mime_map = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+        }
+        mime = mime_map.get(ext, "image/png")
+
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+
+        return json.dumps({
+            "type": "image_request",
+            "image_base64": b64,
+            "mime_type": mime,
+            "question": question,
+            "hint": "需要使用支持视觉的模型（如 GPT-4o、Claude 3 Vision）来回答",
+        }, ensure_ascii=False)
+
+    return handler
+
 
 def _schema(name: str, description: str, required: List[str]) -> Dict[str, Any]:
     return {
@@ -475,6 +655,98 @@ def _schema(name: str, description: str, required: List[str]) -> Dict[str, Any]:
             },
         },
     }
+
+
+def make_doc_search_handler(store):
+    async def handler(args):
+        action = args.get("action", "search")
+        if action == "search":
+            query = args.get("query", args.get("input", ""))
+            if not query:
+                return "请提供搜索关键词"
+            results = store.search(query, limit=args.get("limit", 5))
+            if not results:
+                return f"未找到与 '{query}' 相关的文档内容"
+            lines = [f"文档搜索结果（{query}）："]
+            for r in results:
+                lines.append(f"\n📄 {r['document']} (chunk {r['chunk']})")
+                lines.append(r['content'][:500])
+            return "\n".join(lines)
+        elif action == "list":
+            docs = store.list_documents()
+            if not docs:
+                return "暂无已上传的文档"
+            lines = ["已上传文档："]
+            for d in docs:
+                lines.append(f"  - {d['name']} ({d['type']}, {d['chunk_count']} chunks, {d['size_bytes']} bytes)")
+            return "\n".join(lines)
+        elif action == "ingest":
+            import asyncio as _asyncio
+            path = args.get("path", "")
+            if not path:
+                return "请提供文档路径"
+            loop = _asyncio.get_event_loop()
+            count = await loop.run_in_executor(None, store.ingest_file, path)
+            return f"已摄入文档，切分为 {count} 个 chunks"
+        else:
+            return f"未知操作: {action}，支持: search, list, ingest"
+    return handler
+
+
+def make_graph_search_handler(kg):
+    """Create a handler for graph_search skill that queries the knowledge graph.
+
+    The handler expects ``kg`` to be a ``KnowledgeGraph`` instance (or any
+    object with ``search``, ``query_entity``, and ``get_neighbors`` methods).
+    """
+    async def handler(args):
+        action = args.get("action", "search")
+        if action == "search":
+            query = args.get("query", args.get("input", ""))
+            if not query:
+                return "请提供搜索关键词"
+            results = kg.search(query, limit=args.get("limit", 10))
+            if not results:
+                return f"未找到与 '{query}' 相关的实体"
+            lines = [f"实体搜索结果（{query}）："]
+            for r in results:
+                lines.append(f"  - {r['name']} (类型: {r.get('type', 'unknown')})")
+            return "\n".join(lines)
+        elif action == "entity":
+            name = args.get("name", args.get("input", ""))
+            if not name:
+                return "请提供实体名称"
+            entity = kg.query_entity(name)
+            if entity is None:
+                return f"未找到实体: {name}"
+            lines = [f"实体: {entity['name']} (类型: {entity['type']})"]
+            if entity["outgoing"]:
+                lines.append("  出边关系:")
+                for r in entity["outgoing"]:
+                    lines.append(f"    --[{r['predicate']}]--> {r['object_name']}")
+            if entity["incoming"]:
+                lines.append("  入边关系:")
+                for r in entity["incoming"]:
+                    lines.append(f"    {r['subject_name']} --[{r['predicate']}]-->")
+            return "\n".join(lines)
+        elif action == "neighbors":
+            name = args.get("name", args.get("input", ""))
+            if not name:
+                return "请提供实体名称"
+            depth = args.get("depth", 1)
+            neighbors = kg.get_neighbors(name, depth=depth)
+            if not neighbors:
+                return f"未找到与 '{name}' 相关的邻居"
+            lines = [f"邻居图谱（源于 {name}，深度 {depth}）："]
+            for n in neighbors:
+                if "relation" in n:
+                    lines.append(f"  {n['relation']}")
+                else:
+                    lines.append(f"  中心实体: {n['name']}")
+            return "\n".join(lines)
+        else:
+            return f"未知操作: {action}，支持: search, entity, neighbors"
+    return handler
 
 
 # ---------- 设置管理：自然语言配置读写 ----------

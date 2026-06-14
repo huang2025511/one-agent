@@ -18,6 +18,8 @@ import os
 import signal
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from typing import Any, Dict, Optional
 
 import yaml
@@ -28,6 +30,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.context import AgentContext  # noqa: E402
 from core.plugin import PluginManager  # noqa: E402
+from memory.session_store import SessionStore  # noqa: E402
 
 
 # ============================================================
@@ -249,13 +252,13 @@ class OneAgentApp:
         from models import LLMProvider
         from router import SmartRouter
         from memory import MemoryPlugin
-        from skills import SkillManager
+        from skills import SkillManager, make_graph_search_handler, Skill
         from executors import ShellExecutor, DockerExecutor, BrowserExecutor
         from scheduler import SchedulerPlugin
         from multimodal import MultimodalPlugin
         from api import RESTAPIGateway
         from monitor import MonitoringPlugin
-        from marketplace import MarketplacePlugin
+        from marketplace import MarketplacePlugin, Marketplace
 
         # Import gateways with graceful degradation — if a gateway's dependencies
         # are missing (e.g., cryptography for WeCom), log warning and skip it
@@ -305,6 +308,10 @@ class OneAgentApp:
         from alerting import AlertManager
         self._alert_manager = AlertManager()
 
+        # Initialize approval manager for human-in-the-loop
+        from core.approval import ApprovalManager
+        self._approval_manager = ApprovalManager()
+
         self._pm = PluginManager()
         for p in (
             self.llm, self.router, self.memory, self.skills,
@@ -328,6 +335,44 @@ class OneAgentApp:
             bus=self.bus,
             data_dir=self.config.agent.data_dir,
         )
+        # Create session store for persistence across restarts
+        from pathlib import Path as _Path
+        session_db_path = str(_Path(self.config.agent.data_dir) / "memory" / "sessions.db")
+        session_store = SessionStore(session_db_path)
+        self.ctx.session_store = session_store
+
+        # Initialize self-improver for learning from failures
+        from core.self_improve import SelfImprover
+        improvements_db = str(_Path(self.config.agent.data_dir) / "memory" / "improvements.db")
+        self.ctx.self_improver = SelfImprover(improvements_db)
+        logger.info("self-improver initialized at %s", improvements_db)
+
+        # Initialize skill marketplace
+        from marketplace import Marketplace
+        marketplace_dir = str(_Path(self.config.agent.data_dir) / "marketplace")
+        self.ctx.marketplace = Marketplace(marketplace_dir)
+
+        # Subscribe to turn_completed so every turn is auto-persisted
+        async def _persist_turn(event):
+            from core.events import Event as _Event
+            turn = event.get("turn") if isinstance(event, _Event) else None
+            if turn is None:
+                return
+            sid = getattr(turn, "session_id", "default")
+            _store = self.ctx.session_store
+            if _store is None:
+                return
+            # Save user message
+            _store.add_message(sid, "user", turn.input_text,
+                               meta={"source": turn.source, "turn_id": turn.turn_id},
+                               tokens=turn.tokens_used)
+            # Save assistant response
+            if turn.result:
+                _store.add_message(sid, "assistant", turn.result,
+                                   meta={"model": turn.model or "", "turn_id": turn.turn_id},
+                                   tokens=turn.tokens_used)
+        self.bus.subscribe("turn_completed", _persist_turn)
+
         self.ctx._plugins = [
             self.llm, self.router, self.memory, self.skills,
             self.exec_shell, self.exec_docker, self.exec_browser,
@@ -338,8 +383,60 @@ class OneAgentApp:
         ]
         self.ctx._alert_manager = self._alert_manager
 
+        # Attach approval manager to agent context
+        self.ctx.approval_manager = self._approval_manager
+
         await self.bus.start()
         await self._pm.setup_all(self.ctx)
+        # Register knowledge graph search skill (KG is created by MemoryPlugin during setup)
+        if self.memory._kg is not None:
+            from skills import Skill as _Skill
+            from skills import make_graph_search_handler
+            self.skills.register(_Skill(
+                id="graph_search",
+                title="知识图谱搜索",
+                description="搜索实体关系：查询谁提到过什么、实体之间的关联信息。"
+                            "使用 action 参数控制操作：search（搜索实体）、entity（查看实体详情）、neighbors（查看邻居图谱）。",
+                schema={
+                    "type": "function",
+                    "function": {
+                        "name": "graph_search",
+                        "description": "搜索知识图谱中的实体和关系，支持实体搜索、详情查询和邻居图谱",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "description": "操作类型：search（搜索实体）、entity（查看实体详情和关系）、neighbors（查看邻居图谱）",
+                                    "enum": ["search", "entity", "neighbors"],
+                                },
+                                "query": {
+                                    "type": "string",
+                                    "description": "搜索关键词（action=search 时使用）",
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "description": "实体名称（action=entity 或 neighbors 时使用）",
+                                },
+                                "input": {
+                                    "type": "string",
+                                    "description": "搜索关键词或实体名称的别名",
+                                },
+                                "depth": {
+                                    "type": "integer",
+                                    "description": "邻居跳数（action=neighbors 时使用，默认 1）",
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "返回结果数量上限（默认 10）",
+                                },
+                            },
+                            "required": [],
+                        },
+                    },
+                },
+                handler=make_graph_search_handler(self.memory._kg),
+            ))
         self.router.bind_llm(self.llm)
         self.coordinator.bind(self.llm, self.skills)
         self.web.bind_callback(self.chat)
@@ -352,6 +449,26 @@ class OneAgentApp:
         await self._alert_manager.start()
 
         await self._pm.start_all()
+
+        # Register daily self-improvement analysis task
+        if self.scheduler is not None:
+            def _analyze_improvements():
+                """Periodic analysis of failure patterns and suggestion generation."""
+                improver = getattr(self.ctx, "self_improver", None) if self.ctx else None
+                if improver is None:
+                    return
+                patterns = improver.analyze_patterns()
+                if patterns:
+                    logger.info("self-improvement: found %d failure patterns", len(patterns))
+                    for p in patterns:
+                        suggestion = improver.generate_improvement(p.get("type", ""))
+                        if suggestion:
+                            improver.apply_improvement(p["type"], suggestion)
+                            logger.info("self-improvement: applied '%s' → %s", p["type"], suggestion)
+                else:
+                    logger.debug("self-improvement: no patterns found")
+            self.scheduler.add_cron("0 0 * * *", _analyze_improvements, "self_improve_analysis")
+            logger.info("self-improvement daily analysis scheduled at midnight")
 
     async def chat(self, text: str, source: str = "cli", session_id: str = "default") -> str:
         from core.context import TurnContext

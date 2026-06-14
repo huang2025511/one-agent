@@ -59,6 +59,11 @@ class TurnContext:
     meta: Dict[str, Any] = field(default_factory=dict)
 
     # ----------------------------------------------------------- convenience
+    @property
+    def tool_results(self) -> list:
+        """List of ToolResult objects from this turn."""
+        return self.meta.get("tool_results", [])
+
     def record_success(self, answer: str, tokens_used: int) -> None:
         self.result = answer
         self.tokens_used = tokens_used
@@ -83,6 +88,12 @@ class AgentContext:
 
     # plugin registry populated from top-level assembly
     _plugins: List[Any] = field(default_factory=list)
+
+    # session store for persistence (set by OneAgentApp.start)
+    session_store: Any = None
+
+    # approval manager for human-in-the-loop (set by OneAgentApp.start)
+    approval_manager: Any = None
 
     def bump(self, name: str, by: int = 1) -> None:
         self.counters[name] = self.counters.get(name, 0) + by

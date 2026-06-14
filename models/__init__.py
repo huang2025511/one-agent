@@ -21,6 +21,7 @@ import httpx
 
 from core.plugin import Plugin
 from models.cache import LLMCache
+from models.cost_tracker import CostTracker
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,7 @@ class LLMProvider(Plugin):
         self._cache_ttl = 3600
         self._call_stats: List[Dict[str, Any]] = []
         self._cost_total: float = 0.0
+        self._cost_tracker: Optional[CostTracker] = None
         # Strong refs to background auto-classify tasks so they don't get
         # GC'd before they run (asyncio doesn't keep them alive).
         self._bg_tasks: set = set()
@@ -165,6 +167,19 @@ class LLMProvider(Plugin):
             max_size = cache_cfg.get("max_size", llm_cfg.get("cache_max_size", 500))
             self._cache = LLMCache(max_size=max_size, ttl_seconds=self._cache_ttl)
             logger.info("LLM cache enabled (size=%d, ttl=%ds)", max_size, self._cache_ttl)
+
+        # Cost tracking
+        cost_cfg = (ctx.config.get("llm") or {}).get("cost_tracking") or {}
+        if cost_cfg:
+            db_path = cost_cfg.get("db_path", "data/memory/costs.db")
+            self._cost_tracker = CostTracker(
+                db_path=db_path,
+                daily_budget=cost_cfg.get("daily_budget", 1.0),
+                monthly_budget=cost_cfg.get("monthly_budget", 20.0),
+            )
+            logger.info("Cost tracking enabled (daily=$%.2f, monthly=$%.2f)",
+                        self._cost_tracker._daily_budget,
+                        self._cost_tracker._monthly_budget)
 
         custom_endpoints = llm_cfg.get("base_urls", {}) or {}
         for k, v in custom_endpoints.items():
@@ -830,6 +845,43 @@ class LLMProvider(Plugin):
         finally:
             await cat.aclose()
 
+    # ---------------------------------------------------------- cost tracking helpers
+    @staticmethod
+    def _parse_model(model: str) -> tuple:
+        """Split ``provider/model_id`` into ``(provider, bare_model)``."""
+        if "/" in model:
+            provider, bare = model.split("/", 1)
+            return provider, bare
+        return "openai", model
+
+    def _find_cheapest_free_model(self) -> str:
+        """Return the cheapest free model available, falling back to the default."""
+        # Look through trivial-tier models for one with zero or negligible cost
+        candidates = list(MODEL_TIERS.get("trivial", []))
+        if not candidates:
+            candidates = list(MODEL_TIERS.get("simple", []))
+        if not candidates:
+            return self._default_model  # nothing available
+
+        # Prefer models that have a configured API key and cost 0 (free)
+        for m in candidates:
+            prov = m.split("/", 1)[0]
+            if self._has_usable_key(prov) and MODEL_COST.get(m, 1.0) == 0.0:
+                return m
+
+        # Fall back to the cheapest model with a usable key
+        best_model = self._default_model
+        best_cost = float("inf")
+        for m in candidates:
+            prov = m.split("/", 1)[0]
+            if self._has_usable_key(prov):
+                c = MODEL_COST.get(m, 0.001)
+                if c < best_cost:
+                    best_cost = c
+                    best_model = m
+
+        return best_model
+
     async def chat_completion(
         self,
         messages: List[Dict[str, Any]],
@@ -853,6 +905,18 @@ class LLMProvider(Plugin):
             if cached is not None:
                 logger.debug("cache hit for model=%s (tools=%s)", model, bool(tools))
                 return cached
+
+        # Budget check: if exceeded, auto-downgrade to cheapest free model
+        if self._cost_tracker:
+            budget = self._cost_tracker.check_budget()
+            if budget["overall_exceeded"]:
+                logger.warning(
+                    "Budget exceeded (daily=$%.4f/%.2f, monthly=$%.4f/%.2f), "
+                    "downgrading to free model",
+                    budget["daily"]["cost"], budget["daily"]["budget"],
+                    budget["monthly"]["cost"], budget["monthly"]["budget"],
+                )
+                model = self._find_cheapest_free_model()
 
         provider = model.split("/", 1)[0] if "/" in model else "openai"
         # Use .get() with fallback to avoid KeyError if openrouter is missing
@@ -908,6 +972,20 @@ class LLMProvider(Plugin):
                 result["estimated_cost_usd"] = round(cost, 6)
                 result["total_cost_usd"] = round(self._cost_total, 6)
 
+                # Persist to cost tracker (best-effort, never blocks the caller)
+                if self._cost_tracker:
+                    try:
+                        provider_name, bare = self._parse_model(model)
+                        cost_tracked = self._cost_tracker.record(
+                            provider=provider_name,
+                            model=bare,
+                            tokens_prompt=result.get("tokens_prompt", 0),
+                            tokens_completion=result.get("tokens_completion", 0),
+                        )
+                        result["cost_usd"] = cost_tracked
+                    except Exception:
+                        logger.debug("cost_tracker record failed", exc_info=True)
+
                 # Store in cache (tools included in key; stateful tools should use use_cache=False)
                 if use_cache and self._cache is not None:
                     self._cache.set(messages, model, tools or [], result, temperature)
@@ -939,6 +1017,17 @@ class LLMProvider(Plugin):
                             self._cost_total += cost
                             result["estimated_cost_usd"] = round(cost, 6)
                             result["total_cost_usd"] = round(self._cost_total, 6)
+                            if self._cost_tracker:
+                                try:
+                                    provider_name, bare = self._parse_model(model)
+                                    cost_tracked = self._cost_tracker.record(
+                                        provider=provider_name, model=bare,
+                                        tokens_prompt=result.get("tokens_prompt", 0),
+                                        tokens_completion=result.get("tokens_completion", 0),
+                                    )
+                                    result["cost_usd"] = cost_tracked
+                                except Exception:
+                                    pass
                             if use_cache and self._cache is not None:
                                 self._cache.set(messages, model, [], result, temperature)
                             return result
@@ -979,6 +1068,17 @@ class LLMProvider(Plugin):
                                     self._cost_total += cost
                                     result["estimated_cost_usd"] = round(cost, 6)
                                     result["total_cost_usd"] = round(self._cost_total, 6)
+                                    if self._cost_tracker:
+                                        try:
+                                            provider_name, bare = self._parse_model(model)
+                                            cost_tracked = self._cost_tracker.record(
+                                                provider=provider_name, model=bare,
+                                                tokens_prompt=result.get("tokens_prompt", 0),
+                                                tokens_completion=result.get("tokens_completion", 0),
+                                            )
+                                            result["cost_usd"] = cost_tracked
+                                        except Exception:
+                                            pass
                                     logger.info("last resort succeeded")
                                     return result
                                 except Exception as last_exc:
@@ -1014,6 +1114,17 @@ class LLMProvider(Plugin):
                                 self._cost_total += cost
                                 result["estimated_cost_usd"] = round(cost, 6)
                                 result["total_cost_usd"] = round(self._cost_total, 6)
+                                if self._cost_tracker:
+                                    try:
+                                        provider_name, bare = self._parse_model(model)
+                                        cost_tracked = self._cost_tracker.record(
+                                            provider=provider_name, model=bare,
+                                            tokens_prompt=result.get("tokens_prompt", 0),
+                                            tokens_completion=result.get("tokens_completion", 0),
+                                        )
+                                        result["cost_usd"] = cost_tracked
+                                    except Exception:
+                                        pass
                                 if use_cache and self._cache is not None:
                                     self._cache.set(messages, model, tools or [], result, temperature)
                                 return result
@@ -1054,6 +1165,158 @@ class LLMProvider(Plugin):
             "failed": True,
         }
 
+    async def chat_completion_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ):
+        """Stream chat completion via SSE. Yields dict chunks:
+        {"delta": content, "done": False} for content chunks
+        {"delta": "", "done": True, "tokens_used": N} on completion
+        {"error": "...", "done": True} on error
+        """
+        model = model or self._default_model
+        temperature = self._default_temperature if temperature is None else temperature
+        max_tokens = self._default_max_tokens if max_tokens is None else max_tokens
+
+        provider = model.split("/", 1)[0] if "/" in model else "openai"
+        base = self._provider_base_urls.get(
+            provider,
+            self._provider_base_urls.get("openrouter", "https://openrouter.ai/api/v1"),
+        )
+        api_key = self._api_keys.get(provider) or self._api_keys.get("openrouter")
+        bare_model = model.split("/", 1)[1] if "/" in model else model
+
+        if not api_key:
+            yield {"delta": "", "done": True, "error": f"no API key for provider '{provider}'"}
+            return
+
+        # Try streaming first; fall back to non-streaming on 400
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        if provider == "anthropic":
+            headers = {
+                "x-api-key": api_key or "",
+                "Content-Type": "application/json",
+                "anthropic-version": "2023-06-01",
+            }
+            payload: Dict[str, Any] = {
+                "model": bare_model,
+                "max_tokens": max_tokens,
+                "messages": messages,
+                "temperature": temperature,
+                "stream": True,
+            }
+            if tools:
+                payload["tools"] = tools
+            url = f"{base.rstrip('/')}/messages"
+            try:
+                async with self._client.stream("POST", url, headers=headers, json=payload, timeout=self._timeout) as resp:  # type: ignore[union-attr]
+                    if resp.status_code == 400:
+                        # Fallback: streaming not supported, use non-streaming
+                        logger.info("streaming not supported by anthropic %s, falling back to non-streaming", bare_model)
+                        result = await self._do_call(
+                            base=base, api_key=api_key, model=model,
+                            messages=messages, temperature=temperature,
+                            max_tokens=max_tokens, tools=tools, provider=provider,
+                        )
+                        yield {"delta": result.get("text", ""), "done": False}
+                        yield {"delta": "", "done": True, "tokens_used": result.get("tokens_used", 0)}
+                        return
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        event_type = data.get("type", "")
+                        if event_type == "content_block_delta":
+                            delta = data.get("delta", {})
+                            text_delta = delta.get("text", "")
+                            if text_delta:
+                                yield {"delta": text_delta, "done": False}
+                        elif event_type == "message_delta":
+                            usage = (data.get("usage") or {})
+                            tokens_used = usage.get("output_tokens", 0)
+                            yield {"delta": "", "done": True, "tokens_used": tokens_used}
+                        elif event_type == "message_stop":
+                            yield {"delta": "", "done": True, "tokens_used": 0}
+                    # Ensure we always yield a final done event
+                    yield {"delta": "", "done": True, "tokens_used": 0}
+            except httpx.HTTPStatusError as exc:
+                yield {"delta": "", "done": True, "error": f"stream error: {exc.response.status_code}"}
+                return
+            except (httpx.RequestError, httpx.TimeoutException, Exception) as exc:
+                logger.warning("stream error for anthropic %s: %s", bare_model, exc)
+                yield {"delta": "", "done": True, "error": str(exc)}
+                return
+        else:
+            # Default — OpenAI-compatible
+            payload = {
+                "model": bare_model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": True,
+            }
+            if tools:
+                payload["tools"] = tools
+            url = f"{base.rstrip('/')}/chat/completions"
+            try:
+                async with self._client.stream("POST", url, headers=headers, json=payload, timeout=self._timeout) as resp:  # type: ignore[union-attr]
+                    if resp.status_code == 400:
+                        # Fallback: streaming not supported, use non-streaming
+                        logger.info("streaming not supported by %s/%s, falling back to non-streaming", provider, bare_model)
+                        result = await self._do_call(
+                            base=base, api_key=api_key, model=model,
+                            messages=messages, temperature=temperature,
+                            max_tokens=max_tokens, tools=tools, provider=provider,
+                        )
+                        yield {"delta": result.get("text", ""), "done": False}
+                        yield {"delta": "", "done": True, "tokens_used": result.get("tokens_used", 0)}
+                        return
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = data.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content", "") or ""
+                            if content:
+                                yield {"delta": content, "done": False}
+                        usage = data.get("usage")
+                        if usage:
+                            tokens_used = usage.get("total_tokens", 0)
+                            yield {"delta": "", "done": True, "tokens_used": tokens_used}
+                            return
+                    # Ensure we always yield a final done event
+                    yield {"delta": "", "done": True, "tokens_used": 0}
+            except httpx.HTTPStatusError as exc:
+                yield {"delta": "", "done": True, "error": f"stream error: {exc.response.status_code}"}
+                return
+            except (httpx.RequestError, httpx.TimeoutException, Exception) as exc:
+                logger.warning("stream error for %s/%s: %s", provider, bare_model, exc)
+                yield {"delta": "", "done": True, "error": str(exc)}
+                return
+
     def stats(self) -> Dict[str, Any]:
         total = len(self._call_stats)
         tokens = sum(c["tokens_used"] for c in self._call_stats)
@@ -1071,6 +1334,38 @@ class LLMProvider(Plugin):
         return {"cleared": True}
 
     # ----------------------------------------------------------- internal
+    @staticmethod
+    def _normalize_vision_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Transform messages with ``image_base64`` in content into the
+        OpenAI vision API format.
+
+        When a message's ``content`` is a dict containing ``image_base64``,
+        replace it with::
+
+            content = [
+                {"type": "text", "text": question},
+                {"type": "image_url", "image_url": {"url": "data:{mime};base64,{b64}"}},
+            ]
+
+        Messages that don't need transformation are returned unchanged.
+        """
+        result: List[Dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, dict) and "image_base64" in content:
+                b64 = content.get("image_base64", "")
+                mime = content.get("mime_type", "image/png")
+                question = content.get("prompt", content.get("question", "请描述这张图片"))
+                new_msg = dict(msg)
+                new_msg["content"] = [
+                    {"type": "text", "text": question},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                ]
+                result.append(new_msg)
+            else:
+                result.append(msg)
+        return result
+
     async def _do_call(
         self,
         *,
@@ -1083,6 +1378,10 @@ class LLMProvider(Plugin):
         tools: Optional[List[Dict[str, Any]]],
         provider: str,
     ) -> Dict[str, Any]:
+        # Normalize vision messages: convert {image_base64, mime_type, prompt}
+        # dicts into the OpenAI vision API format.
+        messages = self._normalize_vision_messages(messages)
+
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         if provider == "anthropic":
             headers = {
@@ -1115,11 +1414,16 @@ class LLMProvider(Plugin):
                         "id": block.get("id"),
                     })
             tokens_used = (data.get("usage") or {}).get("total_tokens", 0)
+            usage = data.get("usage") or {}
+            tokens_prompt = usage.get("input_tokens", 0)
+            tokens_completion = usage.get("output_tokens", 0)
             result = {
                 "text": text.strip(),
                 "tool_calls": tool_calls,
                 "tool_calls_raw": tool_calls,  # Anthropic: same format
                 "tokens_used": tokens_used,
+                "tokens_prompt": tokens_prompt,
+                "tokens_completion": tokens_completion,
                 "model": data.get("model", model),
             }
             self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
@@ -1163,6 +1467,9 @@ class LLMProvider(Plugin):
                 "id": tc.get("id"),
             })
         tokens_used = (data.get("usage") or {}).get("total_tokens", 0)
+        usage = data.get("usage") or {}
+        tokens_prompt = usage.get("prompt_tokens", 0)
+        tokens_completion = usage.get("completion_tokens", 0)
         self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
         # Cap stats to prevent unbounded memory growth
         if len(self._call_stats) > 1000:
@@ -1172,5 +1479,7 @@ class LLMProvider(Plugin):
             "tool_calls": tool_calls,
             "tool_calls_raw": tool_calls_raw,
             "tokens_used": tokens_used,
+            "tokens_prompt": tokens_prompt,
+            "tokens_completion": tokens_completion,
             "model": data.get("model", model),
         }

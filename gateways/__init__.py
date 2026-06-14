@@ -72,6 +72,8 @@ class CLIGateway(Plugin):
         await super().setup(ctx)
         self._prompt = (ctx.config.get("gateways") or {}).get("cli", {}).get("prompt", self._prompt)
         self.bus.subscribe("turn_completed", self._on_done)
+        # Subscribe to approval events for human-in-the-loop
+        self.bus.subscribe("approval_needed", self._on_approval_needed)
 
     async def run_loop(self, send_to_agent) -> None:
         """Run the interactive REPL.  ``send_to_agent(text)`` should be an
@@ -130,6 +132,43 @@ class CLIGateway(Plugin):
         if self._reply_available is not None:
             self._reply_available.set()
 
+    async def _on_approval_needed(self, event) -> None:
+        """Handle approval request: prompt CLI user to approve or deny."""
+        req_data = event.get("request")
+        if req_data is None:
+            return
+        req_id = req_data.get("id", "")
+        operation = req_data.get("operation", "unknown")
+        details = req_data.get("details", "")
+        risk_level = req_data.get("risk_level", "medium")
+
+        # Check if request is still pending
+        approval_mgr = getattr(self.ctx, "approval_manager", None) if self.ctx else None
+        if approval_mgr is None:
+            return
+        pending = approval_mgr.get_pending()
+        if not any(r["id"] == req_id for r in pending):
+            return  # Already handled
+
+        print(f"\n[⏳ 需要审批] {operation}")
+        print(f"  风险等级: {risk_level}")
+        print(f"  详情: {details[:200]}")
+        print(f"  ID: {req_id}")
+
+        try:
+            answer = await asyncio.to_thread(
+                input, "  批准执行? (y/n, 默认 120s 超时自动拒绝): "
+            )
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+
+        if answer.strip().lower().startswith("y"):
+            approval_mgr.approve(req_id)
+            print("  ✓ 已批准")
+        else:
+            approval_mgr.deny(req_id)
+            print("  ✗ 已拒绝")
+
 
 # ------------- Web UI (FastAPI) -------------------------------------------
 class WebGateway(Plugin):
@@ -182,6 +221,47 @@ class WebGateway(Plugin):
                 return {"reply": "[no agent callback bound]"}
             reply = await self._agent_callback(text, source="web", session_id=session_id)
             return {"reply": reply, "session_id": session_id}
+
+        @app.post("/api/chat/stream")
+        async def api_chat_stream(body: dict):
+            text = body.get("text", "")
+            session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            model = body.get("model")
+            temperature = body.get("temperature")
+            max_tokens = body.get("max_tokens")
+            tools = body.get("tools")
+
+            _llm = self.ctx.get_plugin("llm") if self.ctx else None
+            if _llm is None:
+                return {"error": "LLM provider not available"}
+
+            from fastapi.responses import StreamingResponse
+            import json as _json
+
+            async def event_generator():
+                msgs = [{"role": "user", "content": text}]
+                if body.get("system"):
+                    msgs.insert(0, {"role": "system", "content": body["system"]})
+                yield f"data: {_json.dumps({'status': 'thinking', 'session_id': session_id})}\n\n"
+                async for chunk in _llm.chat_completion_stream(
+                    messages=msgs,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                ):
+                    yield f"data: {_json.dumps(chunk)}\n\n"
+                yield f"data: {_json.dumps({'done': True, 'session_id': session_id})}\n\n"
+
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
         @app.get("/api/status")
         async def status():

@@ -96,7 +96,10 @@ class SmartRouter(Plugin):
         turn.model = model  # None is fine — chat_completion falls back to default model
         # 2) build messages + compress history
         turn.messages = self._build_messages(turn)
-        # 3) cap token budget
+        # 3) pass context_compression config to coordinator via turn.meta
+        compression_cfg = self._cfg.get("context_compression", {}) or {}
+        turn.meta["context_compression"] = compression_cfg.get("enabled", True)
+        # 4) cap token budget
         turn.token_budget = self._token_budget_for(tier)
         self._tier_stats[tier]["picked"] += 1
         logger.info("router: complexity=%.2f tier=%s model=%s",

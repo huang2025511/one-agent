@@ -21,6 +21,9 @@ from core.context import TurnContext
 from core.events import Event
 from core.plugin import Plugin
 
+from .knowledge_graph import KnowledgeGraph  # noqa: F401
+from .session_store import SessionStore  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 
@@ -268,6 +271,7 @@ class MemoryPlugin(Plugin):
         super().__init__()
         self._long: Optional[LongTermMemory] = None
         self._procedural: Optional[ProceduralMemory] = None
+        self._kg: Optional[KnowledgeGraph] = None
         self._max_results = 5
         self._auto_create_skills = True
         self._min_usage = 3
@@ -283,6 +287,7 @@ class MemoryPlugin(Plugin):
             decay_enabled=mem_cfg.get("decay_enabled", True),
         )
         self._procedural = ProceduralMemory(os.path.join(data_dir, "memory/skills"))
+        self._kg = KnowledgeGraph(os.path.join(data_dir, "memory/kg.db"))
         self._max_results = mem_cfg.get("max_results", 5)
         self._auto_create_skills = cfg.get("procedural", {}).get("auto_create_skills", True)
         self._min_usage = cfg.get("procedural", {}).get("min_usage_before_skill", 3)
@@ -311,6 +316,10 @@ class MemoryPlugin(Plugin):
                 source=turn.source,
                 tags="interaction",
             )
+            # Auto-extract entities into knowledge graph
+            if self._kg is not None:
+                combined = turn.input_text + " " + (turn.result or "")
+                self._kg.extract_from_text(combined, source=turn.source)
         if self._auto_create_skills and self._procedural and self._looks_teachable(turn):
             triggers = [w for w in re.findall(r"\w{4,}", turn.input_text)][:5]
             if triggers:
@@ -364,7 +373,34 @@ class MemoryPlugin(Plugin):
         return {
             "long_term": self._long.stats() if self._long else {},
             "procedural_skills": len(self._procedural.list()) if self._procedural else 0,
+            "knowledge_graph": self._kg.stats() if self._kg else {},
         }
+
+    def graph_search(self, action: str = "search", **kwargs) -> Any:
+        """Query the knowledge graph.
+
+        Actions:
+          - search: search entities by name (keyword query)
+          - entity: get entity details and its relationships
+          - neighbors: get entities within N hops
+        """
+        if self._kg is None:
+            return {"error": "knowledge graph not initialized"}
+        if action == "search":
+            return self._kg.search(kwargs.get("query", ""), limit=kwargs.get("limit", 10))
+        elif action == "entity":
+            name = kwargs.get("name", "")
+            if not name:
+                return {"error": "entity name required"}
+            result = self._kg.query_entity(name)
+            return result if result is not None else {"error": f"entity '{name}' not found"}
+        elif action == "neighbors":
+            name = kwargs.get("name", "")
+            if not name:
+                return {"error": "entity name required"}
+            return self._kg.get_neighbors(name, depth=kwargs.get("depth", 1))
+        else:
+            return {"error": f"unknown action: {action}, supported: search, entity, neighbors"}
 
     async def stop(self) -> None:
         # Flush pending procedural-memory writes (so we don't lose the last
@@ -378,6 +414,11 @@ class MemoryPlugin(Plugin):
         if self._long is not None:
             try:
                 self._long.close()
+            except Exception:
+                pass
+        if self._kg is not None:
+            try:
+                self._kg.close()
             except Exception:
                 pass
         await super().stop()

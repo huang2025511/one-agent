@@ -1,19 +1,20 @@
-"""Plugin marketplace — auto-install skills from GitHub, GitLab, or URLs.
+"""Skill marketplace — publish, discover, and install skill packages.
 
-Features:
-  - Install skill from GitHub repo (owner/repo@path)
-  - Verify repository exists and is accessible before installing
-  - Sandboxed installation (validate YAML header before writing)
-  - Uninstall / list installed skills
-  - Skill manifest registry at data/marketplace/registry.json
+A skill package is a directory containing:
+  - SKILL.md (required): skill metadata and documentation
+  - handler.py (optional): Python handler function
+  - references/ (optional): reference documents
+  - scripts/ (optional): helper scripts
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
+import shutil
+import hashlib
+import time
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,10 +25,178 @@ from core.plugin import Plugin
 
 logger = logging.getLogger(__name__)
 
-
 # Official community hub base URL
 COMMUNITY_HUB_URL = "https://raw.githubusercontent.com/huang2025511/one-agent-skills/main/"
 
+
+class SkillPackage:
+    """Represents a skill package."""
+    
+    def __init__(self, name: str, version: str = "1.0.0", description: str = "",
+                 author: str = "", path: str = ""):
+        self.name = name
+        self.version = version
+        self.description = description
+        self.author = author
+        self.path = path
+        self.sha256 = ""
+        self.installed_at: Optional[float] = None
+        self.tags: List[str] = []
+    
+    @classmethod
+    def from_directory(cls, dirpath: str) -> Optional["SkillPackage"]:
+        """Load a skill package from a directory."""
+        path = Path(dirpath)
+        skill_md = path / "SKILL.md"
+        if not skill_md.exists():
+            return None
+        
+        # Parse SKILL.md front matter
+        content = skill_md.read_text(encoding='utf-8', errors='ignore')
+        meta = cls._parse_front_matter(content)
+        
+        pkg = cls(
+            name=path.name,
+            version=meta.get("version", "1.0.0"),
+            description=meta.get("description", ""),
+            author=meta.get("author", ""),
+            path=str(path),
+        )
+        return pkg
+    
+    @staticmethod
+    def _parse_front_matter(content: str) -> Dict[str, str]:
+        """Extract YAML front matter from SKILL.md."""
+        lines = content.split("\n")
+        if lines and lines[0].strip() == "---":
+            meta = {}
+            for line in lines[1:]:
+                if line.strip() == "---":
+                    break
+                if ":" in line:
+                    key, _, val = line.partition(":")
+                    meta[key.strip()] = val.strip().strip('"').strip("'")
+            return meta
+        return {}
+    
+    def compute_hash(self) -> str:
+        """Compute SHA256 of the skill package contents."""
+        hasher = hashlib.sha256()
+        path = Path(self.path)
+        for f in sorted(path.rglob("*")):
+            if f.is_file() and f.suffix != '.pyc':
+                hasher.update(str(f.relative_to(path)).encode())
+                hasher.update(f.read_bytes())
+        self.sha256 = hasher.hexdigest()[:16]
+        return self.sha256
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "version": self.version,
+            "description": self.description,
+            "author": self.author,
+            "sha256": self.sha256,
+            "tags": self.tags,
+        }
+
+
+class Marketplace:
+    """Skill marketplace for discovering and installing skill packages."""
+    
+    def __init__(self, registry_dir: str = "data/marketplace"):
+        self._registry_dir = Path(registry_dir)
+        self._registry_dir.mkdir(parents=True, exist_ok=True)
+        self._registry_file = self._registry_dir / "registry.json"
+        self._packages: Dict[str, SkillPackage] = {}
+        self._load_registry()
+    
+    def _load_registry(self):
+        if self._registry_file.exists():
+            try:
+                data = json.loads(self._registry_file.read_text())
+                for entry in data.get("packages", []):
+                    pkg = SkillPackage(
+                        name=entry["name"],
+                        version=entry.get("version", "1.0.0"),
+                        description=entry.get("description", ""),
+                        author=entry.get("author", ""),
+                    )
+                    pkg.sha256 = entry.get("sha256", "")
+                    pkg.tags = entry.get("tags", [])
+                    self._packages[pkg.name] = pkg
+            except Exception as exc:
+                logger.warning("Failed to load marketplace registry: %s", exc)
+    
+    def _save_registry(self):
+        data = {
+            "updated_at": time.time(),
+            "packages": [p.to_dict() for p in self._packages.values()],
+        }
+        self._registry_file.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    
+    def publish(self, dirpath: str) -> Optional[SkillPackage]:
+        """Publish a skill package from a local directory."""
+        pkg = SkillPackage.from_directory(dirpath)
+        if pkg is None:
+            return None
+        pkg.compute_hash()
+        
+        # Copy to marketplace
+        dest = self._registry_dir / pkg.name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(dirpath, dest, dirs_exist_ok=True)
+        
+        self._packages[pkg.name] = pkg
+        self._save_registry()
+        logger.info("Published skill: %s v%s", pkg.name, pkg.version)
+        return pkg
+    
+    def discover(self, query: str = "") -> List[Dict[str, Any]]:
+        """Search available packages."""
+        results = []
+        for pkg in self._packages.values():
+            if query and query.lower() not in pkg.name.lower() and query.lower() not in pkg.description.lower():
+                continue
+            results.append(pkg.to_dict())
+        return sorted(results, key=lambda p: p["name"])
+    
+    def install(self, name: str, target_dir: str) -> bool:
+        """Install a skill package to a target directory (e.g., ./skills/)."""
+        if name not in self._packages:
+            return False
+        pkg = self._packages[name]
+        src = self._registry_dir / pkg.name
+        if not src.exists():
+            return False
+        dest = Path(target_dir) / pkg.name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest, dirs_exist_ok=True)
+        logger.info("Installed skill: %s → %s", name, dest)
+        return True
+    
+    def uninstall(self, name: str, target_dir: str) -> bool:
+        """Remove an installed skill package."""
+        dest = Path(target_dir) / name
+        if not dest.exists():
+            return False
+        shutil.rmtree(dest)
+        logger.info("Uninstalled skill: %s", name)
+        return True
+    
+    def list_installed(self, target_dir: str) -> List[str]:
+        """List installed skill packages."""
+        path = Path(target_dir)
+        if not path.exists():
+            return []
+        return [d.name for d in path.iterdir() if d.is_dir() and (d / "SKILL.md").exists()]
+
+
+# ============================================================
+# Backward-compatible plugin wrapper (used by tests & one_agent.py)
+# ============================================================
 
 class SkillSpec:
     """Validated skill specification parsed from a markdown file."""

@@ -1,0 +1,207 @@
+"""Knowledge graph memory — entity extraction and relationship queries."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import time
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+class KnowledgeGraph:
+    """Lightweight entity-relationship graph on SQLite."""
+
+    def __init__(self, db_path: str = "data/memory/kg.db"):
+        parent = os.path.dirname(db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._migrate()
+
+    def _migrate(self):
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS entities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT DEFAULT 'unknown',
+                source TEXT DEFAULT '',
+                created_at REAL,
+                updated_at REAL
+            );
+            CREATE TABLE IF NOT EXISTS relations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL,
+                predicate TEXT NOT NULL,
+                object_id INTEGER NOT NULL,
+                weight REAL DEFAULT 1.0,
+                source TEXT DEFAULT '',
+                created_at REAL,
+                FOREIGN KEY (subject_id) REFERENCES entities(id),
+                FOREIGN KEY (object_id) REFERENCES entities(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+            CREATE INDEX IF NOT EXISTS idx_relations_subj ON relations(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_relations_obj ON relations(object_id);
+        """)
+        self._conn.commit()
+
+    def add_entity(self, name: str, etype: str = "unknown", source: str = "") -> int:
+        """Add or update an entity. Returns entity id."""
+        now = time.time()
+        cur = self._conn.execute("SELECT id FROM entities WHERE name = ?", (name,))
+        row = cur.fetchone()
+        if row:
+            self._conn.execute(
+                "UPDATE entities SET type = ?, updated_at = ? WHERE id = ?",
+                (etype, now, row["id"])
+            )
+            return row["id"]
+        cur = self._conn.execute(
+            "INSERT INTO entities (name, type, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (name, etype, source, now, now)
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def add_relation(self, subject: str, predicate: str, obj: str,
+                    weight: float = 1.0, source: str = "") -> bool:
+        """Add a relationship between two entities."""
+        subj_id = self.add_entity(subject, source=source)
+        obj_id = self.add_entity(obj, source=source)
+
+        # Check if relation already exists
+        cur = self._conn.execute(
+            "SELECT id FROM relations WHERE subject_id = ? AND predicate = ? AND object_id = ?",
+            (subj_id, predicate, obj_id)
+        )
+        if cur.fetchone():
+            # Update weight
+            self._conn.execute(
+                "UPDATE relations SET weight = weight + ? WHERE subject_id = ? AND predicate = ? AND object_id = ?",
+                (weight, subj_id, predicate, obj_id)
+            )
+        else:
+            self._conn.execute(
+                "INSERT INTO relations (subject_id, predicate, object_id, weight, source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (subj_id, predicate, obj_id, weight, source, time.time())
+            )
+        self._conn.commit()
+        return True
+
+    def query_entity(self, name: str) -> Optional[Dict[str, Any]]:
+        """Get entity info and its relationships."""
+        cur = self._conn.execute("SELECT * FROM entities WHERE name = ?", (name,))
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        # Get outgoing relations
+        cur = self._conn.execute("""
+            SELECT e.name as object_name, e.type as object_type, r.predicate, r.weight
+            FROM relations r
+            JOIN entities e ON e.id = r.object_id
+            WHERE r.subject_id = ?
+            ORDER BY r.weight DESC
+        """, (row["id"],))
+        outgoing = [dict(r) for r in cur.fetchall()]
+
+        # Get incoming relations
+        cur = self._conn.execute("""
+            SELECT e.name as subject_name, e.type as subject_type, r.predicate, r.weight
+            FROM relations r
+            JOIN entities e ON e.id = r.subject_id
+            WHERE r.object_id = ?
+            ORDER BY r.weight DESC
+        """, (row["id"],))
+        incoming = [dict(r) for r in cur.fetchall()]
+
+        return {
+            "name": row["name"],
+            "type": row["type"],
+            "outgoing": outgoing,
+            "incoming": incoming,
+        }
+
+    def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search entities by name (LIKE)."""
+        cur = self._conn.execute(
+            "SELECT * FROM entities WHERE name LIKE ? LIMIT ?",
+            (f"%{query}%", limit)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_neighbors(self, name: str, depth: int = 1) -> List[Dict[str, Any]]:
+        """Get all entities within N hops of the given entity."""
+        entity = self.query_entity(name)
+        if not entity:
+            return []
+
+        visited = {name}
+        result = [entity]
+        current = [name]
+
+        for _ in range(depth):
+            next_level = []
+            for node_name in current:
+                node = self.query_entity(node_name)
+                if not node:
+                    continue
+                for rel in node.get("outgoing", []):
+                    neighbor = rel["object_name"]
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        next_level.append(neighbor)
+                        result.append({
+                            "name": neighbor,
+                            "relation": f"{node_name} --[{rel['predicate']}]--> {neighbor}",
+                        })
+            current = next_level
+            if not current:
+                break
+
+        return result
+
+    def extract_from_text(self, text: str, source: str = "") -> int:
+        """Simple rule-based entity extraction from text."""
+        count = 0
+
+        # Extract proper nouns (capitalized words, Chinese names)
+        # English: capitalized sequences
+        for match in re.finditer(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text):
+            name = match.group()
+            if len(name) > 3:
+                self.add_entity(name, etype="unknown", source=source)
+                count += 1
+
+        # Chinese: 2-4 character sequences that look like names/terms
+        for match in re.finditer(r'[\u4e00-\u9fff]{2,4}', text):
+            name = match.group()
+            # Skip common words
+            if name not in ("一个", "这个", "那个", "我们", "他们", "什么", "可以", "就是", "没有",
+                          "因为", "所以", "但是", "如果", "已经", "还是", "不过", "虽然"):
+                self.add_entity(name, etype="unknown", source=source)
+                count += 1
+
+        return count
+
+    def stats(self) -> Dict[str, Any]:
+        """Get graph statistics."""
+        entity_count = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        relation_count = self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
+        return {
+            "entities": entity_count,
+            "relations": relation_count,
+        }
+
+    def close(self) -> None:
+        """Close the SQLite connection."""
+        try:
+            self._conn.close()
+        except Exception:
+            pass

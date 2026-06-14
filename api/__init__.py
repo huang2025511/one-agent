@@ -7,6 +7,10 @@ Exposes:
   GET  /api/memory/page    — paginated memory list
   GET  /api/skills         — list all skills
   POST /api/skills/install — install a skill from URL / GitHub
+  GET  /api/marketplace           — discover available skill packages
+  POST /api/marketplace/publish   — publish a local skill to marketplace
+  POST /api/marketplace/install   — install a skill from marketplace
+  DELETE /api/marketplace/{name}  — uninstall a skill
   GET  /api/stats          — system statistics
   GET  /api/metrics        — bus + LLM + memory metrics
   POST /api/cache/clear    — clear LLM response cache
@@ -21,8 +25,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.plugin import Plugin
@@ -94,7 +100,7 @@ class RESTAPIGateway(Plugin):
         if not self._enabled:
             return
         try:
-            from fastapi import FastAPI, HTTPException, Header, Request
+            from fastapi import FastAPI, HTTPException, Header, Request, UploadFile
             from fastapi.middleware.cors import CORSMiddleware
             from fastapi.responses import JSONResponse
         except ImportError:
@@ -131,7 +137,7 @@ class RESTAPIGateway(Plugin):
         # 100 MB /chat posts.
         @app.middleware("http")
         async def body_size_middleware(request, call_next):
-            if request.url.path == "/api/chat":
+            if request.url.path in ("/api/chat", "/api/chat/stream"):
                 cl = request.headers.get("content-length")
                 try:
                     if cl is not None and int(cl) > self._max_chat_bytes:
@@ -277,6 +283,55 @@ class RESTAPIGateway(Plugin):
                 result = {"reply": reply, "session_id": session_id, "thinking": ""}
             return result
 
+        @app.post("/api/chat/stream")
+        async def chat_stream(body: dict, request: Request, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            text = body.get("text") or body.get("message", "")
+            session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            model = body.get("model")
+            temperature = body.get("temperature")
+            max_tokens = body.get("max_tokens")
+            tools = body.get("tools")
+
+            # Auto-detect language from user input
+            if text:
+                from i18n import detect_language, set_language, get_language
+                detected_lang = detect_language(text)
+                current_lang = get_language()
+                if detected_lang != current_lang:
+                    set_language(detected_lang)
+
+            if _llm is None:
+                raise HTTPException(503, _("llm_not_available"))
+
+            from fastapi.responses import StreamingResponse
+
+            async def event_generator():
+                # Build messages list
+                msgs: List[Dict[str, Any]] = [{"role": "user", "content": text}]
+                if body.get("system"):
+                    msgs.insert(0, {"role": "system", "content": body["system"]})
+                yield f"data: {json.dumps({'status': 'thinking', 'session_id': session_id})}\n\n"
+                async for chunk in _llm.chat_completion_stream(
+                    messages=msgs,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                ):
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
+
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         @app.get("/api/memory/search")
         async def memory_search(
             q: str,
@@ -319,6 +374,59 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("skills_not_available"))
             return {"skills": _skills.all_skill_ids()}
 
+        # ---------------------------------------------------------------- Marketplace endpoints
+        @app.get("/api/marketplace")
+        async def list_marketplace(query: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Discover available skill packages in the marketplace."""
+            auth(x_api_key)
+            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            if mp is None:
+                raise HTTPException(503, _("marketplace_not_available"))
+            return {"packages": mp.discover(query)}
+
+        @app.post("/api/marketplace/publish")
+        async def publish_skill(dirpath: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Publish a local skill directory to the marketplace."""
+            auth(x_api_key)
+            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            if mp is None:
+                raise HTTPException(503, _("marketplace_not_available"))
+            pkg = mp.publish(dirpath)
+            if pkg is None:
+                raise HTTPException(400, _("invalid_skill_package", path=dirpath))
+            return {"published": True, "package": pkg.to_dict()}
+
+        @app.post("/api/marketplace/install")
+        async def install_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Install a skill package from the marketplace."""
+            auth(x_api_key)
+            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            if mp is None:
+                raise HTTPException(503, _("marketplace_not_available"))
+            if not target_dir:
+                target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
+            ok = mp.install(name, target_dir)
+            if not ok:
+                raise HTTPException(404, _("skill_not_found", name=name))
+            # Reload skills after installation
+            if _skills is not None:
+                _skills._scan_directory(target_dir)
+            return {"installed": True, "name": name, "target_dir": target_dir}
+
+        @app.delete("/api/marketplace/{name}")
+        async def uninstall_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Uninstall a skill package from the target directory."""
+            auth(x_api_key)
+            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            if mp is None:
+                raise HTTPException(503, _("marketplace_not_available"))
+            if not target_dir:
+                target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
+            ok = mp.uninstall(name, target_dir)
+            if not ok:
+                raise HTTPException(404, _("skill_not_found", name=name))
+            return {"uninstalled": True, "name": name}
+
         @app.post("/api/cache/clear")
         async def cache_clear(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
@@ -326,6 +434,136 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("llm_not_available"))
             return _llm.clear_cache()
 
+        # ---------------------------------------------------------------- Self-improvement endpoints
+        @app.get("/api/improvements")
+        async def get_improvements(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get self-improvement stats and patterns."""
+            auth(x_api_key)
+            improver = getattr(_ctx, "self_improver", None) if _ctx else None
+            if improver is None:
+                raise HTTPException(503, _("improvement_not_available"))
+            stats = improver.get_stats()
+            improvements = improver.get_improvements()
+            return {**stats, "applied_improvements": improvements}
+
+        @app.get("/api/improvements/failures")
+        async def get_failures(limit: int = 50, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get recent failure cases."""
+            auth(x_api_key)
+            improver = getattr(_ctx, "self_improver", None) if _ctx else None
+            if improver is None:
+                raise HTTPException(503, _("improvement_not_available"))
+            failures = improver.get_failures(limit=limit)
+            return {"failures": failures, "limit": limit}
+
+        # ---------------------------------------------------------------- Cost tracking endpoints
+        @app.get("/api/costs/daily")
+        async def daily_costs(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get daily cost breakdown."""
+            auth(x_api_key)
+            if _llm is None or getattr(_llm, "_cost_tracker", None) is None:
+                raise HTTPException(503, _("cost_tracking_not_available"))
+            tracker = _llm._cost_tracker
+            return {
+                "daily": tracker.daily_cost(),
+                "by_provider": tracker.by_provider(),
+                "by_model": tracker.by_model(),
+                "total_tokens": tracker.total_tokens(),
+                "total_cost": tracker.total_cost(),
+            }
+
+        @app.get("/api/costs/monthly")
+        async def monthly_costs(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get monthly cost breakdown."""
+            auth(x_api_key)
+            if _llm is None or getattr(_llm, "_cost_tracker", None) is None:
+                raise HTTPException(503, _("cost_tracking_not_available"))
+            tracker = _llm._cost_tracker
+            return {
+                "monthly": tracker.monthly_cost(),
+                "by_provider": tracker.by_provider(),
+                "by_model": tracker.by_model(),
+                "total_tokens": tracker.total_tokens(),
+                "total_cost": tracker.total_cost(),
+            }
+
+        @app.get("/api/costs/budget")
+        async def budget_status(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get budget status."""
+            auth(x_api_key)
+            if _llm is None or getattr(_llm, "_cost_tracker", None) is None:
+                raise HTTPException(503, _("cost_tracking_not_available"))
+            tracker = _llm._cost_tracker
+            return tracker.check_budget()
+
+        @app.get("/api/costs/by-provider")
+        async def costs_by_provider(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get costs grouped by provider."""
+            auth(x_api_key)
+            if _llm is None or getattr(_llm, "_cost_tracker", None) is None:
+                raise HTTPException(503, _("cost_tracking_not_available"))
+            tracker = _llm._cost_tracker
+            return {
+                "by_provider": tracker.by_provider(),
+                "by_model": tracker.by_model(),
+                "total_cost": tracker.total_cost(),
+            }
+
+        @app.get("/api/costs/recent")
+        async def costs_recent(
+            limit: int = 50,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """Get recent cost entries."""
+            auth(x_api_key)
+            if _llm is None or getattr(_llm, "_cost_tracker", None) is None:
+                raise HTTPException(503, _("cost_tracking_not_available"))
+            tracker = _llm._cost_tracker
+            return {"recent": tracker.get_recent(limit=limit)}
+
+        # ---------------------------------------------------------------- Session endpoints
+        @app.get("/api/sessions")
+        async def list_sessions(
+            limit: int = 50,
+            offset: int = 0,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            auth(x_api_key)
+            store = _ctx.session_store if _ctx else None
+            if store is None:
+                raise HTTPException(503, _("session_store_not_available"))
+            sessions = store.list_sessions(limit=limit, offset=offset)
+            return {"sessions": sessions, "limit": limit, "offset": offset}
+
+        @app.get("/api/sessions/{session_id}")
+        async def get_session(
+            session_id: str,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            auth(x_api_key)
+            store = _ctx.session_store if _ctx else None
+            if store is None:
+                raise HTTPException(503, _("session_store_not_available"))
+            session = store.get_session(session_id)
+            if session is None:
+                raise HTTPException(404, _("session_not_found", session_id=session_id))
+            return session
+
+        @app.delete("/api/sessions/{session_id}")
+        async def delete_session(
+            session_id: str,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            auth(x_api_key)
+            store = _ctx.session_store if _ctx else None
+            if store is None:
+                raise HTTPException(503, _("session_store_not_available"))
+            deleted = store.delete_session(session_id)
+            if not deleted:
+                raise HTTPException(404, _("session_not_found", session_id=session_id))
+            return {"deleted": True, "session_id": session_id}
+
+        # ---------------------------------------------------------------- Settings
         @app.get("/api/settings")
         async def settings_get(key: Optional[str] = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """读取配置项。不传 key 则返回所有可配置项列表。"""
@@ -446,6 +684,52 @@ class RESTAPIGateway(Plugin):
                 return {"deleted": True, "filename": filename}
             raise HTTPException(404, _("backup_not_found", filename=filename))
 
+        # ---------------------------------------------------------------- Document RAG
+        @app.post("/api/documents/ingest")
+        async def ingest_document(file: UploadFile = None, path: str = None,
+                                  x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            from skills import _doc_store
+            if file is not None:
+                import tempfile
+                import shutil
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
+                    shutil.copyfileobj(file.file, tmp)
+                    tmp_path = tmp.name
+                try:
+                    count = _doc_store.ingest_file(tmp_path)
+                finally:
+                    os.unlink(tmp_path)
+                return {"ingested": True, "name": file.filename, "chunks": count}
+            if path:
+                count = _doc_store.ingest_file(path)
+                return {"ingested": True, "name": Path(path).name, "chunks": count}
+            raise HTTPException(400, _("need_file_or_path"))
+
+        @app.get("/api/documents")
+        async def list_documents(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            from skills import _doc_store
+            docs = _doc_store.list_documents()
+            return {"documents": docs}
+
+        @app.get("/api/documents/search")
+        async def search_documents(q: str, limit: int = 5,
+                                   x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            from skills import _doc_store
+            results = _doc_store.search(q, limit=limit)
+            return {"query": q, "results": results, "limit": limit}
+
+        @app.delete("/api/documents/{name}")
+        async def delete_document(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            from skills import _doc_store
+            deleted = _doc_store.delete_document(name)
+            if not deleted:
+                raise HTTPException(404, _("document_not_found", name=name))
+            return {"deleted": True, "name": name}
+
         # ---------------------------------------------------------------- Alerting
         @app.get("/api/alerts/rules")
         async def alert_rules_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -498,6 +782,40 @@ class RESTAPIGateway(Plugin):
             if _alert_mgr is None:
                 return {"alerts": []}
             return {"alerts": _alert_mgr.list_history(limit=limit)}
+
+        # ---------------------------------------------------------------- Approval (Human-in-the-Loop)
+        @app.get("/api/approvals/pending")
+        async def list_pending_approvals(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """List pending approval requests."""
+            auth(x_api_key)
+            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            if _approval_mgr is None:
+                return {"pending": []}
+            return {"pending": _approval_mgr.get_pending()}
+
+        @app.post("/api/approvals/{request_id}/approve")
+        async def approve_request(request_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Approve a pending request."""
+            auth(x_api_key)
+            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            if _approval_mgr is None:
+                raise HTTPException(503, _("approval_manager_not_available"))
+            ok = _approval_mgr.approve(request_id)
+            if not ok:
+                raise HTTPException(404, _("approval_request_not_found", request_id=request_id))
+            return {"approved": True, "request_id": request_id}
+
+        @app.post("/api/approvals/{request_id}/deny")
+        async def deny_request(request_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Deny a pending request."""
+            auth(x_api_key)
+            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            if _approval_mgr is None:
+                raise HTTPException(503, _("approval_manager_not_available"))
+            ok = _approval_mgr.deny(request_id)
+            if not ok:
+                raise HTTPException(404, _("approval_request_not_found", request_id=request_id))
+            return {"approved": False, "request_id": request_id}
 
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):

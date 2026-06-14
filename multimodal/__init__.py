@@ -261,6 +261,100 @@ class MultimodalPlugin(Plugin):
             logger.warning("TTS failed: %s", exc)
             return {"error": str(exc), "b64_audio": ""}
 
+    # --------------------------------------------------------- audio transcription
+    async def transcribe_audio(
+        self,
+        audio_path: str,
+        language: str = "zh",
+    ) -> Dict[str, Any]:
+        """Transcribe audio to text using Whisper API.
+
+        Tries the local ``whisper`` CLI first (openai-whisper), then falls
+        back to the OpenAI-compatible whisper-1 model via the LLM provider.
+        """
+        import os
+        import subprocess
+
+        if not os.path.exists(audio_path):
+            return {"text": "", "error": f"audio file not found: {audio_path}"}
+
+        # Try local whisper CLI first (fast, offline)
+        try:
+            result = subprocess.run(
+                ["whisper", audio_path, "--language", language, "--model", "tiny",
+                 "--output_format", "txt", "--output_dir", "/tmp"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                out_path = os.path.splitext(audio_path)[0] + ".txt"
+                if os.path.exists(out_path):
+                    with open(out_path, encoding="utf-8") as f:
+                        text = f.read().strip()
+                    return {"text": text, "method": "local_whisper"}
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        except Exception as exc:
+            logger.debug("local whisper failed: %s", exc)
+
+        # Fallback: use OpenAI-compatible whisper-1 endpoint
+        try:
+            _provider, _model_name, api_key, _base, cli = self._resolve("openai/whisper-1")
+        except ValueError as exc:
+            return {"text": "", "error": str(exc)}
+
+        try:
+            with open(audio_path, "rb") as f:
+                resp = await cli.post(
+                    "/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    data={"model": "whisper-1", "language": language},
+                    files={"file": (os.path.basename(audio_path), f, "audio/mpeg")},
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            return {"text": data.get("text", ""), "method": "openai_whisper"}
+        except Exception as exc:
+            logger.warning("whisper API transcription failed: %s", exc)
+            return {"text": "", "error": str(exc)}
+
+    # --------------------------------------------------------- image description (convenience)
+    async def describe_image(
+        self,
+        image_path: str,
+        question: str = "",
+    ) -> Dict[str, Any]:
+        """Describe an image using a vision-capable LLM.
+
+        Reads the image, base64-encodes it, and returns a structured payload
+        that the coordinator can forward to a vision model via
+        :meth:`LLMProvider.chat_completion`.
+        """
+        import base64 as _b64
+        import mimetypes as _mt
+        from pathlib import Path
+
+        path = Path(image_path)
+        if not path.exists():
+            return {"error": "image not found", "image_base64": "", "mime_type": "", "prompt": ""}
+
+        ext = path.suffix.lower()
+        mime_map = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+        }
+        mime_type = mime_map.get(ext, "image/png")
+
+        image_data = _b64.b64encode(path.read_bytes()).decode()
+
+        prompt = question or "请描述这张图片的内容"
+
+        return {
+            "image_base64": image_data,
+            "mime_type": mime_type,
+            "prompt": prompt,
+            "model_hint": "vision",
+        }
+
     # --------------------------------------------------------- batch
     async def batch_analyze(
         self,

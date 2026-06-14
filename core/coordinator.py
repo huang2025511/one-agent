@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from core.context import TurnContext
 from core.events import Event
 from core.plugin import Plugin
+from core.tool_result import ToolResult
 from models import LLMProvider
 from skills import SkillManager
 
@@ -54,7 +55,7 @@ class Coordinator(Plugin):
         name: str,
         args: Dict[str, Any],
         failed_skills: Dict[str, int],
-    ) -> str:
+    ) -> ToolResult:
         """Dispatch a skill with smart failure tracking.
 
         If a skill has failed too many times consecutively, return a hint
@@ -62,10 +63,12 @@ class Coordinator(Plugin):
         """
         _MAX = 3
         if failed_skills.get(name, 0) >= _MAX:
-            return (
-                f"[{name} 不可用（已连续失败 {_MAX} 次），"
-                "请停止调用此工具，直接用你的知识给出答案。"
+            return ToolResult(
+                tool_name=name,
+                status="unavailable",
+                error=f"已连续失败 {_MAX} 次，请停止调用此工具，直接用你的知识给出答案。",
             )
+        start = time.time()
         try:
             if self._skills is not None:
                 result = await self._skills.dispatch(name, args)
@@ -74,7 +77,15 @@ class Coordinator(Plugin):
                 result_str = "[no skill manager bound]"
         except Exception as exc:  # noqa: BLE001
             logger.exception("skill dispatch failed: %s(%s)", name, args)
-            result_str = f"[skill error: {exc}]"
+            duration_ms = (time.time() - start) * 1000
+            return ToolResult(
+                tool_name=name,
+                status="error",
+                error=str(exc),
+                duration_ms=duration_ms,
+            )
+
+        duration_ms = (time.time() - start) * 1000
 
         # Track failures — if result contains error keywords, count it
         if "error" in result_str.lower() or "不可用" in result_str or "unavailable" in result_str.lower():
@@ -91,7 +102,12 @@ class Coordinator(Plugin):
             if name in failed_skills:
                 del failed_skills[name]
 
-        return result_str
+        return ToolResult(
+            tool_name=name,
+            status="success",
+            data=result_str,
+            duration_ms=duration_ms,
+        )
 
     def _persist_language(self, lang: str) -> None:
         """Persist detected language to config file so it survives restarts."""
@@ -107,6 +123,45 @@ class Coordinator(Plugin):
             logger.info("persisted language '%s' to config", lang)
         except Exception as exc:  # noqa: BLE001
             logger.warning("failed to persist language: %s", exc)
+
+    async def _compress_messages(self, messages: list, turn) -> str:
+        """Use a lightweight LLM call to summarize early conversation."""
+        if not self._llm:
+            return ""
+        early_text = "\n".join(
+            f"{m['role']}: {str(m.get('content', ''))[:500]}"
+            for m in messages[:max(1, len(messages) // 2)]
+            if m.get("role") in ("user", "assistant") and not m.get("tool_calls")
+        )
+        if not early_text.strip():
+            return ""
+        # Use lightweight model if configured, otherwise fall back to turn model
+        model = turn.model
+        if self.ctx and self.ctx.config:
+            lightweight = self.ctx.config.get("llm", {}).get("lightweight_model")
+            if lightweight:
+                model = lightweight
+        prompt = [
+            {"role": "system", "content": "你是对话摘要助手。用2-3句话总结以下对话的关键信息、用户需求和已完成的步骤。只输出摘要，不要加任何前缀。"},
+            {"role": "user", "content": early_text[:4000]},
+        ]
+        try:
+            resp = await self._llm.chat_completion(
+                messages=prompt,
+                model=model,
+                max_tokens=200,
+                tools=None,
+            )
+            return resp.get("text", "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _detect_complex_task(text: str) -> bool:
+        """Quick heuristic: tasks with comparison, research, or analysis keywords."""
+        keywords = ["比较", "对比", "分析", "研究", "评估", "调查", "分别", "各",
+                    "compare", "analyze", "research", "evaluate", "both", "each"]
+        return len(text) > 50 and any(k in text for k in keywords)
 
     # ------------------------------------------------------------ handlers
     async def _on_routed(self, event: Event) -> None:
@@ -224,6 +279,48 @@ class Coordinator(Plugin):
                 logger.info("think phase skipped: %s", exc)
                 turn.meta["thinking"] = ""
 
+        # ── Context compression ──
+        if self.ctx and self.ctx.config:
+            compression_enabled = self.ctx.config.get("router", {}).get("context_compression", {}).get("enabled", True)
+            if compression_enabled:
+                max_tokens = self.ctx.config.get("memory", {}).get("short_term", {}).get("max_tokens", 8000)
+                # Estimate token count (rough: 1 token ≈ 4 chars)
+                estimated_tokens = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+                if estimated_tokens > max_tokens * 0.8:
+                    # Compress early messages
+                    summary = await self._compress_messages(messages, turn)
+                    if summary:
+                        # Replace early messages with a summary system message
+                        keep_recent = max(4, len(messages) // 3)  # Keep last 1/3
+                        early = messages[:len(messages) - keep_recent]
+                        recent = messages[len(messages) - keep_recent:]
+                        messages = [
+                            {"role": "system", "content": f"[对话历史摘要]\n{summary}"}
+                        ] + recent
+                        turn.meta["context_compressed"] = True
+                        turn.meta["compressed_messages"] = len(early)
+
+        # ── Delegation check ──
+        if turn.meta.get("enable_delegation") or self._detect_complex_task(turn.input_text):
+            from core.sub_agent import DelegationManager
+            try:
+                delegator = DelegationManager(self._llm, self._skills)
+                result = await delegator.execute(turn.input_text, turn.model)
+                if result.get("parallel"):
+                    turn.result = result["result"]
+                    turn.meta["delegation_used"] = True
+                    turn.meta["subtask_count"] = len(result["subtasks"])
+                    turn.meta["delegation_total_tokens"] = result["total_tokens"]
+                    turn.record_success(result["result"], result.get("total_tokens", 0))
+                    self.publish("turn_completed", turn=turn)
+                    logger.info("delegation completed (%d subtasks, %d tokens, %.2fs)",
+                                result.get("subtask_count", 0),
+                                result.get("total_tokens", 0),
+                                result.get("duration_ms", 0) / 1000)
+                    return  # Skip normal tool loop
+            except Exception as exc:
+                logger.warning("delegation failed, falling back to normal flow: %s", exc)
+
         # ── Tool-call loop ──
         # force a final reply.  This mirrors the classic ReAct loop but we
         # keep it dead simple (no scratchpad, no tree of thought).
@@ -256,10 +353,17 @@ class Coordinator(Plugin):
                     name = tc.get("name") or ""
                     args = tc.get("args") or {}
                     result = await self._dispatch_smart(tc, name, args, _failed_skills)
+                    if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+                        self.ctx.self_improver.record_failure(
+                            user_input=turn.input_text,
+                            error_type="tool_unavailable",
+                            error_detail=f"Tool {name} unavailable",
+                        )
+                    turn.meta.setdefault("tool_results", []).append(result)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id") or f"call_{idx}",
-                        "content": str(result),
+                        "content": result.to_message(),
                     })
             else:
                 raw_tool_calls = resp.get("tool_calls_raw") or tool_calls
@@ -272,11 +376,18 @@ class Coordinator(Plugin):
                     name = tc.get("name") or ""
                     args = tc.get("args") or {}
                     result = await self._dispatch_smart(tc, name, args, _failed_skills)
+                    if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+                        self.ctx.self_improver.record_failure(
+                            user_input=turn.input_text,
+                            error_type="tool_unavailable",
+                            error_detail=f"Tool {name} unavailable",
+                        )
+                    turn.meta.setdefault("tool_results", []).append(result)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id") or "",
                         "name": name,
-                        "content": str(result),
+                        "content": result.to_message(),
                     })
             # If ALL called skills in this iteration failed, and we're past iteration 1,
             # inject a hint to nudge the model to synthesize rather than retry
@@ -306,6 +417,18 @@ class Coordinator(Plugin):
             )
             final_text = resp.get("text", "") or "(no reply)"
             total_tokens += int(resp.get("tokens_used") or 0)
+
+        # After tool loop exhaustion: record failure for self-improvement
+        if turn.result is None and turn.error:
+            if self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+                error_type = turn.error if isinstance(turn.error, str) else turn.error.get("type", "unknown") if isinstance(turn.error, dict) else "unknown"
+                error_detail = turn.error if isinstance(turn.error, str) else turn.error.get("detail", str(turn.error)) if isinstance(turn.error, dict) else str(turn.error)
+                self.ctx.self_improver.record_failure(
+                    user_input=turn.input_text,
+                    error_type=error_type,
+                    error_detail=error_detail,
+                    turn_meta=turn.meta,
+                )
 
         if not final_text:
             final_text = "(no reply produced)"

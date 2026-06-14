@@ -47,7 +47,15 @@ _translations: Dict[str, Dict[str, str]] = {
         "internal_error": "internal server error",
         "agent_not_ready": "agent not ready",
         "alert_manager_not_available": "alert manager not available",
+        "cost_tracking_not_available": "cost tracking not available",
         "need_key_and_value": "need key and value",
+        "approval_manager_not_available": "approval manager not available",
+        "approval_request_not_found": "approval request not found: {request_id}",
+        "session_not_found": "session not found: {session_id}",
+        "document_not_found": "document not found: {name}",
+        "need_file_or_path": "need file or path",
+        "session_store_not_available": "session store not available",
+        "improvement_not_available": "self-improvement not available",
         
         # Model errors
         "no_api_key": "[no API key configured for provider '{provider}']",
@@ -84,7 +92,15 @@ _translations: Dict[str, Dict[str, str]] = {
         "internal_error": "内部服务器错误",
         "agent_not_ready": "代理未就绪",
         "alert_manager_not_available": "告警管理器不可用",
+        "cost_tracking_not_available": "成本追踪不可用",
         "need_key_and_value": "需要提供 key 和 value",
+        "approval_manager_not_available": "审批管理器不可用",
+        "approval_request_not_found": "审批请求不存在: {request_id}",
+        "session_not_found": "会话不存在: {session_id}",
+        "document_not_found": "文档不存在: {name}",
+        "need_file_or_path": "需要提供文件或路径",
+        "session_store_not_available": "会话存储不可用",
+        "improvement_not_available": "自我改进服务不可用",
         
         # Model errors
         "no_api_key": "[未配置提供商 '{provider}' 的 API 密钥]",

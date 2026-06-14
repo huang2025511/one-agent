@@ -138,6 +138,35 @@ class ShellExecutor(Plugin):
                 self._audit(command, result)
             return result
 
+        # Human-in-the-loop approval check for dangerous commands
+        approval_manager = getattr(self.ctx, 'approval_manager', None) if self.ctx else None
+        if approval_manager is not None:
+            # Determine risk level based on command content
+            if any(d in command for d in ["sudo", "rm -rf", "mkfs", "dd if="]):
+                risk = "critical"
+            elif any(d in command for d in ["rm", "delete", "drop", ">", "sudo", "chmod", "chown"]):
+                risk = "high"
+            else:
+                risk = "medium"
+            req = approval_manager.request_approval(
+                operation=f"shell: {command[:100]}",
+                details=command,
+                risk_level=risk,
+            )
+            # Publish event so gateways (CLI/Web) can prompt the user
+            self.publish("approval_needed", request=req.to_dict())
+            approved = await req.wait(timeout=120.0)
+            if not approved:
+                result = {
+                    "stdout": "",
+                    "stderr": "[execution denied by user]",
+                    "returncode": -1,
+                    "blocked": True,
+                }
+                if audit:
+                    self._audit(command, result)
+                return result
+
         try:
             # Use asyncio.create_subprocess_exec to avoid blocking the event loop
             proc = await asyncio.create_subprocess_exec(
@@ -234,6 +263,29 @@ class DockerExecutor(Plugin):
                 "stdout": "", "stderr": f"[security] command blocked: {command[:100]}",
                 "returncode": -1, "blocked": True,
             }
+        # Human-in-the-loop approval check for dangerous commands
+        approval_manager = getattr(self.ctx, 'approval_manager', None) if self.ctx else None
+        if approval_manager is not None:
+            if any(d in command for d in ["sudo", "rm -rf", "mkfs", "dd if="]):
+                risk = "critical"
+            elif any(d in command for d in ["rm", "delete", "drop", ">", "sudo", "chmod", "chown"]):
+                risk = "high"
+            else:
+                risk = "medium"
+            req = approval_manager.request_approval(
+                operation=f"docker: {command[:100]}",
+                details=command,
+                risk_level=risk,
+            )
+            self.publish("approval_needed", request=req.to_dict())
+            approved = await req.wait(timeout=120.0)
+            if not approved:
+                return {
+                    "stdout": "",
+                    "stderr": "[execution denied by user]",
+                    "returncode": -1,
+                    "blocked": True,
+                }
         # Use exec-form (argv) instead of shell-form to avoid container-internal
         # shell interpretation.  The container is already heavily sandboxed
         # (--network=none, --read-only, --cap-drop=all, non-root), but
