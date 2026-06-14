@@ -23,7 +23,7 @@ import hmac
 import logging
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from core.plugin import Plugin
 from i18n import _
@@ -86,6 +86,9 @@ class RESTAPIGateway(Plugin):
 
     def bind_callback(self, cb) -> None:
         self._agent_callback = cb
+        # Store the app instance for thinking access
+        if hasattr(cb, "__self__"):
+            self._app_instance = cb.__self__
 
     async def start(self) -> None:
         if not self._enabled:
@@ -141,6 +144,7 @@ class RESTAPIGateway(Plugin):
             return await call_next(request)
 
         _agent = self._agent_callback
+        _app_instance: Any = getattr(self, "_app_instance", None)
         _ctx = self.ctx
         _llm = _ctx.get_plugin("llm") if _ctx else None
         _memory = _ctx.get_plugin("memory") if _ctx else None
@@ -265,8 +269,13 @@ class RESTAPIGateway(Plugin):
             
             if _agent is None:
                 raise HTTPException(503, _("agent_not_ready"))
-            reply = await _agent(text, source="api", session_id=session_id)
-            return {"reply": reply, "session_id": session_id}
+            # Use chat_with_thinking to get thinking process alongside reply
+            if _app_instance and hasattr(_app_instance, "chat_with_thinking"):
+                result = await _app_instance.chat_with_thinking(text, source="api", session_id=session_id)
+            else:
+                reply = await _agent(text, source="api", session_id=session_id)
+                result = {"reply": reply, "session_id": session_id, "thinking": ""}
+            return result
 
         @app.get("/api/memory/search")
         async def memory_search(

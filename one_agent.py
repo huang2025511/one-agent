@@ -361,11 +361,6 @@ class OneAgentApp:
             "payload": {"turn": turn, "session_id": session_id},
             "source": source,
         })
-        # Use ``time.monotonic()`` instead of ``asyncio.get_event_loop().time()``
-        # — the latter is deprecated since Python 3.10 and raises
-        # ``RuntimeError`` in 3.12+ when no event loop is currently
-        # associated with the thread.  ``time.monotonic()`` works
-        # everywhere and is the right primitive for measuring elapsed time.
         import time as _time
         deadline = _time.monotonic() + 180
         while _time.monotonic() < deadline:
@@ -373,6 +368,28 @@ class OneAgentApp:
                 break
             await asyncio.sleep(0.1)
         return turn.result or "[timeout]"
+
+    async def chat_with_thinking(self, text: str, source: str = "api", session_id: str = "default") -> dict:
+        """Like chat(), but returns {"reply": ..., "thinking": ...} with thinking process.
+        
+        Uses its own TurnContext to avoid cross-request race conditions.
+        """
+        from core.context import TurnContext
+        turn = TurnContext(input_text=text, source=source, session_id=session_id)
+        self.bus.publish({
+            "type": "user_message",
+            "payload": {"turn": turn, "session_id": session_id},
+            "source": source,
+        })
+        import time as _time
+        deadline = _time.monotonic() + 180
+        while _time.monotonic() < deadline:
+            if turn.result is not None or turn.error is not None:
+                break
+            await asyncio.sleep(0.1)
+        reply = turn.result or "[timeout]"
+        thinking_text = turn.meta.get("thinking", "")
+        return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
 
     async def stop(self) -> None:
         await self._alert_manager.stop()

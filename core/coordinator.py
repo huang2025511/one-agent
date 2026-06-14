@@ -190,7 +190,41 @@ class Coordinator(Plugin):
         else:
             turn.skills = []
 
-        # iterative tool-call loop — supports up to N tool turns before we
+        # ── Think Phase: 先想清楚再动手 ──
+        # 先让 LLM 输出思考过程，拆解任务步骤、确定工具使用策略。
+        # 思考内容会展示给用户，对简单问候也只需 ~1s。
+        thinking_text = ""
+        # Always do a quick think phase — it's cheap and provides crucial
+        # context for multi-step tasks. For trivial greetings it takes ~1s.
+        if True:
+            think_prompt = (
+                "[思考阶段] 在动手之前，请用 2-4 句话快速思考：\n"
+                "1. 用户真正要什么？（一句话）\n"
+                "2. 需要分几步？用什么工具？\n"
+                "3. 先执行，不要在这步就给出最终答案，思考完直接开始调用工具。"
+            )
+            try:
+                think_resp = await self._llm.chat_completion(
+                    messages=messages + [{"role": "user", "content": think_prompt}],
+                    model=turn.model,
+                    max_tokens=min(turn.token_budget, 512),
+                    tools=None,  # No tools during thinking — think first, act later
+                )
+                thinking_text = think_resp.get("text", "").strip()
+                if thinking_text:
+                    # Store for frontend display
+                    turn.meta["thinking"] = thinking_text
+                    # Append thinking to message history as assistant message
+                    messages.append({
+                        "role": "assistant",
+                        "content": f"[思考]\n{thinking_text}",
+                    })
+                    logger.debug("think phase completed (%d chars)", len(thinking_text))
+            except Exception as exc:
+                logger.info("think phase skipped: %s", exc)
+                turn.meta["thinking"] = ""
+
+        # ── Tool-call loop ──
         # force a final reply.  This mirrors the classic ReAct loop but we
         # keep it dead simple (no scratchpad, no tree of thought).
         final_text = ""
