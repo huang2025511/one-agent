@@ -299,6 +299,10 @@ class OneAgentApp:
         self.monitor = MonitoringPlugin()
         self.marketplace = MarketplacePlugin()
 
+        # Initialize alert manager
+        from alerting import AlertManager
+        self._alert_manager = AlertManager()
+
         self._pm = PluginManager()
         for p in (
             self.llm, self.router, self.memory, self.skills,
@@ -326,6 +330,7 @@ class OneAgentApp:
             self.discord, self.slack, self.web,
             self.multimodal, self.rest_api, self.monitor, self.marketplace,
         ]
+        self.ctx._alert_manager = self._alert_manager
 
         await self.bus.start()
         await self._pm.setup_all(self.ctx)
@@ -335,6 +340,11 @@ class OneAgentApp:
         self.rest_api.bind_callback(self.chat)
         # wire marketplace to skills plugin
         self.marketplace._skills_plugin = self.skills  # type: ignore[attr-defined]
+
+        # Setup and start alert manager
+        await self._alert_manager.setup(self.config.model_dump())
+        await self._alert_manager.start()
+
         await self._pm.start_all()
 
     async def chat(self, text: str, source: str = "cli", session_id: str = "default") -> str:
@@ -359,6 +369,7 @@ class OneAgentApp:
         return turn.result or "[timeout]"
 
     async def stop(self) -> None:
+        await self._alert_manager.stop()
         await self._pm.stop_all()
         await self.bus.stop()
 

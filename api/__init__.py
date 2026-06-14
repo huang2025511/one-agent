@@ -153,7 +153,70 @@ class RESTAPIGateway(Plugin):
         async def health():
             if _ctx is None:
                 return {"status": "not_ready", "uptime": 0}
-            return {"status": "ok", "uptime": int(time.time() - _ctx.started_at)}
+            uptime = int(time.time() - _ctx.started_at)
+
+            # Per-component health check
+            components = {}
+            # LLM provider
+            if _llm is not None:
+                llm_s = _llm.stats()
+                components["llm"] = {
+                    "status": "ok" if not llm_s.get("failed") else "degraded",
+                    "calls": llm_s.get("calls", 0),
+                }
+            else:
+                components["llm"] = {"status": "unavailable"}
+
+            # Memory
+            if _memory is not None:
+                components["memory"] = {"status": "ok"}
+            else:
+                components["memory"] = {"status": "unavailable"}
+
+            # Event bus
+            if _bus is not None:
+                bus_m = _bus.metrics()
+                components["bus"] = {
+                    "status": "ok",
+                    "queue_depth": bus_m.get("queue_depth", 0),
+                    "errors": bus_m.get("errors", 0),
+                }
+            else:
+                components["bus"] = {"status": "unavailable"}
+
+            # Skills
+            if _skills is not None:
+                components["skills"] = {
+                    "status": "ok",
+                    "count": len(_skills.all_skill_ids()),
+                }
+            else:
+                components["skills"] = {"status": "unavailable"}
+
+            # Overall status: ok if at least llm + bus are ok
+            all_ok = all(
+                c.get("status") in ("ok", "unavailable")
+                for c in components.values()
+            )
+            overall = "ok" if all_ok else "degraded"
+
+            return {
+                "status": overall,
+                "uptime": uptime,
+                "components": components,
+            }
+
+        @app.get("/api/health/ready")
+        async def readiness():
+            """Kubernetes-style readiness probe — returns 503 if not ready."""
+            if _ctx is None or _agent is None:
+                raise HTTPException(503, "not ready")
+            return {"ready": True}
+
+        @app.get("/api/health/live")
+        async def liveness():
+            """Kubernetes-style liveness probe."""
+            return {"alive": True}
 
         @app.get("/api/stats")
         async def stats():
@@ -276,10 +339,134 @@ class RESTAPIGateway(Plugin):
                     if parsed is None:
                         raise HTTPException(400, f"cannot parse value for type {vtype.__name__}")
                     if _ctx:
+                        # Create backup before changing config
+                        from config_backup import ConfigBackupManager
+                        import os
+                        cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+                        backup_mgr = ConfigBackupManager(cfg_path)
+                        backup_mgr.create_backup(reason="pre-change")
                         _set_nested(_ctx.config, path, parsed)
                         _save_config(_ctx.config)
                     return {"alias": alias, "path": path, "value": parsed, "saved": True}
             raise HTTPException(404, f"unknown key: {key}")
+
+        # ---------------------------------------------------------------- Config Backup
+        @app.get("/api/config/backups")
+        async def config_backups_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """List all config backups."""
+            auth(x_api_key)
+            import os
+            from config_backup import ConfigBackupManager
+            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            backup_mgr = ConfigBackupManager(cfg_path)
+            return {"backups": backup_mgr.list_backups()}
+
+        @app.post("/api/config/backup")
+        async def config_backup_create(body: dict = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Create a config backup."""
+            auth(x_api_key)
+            import os
+            from config_backup import ConfigBackupManager
+            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            backup_mgr = ConfigBackupManager(cfg_path)
+            reason = (body or {}).get("reason", "manual")
+            backup_name = backup_mgr.create_backup(reason=reason)
+            if backup_name:
+                return {"created": True, "filename": backup_name}
+            raise HTTPException(500, "failed to create backup")
+
+        @app.post("/api/config/restore")
+        async def config_restore(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Restore config from a backup."""
+            auth(x_api_key)
+            import os
+            from config_backup import ConfigBackupManager
+            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_name = body.get("filename")  # None means most recent
+            success = backup_mgr.restore_backup(backup_name)
+            if success:
+                return {"restored": True, "filename": backup_name or "latest"}
+            raise HTTPException(500, "failed to restore config")
+
+        @app.get("/api/config/backups/{filename}")
+        async def config_backup_get(filename: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get backup content."""
+            auth(x_api_key)
+            import os
+            from config_backup import ConfigBackupManager
+            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            backup_mgr = ConfigBackupManager(cfg_path)
+            content = backup_mgr.get_backup_content(filename)
+            if content is not None:
+                return {"filename": filename, "content": content}
+            raise HTTPException(404, f"backup not found: {filename}")
+
+        @app.delete("/api/config/backups/{filename}")
+        async def config_backup_delete(filename: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Delete a config backup."""
+            auth(x_api_key)
+            import os
+            from config_backup import ConfigBackupManager
+            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            backup_mgr = ConfigBackupManager(cfg_path)
+            success = backup_mgr.delete_backup(filename)
+            if success:
+                return {"deleted": True, "filename": filename}
+            raise HTTPException(404, f"backup not found: {filename}")
+
+        # ---------------------------------------------------------------- Alerting
+        @app.get("/api/alerts/rules")
+        async def alert_rules_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """List all alert rules."""
+            auth(x_api_key)
+            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            if _alert_mgr is None:
+                return {"rules": []}
+            return {"rules": _alert_mgr.list_rules()}
+
+        @app.post("/api/alerts/rules")
+        async def alert_rule_create(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Create or update an alert rule."""
+            auth(x_api_key)
+            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            if _alert_mgr is None:
+                raise HTTPException(503, "alert manager not available")
+            from alerting import AlertRule
+            try:
+                rule = AlertRule(
+                    name=body["name"],
+                    metric_path=body["metric_path"],
+                    operator=body["operator"],
+                    threshold=float(body["threshold"]),
+                    severity=body.get("severity", "warning"),
+                    cooldown_seconds=body.get("cooldown_seconds", 300),
+                    enabled=body.get("enabled", True),
+                    description=body.get("description", ""),
+                )
+                _alert_mgr.add_rule(rule)
+                return {"created": True, "rule": body["name"]}
+            except KeyError as exc:
+                raise HTTPException(400, f"missing field: {exc}")
+
+        @app.delete("/api/alerts/rules/{name}")
+        async def alert_rule_delete(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Delete an alert rule."""
+            auth(x_api_key)
+            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            if _alert_mgr is None:
+                raise HTTPException(503, "alert manager not available")
+            _alert_mgr.remove_rule(name)
+            return {"deleted": True, "rule": name}
+
+        @app.get("/api/alerts/history")
+        async def alert_history(limit: int = 50, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get recent alert events."""
+            auth(x_api_key)
+            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            if _alert_mgr is None:
+                return {"alerts": []}
+            return {"alerts": _alert_mgr.list_history(limit=limit)}
 
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):
