@@ -155,6 +155,14 @@ class LLMProvider(Plugin):
         self._cache_ttl = 3600
         self._call_stats: List[Dict[str, Any]] = []
         self._cost_total: float = 0.0
+        # Strong refs to background auto-classify tasks so they don't get
+        # GC'd before they run (asyncio doesn't keep them alive).
+        self._bg_tasks: set = set()
+        # Auto-classify cache: last successful reclassify time per provider
+        self._auto_classify_timestamps: Dict[str, float] = {}
+        # If setup() can't find an event loop, defer the first auto-classify
+        # to the next chat_completion() / get_catalog() call.
+        self._pending_auto_classify: bool = False
         self._provider_base_urls = {
             "openrouter": "https://openrouter.ai/api/v1",
             "openai": "https://api.openai.com/v1",
@@ -193,13 +201,143 @@ class LLMProvider(Plugin):
         self._client = httpx.AsyncClient(timeout=self._timeout)
         logger.info("LLM provider ready, default model=%s, cache=%s",
                     self._default_model, self._cache_enabled)
+        # ── Auto-classify every provider that has a non-empty key ──────
+        # This runs in the background so setup() returns immediately.
+        # It populates MODEL_TIERS with newly-discovered models so
+        # failover / model_for_tier() work without any user action.
+        if llm_cfg.get("auto_classify_on_setup", True):
+            import asyncio as _asyncio
+            ran = False
+            coro = self._auto_classify_all_providers()
+            task = self._spawn_bg(coro)
+            logger.info("setup auto-classify: spawn_bg returned %s", task)
+            if task is not None:
+                ran = True
+            else:
+                try:
+                    loop = _asyncio.get_event_loop()
+                    if not loop.is_running():
+                        loop.run_until_complete(coro)
+                        ran = True
+                except RuntimeError:
+                    # Python 3.12+ — no event loop. Spin one up.
+                    try:
+                        new_loop = _asyncio.new_event_loop()
+                        try:
+                            new_loop.run_until_complete(coro)
+                            ran = True
+                        finally:
+                            new_loop.close()
+                    except Exception:
+                        # Final safety net: avoid "coroutine was never awaited"
+                        try:
+                            coro.close()
+                        except Exception:
+                            pass
+            if not ran:
+                # Defer to the first chat_completion() / get_catalog() call
+                self._pending_auto_classify = True
 
     async def stop(self) -> None:
+        # Wait for any in-flight auto-classify background tasks (max 5s)
+        if getattr(self, "_bg_tasks", None):
+            import asyncio as _asyncio
+            pending = list(self._bg_tasks)
+            if pending:
+                try:
+                    await _asyncio.wait_for(
+                        _asyncio.gather(*pending, return_exceptions=True),
+                        timeout=5.0,
+                    )
+                except _asyncio.TimeoutError:
+                    for t in pending:
+                        t.cancel()
         if self._client is not None:
             await self._client.aclose()
         await super().stop()
 
     # ---------------------------------------------------------- public API
+    def _has_usable_key(self, provider: str) -> bool:
+        """True if ``provider`` has a non-empty, unexpanded key configured."""
+        v = self._api_keys.get(provider) or self._api_keys.get("openrouter")
+        if not v or not v.strip() or "${" in v:
+            return False
+        return True
+
+    def set_api_key(self, provider: str, key: str) -> Dict[str, Any]:
+        """Add or update an API key.  Triggers a background reclassify so
+        newly-reachable models get slotted into MODEL_TIERS without
+        requiring a restart."""
+        key = (key or "").strip()
+        self._api_keys[provider] = key
+        # Make sure we have a base URL we can talk to
+        if provider not in self._provider_base_urls:
+            # Use the resolver if available, otherwise just leave it —
+            # get_catalog() / rebuild_tiers() will return no_api_key in that case
+            try:
+                from .resolver import resolve
+                import asyncio as _asyncio
+                try:
+                    loop = _asyncio.get_event_loop()
+                    if loop.is_running():
+                        hint_info = _asyncio.ensure_future(resolve(provider))
+                        hint_info.add_done_callback(
+                            lambda fut: self._on_provider_resolved(provider, fut.result())
+                        )
+                except RuntimeError:
+                    # No event loop — schedule via new_event_loop for the
+                    # background resolve, then register the URL
+                    try:
+                        new_loop = _asyncio.new_event_loop()
+                        try:
+                            hint_info = new_loop.run_until_complete(resolve(provider))
+                        finally:
+                            new_loop.close()
+                        self._on_provider_resolved(provider, hint_info)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        # Fire-and-forget background reclassify
+        ran = False
+        import asyncio as _asyncio
+        coro = self._auto_classify_one(provider)
+        task = self._spawn_bg(coro)
+        if task is not None:
+            ran = True
+        else:
+            try:
+                loop = _asyncio.get_event_loop()
+                if not loop.is_running():
+                    loop.run_until_complete(coro)
+                    ran = True
+            except RuntimeError:
+                # Python 3.12+ raises here when no event loop exists.
+                # Spin up a one-shot loop just for the reclassify.
+                try:
+                    new_loop = _asyncio.new_event_loop()
+                    try:
+                        new_loop.run_until_complete(coro)
+                        ran = True
+                    finally:
+                        new_loop.close()
+                except Exception:
+                    try:
+                        coro.close()
+                    except Exception:
+                        pass
+        return {"ok": True, "provider": provider, "key_set": bool(key), "reclassified": ran}
+
+    def _on_provider_resolved(self, provider: str, hint_info: Any) -> None:
+        """Callback when an async resolve() finishes — register the URL."""
+        if hint_info is None:
+            return
+        try:
+            if hint_info.found and hint_info.base_url:
+                self._provider_base_urls[provider] = hint_info.base_url
+        except Exception:
+            pass
+
     def model_for_tier(self, tier: str) -> str:
         for model in MODEL_TIERS.get(tier, []):
             provider = model.split("/", 1)[0]
@@ -272,6 +410,106 @@ class LLMProvider(Plugin):
         finally:
             await cat.aclose()
 
+    # ---------------------------------------------------------- auto-classify
+    def _spawn_bg(self, coro) -> Optional[Any]:
+        """Schedule a coroutine as a background task with a strong ref so
+        asyncio doesn't GC it before it runs.  Returns the Task or None."""
+        import asyncio as _asyncio
+        # If we're inside a running coroutine, get_running_loop() works;
+        # otherwise we have to use get_event_loop() which can return None.
+        try:
+            loop = _asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                loop = _asyncio.get_event_loop()
+                if not loop.is_running():
+                    return None
+            except RuntimeError:
+                return None
+        task = loop.create_task(coro)
+        self._bg_tasks.add(task)
+
+        def _done(t):
+            self._bg_tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.warning("bg auto-classify task failed: %s", exc)
+
+        task.add_done_callback(_done)
+        return task
+
+    async def _auto_classify_all_providers(self, max_per_tier: int = 0) -> Dict[str, Any]:
+        """One-shot auto-classify across every provider with a usable key.
+
+        Iterates over self._provider_base_urls and reclassifies each one
+        that has a non-empty key.  Failures are logged but never raised —
+        one bad provider must not stop the rest.
+
+        Returns a per-provider summary so callers (e.g. the CLI) can show
+        the user "I auto-classified 3 providers: openrouter, sensenova, ...".
+        """
+        logger.debug("auto_classify_all_providers: starting")
+        results: Dict[str, Any] = {}
+        # Process providers in a stable order
+        for prov in sorted(self._provider_base_urls.keys()):
+            if not self._has_usable_key(prov):
+                logger.debug("auto_classify_all: skip %s (no key)", prov)
+                continue
+            try:
+                logger.debug("auto_classify_all: classifying %s", prov)
+                r = await self._auto_classify_one(prov, max_per_tier=max_per_tier)
+                results[prov] = r
+                logger.debug("auto_classify_all: %s → %s", prov, r.get("ok"))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("auto_classify %s failed: %s", prov, exc)
+                results[prov] = {"ok": False, "error": str(exc)}
+        # Clear pending flag
+        if getattr(self, "_pending_auto_classify", False):
+            self._pending_auto_classify = False
+        logger.debug("auto_classify_all_providers: done, results=%s", list(results.keys()))
+        return results
+
+    async def _auto_classify_one(
+        self, provider: str, max_per_tier: int = 0,
+    ) -> Dict[str, Any]:
+        """Auto-classify a single provider, silently skipping on failure.
+
+        This is the workhorse used by:
+          * ``setup()`` at startup
+          * ``set_api_key()`` when a new key is added
+          * The first call to ``get_catalog()`` / ``chat_completion()``
+            if setup() couldn't find an event loop
+        """
+        if not self._has_usable_key(provider):
+            return {"ok": False, "provider": provider, "skipped": "no_key"}
+        # Don't reclassify the same provider within the TTL window
+        last = self._auto_classify_timestamps.get(provider, 0.0)
+        import time as _t
+        now = _t.time()
+        if now - last < 30:
+            return {"ok": True, "provider": provider, "cached": True}
+        try:
+            r = await self.rebuild_tiers(provider=provider, max_per_tier=max_per_tier)
+            # Only record the timestamp on success — a failure should
+            # be retryable immediately (e.g. transient network blip).
+            if r.get("ok"):
+                self._auto_classify_timestamps[provider] = now
+                n = r.get("model_count", 0)
+                tier_counts = {
+                    t: len(r["tiers"].get(t, [])) for t in ("trivial", "simple", "complex", "expert")
+                }
+                logger.info(
+                    "auto-classify %s: %d models → trivial=%d simple=%d complex=%d expert=%d",
+                    provider, n, tier_counts["trivial"], tier_counts["simple"],
+                    tier_counts["complex"], tier_counts["expert"],
+                )
+            return r
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("auto_classify_one %s: %s", provider, exc)
+            return {"ok": False, "provider": provider, "error": str(exc)}
+
     # ---------------------------------------------------------- catalog access
     def get_catalog(self, provider: Optional[str] = None) -> Any:
         """Return a ModelCatalog for the given provider (or current default).
@@ -287,6 +525,31 @@ class LLMProvider(Plugin):
         api_key = self._api_keys.get(prov) or self._api_keys.get("openrouter")
         if not api_key or "${" in (api_key or ""):
             return None
+        # If we deferred the auto-classify from setup(), do it now
+        # (we have an httpx client + event loop available)
+        if getattr(self, "_pending_auto_classify", False):
+            self._pending_auto_classify = False  # clear first so retries don't loop
+            import asyncio as _asyncio
+            coro = self._auto_classify_all_providers()
+            task = self._spawn_bg(coro)
+            if task is None:
+                # No running loop — try a one-shot run
+                try:
+                    loop = _asyncio.get_event_loop()
+                    if not loop.is_running():
+                        loop.run_until_complete(coro)
+                except RuntimeError:
+                    try:
+                        new_loop = _asyncio.new_event_loop()
+                        try:
+                            new_loop.run_until_complete(coro)
+                        finally:
+                            new_loop.close()
+                    except Exception:
+                        try:
+                            coro.close()
+                        except Exception:
+                            pass
         return ModelCatalog(base_url=base, api_key=api_key, provider=prov)
 
     def _infer_primary_provider(self) -> str:
