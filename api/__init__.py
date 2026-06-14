@@ -25,6 +25,7 @@ import uuid
 from typing import Dict, List, Optional
 
 from core.plugin import Plugin
+from i18n import _
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ class RESTAPIGateway(Plugin):
             # evict entries older than 60s
             bucket[:] = [t for t in bucket if now - t < 60]
             if len(bucket) >= self._rate_limit:
-                return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+                return JSONResponse({"error": _("rate_limit_exceeded")}, status_code=429)
             bucket.append(now)
             return await call_next(request)
 
@@ -131,7 +132,7 @@ class RESTAPIGateway(Plugin):
                 try:
                     if cl is not None and int(cl) > self._max_chat_bytes:
                         return JSONResponse(
-                            {"error": f"request body too large ({cl} > {self._max_chat_bytes})"},
+                            {"error": _("request_body_too_large", size=cl, max=self._max_chat_bytes)},
                             status_code=413,
                         )
                 except ValueError:
@@ -147,7 +148,7 @@ class RESTAPIGateway(Plugin):
 
         def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
             if self._api_key and x_api_key != self._api_key:
-                raise HTTPException(401, "Invalid API key")
+                raise HTTPException(401, _("invalid_api_key"))
 
         @app.get("/api/health")
         async def health():
@@ -210,7 +211,7 @@ class RESTAPIGateway(Plugin):
         async def readiness():
             """Kubernetes-style readiness probe — returns 503 if not ready."""
             if _ctx is None or _agent is None:
-                raise HTTPException(503, "not ready")
+                raise HTTPException(503, _("not_ready"))
             return {"ready": True}
 
         @app.get("/api/health/live")
@@ -242,7 +243,7 @@ class RESTAPIGateway(Plugin):
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
             if _agent is None:
-                raise HTTPException(503, "agent not ready")
+                raise HTTPException(503, _("agent_not_ready"))
             reply = await _agent(text, source="api", session_id=session_id)
             return {"reply": reply, "session_id": session_id}
 
@@ -255,7 +256,7 @@ class RESTAPIGateway(Plugin):
         ):
             auth(x_api_key)
             if _memory is None:
-                raise HTTPException(503, "memory not available")
+                raise HTTPException(503, _("memory_not_available"))
             results = _memory.search_facts(q, limit=limit, offset=offset)
             return {"query": q, "results": results, "limit": limit, "offset": offset}
 
@@ -263,7 +264,7 @@ class RESTAPIGateway(Plugin):
         async def memory_add(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _memory is None:
-                raise HTTPException(503, "memory not available")
+                raise HTTPException(503, _("memory_not_available"))
             text = body.get("text", "")
             tags = body.get("tags", "")
             source = body.get("source", "api")
@@ -278,21 +279,21 @@ class RESTAPIGateway(Plugin):
         ):
             auth(x_api_key)
             if _memory is None:
-                raise HTTPException(503, "memory not available")
+                raise HTTPException(503, _("memory_not_available"))
             return _memory.paginate_facts(page=page, page_size=page_size)
 
         @app.get("/api/skills")
         async def skills_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _skills is None:
-                raise HTTPException(503, "skills not available")
+                raise HTTPException(503, _("skills_not_available"))
             return {"skills": _skills.all_skill_ids()}
 
         @app.post("/api/cache/clear")
         async def cache_clear(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _llm is None:
-                raise HTTPException(503, "llm not available")
+                raise HTTPException(503, _("llm_not_available"))
             return _llm.clear_cache()
 
         @app.get("/api/settings")
@@ -319,7 +320,7 @@ class RESTAPIGateway(Plugin):
                         if not sensitive_allowed:
                             val = val[:4] + "****"
                     return {"alias": alias, "path": path, "value": val}
-            return {"error": f"unknown key: {key}"}
+            return {"error": _("unknown_key", key=key)}
 
         @app.post("/api/settings")
         async def settings_set(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -329,15 +330,15 @@ class RESTAPIGateway(Plugin):
             key = body.get("key", "")
             value = body.get("value")
             if not key or value is None:
-                raise HTTPException(400, "need key and value")
+                raise HTTPException(400, _("need_key_and_value"))
             for alias, (path, vtype) in _SETTING_ALIASES.items():
                 if alias == key or path == key:
                     if any(sk in path for sk in _SENSITIVE_KEYS):
                         if not _is_sensitive_write_allowed(_ctx.config if _ctx else {}):
-                            raise HTTPException(403, f"{alias} is sensitive — enable security.allow_sensitive_chat_settings to modify via API")
+                            raise HTTPException(403, _("sensitive_setting_protected", alias=alias))
                     parsed = _parse_value(str(value), vtype)
                     if parsed is None:
-                        raise HTTPException(400, f"cannot parse value for type {vtype.__name__}")
+                        raise HTTPException(400, _("cannot_parse_value", type=vtype.__name__))
                     if _ctx:
                         # Create backup before changing config
                         from config_backup import ConfigBackupManager
@@ -348,7 +349,7 @@ class RESTAPIGateway(Plugin):
                         _set_nested(_ctx.config, path, parsed)
                         _save_config(_ctx.config)
                     return {"alias": alias, "path": path, "value": parsed, "saved": True}
-            raise HTTPException(404, f"unknown key: {key}")
+            raise HTTPException(404, _("unknown_key", key=key))
 
         # ---------------------------------------------------------------- Config Backup
         @app.get("/api/config/backups")
@@ -373,7 +374,7 @@ class RESTAPIGateway(Plugin):
             backup_name = backup_mgr.create_backup(reason=reason)
             if backup_name:
                 return {"created": True, "filename": backup_name}
-            raise HTTPException(500, "failed to create backup")
+            raise HTTPException(500, _("backup_create_failed"))
 
         @app.post("/api/config/restore")
         async def config_restore(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -387,7 +388,7 @@ class RESTAPIGateway(Plugin):
             success = backup_mgr.restore_backup(backup_name)
             if success:
                 return {"restored": True, "filename": backup_name or "latest"}
-            raise HTTPException(500, "failed to restore config")
+            raise HTTPException(500, _("restore_failed"))
 
         @app.get("/api/config/backups/{filename}")
         async def config_backup_get(filename: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -400,7 +401,7 @@ class RESTAPIGateway(Plugin):
             content = backup_mgr.get_backup_content(filename)
             if content is not None:
                 return {"filename": filename, "content": content}
-            raise HTTPException(404, f"backup not found: {filename}")
+            raise HTTPException(404, _("backup_not_found", filename=filename))
 
         @app.delete("/api/config/backups/{filename}")
         async def config_backup_delete(filename: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -413,7 +414,7 @@ class RESTAPIGateway(Plugin):
             success = backup_mgr.delete_backup(filename)
             if success:
                 return {"deleted": True, "filename": filename}
-            raise HTTPException(404, f"backup not found: {filename}")
+            raise HTTPException(404, _("backup_not_found", filename=filename))
 
         # ---------------------------------------------------------------- Alerting
         @app.get("/api/alerts/rules")
@@ -431,7 +432,7 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
             if _alert_mgr is None:
-                raise HTTPException(503, "alert manager not available")
+                raise HTTPException(503, _("alert_manager_not_available"))
             from alerting import AlertRule
             try:
                 rule = AlertRule(
@@ -447,7 +448,7 @@ class RESTAPIGateway(Plugin):
                 _alert_mgr.add_rule(rule)
                 return {"created": True, "rule": body["name"]}
             except KeyError as exc:
-                raise HTTPException(400, f"missing field: {exc}")
+                raise HTTPException(400, _("missing_field", field=str(exc)))
 
         @app.delete("/api/alerts/rules/{name}")
         async def alert_rule_delete(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -455,7 +456,7 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
             if _alert_mgr is None:
-                raise HTTPException(503, "alert manager not available")
+                raise HTTPException(503, _("alert_manager_not_available"))
             _alert_mgr.remove_rule(name)
             return {"deleted": True, "rule": name}
 
@@ -475,7 +476,7 @@ class RESTAPIGateway(Plugin):
                 raise exc
             logger.exception("api error: %s", exc)
             # Return generic error message to avoid leaking internal details
-            return JSONResponse({"error": "internal server error"}, status_code=500)
+            return JSONResponse({"error": _("internal_error")}, status_code=500)
 
         self._app = app
         try:

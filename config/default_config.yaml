@@ -11,6 +11,7 @@ agent:
   data_dir: "./data"
   log_level: "INFO"
   timezone: "Asia/Shanghai"
+  language: "zh"  # 语言设置: en (English) | zh (中文)
 
 # ---------- LLM 提供商配置（支持20+模型） ----------
 llm:

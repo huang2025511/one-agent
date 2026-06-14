@@ -775,8 +775,9 @@ class LLMProvider(Plugin):
 
         # If no API key is available, fail fast instead of retrying 3 times
         if not api_key:
+            from i18n import _
             return {
-                "text": f"[no API key configured for provider '{provider}']",
+                "text": _("no_api_key", provider=provider),
                 "tool_calls": [],
                 "tokens_used": 0,
                 "model": model,
@@ -838,8 +839,9 @@ class LLMProvider(Plugin):
                 else:
                     logger.error("llm call gave up after %d attempts: %s", self._retry_count, exc)
 
+        from i18n import _
         return {
-            "text": "[service temporarily unavailable — please retry later]",
+            "text": _("service_unavailable"),
             "tool_calls": [],
             "tokens_used": 0,
             "model": model,

@@ -104,6 +104,7 @@ class AgentConfig(BaseModel):
     data_dir: str = "./data"
     log_level: str = Field(default="INFO")
     timezone: str = Field(default="UTC")
+    language: str = Field(default="en")  # 语言设置: en | zh
 
     @field_validator("log_level")
     @classmethod
@@ -317,6 +318,10 @@ class OneAgentApp:
         self.ctx: Optional[AgentContext] = None
 
     async def start(self) -> None:
+        # Initialize i18n based on config
+        from i18n import set_language
+        set_language(self.config.agent.language)
+        
         self.ctx = AgentContext(
             config=self.config.model_dump(),
             bus=self.bus,
