@@ -158,7 +158,7 @@ class SkillManager(Plugin):
         import yaml
         try:
             meta = yaml.safe_load(m.group(1)) or {}
-        except Exception:
+        except yaml.YAMLError:
             return None
         skill_id = str(meta.get("id") or path.stem)
         title = str(meta.get("title") or skill_id)
@@ -326,6 +326,7 @@ class SkillManager(Plugin):
             
             import re as _re
             import httpx as _httpx
+            from urllib.parse import quote as _url_quote
             
             headers = {
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -369,14 +370,14 @@ class SkillManager(Plugin):
                             if title and "duckduckgo" not in url_r.lower():
                                 results.append(f"{title}\n  {url_r}")
                     return bool(results)
-                except Exception:
+                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException):
                     return False
 
             async def _try_bing() -> bool:
                 """Bing HTML search — broader coverage."""
                 nonlocal results
                 try:
-                    bing_url = f"https://www.bing.com/search?q={_re.quote(query)}&setlang=zh-cn"
+                    bing_url = f"https://www.bing.com/search?q={_url_quote(query)}&setlang=zh-cn"
                     async with _httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
                         resp = await client.get(bing_url, headers=headers)
                         if resp.status_code != 200:
@@ -398,7 +399,7 @@ class SkillManager(Plugin):
                             if title and "bing.com" not in url_r.lower():
                                 results.append(f"{title}\n  {snippet}\n  {url_r}")
                     return bool(results)
-                except Exception:
+                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException):
                     return False
 
             # Try sources in order

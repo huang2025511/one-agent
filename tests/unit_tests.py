@@ -942,7 +942,10 @@ def test_resolver_candidate_hosts_generates_expected_hosts() -> None:
 
 
 def test_resolver_async_probe_finds_working_url() -> None:
-    """Mock HTTP server returns 200 on /models → resolver picks the URL."""
+    """Mock HTTP server returns 200 on /models → resolver picks the URL.
+
+    Uses a provider NOT in the registry so the probe path is exercised.
+    """
     import httpx
     from models.resolver import resolve, clear_cache
     clear_cache()
@@ -951,7 +954,7 @@ def test_resolver_async_probe_finds_working_url() -> None:
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(transport=transport)
     try:
-        r = asyncio.run(resolve("sensenova", "sk-test", client=client, timeout=1.0))
+        r = asyncio.run(resolve("fakeprov-not-registered", "sk-test", client=client, timeout=1.0))
         _check("probe returns found=True", r.found is True)
         _check("probe via probe", r.via == "probe")
         _check("probe url endswith /v1 or /compatible-mode/v1",
@@ -1530,6 +1533,307 @@ def test_paginate_facts_wrapper_exists() -> None:
     _check("returns total=0", out.get("total") == 0)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 16. Coordinator dispatch_smart (failure tracking)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_dispatch_smart_normal():
+    """_dispatch_smart with a happy skill: returns result, no failures tracked."""
+    from core.coordinator import Coordinator
+
+    class MockSkills:
+        async def dispatch(self, name, args):
+            return "ok"
+
+    coord = Coordinator()
+    coord._skills = MockSkills()
+    failed: dict = {}
+
+    async def run():
+        return await coord._dispatch_smart({}, "echo", {"input": "hi"}, failed)
+
+    result = asyncio.run(run())
+    _check("dispatch normal result", result == "ok", f"got {result!r}")
+    _check("dispatch normal no failures", failed == {}, f"got {failed}")
+
+
+def test_dispatch_smart_error_tracking():
+    """Result containing 'error' increments the failed_skills counter."""
+    from core.coordinator import Coordinator
+
+    class MockSkills:
+        async def dispatch(self, name, args):
+            return "error: something went wrong"
+
+    coord = Coordinator()
+    coord._skills = MockSkills()
+    failed: dict = {}
+
+    async def run():
+        return await coord._dispatch_smart({}, "search", {"input": "q"}, failed)
+
+    result = asyncio.run(run())
+    _check("dispatch error result contains error", "error" in result.lower())
+    _check("dispatch error counter incremented", failed.get("search") == 1,
+           f"got {failed}")
+
+
+def test_dispatch_smart_max_failures():
+    """After 3 consecutive errors, the 4th call returns stop-hint without dispatch."""
+    from core.coordinator import Coordinator
+
+    call_count = [0]
+
+    class MockSkills:
+        async def dispatch(self, name, args):
+            call_count[0] += 1
+            return "error: fail"
+
+    coord = Coordinator()
+    coord._skills = MockSkills()
+    failed: dict = {"search": 3}
+
+    # 4th call — should skip dispatch entirely
+    async def run():
+        return await coord._dispatch_smart({}, "search", {"input": "q"}, failed)
+
+    result = asyncio.run(run())
+    _check("dispatch max failures skipped dispatch", call_count[0] == 0,
+           f"dispatch called {call_count[0]} times")
+    _check("dispatch max failures returns 不可用", "不可用" in result, result[:80])
+
+
+def test_dispatch_smart_recovery():
+    """After 2 errors, a success resets the counter."""
+    from core.coordinator import Coordinator
+
+    class MockSkills:
+        async def dispatch(self, name, args):
+            return "great success!"
+
+    coord = Coordinator()
+    coord._skills = MockSkills()
+    failed: dict = {"calc": 2}
+
+    async def run():
+        return await coord._dispatch_smart({}, "calc", {"input": "1+1"}, failed)
+
+    result = asyncio.run(run())
+    _check("dispatch recovery result", result == "great success!", f"got {result!r}")
+    _check("dispatch recovery counter reset", "calc" not in failed, f"got {failed}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 17. Coordinator think phase
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_think_phase_injects_into_turn():
+    """Think phase should store LLM output in turn.meta['thinking']."""
+    from core.coordinator import Coordinator
+    from core.context import TurnContext
+
+    class MockLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat_completion(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                # Think phase call
+                return {"text": "I will search first then summarize"}
+            else:
+                # Tool loop call (no tools → break)
+                return {"text": "hello there", "tool_calls": []}
+
+    class MockSkills:
+        def pick_relevant(self, text, limit=4):
+            return []
+
+        def get(self, id):
+            return None
+
+    coord = Coordinator()
+    coord._llm = MockLLM()
+    coord._skills = MockSkills()
+
+    turn = TurnContext(input_text="hello", model="test/model")
+
+    async def run():
+        await coord._run_turn(turn)
+
+    asyncio.run(run())
+
+    _check("think phase stored in meta", "thinking" in turn.meta,
+           f"meta keys: {list(turn.meta.keys())}")
+    _check("think phase content", turn.meta.get("thinking") == "I will search first then summarize",
+           f"got {turn.meta.get('thinking')!r}")
+    _check("turn completed ok", turn.result == "hello there",
+           f"got {turn.result!r}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 18. LLM 3-level degradation
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_llm_degradation_tools_fallback():
+    """400 with tools → retry without tools (200) → success."""
+    import json as _json
+    import httpx
+    from models import LLMProvider
+
+    call_count = [0]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        call_count[0] += 1
+        body = _json.loads(req.content) if req.content else {}
+        has_tools = "tools" in body
+
+        if call_count[0] == 1 and has_tools:
+            return httpx.Response(400, json={"error": "tools not supported"})
+        elif call_count[0] == 2 and not has_tools:
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok no tools"}}],
+                "usage": {"total_tokens": 7},
+            })
+        return httpx.Response(500, json={"error": "unexpected call"})
+
+    transport = httpx.MockTransport(handler)
+    p = LLMProvider()
+    p._api_keys = {"testprov": "sk-test"}
+    p._provider_base_urls["testprov"] = "https://testprov.example/v1"
+    p._client = httpx.AsyncClient(transport=transport)
+
+    async def run():
+        return await p.chat_completion(
+            messages=[{"role": "user", "content": "hi"}],
+            model="testprov/test-model",
+            tools=[{"type": "function", "function": {"name": "test"}}],
+        )
+
+    r = asyncio.run(run())
+    _check("degradation tools fallback result", r.get("text") == "ok no tools",
+           f"got {r.get('text')!r}")
+    _check("degradation tools fallback 2 calls", call_count[0] == 2,
+           f"got {call_count[0]}")
+
+
+def test_llm_degradation_minimal_prompt():
+    """400 with tools → 400 without tools → last resort minimal prompt → success."""
+    import json as _json
+    import httpx
+    from models import LLMProvider
+
+    call_count = [0]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        call_count[0] += 1
+        body = _json.loads(req.content) if req.content else {}
+        has_tools = "tools" in body
+
+        if call_count[0] == 1 and has_tools:
+            return httpx.Response(400, json={"error": "bad request"})
+        elif call_count[0] == 2 and not has_tools:
+            return httpx.Response(400, json={"error": "still bad"})
+        elif call_count[0] == 3:
+            # Minimal prompt — verify system msg was stripped
+            msgs = body.get("messages", [])
+            roles = [m.get("role") for m in msgs]
+            _check("minimal prompt stripped system", "system" not in roles,
+                   f"roles: {roles}")
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok minimal"}}],
+                "usage": {"total_tokens": 5},
+            })
+        return httpx.Response(500, json={"error": "unexpected call"})
+
+    transport = httpx.MockTransport(handler)
+    p = LLMProvider()
+    p._api_keys = {"testprov": "sk-test"}
+    p._provider_base_urls["testprov"] = "https://testprov.example/v1"
+    p._client = httpx.AsyncClient(transport=transport)
+
+    async def run():
+        return await p.chat_completion(
+            messages=[
+                {"role": "system", "content": "you are helpful"},
+                {"role": "user", "content": "hi"},
+            ],
+            model="testprov/test-model",
+            tools=[{"type": "function", "function": {"name": "test"}}],
+        )
+
+    r = asyncio.run(run())
+    _check("degradation minimal prompt result", r.get("text") == "ok minimal",
+           f"got {r.get('text')!r}")
+    _check("degradation minimal prompt 3 calls", call_count[0] == 3,
+           f"got {call_count[0]}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 19. web_search skill
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_web_search_skill_exists():
+    """Verify the skills module has a web_search handler registered."""
+    from skills import SkillManager
+
+    sm = SkillManager()
+    sm._seed_builtins()
+    skill = sm.get("web_search")
+    _check("web_search skill found", skill is not None)
+    if skill is not None:
+        _check("web_search handler callable", callable(skill.handler))
+        _check("web_search id correct", skill.id == "web_search")
+
+
+def test_web_search_skill_returns_fallback():
+    """Call web_search handler with no network → returns fallback suggesting own knowledge."""
+    from skills import SkillManager
+    import httpx
+
+    sm = SkillManager()
+    sm._seed_builtins()
+    skill = sm.get("web_search")
+    _check("web_search exists for fallback test", skill is not None)
+
+    # Monkey-patch httpx.AsyncClient to simulate no network
+    original_async_client = httpx.AsyncClient
+
+    class FailingClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, *args, **kwargs):
+            raise httpx.RequestError("no network")
+
+        async def get(self, *args, **kwargs):
+            raise httpx.RequestError("no network")
+
+        async def aclose(self):
+            pass
+
+    httpx.AsyncClient = FailingClient
+    try:
+        async def run():
+            return await skill.handler({"input": "test query"})
+        result = asyncio.run(run())
+    finally:
+        httpx.AsyncClient = original_async_client
+
+    _check("web_search fallback msg", "建议直接基于已有知识" in result,
+           f"got: {result[:120]}")
+
+
 if __name__ == "__main__":
     print("=== unit tests ===\n")
 
@@ -1645,6 +1949,23 @@ if __name__ == "__main__":
     test_eventbus_metrics_includes_by_type()
     test_llm_uses_httpx_limits()
     test_paginate_facts_wrapper_exists()
+
+    print("\n─ coordinator dispatch_smart ─")
+    test_dispatch_smart_normal()
+    test_dispatch_smart_error_tracking()
+    test_dispatch_smart_max_failures()
+    test_dispatch_smart_recovery()
+
+    print("\n─ coordinator think phase ─")
+    test_think_phase_injects_into_turn()
+
+    print("\n─ LLM 3-level degradation ─")
+    test_llm_degradation_tools_fallback()
+    test_llm_degradation_minimal_prompt()
+
+    print("\n─ web_search skill ─")
+    test_web_search_skill_exists()
+    test_web_search_skill_returns_fallback()
 
     print("\n" + "─" * 60)
     ok = _summary()

@@ -33,12 +33,41 @@ class MonitoringPlugin(Plugin):
         self._task = None
         self._app = None
 
+        # --- latency histogram ---
+        self._latency_buckets = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+        self._latency_counts = [0] * len(self._latency_buckets)
+        self._request_count = 0
+        self._error_count = 0
+
+        # --- token trend ---
+        self._total_tokens = 0
+        self._token_history: list[tuple[float, int]] = []  # (timestamp, tokens)
+
+    def record_request_latency(self, latency_seconds: float) -> None:
+        """Record a request latency sample into the histogram buckets."""
+        self._request_count += 1
+        for i, boundary in enumerate(self._latency_buckets):
+            if latency_seconds <= boundary:
+                self._latency_counts[i] += 1
+                break
+
+    def record_token_usage(self, tokens: int) -> None:
+        """Accumulate token usage and keep a rolling history (last 100 entries)."""
+        self._total_tokens += tokens
+        now = time.time()
+        self._token_history.append((now, tokens))
+        if len(self._token_history) > 100:
+            self._token_history.pop(0)
+
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         cfg = ctx.config.get("monitoring") or {}
         self._port = int(cfg.get("port", self._port))
         self._enabled = bool(cfg.get("enabled", True))
         logger.info("monitoring configured on port %d", self._port)
+
+        if ctx.bus:
+            ctx.bus.subscribe("turn_completed", self._on_turn_completed)
 
     async def start(self) -> None:
         if not self._enabled:
@@ -90,6 +119,38 @@ class MonitoringPlugin(Plugin):
                 },
                 "skills_count": len(skills),
                 "skills": skills,
+                "latency_histogram": dict(
+                    zip(
+                        [f"le_{b}" for b in self._latency_buckets],
+                        self._latency_counts,
+                    )
+                ),
+                "request_stats": {
+                    "count": self._request_count,
+                    "error_count": self._error_count,
+                    "error_rate": (
+                        round(self._error_count / self._request_count, 4)
+                        if self._request_count
+                        else 0
+                    ),
+                },
+                "token_stats": {
+                    "total_tokens": self._total_tokens,
+                    "tokens_per_second": (
+                        round(self._total_tokens / uptime, 2)
+                        if uptime > 0
+                        else 0
+                    ),
+                    "recent_avg_tokens": (
+                        round(
+                            sum(t for _, t in self._token_history[-10:])
+                            / min(len(self._token_history), 10),
+                            1,
+                        )
+                        if self._token_history
+                        else 0
+                    ),
+                },
             }
 
         @app.get("/api/dashboard_data")
@@ -121,6 +182,38 @@ class MonitoringPlugin(Plugin):
                 "skills": skills,
                 "recent_logs": log_lines,
                 "timestamp": time.time(),
+                "latency_histogram": dict(
+                    zip(
+                        [f"le_{b}" for b in self._latency_buckets],
+                        self._latency_counts,
+                    )
+                ),
+                "request_stats": {
+                    "count": self._request_count,
+                    "error_count": self._error_count,
+                    "error_rate": (
+                        round(self._error_count / self._request_count, 4)
+                        if self._request_count
+                        else 0
+                    ),
+                },
+                "token_stats": {
+                    "total_tokens": self._total_tokens,
+                    "tokens_per_second": (
+                        round(self._total_tokens / uptime, 2)
+                        if (_ctx and (uptime := _ctx.uptime()) and uptime > 0)
+                        else 0
+                    ),
+                    "recent_avg_tokens": (
+                        round(
+                            sum(t for _, t in self._token_history[-10:])
+                            / min(len(self._token_history), 10),
+                            1,
+                        )
+                        if self._token_history
+                        else 0
+                    ),
+                },
             }
 
         @app.get("/api/logs")
@@ -144,6 +237,26 @@ class MonitoringPlugin(Plugin):
             logger.info("monitoring dashboard on http://127.0.0.1:%d", self._port)
         except Exception as exc:
             logger.warning("could not start monitoring dashboard: %s", exc)
+
+    def _on_turn_completed(self, event) -> None:
+        """Auto-record latency and token usage from turn_completed events."""
+        payload = event.payload if hasattr(event, "payload") else event.get("payload", {})
+        turn = payload.get("turn", payload)
+        if isinstance(turn, dict):
+            duration = turn.get("duration_seconds", turn.get("duration"))
+            tokens = turn.get("tokens_used", 0)
+            error = turn.get("error")
+        else:
+            duration = getattr(turn, "duration_seconds", None) or getattr(turn, "duration", None)
+            tokens = getattr(turn, "tokens_used", 0)
+            error = getattr(turn, "error", None)
+
+        if duration is not None:
+            self.record_request_latency(float(duration))
+        if error:
+            self._error_count += 1
+        if tokens:
+            self.record_token_usage(int(tokens))
 
     async def stop(self) -> None:
         if self._task:

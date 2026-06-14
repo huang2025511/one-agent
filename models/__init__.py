@@ -15,12 +15,12 @@ import asyncio
 import json
 import logging
 import time
-from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from core.plugin import Plugin
+from models.cache import LLMCache
 
 logger = logging.getLogger(__name__)
 
@@ -93,82 +93,6 @@ MODEL_COST: Dict[str, float] = {
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
-class _CacheEntry:
-    """Simple LRU cache entry with TTL support."""
-
-    def __init__(self, value: Dict[str, Any], ttl: float = 3600) -> None:
-        self.value = value
-        self.created_at = time.time()
-        self.ttl = ttl
-        self.hits = 0
-
-    def is_expired(self) -> bool:
-        return time.time() - self.created_at > self.ttl
-
-
-class LLMCache:
-    """LRU cache with TTL for LLM responses."""
-
-    def __init__(self, max_size: int = 500, ttl_seconds: float = 3600) -> None:
-        self._max_size = max_size
-        self._ttl = ttl_seconds
-        self._store: OrderedDict[str, _CacheEntry] = OrderedDict()
-        self._hits = 0
-        self._misses = 0
-
-    @staticmethod
-    def _make_key(messages, model, tools, temperature=None) -> str:
-        import hashlib
-        payload = json.dumps({
-            "messages": messages,
-            "model": model,
-            "tools": tools,
-            "temperature": temperature,
-        }, sort_keys=True)
-        return hashlib.sha256(payload.encode()).hexdigest()[:32]
-
-    def get(self, messages, model, tools=None, temperature=None) -> Optional[Dict[str, Any]]:
-        key = self._make_key(messages, model, tools, temperature)
-        entry = self._store.get(key)
-        if entry is None:
-            self._misses += 1
-            return None
-        if entry.is_expired():
-            del self._store[key]
-            self._misses += 1
-            return None
-        self._hits += 1
-        entry.hits += 1
-        # Move to end (most recently used)
-        self._store.move_to_end(key)
-        return entry.value
-
-    def set(self, messages, model, tools, value: Dict[str, Any], temperature=None) -> None:
-        key = self._make_key(messages, model, tools, temperature)
-        entry = _CacheEntry(value, self._ttl)
-        if key in self._store:
-            self._store.move_to_end(key)
-        self._store[key] = entry
-        if len(self._store) > self._max_size:
-            # Evict oldest
-            self._store.popitem(last=False)
-
-    def stats(self) -> Dict[str, Any]:
-        total = self._hits + self._misses
-        return {
-            "hits": self._hits,
-            "misses": self._misses,
-            "hit_rate": round(self._hits / total, 3) if total > 0 else 0.0,
-            "size": len(self._store),
-            "max_size": self._max_size,
-        }
-
-    def clear(self) -> None:
-        self._store.clear()
-        self._hits = 0
-        self._misses = 0
-
-
 class LLMProvider(Plugin):
     """Central LLM caller with caching and cost tracking."""
 
@@ -209,7 +133,7 @@ class LLMProvider(Plugin):
         try:
             from .resolver import list_known
             self._provider_base_urls.update(list_known())
-        except Exception:  # noqa: BLE001
+        except ImportError:
             # Resolver module missing — fall back to a tiny built-in table
             self._provider_base_urls = {
                 "openrouter": "https://openrouter.ai/api/v1",
@@ -315,7 +239,7 @@ class LLMProvider(Plugin):
                         logger.warning("endpoint check returned %s: %s → %s, trying fallback",
                                        r.status_code, provider, base)
                         await self._try_endpoint_fallback(provider)
-            except Exception as exc:
+            except (httpx.RequestError, httpx.TimeoutException) as exc:
                 logger.debug("endpoint check probe failed: %s", exc)
 
     async def stop(self) -> None:
@@ -575,7 +499,7 @@ class LLMProvider(Plugin):
         try:
             from .resolver import list_known
             return list_known()
-        except Exception:  # noqa: BLE001
+        except ImportError:
             return dict(self._provider_base_urls)
 
     def get_provider_url(self, provider: str) -> Optional[str]:
@@ -585,7 +509,7 @@ class LLMProvider(Plugin):
             hit = lookup(provider)
             if hit:
                 return hit
-        except Exception:  # noqa: BLE001
+        except ImportError:
             pass
         return self._provider_base_urls.get(provider)
 
@@ -785,7 +709,7 @@ class LLMProvider(Plugin):
                     )
                     if 200 <= r.status_code < 300:
                         return url
-            except Exception:
+            except (httpx.RequestError, httpx.TimeoutException):
                 pass
             return None
 
@@ -848,7 +772,7 @@ class LLMProvider(Plugin):
                         import re
                         normalized = re.sub(r"[^a-z0-9]", "", real_id.lower())
                         mapping[normalized] = real_id
-        except Exception as exc:
+        except (httpx.RequestError, httpx.TimeoutException, json.JSONDecodeError) as exc:
             logger.debug("model name map for %s failed: %s", provider, exc)
 
         self._model_name_cache[provider] = mapping
@@ -1231,7 +1155,7 @@ class LLMProvider(Plugin):
             tool_calls_raw.append(tc)  # Preserve original format
             try:
                 args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
                 args = {}
             tool_calls.append({
                 "name": tc.get("function", {}).get("name"),
