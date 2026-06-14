@@ -35,7 +35,7 @@ class Coordinator(Plugin):
         super().__init__()
         self._llm: Optional[LLMProvider] = None
         self._skills: Optional[SkillManager] = None
-        self._max_tool_iterations = 3
+        self._max_tool_iterations = 5
         self._max_tokens = 2048
 
     # ------------------------------------------------------------ setup
@@ -136,6 +136,10 @@ class Coordinator(Plugin):
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
             chosen = self._skills.pick_relevant(turn.input_text, limit=4)
+            # Always include web_search as a core capability
+            web_search = self._skills.get("web_search")
+            if web_search and web_search not in chosen:
+                chosen.insert(0, web_search)
             turn.skills = [s.id for s in chosen]
             tools = [s.schema for s in chosen]
         else:
@@ -183,10 +187,12 @@ class Coordinator(Plugin):
                     })
             else:
                 # OpenAI-compatible: single assistant message with all tool_calls, then one tool result per call
+                # Use raw tool_calls format to preserve API compatibility (type, function fields)
+                raw_tool_calls = resp.get("tool_calls_raw") or tool_calls
                 messages.append({
                     "role": "assistant",
                     "content": None,
-                    "tool_calls": tool_calls,
+                    "tool_calls": raw_tool_calls,
                 })
                 for tc in tool_calls:
                     name = tc.get("name") or ""

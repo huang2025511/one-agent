@@ -949,6 +949,7 @@ class LLMProvider(Plugin):
             return {
                 "text": _("no_api_key", provider=provider),
                 "tool_calls": [],
+                "tool_calls_raw": [],
                 "tokens_used": 0,
                 "model": model,
                 "failed": True,
@@ -999,6 +1000,66 @@ class LLMProvider(Plugin):
                     or isinstance(exc, (asyncio.TimeoutError, ConnectionError))
                 )
                 if not retryable:
+                    # --- Auto-heal: tools not supported (400) ---
+                    # Some providers/models don't support function calling.
+                    # If we sent tools and got 400, retry without tools.
+                    if status == 400 and tools:
+                        logger.info("tools not supported by %s, retrying without tools", provider)
+                        try:
+                            result = await self._do_call(
+                                base=base, api_key=api_key, model=model,
+                                messages=messages, temperature=temperature,
+                                max_tokens=max_tokens, tools=None, provider=provider,
+                            )
+                            cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
+                            self._cost_total += cost
+                            result["estimated_cost_usd"] = round(cost, 6)
+                            result["total_cost_usd"] = round(self._cost_total, 6)
+                            if use_cache and self._cache is not None:
+                                self._cache.set(messages, model, [], result, temperature)
+                            return result
+                        except Exception as retry_exc:
+                            retry_status = getattr(getattr(retry_exc, "response", None), "status_code", None)
+                            retry_body = ""
+                            try:
+                                resp_obj = getattr(retry_exc, "response", None)
+                                if resp_obj and hasattr(resp_obj, "text"):
+                                    retry_body = resp_obj.text[:300]
+                            except Exception:
+                                pass
+                            logger.warning("retry without tools also failed: status=%s body=%s", 
+                                          retry_status, retry_body)
+                            # Last resort: retry with minimal prompt (no system message)
+                            if retry_status == 400:
+                                try:
+                                    logger.info("last resort: retry with minimal prompt")
+                                    # Strip system, tool messages, and tool_calls from assistant
+                                    minimal_msgs = []
+                                    for m in messages:
+                                        role = m.get("role", "")
+                                        if role == "tool":
+                                            continue
+                                        if role == "system":
+                                            continue
+                                        if role == "assistant" and m.get("tool_calls"):
+                                            continue  # skip assistant messages with tool_calls
+                                        minimal_msgs.append(m)
+                                    if not minimal_msgs:
+                                        minimal_msgs = [{"role": "user", "content": "(empty)"}]
+                                    result = await self._do_call(
+                                        base=base, api_key=api_key, model=model,
+                                        messages=minimal_msgs, temperature=temperature,
+                                        max_tokens=max_tokens, tools=None, provider=provider,
+                                    )
+                                    cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
+                                    self._cost_total += cost
+                                    result["estimated_cost_usd"] = round(cost, 6)
+                                    result["total_cost_usd"] = round(self._cost_total, 6)
+                                    logger.info("last resort succeeded")
+                                    return result
+                                except Exception as last_exc:
+                                    logger.warning("last resort failed: %s", last_exc)
+
                     # --- Auto-heal: endpoint fallback ---
                     # When we get 403/404, try probing alternative URLs.
                     # The resolver module has 40+ provider aliases and
@@ -1063,6 +1124,7 @@ class LLMProvider(Plugin):
         return {
             "text": _("service_unavailable"),
             "tool_calls": [],
+            "tool_calls_raw": [],
             "tokens_used": 0,
             "model": model,
             "failed": True,
@@ -1132,6 +1194,7 @@ class LLMProvider(Plugin):
             result = {
                 "text": text.strip(),
                 "tool_calls": tool_calls,
+                "tool_calls_raw": tool_calls,  # Anthropic: same format
                 "tokens_used": tokens_used,
                 "model": data.get("model", model),
             }
@@ -1163,7 +1226,9 @@ class LLMProvider(Plugin):
         msg = choice.get("message", {})
         text = msg.get("content", "") or ""
         tool_calls: List[Dict[str, Any]] = []
+        tool_calls_raw: List[Dict[str, Any]] = []  # Original API format for message history
         for tc in msg.get("tool_calls") or []:
+            tool_calls_raw.append(tc)  # Preserve original format
             try:
                 args = json.loads(tc.get("function", {}).get("arguments", "{}"))
             except Exception:
@@ -1181,6 +1246,7 @@ class LLMProvider(Plugin):
         return {
             "text": text.strip(),
             "tool_calls": tool_calls,
+            "tool_calls_raw": tool_calls_raw,
             "tokens_used": tokens_used,
             "model": data.get("model", model),
         }
