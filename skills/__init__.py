@@ -316,66 +316,101 @@ class SkillManager(Plugin):
 
         # ---------- 网页搜索技能 ----------
         async def web_search_handler(args: Dict[str, Any]) -> str:
-            """搜索互联网获取最新信息，使用 DuckDuckGo HTML 搜索（无需 API key）。"""
+            """搜索互联网获取最新信息。多源自动切换：DuckDuckGo → Bing → 自给。
+            
+            不依赖任何 API key，纯 HTML 解析。任一源成功即返回结果。
+            """
             query = str(args.get("input", "")).strip()
             if not query:
                 return "[web_search error: empty query]"
-            try:
-                import urllib.parse
-                import httpx as _httpx
-                # Use DuckDuckGo Lite — returns clean HTML, no JS required
-                url = f"https://lite.duckduckgo.com/lite/"
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                }
-                async with _httpx.AsyncClient(timeout=15.0, follow_redirects=True) as _client:
-                    resp = await _client.post(
-                        url,
-                        data={"q": query, "kl": "cn-zh"},
-                        headers=headers,
+            
+            import re as _re
+            import httpx as _httpx
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            }
+            results: list[str] = []
+            sources_tried: list[str] = []
+            
+            async def _try_ddg() -> bool:
+                """DuckDuckGo Lite — clean HTML, no JS."""
+                nonlocal results
+                try:
+                    async with _httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+                        resp = await client.post(
+                            "https://lite.duckduckgo.com/lite/",
+                            data={"q": query, "kl": "cn-zh"},
+                            headers=headers,
+                        )
+                        if resp.status_code != 200:
+                            return False
+                        html = resp.text
+                    pattern = _re.compile(
+                        r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<span[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</span>',
+                        _re.DOTALL | _re.IGNORECASE,
                     )
-                    if resp.status_code != 200:
-                        return f"[web_search error: HTTP {resp.status_code}]"
-                    html = resp.text
-
-                # Parse DuckDuckGo Lite results
-                import re as _re
-                results: list[str] = []
-                # Each result looks like: <a rel="nofollow" href="URL">Title</a>
-                # followed by <span class="snippet">Snippet</span>
-                pattern = _re.compile(
-                    r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<span[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</span>',
-                    _re.DOTALL | _re.IGNORECASE,
-                )
-                for m in pattern.finditer(html):
-                    url_result = m.group(1)
-                    title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
-                    snippet = _re.sub(r"<[^>]+>", "", m.group(3)).strip()
-                    if title and snippet:
-                        results.append(f"{title}\n  {snippet}\n  {url_result}")
-
-                if not results:
-                    # Fallback: simpler regex for basic link extraction
-                    link_pattern = _re.compile(
-                        r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>',
-                        _re.DOTALL,
-                    )
-                    for m in link_pattern.finditer(html):
-                        url_result = m.group(1)
+                    for m in pattern.finditer(html):
+                        url_r = m.group(1)
                         title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
-                        if title and "duckduckgo" not in url_result.lower():
-                            results.append(f"{title}\n  {url_result}")
+                        snippet = _re.sub(r"<[^>]+>", "", m.group(3)).strip()
+                        if title and snippet:
+                            results.append(f"{title}\n  {snippet}\n  {url_r}")
+                    if not results:
+                        link_pattern = _re.compile(
+                            r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', _re.DOTALL,
+                        )
+                        for m in link_pattern.finditer(html):
+                            url_r = m.group(1)
+                            title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
+                            if title and "duckduckgo" not in url_r.lower():
+                                results.append(f"{title}\n  {url_r}")
+                    return bool(results)
+                except Exception:
+                    return False
 
-                if not results:
-                    return f"[web_search: 未找到与 '{query}' 相关的结果]"
+            async def _try_bing() -> bool:
+                """Bing HTML search — broader coverage."""
+                nonlocal results
+                try:
+                    bing_url = f"https://www.bing.com/search?q={_re.quote(query)}&setlang=zh-cn"
+                    async with _httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+                        resp = await client.get(bing_url, headers=headers)
+                        if resp.status_code != 200:
+                            return False
+                        html = resp.text
+                    # Bing: results are in <li class="b_algo"> blocks
+                    algo_pattern = _re.compile(
+                        r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>',
+                        _re.DOTALL | _re.IGNORECASE,
+                    )
+                    for block in algo_pattern.finditer(html):
+                        block_html = block.group(1)
+                        link_m = _re.search(r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', block_html, _re.DOTALL)
+                        snippet_m = _re.search(r'<p[^>]*>(.*?)</p>', block_html, _re.DOTALL)
+                        if link_m:
+                            title = _re.sub(r"<[^>]+>", "", link_m.group(2)).strip()
+                            url_r = link_m.group(1)
+                            snippet = _re.sub(r"<[^>]+>", "", snippet_m.group(1)).strip() if snippet_m else ""
+                            if title and "bing.com" not in url_r.lower():
+                                results.append(f"{title}\n  {snippet}\n  {url_r}")
+                    return bool(results)
+                except Exception:
+                    return False
 
+            # Try sources in order
+            for name, fn in [("DuckDuckGo", _try_ddg), ("Bing", _try_bing)]:
+                sources_tried.append(name)
+                if await fn():
+                    break
+            
+            if results:
                 summary = "\n\n".join(results[:5])
-                return f"搜索结果（{query}）：\n\n{summary}"
-            except Exception as e:
-                return f"[web_search error: {e}]"
+                return f"搜索结果（{query}，来源: {' → '.join(sources_tried)}）：\n\n{summary}"
+            return f"[web_search: {'、'.join(sources_tried)} 均无法访问。建议直接基于已有知识回答。]"
 
         self.register(Skill(
             id="web_search", title="Web Search",
