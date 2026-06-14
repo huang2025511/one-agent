@@ -40,6 +40,7 @@ class EventStatus(enum.Enum):
     SENT = "sent"
     PROCESSING = "processing"
     DONE = "done"
+    PARTIAL = "partial"  # Some handlers succeeded, some failed
     FAILED = "failed"
     DEAD_LETTER = "dead_letter"
 
@@ -245,11 +246,21 @@ class EventBus:
                 handler_errors.append(str(handler))
                 self._metrics["errors"] += 1
 
-        # 只有所有 handler 都失败才标记
-        if handler_errors and len(handler_errors) == len(handlers):
+        # Mark event status based on handler results
+        if not handler_errors:
+            # All handlers succeeded
+            event.mark_done()
+        elif len(handler_errors) == len(handlers):
+            # All handlers failed
             event.mark_failed("; ".join(handler_errors))
         else:
-            event.mark_done()
+            # Partial success — some handlers succeeded, some failed
+            event.status = EventStatus.PARTIAL
+            event.error = f"{len(handler_errors)}/{len(handlers)} handlers failed"
+            logger.warning(
+                "event %s partial success: %d/%d handlers failed",
+                event.type, len(handler_errors), len(handlers),
+            )
 
     # ---------------------------------------------------------------- DLQ
     def _add_to_dlq(self, event: Event) -> None:

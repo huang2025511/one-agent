@@ -152,6 +152,10 @@ class TelegramGateway(Plugin):
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
         if self._client:
             await self._client.aclose()
         await super().stop()
@@ -300,6 +304,10 @@ class WeComGateway(Plugin):
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
         if self._client:
             await self._client.aclose()
         await super().stop()
@@ -559,6 +567,10 @@ class DingTalkGateway(Plugin):
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
         if self._client:
             await self._client.aclose()
         await super().stop()
@@ -772,6 +784,10 @@ class FeishuGateway(Plugin):
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
         if self._client:
             await self._client.aclose()
         await super().stop()
@@ -962,6 +978,10 @@ class DiscordGateway(Plugin):
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
         if self._client:
             await self._client.aclose()
         await super().stop()
@@ -1111,6 +1131,10 @@ class SlackGateway(Plugin):
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
         if self._client:
             await self._client.aclose()
         await super().stop()
@@ -1259,4 +1283,8 @@ class WebGateway(Plugin):
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
         await super().stop()

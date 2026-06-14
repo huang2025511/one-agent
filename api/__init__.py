@@ -18,10 +18,11 @@ All endpoints return JSON.  Authentication via X-API-Key header
 
 from __future__ import annotations
 
+import hmac
 import logging
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from core.plugin import Plugin
 
@@ -29,9 +30,11 @@ logger = logging.getLogger(__name__)
 
 
 def _check_auth(api_key: Optional[str], required_key: str) -> bool:
+    """Compare API keys using constant-time comparison to prevent timing attacks."""
     if not required_key:
         return True  # Auth disabled if no key configured
-    return api_key == required_key
+    # Use hmac.compare_digest for constant-time comparison
+    return hmac.compare_digest(api_key or "", required_key)
 
 
 class RESTAPIGateway(Plugin):
@@ -284,7 +287,8 @@ class RESTAPIGateway(Plugin):
             if isinstance(exc, StarletteHTTPException):
                 raise exc
             logger.exception("api error: %s", exc)
-            return JSONResponse({"error": str(exc)}, status_code=500)
+            # Return generic error message to avoid leaking internal details
+            return JSONResponse({"error": "internal server error"}, status_code=500)
 
         self._app = app
         try:

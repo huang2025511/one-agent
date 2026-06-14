@@ -761,7 +761,11 @@ class LLMProvider(Plugin):
                 return cached
 
         provider = model.split("/", 1)[0] if "/" in model else "openai"
-        base = self._provider_base_urls.get(provider, self._provider_base_urls["openrouter"])
+        # Use .get() with fallback to avoid KeyError if openrouter is missing
+        base = self._provider_base_urls.get(
+            provider,
+            self._provider_base_urls.get("openrouter", "https://openrouter.ai/api/v1"),
+        )
         api_key = self._api_keys.get(provider) or self._api_keys.get("openrouter")
         # Strip the "<provider>/" prefix from the model id — OpenAI-compatible
         # endpoints expect the bare model name (e.g. "deepseek-v4-flash",
@@ -916,6 +920,10 @@ class LLMProvider(Plugin):
             return result
 
         # Default — OpenAI compatible
+        # Strip the "<provider>/" prefix from the model id — OpenAI-compatible
+        # endpoints expect the bare model name (e.g. "deepseek-v4-flash",
+        # not "sensenova/deepseek-v4-flash").
+        bare_model = model.split("/", 1)[1] if "/" in model else model
         payload = {
             "model": bare_model,
             "messages": messages,

@@ -83,7 +83,7 @@ class SchedulerPlugin(Plugin):
             if self.bus is not None:
                 self.bus.publish({  # type: ignore[attr-defined]
                     "type": "cron",
-                    "name": name,
+                    "payload": {"name": name},
                 })
             logger.debug("cron fired: %s", name)
         self.add_cron(cron, fire, name)

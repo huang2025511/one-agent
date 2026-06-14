@@ -270,4 +270,12 @@ class MultimodalPlugin(Plugin):
     ) -> List[Dict[str, Any]]:
         """Analyze multiple images in parallel."""
         tasks = [self.analyze_image(img, prompt, model) for img in images]
-        return await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Convert any exceptions to error dicts so callers can safely .get()
+        normalized: List[Dict[str, Any]] = []
+        for r in results:
+            if isinstance(r, Exception):
+                normalized.append({"error": str(r), "analysis": ""})
+            else:
+                normalized.append(r)
+        return normalized

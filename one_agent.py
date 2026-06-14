@@ -249,12 +249,36 @@ class OneAgentApp:
         from memory import MemoryPlugin
         from skills import SkillManager
         from executors import ShellExecutor, DockerExecutor, BrowserExecutor
-        from gateways import CLIGateway, TelegramGateway, WeComGateway, DingTalkGateway, FeishuGateway, DiscordGateway, SlackGateway, WebGateway
         from scheduler import SchedulerPlugin
         from multimodal import MultimodalPlugin
         from api import RESTAPIGateway
         from monitor import MonitoringPlugin
         from marketplace import MarketplacePlugin
+
+        # Import gateways with graceful degradation — if a gateway's dependencies
+        # are missing (e.g., cryptography for WeCom), log warning and skip it
+        # rather than crashing the entire startup.
+        from gateways import CLIGateway
+        self.cli = CLIGateway()
+        
+        gateways_to_load = [
+            ("telegram", "TelegramGateway"),
+            ("wecom", "WeComGateway"),
+            ("dingtalk", "DingTalkGateway"),
+            ("feishu", "FeishuGateway"),
+            ("discord", "DiscordGateway"),
+            ("slack", "SlackGateway"),
+            ("web", "WebGateway"),
+        ]
+        
+        for attr_name, class_name in gateways_to_load:
+            try:
+                module = __import__("gateways", fromlist=[class_name])
+                cls = getattr(module, class_name)
+                setattr(self, attr_name, cls())
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"Gateway {class_name} not available: {e}")
+                setattr(self, attr_name, None)
 
         self.config = load_config(config_path)
         setup_logging(self.config)  # type: ignore[arg-type]
@@ -270,14 +294,6 @@ class OneAgentApp:
         self.exec_browser = BrowserExecutor()
         self.coordinator = Coordinator()
         self.scheduler = SchedulerPlugin()
-        self.cli = CLIGateway()
-        self.telegram = TelegramGateway()
-        self.wecom = WeComGateway()
-        self.dingtalk = DingTalkGateway()
-        self.feishu = FeishuGateway()
-        self.discord = DiscordGateway()
-        self.slack = SlackGateway()
-        self.web = WebGateway()
         self.multimodal = MultimodalPlugin()
         self.rest_api = RESTAPIGateway()
         self.monitor = MonitoringPlugin()
@@ -576,13 +592,14 @@ async def main() -> None:
     # deprecated in 3.10+ and raises in 3.12+ when no loop is set).
     loop = asyncio.get_running_loop()
     _shutdown_triggered = False
+    _shutdown_task: Optional[asyncio.Task] = None  # prevent GC of shutdown task
 
     def _on_signal():
-        nonlocal _shutdown_triggered
+        nonlocal _shutdown_triggered, _shutdown_task
         if not _shutdown_triggered:
             _shutdown_triggered = True
             print("\n[shutting down...]")
-            asyncio.create_task(app.stop())
+            _shutdown_task = asyncio.create_task(app.stop())
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:

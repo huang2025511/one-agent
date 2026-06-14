@@ -248,7 +248,7 @@ class SmartRouter(Plugin):
                     thresholds[tier] = new_val
 
     def _token_budget_for(self, tier: str) -> int:
-        return {"trivial": 512, "simple": 1024, "complex": 2048, "expert": 4096}[tier]
+        return {"trivial": 512, "simple": 1024, "complex": 2048, "expert": 4096}.get(tier, 2048)
 
     def _build_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Build compressed prompt: system + recent memories + current input.

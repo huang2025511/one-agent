@@ -113,7 +113,7 @@ class ShellExecutor(Plugin):
         except Exception:
             pass
 
-    def run(
+    async def run(
         self,
         command: str,
         timeout: Optional[int] = None,
@@ -139,21 +139,25 @@ class ShellExecutor(Plugin):
             return result
 
         try:
-            out = subprocess.run(
-                args,
-                shell=False,
+            # Use asyncio.create_subprocess_exec to avoid blocking the event loop
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=self._workdir,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
                 timeout=timeout or self._timeout,
-                capture_output=True,
-                text=True,
             )
             result = {
-                "stdout": (out.stdout or "")[:8000],
-                "stderr": (out.stderr or "")[:4000],
-                "returncode": out.returncode,
+                "stdout": (stdout.decode() or "")[:8000],
+                "stderr": (stderr.decode() or "")[:4000],
+                "returncode": proc.returncode,
                 "blocked": False,
             }
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
+            proc.kill()
             result = {
                 "stdout": "",
                 "stderr": f"[timeout after {timeout or self._timeout}s]",
@@ -218,7 +222,7 @@ class DockerExecutor(Plugin):
                 return True
         return False
 
-    def run(self, command: str) -> Dict:
+    async def run(self, command: str) -> Dict:
         if not self._enabled:
             return {
                 "stdout": "", "stderr": "docker executor disabled",
@@ -253,14 +257,20 @@ class DockerExecutor(Plugin):
             self._image,
         ] + cmd_parts
         try:
-            out = subprocess.run(args, capture_output=True, text=True, timeout=self._timeout)
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
             return {
-                "stdout": (out.stdout or "")[:8000],
-                "stderr": (out.stderr or "")[:4000],
-                "returncode": out.returncode,
+                "stdout": (stdout.decode() or "")[:8000],
+                "stderr": (stderr.decode() or "")[:4000],
+                "returncode": proc.returncode,
                 "blocked": False,
             }
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
+            proc.kill()
             return {"stdout": "", "stderr": "docker timeout", "returncode": -2}
         except FileNotFoundError:
             return {"stdout": "", "stderr": "docker binary not found", "returncode": -3}

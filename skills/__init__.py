@@ -185,13 +185,17 @@ class SkillManager(Plugin):
                 safe_input = shlex.quote(input_text)
                 resolved = command.replace("{input}", safe_input)
                 try:
-                    # 解析为列表参数，使用 shell=False 避免 shell 注入
+                    # 解析为列表参数，使用 asyncio.create_subprocess_exec 避免阻塞事件循环
                     cmd_parts = shlex.split(resolved, posix=True)
-                    out = subprocess.run(
-                        cmd_parts, shell=False, capture_output=True, text=True, timeout=30
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd_parts,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
                     )
-                    return (out.stdout or "") + (out.stderr or "")
-                except subprocess.TimeoutExpired:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                    return (stdout.decode() or "") + (stderr.decode() or "")
+                except asyncio.TimeoutError:
+                    proc.kill()
                     return "[timeout]"
                 except (FileNotFoundError, PermissionError, OSError) as exc:
                     return f"[command error: {exc}]"
@@ -609,11 +613,29 @@ def _process_settings_command(input_text: str, config: dict) -> str:
 
 
 def _save_config(config: dict) -> None:
-    """将配置写回 YAML 文件。"""
+    """将配置写回 YAML 文件（原子写入）。"""
     import yaml
+    import tempfile
     config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
     try:
-        with open(config_path, "w", encoding="utf-8") as f:
+        # Write to temp file first, then atomically rename
+        dir_name = os.path.dirname(config_path) or "."
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".yaml",
+            dir=dir_name,
+            delete=False,
+        ) as f:
             yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            temp_path = f.name
+        # Atomic rename
+        os.replace(temp_path, config_path)
     except Exception as exc:
         logger.warning("保存配置失败: %s", exc)
+        # Clean up temp file on error
+        try:
+            if 'temp_path' in locals():
+                os.unlink(temp_path)
+        except Exception:
+            pass
