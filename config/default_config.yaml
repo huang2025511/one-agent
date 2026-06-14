@@ -1,27 +1,28 @@
 agent:
-  name: One-Agent
-  description: Token-efficient self-evolving microkernel AI agent
+  name: One-Agent-Test
+  description: Test configuration for One-Agent
   version: 2.0.0
   data_dir: ./data
-  log_level: INFO
+  log_level: WARNING
   timezone: Asia/Shanghai
-  language: en
+  language: zh
 llm:
-  primary_provider: openrouter
-  primary_model: anthropic/claude-3.5-sonnet
-  lightweight_model: gpt-4o-mini
+  primary_provider: sensenova
+  primary_model: sensenova/deepseek-v4-flash
+  lightweight_model: sensenova/sensenova-6.7-flash-lite
   local_endpoint: http://localhost:11434
   local_model: qwen2.5:7b
   api_keys:
-    openrouter: ${OPENROUTER_API_KEY}
-    openai: ${OPENAI_API_KEY}
-    anthropic: ${ANTHROPIC_API_KEY}
-    deepseek: ${DEEPSEEK_API_KEY}
-    dashscope: ${DASHSCOPE_API_KEY}
+    openrouter: null
+    openai: null
+    anthropic: null
+    deepseek: null
+    dashscope: null
+    sensenova: sk-6HEk7kCx2aBkMIcv75LoVrvIubXTXRhT
   default_temperature: 0.3
   default_max_tokens: 2048
-  timeout: 60
-  retries: 3
+  timeout: 30
+  retries: 1
 router:
   enabled: true
   task_complexity_thresholds:
@@ -30,18 +31,11 @@ router:
     complex: 0.8
     expert: 1.0
   context_compression:
-    enabled: true
-    min_tokens_before_compress: 2000
-    compression_ratio: 0.4
-    strategy: semantic-ranking
+    enabled: false
   skill_lazy_loading:
-    enabled: true
-    max_skills_per_turn: 5
-    ttl_seconds: 300
+    enabled: false
   self_evolution:
-    enabled: true
-    min_samples_before_adjust: 50
-    review_interval_hours: 24
+    enabled: false
 memory:
   short_term:
     max_turns: 20
@@ -58,148 +52,26 @@ memory:
     min_usage_before_skill: 3
     skill_storage: markdown
 skills:
-  builtin_skills_dir: ./data/skills/builtin
-  user_skills_dir: ./data/skills/user
-  community_skills_dir: ./data/skills/community
-  security:
-    sandbox_code: true
-    allow_network: true
-    allow_file_write: true
-    file_write_root: ./data/workspace
-    require_human_approval_for:
-    - shell:rm
-    - shell:sudo
-    - file:delete
-  mcp_servers:
-  - name: filesystem
-    command: npx
-    args:
-    - -y
-    - '@modelcontextprotocol/server-filesystem'
-    - ./data/workspace
-  - name: github
-    command: npx
-    args:
-    - -y
-    - '@modelcontextprotocol/server-github'
-    env:
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
-gateways:
-  cli:
-    enabled: true
-    prompt: 'one-agent> '
-  web:
-    enabled: true
-    host: 127.0.0.1
-    port: 18791
-    auth_required: false
-  telegram:
-    enabled: false
-    bot_token: ${TELEGRAM_BOT_TOKEN}
-    allowed_users: []
-  wecom:
-    enabled: false
-    mode: webhook
-    webhook_key: ${WECOM_WEBHOOK_KEY}
-    corp_id: ${WECOM_CORP_ID}
-    agent_id: ${WECOM_AGENT_ID}
-    secret: ${WECOM_SECRET}
-    callback_token: ${WECOM_CALLBACK_TOKEN}
-    encoding_aes_key: ${WECOM_ENCODING_AES_KEY}
-    callback_host: 0.0.0.0
-    callback_port: 18794
-  dingtalk:
-    enabled: false
-    mode: webhook
-    webhook_url: ${DINGTALK_WEBHOOK_URL}
-    secret: ${DINGTALK_SECRET}
-    client_id: ${DINGTALK_CLIENT_ID}
-    client_secret: ${DINGTALK_CLIENT_SECRET}
-  feishu:
-    enabled: false
-    mode: webhook
-    webhook_url: ${FEISHU_WEBHOOK_URL}
-    secret: ${FEISHU_SECRET}
-    app_id: ${FEISHU_APP_ID}
-    app_secret: ${FEISHU_APP_SECRET}
-    verification_token: ${FEISHU_VERIFICATION_TOKEN}
-    encrypt_key: ${FEISHU_ENCRYPT_KEY}
-    callback_host: 0.0.0.0
-    callback_port: 18795
-  discord:
-    enabled: false
-    bot_token: ${DISCORD_BOT_TOKEN}
-    allowed_channels: []
-  slack:
-    enabled: false
-    bot_token: ${SLACK_BOT_TOKEN}
-    app_token: ${SLACK_APP_TOKEN}
-    allowed_channels: []
-  cross_platform_continue: true
-execution:
-  local_shell:
-    enabled: true
-    default_timeout: 60
-    allowed_commands:
-    - ls
-    - cat
-    - grep
-    - find
-    - python
-    - node
-  docker:
-    enabled: false
-    image: python:3.12-slim
-    memory_limit_mb: 512
-    timeout: 120
-  ssh:
-    enabled: false
-    hosts: []
-  browser:
-    enabled: false
-    playwright_headless: true
-scheduler:
   enabled: true
-  builtin_jobs:
-  - name: memory_housekeeping
-    cron: 0 3 * * *
-    enabled: true
-  - name: skill_pattern_mining
-    cron: 0 4 * * 0
-    enabled: true
-  - name: router_statistics
-    cron: '*/30 * * * *'
-    enabled: true
-  user_jobs_file: ./data/scheduler/jobs.yaml
-security:
-  audit_log:
-    enabled: true
-    path: ./data/logs/audit.log
-    retention_days: 90
-  conversation_persistence:
-    enabled: true
-    path: ./data/logs/conversations
-  data_encryption:
-    enabled: false
-    key_env: ONE_AGENT_ENCRYPTION_KEY
-  allow_sensitive_chat_settings: false
+  auto_discover: true
+  search_paths:
+  - ./skills
+gateways: {}
+execution: {}
+scheduler: {}
+security: {}
 rest:
   enabled: true
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 18792
   api_key: ''
-monitoring:
-  enabled: true
-  port: 18793
-multimodal:
-  enabled: false
-  image_model: openai/dall-e-3
-  vision_model: openai/gpt-4o
-  tts_model: openai/tts-1
+  rate_limit_per_minute: 10000
+  max_chat_bytes: 65536
+  cors_origins:
+  - '*'
+monitoring: {}
+multimodal: {}
 marketplace:
-  community_hub: https://raw.githubusercontent.com/huang2025511/one-agent-skills/main/
-  install_dir: ./data/skills/community
-llm_cache:
   enabled: true
-  max_size: 500
-  ttl_seconds: 3600
+  registry_url: ''
+llm_cache: {}

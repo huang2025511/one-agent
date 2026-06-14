@@ -8,20 +8,16 @@ agent:
   language: en
 
 llm:
-  primary_provider: openrouter
-  primary_model: anthropic/claude-3.5-sonnet
-  lightweight_model: gpt-4o-mini
+  primary_provider: sensenova
+  primary_model: sensenova/deepseek-v4-flash
+  lightweight_model: sensenova/sensenova-6.7-flash-lite
   local_endpoint: http://localhost:11434
   local_model: qwen2.5:7b
   api_keys:
-    openrouter: test-key-not-real
-    openai: test-key-not-real
-    anthropic: test-key-not-real
-    deepseek: test-key-not-real
-    dashscope: test-key-not-real
+    sensenova: sk-6HEk7kCx2aBkMIcv75LoVrvIubXTXRhT
   default_temperature: 0.3
   default_max_tokens: 2048
-  timeout: 5
+  timeout: 30
   retries: 1
 
 router:

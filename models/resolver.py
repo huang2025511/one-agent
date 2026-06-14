@@ -64,7 +64,7 @@ KNOWN_PROVIDERS: Dict[str, str] = {
     "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "tongyi": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "sensenova": "https://api.sensenova.cn/compatible-mode/v1",
+    "sensenova": "https://token.sensenova.cn/v1",
     "yi": "https://api.lingyiwanwu.com/v1",
     "lingyiwanwu": "https://api.lingyiwanwu.com/v1",
     "zhipu": "https://open.bigmodel.cn/api/paas/v4",

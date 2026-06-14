@@ -75,9 +75,8 @@ MODEL_COST: Dict[str, float] = {
     "qwen/qwen-2.5-72b-instruct":     0.0004,
     "qwen/qwen-2.5-7b-instruct":      0.0001,
     # SenseNova (商汤)
-    "sensenova/DeepSeek-V4-Flash":    0.0001,
-    "sensenova/SenseNova-6.7-Flash-Lite": 0.0001,
-    "sensenova/SenseNova-U1-Fast":    0.0001,
+    "sensenova/deepseek-v4-flash":    0.0001,
+    "sensenova/sensenova-6.7-flash-lite": 0.0001,
     # Zhipu GLM (智谱)
     "glm/glm-4":                      0.001,
     "glm/glm-4-plus":                 0.001,

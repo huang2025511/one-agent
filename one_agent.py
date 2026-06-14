@@ -35,6 +35,7 @@ from core.plugin import PluginManager  # noqa: E402
 # ============================================================
 
 class LLMApiKeys(BaseModel):
+    model_config = {"extra": "allow"}  # Accept any provider's key (sensenova, zhipu, etc.)
     openrouter: Optional[str] = Field(default=None, description="OpenRouter API key")
     openai: Optional[str] = Field(default=None, description="OpenAI API key")
     anthropic: Optional[str] = Field(default=None, description="Anthropic API key")
