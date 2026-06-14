@@ -194,6 +194,10 @@ class LLMProvider(Plugin):
         self._bg_tasks: set = set()
         # Auto-classify cache: last successful reclassify time per provider
         self._auto_classify_timestamps: Dict[str, float] = {}
+        # Model name normalization cache: {provider: {lowercase_name: real_id}}
+        self._model_name_cache: Dict[str, Dict[str, str]] = {}
+        # Endpoint fallback guard: count attempts per provider (max 2)
+        self._fallback_count: Dict[str, int] = {}
         # If setup() can't find an event loop, defer the first auto-classify
         # to the next chat_completion() / get_catalog() call.
         self._pending_auto_classify: bool = False
@@ -291,6 +295,28 @@ class LLMProvider(Plugin):
             if not ran:
                 # Defer to the first chat_completion() / get_catalog() call
                 self._pending_auto_classify = True
+
+        # ── Self-check: probe primary provider's endpoint ──────────────
+        # A quick health check to catch bad URLs early. If the default
+        # endpoint returns 403/404, trigger auto-fallback immediately.
+        provider = self._infer_primary_provider()
+        base = self._provider_base_urls.get(provider)
+        api_key = self._api_keys.get(provider)
+        if base and api_key and not "${" in (api_key or ""):
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as probe:
+                    r = await probe.get(
+                        f"{base.rstrip('/')}/models",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                    if r.status_code == 200:
+                        logger.info("endpoint check OK: %s → %s", provider, base)
+                    else:
+                        logger.warning("endpoint check returned %s: %s → %s, trying fallback",
+                                       r.status_code, provider, base)
+                        await self._try_endpoint_fallback(provider)
+            except Exception as exc:
+                logger.debug("endpoint check probe failed: %s", exc)
 
     async def stop(self) -> None:
         # Wait for any in-flight auto-classify background tasks (max 5s)
@@ -711,6 +737,151 @@ class LLMProvider(Plugin):
             return m.split("/", 1)[0]
         return "openai"
 
+    async def _try_endpoint_fallback(self, provider: str) -> Optional[str]:
+        """Probe alternative endpoints when the current one returns 403/404.
+
+        Returns a new working base URL or None if no alternative found.
+        Limited to max 2 attempts per provider per session.
+
+        Bypasses the registry lookup (which may return the same broken URL)
+        and directly probes candidate hosts from the resolver's heuristic list.
+        """
+        count = self._fallback_count.get(provider, 0)
+        if count >= 2:
+            logger.debug("fallback: max attempts reached for %s", provider)
+            return None
+        self._fallback_count[provider] = count + 1
+
+        api_key = self._api_keys.get(provider)
+        if not api_key or "${" in (api_key or ""):
+            return None
+
+        logger.info("probing alternative endpoints for provider=%s (attempt %d/2)", provider, count + 1)
+
+        try:
+            from .resolver import _candidate_hosts as _hosts, _PROBE_PATH_PATTERNS as _patterns
+        except ImportError:
+            return None
+
+        # Generate all candidate URLs from the resolver's host+path patterns
+        candidates: list[str] = []
+        for host in _hosts(provider):
+            for pattern in _patterns:
+                candidates.append(pattern.format(h=host))
+
+        if not candidates:
+            return None
+
+        # Probe in parallel, stop at first success
+        import asyncio as _a
+        current_base = self._provider_base_urls.get(provider, "")
+
+        async def _probe(url: str) -> Optional[str]:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as cli:
+                    r = await cli.get(
+                        f"{url.rstrip('/')}/models",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
+                    if 200 <= r.status_code < 300:
+                        return url
+            except Exception:
+                pass
+            return None
+
+        # Probe in batches of 10 to avoid overwhelming network
+        for i in range(0, len(candidates), 10):
+            batch = candidates[i:i + 10]
+            results = await _a.gather(*[_probe(url) for url in batch])
+            for url in results:
+                if url and url != current_base:
+                    logger.info("switched %s endpoint: %s → %s (auto-probe)",
+                                 provider, current_base, url)
+                    self._provider_base_urls[provider] = url
+                    self._model_name_cache.pop(provider, None)
+                    # Update the resolver's known list too
+                    try:
+                        from .resolver import KNOWN_PROVIDERS
+                        KNOWN_PROVIDERS[provider] = url
+                    except ImportError:
+                        pass
+                    return url
+
+        logger.warning("fallback probe for %s: no working endpoint found among %d candidates",
+                       provider, len(candidates))
+        return None
+
+    async def _build_model_name_map(self, provider: str) -> Dict[str, str]:
+        """Fetch the real model list from the API and build a case-insensitive
+        name → real ID mapping.  Cached per provider to avoid repeated fetches.
+
+        Example: {"deepseek-v4-flash": "deepseek-v4-flash", "deepseek v4 flash": "deepseek-v4-flash"}
+        """
+        cached = self._model_name_cache.get(provider)
+        if cached:
+            return cached
+
+        base = self._provider_base_urls.get(provider)
+        api_key = self._api_keys.get(provider)
+        if not base or not api_key or "${" in (api_key or ""):
+            return {}
+
+        mapping: Dict[str, str] = {}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    f"{base.rstrip('/')}/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    models = data.get("data", data.get("models", []))
+                    for m in models:
+                        real_id = m.get("id", "")
+                        if not real_id:
+                            continue
+                        # Map: real ID → itself
+                        mapping[real_id] = real_id
+                        # Map: lowercase → itself
+                        mapping[real_id.lower()] = real_id
+                        # Map: normalized (strip special chars, lowercase) → itself
+                        import re
+                        normalized = re.sub(r"[^a-z0-9]", "", real_id.lower())
+                        mapping[normalized] = real_id
+        except Exception as exc:
+            logger.debug("model name map for %s failed: %s", provider, exc)
+
+        self._model_name_cache[provider] = mapping
+        return mapping
+
+    def _normalize_model_id(self, model: str, provider: str, bare_model: str) -> str:
+        """Try to correct a model name that the API doesn't recognize.
+
+        Strategy:
+        1. Exact match in mapping → use as-is
+        2. Lowercase match → use real ID
+        3. Normalized (strip non-alnum) match → use real ID
+        4. Fallback: return original bare_model unchanged
+        """
+        mapping = self._model_name_cache.get(provider, {})
+        if not mapping:
+            return bare_model
+
+        # Exact match
+        if bare_model in mapping:
+            return bare_model
+        # Case-insensitive
+        low = bare_model.lower()
+        if low in mapping:
+            return mapping[low]
+        # Normalized (strip non-alnum, lowercase)
+        import re
+        norm = re.sub(r"[^a-z0-9]", "", low)
+        if norm in mapping:
+            return mapping[norm]
+
+        return bare_model
+
     async def list_models(
         self,
         provider: Optional[str] = None,
@@ -783,6 +954,21 @@ class LLMProvider(Plugin):
                 "failed": True,
             }
 
+        # --- Auto-heal: build model name map and normalize model ID ---
+        # Fetches the real model list from the API and builds a
+        # case-insensitive mapping so users can type "DeepSeek-V4-Flash"
+        # and it maps to the actual "deepseek-v4-flash" automatically.
+        try:
+            await self._build_model_name_map(provider)
+            corrected = self._normalize_model_id(model, provider, bare_model)
+            if corrected != bare_model:
+                logger.info("auto-corrected model name: %s → %s", bare_model, corrected)
+                bare_model = corrected
+                # Rebuild the full model string with provider prefix
+                model = f"{provider}/{bare_model}"
+        except Exception:
+            pass  # Best-effort — fall through to original name
+
         last_err: Optional[Exception] = None
         for attempt in range(1, self._retry_count + 1):
             try:
@@ -813,6 +999,41 @@ class LLMProvider(Plugin):
                     or isinstance(exc, (asyncio.TimeoutError, ConnectionError))
                 )
                 if not retryable:
+                    # --- Auto-heal: endpoint fallback ---
+                    # When we get 403/404, try probing alternative URLs.
+                    # The resolver module has 40+ provider aliases and
+                    # candidate host patterns — this is what makes
+                    # "give a provider name + key → auto-adapt" work.
+                    if status in (403, 404) and self._fallback_count.get(provider, 0) < 2:
+                        new_base = await self._try_endpoint_fallback(provider)
+                        if new_base:
+                            base = new_base
+                            # Rebuild model name map with new URL
+                            self._model_name_cache.pop(provider, None)
+                            try:
+                                await self._build_model_name_map(provider)
+                                corrected = self._normalize_model_id(model, provider, bare_model)
+                                if corrected != bare_model:
+                                    bare_model = corrected
+                                    model = f"{provider}/{bare_model}"
+                            except Exception:
+                                pass
+                            # Retry once with the new endpoint
+                            try:
+                                result = await self._do_call(
+                                    base=base, api_key=api_key, model=model,
+                                    messages=messages, temperature=temperature,
+                                    max_tokens=max_tokens, tools=tools, provider=provider,
+                                )
+                                cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
+                                self._cost_total += cost
+                                result["estimated_cost_usd"] = round(cost, 6)
+                                result["total_cost_usd"] = round(self._cost_total, 6)
+                                if use_cache and self._cache is not None:
+                                    self._cache.set(messages, model, tools or [], result, temperature)
+                                return result
+                            except Exception:
+                                pass  # Fallback also failed, continue to error path
                     logger.warning("llm call non-retryable error (status=%s): %s", status, exc)
                     break
                 if attempt < self._retry_count:

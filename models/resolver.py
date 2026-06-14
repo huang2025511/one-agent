@@ -143,6 +143,7 @@ def _candidate_hosts(name: str) -> List[str]:
         f"api.{n}.ai",
         f"open.{n}.cn",
         f"open.{n}.com",
+        f"token.{n}.cn",   # SenseNova / 商汤
         n,
         f"api.{n}.com",
         f"{n}.com.cn",
