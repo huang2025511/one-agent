@@ -839,7 +839,7 @@ class LLMProvider(Plugin):
                     logger.error("llm call gave up after %d attempts: %s", self._retry_count, exc)
 
         return {
-            "text": f"[upstream unreachable: {last_err}]",
+            "text": "[service temporarily unavailable — please retry later]",
             "tool_calls": [],
             "tokens_used": 0,
             "model": model,

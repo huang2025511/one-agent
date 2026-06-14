@@ -159,10 +159,14 @@ class Coordinator(Plugin):
                 for tc in tool_calls:
                     name = tc.get("name") or ""
                     args = tc.get("args") or {}
-                    if self._skills is not None:
-                        result = await self._skills.dispatch(name, args)
-                    else:
-                        result = "[no skill manager bound]"
+                    try:
+                        if self._skills is not None:
+                            result = await self._skills.dispatch(name, args)
+                        else:
+                            result = "[no skill manager bound]"
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("skill dispatch failed: %s(%s)", name, args)
+                        result = f"[skill error: {exc}]"
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.get("id") or "",
