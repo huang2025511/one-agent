@@ -163,14 +163,24 @@ class LLMProvider(Plugin):
         # If setup() can't find an event loop, defer the first auto-classify
         # to the next chat_completion() / get_catalog() call.
         self._pending_auto_classify: bool = False
-        self._provider_base_urls = {
-            "openrouter": "https://openrouter.ai/api/v1",
-            "openai": "https://api.openai.com/v1",
-            "anthropic": "https://api.anthropic.com/v1",
-            "deepseek": "https://api.deepseek.com/v1",
-            "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "ollama": "http://localhost:11434/v1",
-        }
+        # Built-in registry of well-known providers.  The resolver
+        # module ships a longer list (40+ aliases) that we merge in at
+        # runtime so the user only needs to give a friendly name like
+        # "sensenova" or "zhipu" — the base URL is auto-filled.
+        self._provider_base_urls: Dict[str, str] = {}
+        try:
+            from .resolver import list_known
+            self._provider_base_urls.update(list_known())
+        except Exception:  # noqa: BLE001
+            # Resolver module missing — fall back to a tiny built-in table
+            self._provider_base_urls = {
+                "openrouter": "https://openrouter.ai/api/v1",
+                "openai": "https://api.openai.com/v1",
+                "anthropic": "https://api.anthropic.com/v1",
+                "deepseek": "https://api.deepseek.com/v1",
+                "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "ollama": "http://localhost:11434/v1",
+            }
 
     # -------------------------------------------------------- lifecycle
     async def setup(self, ctx) -> None:
@@ -409,6 +419,105 @@ class LLMProvider(Plugin):
             }
         finally:
             await cat.aclose()
+
+    async def recommend_for(
+        self, provider: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return per-capability best-model picks for ``provider``.
+
+        The catalog is force-refreshed first, so newly-added models
+        show up immediately.  Output looks like::
+
+            {
+              "ok": True,
+              "provider": "sensenova",
+              "model_count": 12,
+              "recommendations": {
+                  "best_paid":          {"id": "...", "tier": "complex", "caps": [...]},
+                  "best_free":          {"id": "...", "tier": "trivial", "caps": [...]},
+                  "best_for_text":      {"id": "..."},
+                  "best_for_vision":    {"id": "..."},
+                  "best_for_image":     None,
+                  ...
+              }
+            }
+
+        Categories with no qualifying model get ``None`` so the caller
+        can show "no vision model on this provider" without crashing.
+        """
+        from .catalog import ModelCatalog
+        from .capabilities import (
+            RECOMMEND_CATEGORIES, describe_capabilities,
+        )
+        prov = provider or self._infer_primary_provider()
+        cat = self.get_catalog(prov)
+        if cat is None:
+            return {
+                "ok": False,
+                "error": f"no API key / base URL configured for provider '{prov}'",
+                "provider": prov,
+                "recommendations": {},
+            }
+        try:
+            n = await cat.refresh(force=True)
+            if n == 0:
+                return {
+                    "ok": False,
+                    "error": f"could not fetch model list from {prov}",
+                    "provider": prov,
+                    "recommendations": {},
+                }
+            recs = cat.recommend()
+            # Convert to JSON-friendly form
+            out: Dict[str, Any] = {}
+            for cat_name, m in recs.items():
+                if m is None:
+                    out[cat_name] = None
+                    continue
+                out[cat_name] = {
+                    "id": m.id,
+                    "name": m.name,
+                    "tier": m.tier,
+                    "is_free": m.is_free,
+                    "context_length": m.context_length,
+                    "capabilities": describe_capabilities(m.capabilities),
+                    "capabilities_list": sorted(m.capabilities),
+                }
+            return {
+                "ok": True,
+                "provider": prov,
+                "model_count": n,
+                "categories": {
+                    k: v.get("label", k) if isinstance(v, dict) else v
+                    for k, v in RECOMMEND_CATEGORIES.items()
+                },
+                "recommendations": out,
+            }
+        finally:
+            await cat.aclose()
+
+    def list_known_providers(self) -> Dict[str, str]:
+        """Return the resolver's known provider registry.
+
+        Useful for the CLI ``/providers`` command — shows the user every
+        provider we can auto-fill a base URL for.
+        """
+        try:
+            from .resolver import list_known
+            return list_known()
+        except Exception:  # noqa: BLE001
+            return dict(self._provider_base_urls)
+
+    def get_provider_url(self, provider: str) -> Optional[str]:
+        """Synchronous lookup of a provider's base URL from the registry."""
+        try:
+            from .resolver import lookup
+            hit = lookup(provider)
+            if hit:
+                return hit
+        except Exception:  # noqa: BLE001
+            pass
+        return self._provider_base_urls.get(provider)
 
     # ---------------------------------------------------------- auto-classify
     def _spawn_bg(self, coro) -> Optional[Any]:

@@ -893,6 +893,422 @@ def test_rebuild_tiers_no_user_action_does_what_user_would():
     _check("tiny auto-added somewhere", "sensenova/tiny" in all_tiers)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 11. Provider resolver — auto-fill base URL from friendly alias
+# ══════════════════════════════════════════════════════════════════════════
+def test_resolver_registry_known_providers() -> None:
+    """Registry should cover the major US and China providers."""
+    from models.resolver import KNOWN_PROVIDERS
+    for must in (
+        "openai", "anthropic", "openrouter", "deepseek",
+        "sensenova", "zhipu", "moonshot", "kimi", "dashscope",
+        "ollama", "groq", "gemini", "mistral", "xai",
+    ):
+        _check(f"registry has '{must}'", must in KNOWN_PROVIDERS)
+    for prov, url in KNOWN_PROVIDERS.items():
+        _check(f"{prov} url starts with http", url.startswith(("http://", "https://")))
+
+
+def test_resolver_registry_includes_china_providers() -> None:
+    from models.resolver import KNOWN_PROVIDERS
+    china = ["deepseek", "dashscope", "qwen", "sensenova", "yi",
+             "zhipu", "moonshot", "kimi", "doubao", "baichuan",
+             "stepfun", "hunyuan", "spark", "ernie", "minimax"]
+    missing = [c for c in china if c not in KNOWN_PROVIDERS]
+    _check("all major china providers in registry", not missing,
+           f"missing: {missing}")
+
+
+def test_resolver_lookup_sync() -> None:
+    from models.resolver import lookup, clear_cache
+    clear_cache()
+    _check("lookup openai", lookup("openai") == "https://api.openai.com/v1")
+    _check("lookup OpenAI (case-insensitive)", lookup("OpenAI") == "https://api.openai.com/v1")
+    _check("lookup openai-stripped", lookup("openai") is not None)
+    _check("lookup sensenova", "sensenova.cn" in (lookup("sensenova") or ""))
+    _check("lookup unknown returns None", lookup("nonexistent-xyz-abc") is None)
+    _check("lookup empty returns None", lookup("") is None)
+
+
+def test_resolver_candidate_hosts_generates_expected_hosts() -> None:
+    from models.resolver import _candidate_hosts
+    hosts = _candidate_hosts("sensenova")
+    _check("candidate includes sensenova.cn", "sensenova.cn" in hosts)
+    _check("candidate includes api.sensenova.cn", "api.sensenova.cn" in hosts)
+    _check("candidate includes sensenova.ai", "sensenova.ai" in hosts)
+    # Strip non-alphanumeric
+    hosts2 = _candidate_hosts("deep seek!")
+    _check("special chars stripped", "deepseek" in hosts2 or "deepseek.cn" in hosts2)
+
+
+def test_resolver_async_probe_finds_working_url() -> None:
+    """Mock HTTP server returns 200 on /models → resolver picks the URL."""
+    import httpx
+    from models.resolver import resolve, clear_cache
+    clear_cache()
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "fake"}]})
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        r = asyncio.run(resolve("sensenova", "sk-test", client=client, timeout=1.0))
+        _check("probe returns found=True", r.found is True)
+        _check("probe via probe", r.via == "probe")
+        _check("probe url endswith /v1 or /compatible-mode/v1",
+               r.base_url.endswith(("/v1", "/compatible-mode/v1")))
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_resolver_async_probe_handles_all_failures() -> None:
+    """If every URL returns 404, probe returns found=False."""
+    import httpx
+    from models.resolver import resolve, clear_cache
+    clear_cache()
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "nope"})
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    try:
+        r = asyncio.run(resolve("nonexistent-xyz", client=client, timeout=1.0))
+        _check("probe all-fail returns found=False", r.found is False)
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_resolver_empty_provider_returns_not_found() -> None:
+    from models.resolver import resolve
+    r = asyncio.run(resolve(""))
+    _check("empty provider found=False", r.found is False)
+    _check("empty provider base_url empty", r.base_url == "")
+
+
+def test_resolver_cache_repeats_return_same() -> None:
+    from models.resolver import resolve, clear_cache
+    clear_cache()
+    r1 = asyncio.run(resolve("openai", probe=False))
+    r2 = asyncio.run(resolve("openai", probe=False))
+    _check("first call via=registry", r1.via == "registry")
+    _check("second call via=cache", r2.via == "cache")
+    _check("cached url matches", r1.base_url == r2.base_url)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 12. Capability detection — recognise what each model can do
+# ══════════════════════════════════════════════════════════════════════════
+def test_capability_text_default() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_TEXT
+    m = ModelInfo(id="custom-model-7b-chat")
+    caps = detect_capabilities(m)
+    _check("default chat model has text", CAP_TEXT in caps)
+
+
+def test_capability_vision_from_name() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_VISION
+    for mid in ("gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash",
+                "qwen2-vl-7b", "internvl2", "kimi-vl"):
+        m = ModelInfo(id=mid)
+        caps = detect_capabilities(m)
+        _check(f"{mid} has vision", CAP_VISION in caps)
+
+
+def test_capability_image_generation_dalle() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_IMAGE_GEN
+    for mid in ("dall-e-3", "sdxl-1.0", "flux-dev", "imagen-3.0",
+                "cogview-3", "wanx-v1", "kolors"):
+        m = ModelInfo(id=mid)
+        caps = detect_capabilities(m)
+        _check(f"{mid} has image_generation", CAP_IMAGE_GEN in caps)
+
+
+def test_capability_video_sora() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_VIDEO
+    for mid in ("sora", "veo-2", "kling-v1", "runway-gen3",
+                "cogvideox", "hunyuan-video", "minimax-video-01"):
+        m = ModelInfo(id=mid)
+        caps = detect_capabilities(m)
+        _check(f"{mid} has video", CAP_VIDEO in caps)
+
+
+def test_capability_audio_in_whisper() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_AUDIO_IN
+    for mid in ("whisper-1", "paraformer-large", "sensevoice"):
+        m = ModelInfo(id=mid)
+        caps = detect_capabilities(m)
+        _check(f"{mid} has audio_in", CAP_AUDIO_IN in caps)
+
+
+def test_capability_audio_out_tts() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_AUDIO_OUT
+    for mid in ("tts-1", "tts-1-hd", "elevenlabs-multilingual-v2",
+                "azure-tts-neural", "cosyvoice-300m"):
+        m = ModelInfo(id=mid)
+        caps = detect_capabilities(m)
+        _check(f"{mid} has audio_out", CAP_AUDIO_OUT in caps)
+
+
+def test_capability_embeddings_excludes_text() -> None:
+    """An embedding-only model should NOT have the 'text' tag."""
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_EMBEDDINGS, CAP_TEXT
+    for mid in ("text-embedding-3-small", "bge-large-en",
+                "e5-large-v2", "nomic-embed-text-v1.5"):
+        m = ModelInfo(id=mid)
+        caps = detect_capabilities(m)
+        _check(f"{mid} has embeddings", CAP_EMBEDDINGS in caps)
+        _check(f"{mid} does NOT have text", CAP_TEXT not in caps)
+
+
+def test_capability_reasoning_o1() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_REASONING
+    for mid in ("o1-preview", "o1-mini", "o3-mini", "deepseek-r1",
+                "qwq-32b-preview", "kimi-thinking"):
+        m = ModelInfo(id=mid)
+        caps = detect_capabilities(m)
+        _check(f"{mid} has reasoning", CAP_REASONING in caps)
+
+
+def test_capability_code_codellama() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_CODE
+    for mid in ("codellama-34b", "deepseek-coder-33b",
+                "qwen2.5-coder-32b", "starcoder2-15b"):
+        m = ModelInfo(id=mid)
+        caps = detect_capabilities(m)
+        _check(f"{mid} has code", CAP_CODE in caps)
+
+
+def test_capability_tools_from_metadata() -> None:
+    """Tools capability should come from features if present."""
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_TOOLS
+    m = ModelInfo(id="my-model", features=["function_calling"])
+    caps = detect_capabilities(m)
+    _check("metadata-driven tools", CAP_TOOLS in caps)
+
+
+def test_capability_long_context_200k() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import detect_capabilities, CAP_LONG_CONTEXT
+    m = ModelInfo(id="some-model", context_length=200_000)
+    caps = detect_capabilities(m)
+    _check("200k context → long_context", CAP_LONG_CONTEXT in caps)
+
+
+def test_capability_describe_chinese_labels() -> None:
+    from models.capabilities import describe_capabilities
+    s = describe_capabilities(["text", "vision", "tools"])
+    _check("describe returns Chinese labels", "文本" in s and "视觉" in s and "工具" in s)
+    _check("describe empty → (未识别)", describe_capabilities([]) == "(未识别)")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 13. Recommendation engine — best model per category
+# ══════════════════════════════════════════════════════════════════════════
+def test_recommend_picks_paid_over_free() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import recommend
+    paid = ModelInfo(id="big-paid", is_free=False, context_length=128_000,
+                     features=["tools"], tier="complex")
+    paid.capabilities = frozenset({"text", "tools"})
+    free = ModelInfo(id="small-free", is_free=True, context_length=8_000,
+                     features=[], tier="trivial")
+    free.capabilities = frozenset({"text"})
+    r = recommend([paid, free])
+    _check("best_paid picked paid", r["best_paid"] is paid)
+    _check("best_free picked free", r["best_free"] is free)
+
+
+def test_recommend_picks_free_for_best_free() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import recommend
+    a = ModelInfo(id="free-a", is_free=True, context_length=4_000)
+    a.capabilities = frozenset({"text"})
+    b = ModelInfo(id="free-b", is_free=True, context_length=16_000)
+    b.capabilities = frozenset({"text"})
+    r = recommend([a, b])
+    _check("best_free picks larger-context free", r["best_free"] is b)
+
+
+def test_recommend_picks_vision_model() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import recommend
+    plain = ModelInfo(id="plain", is_free=False, context_length=8_000)
+    plain.capabilities = frozenset({"text"})
+    vision = ModelInfo(id="vision", is_free=False, context_length=128_000,
+                       features=["vision"])
+    vision.capabilities = frozenset({"text", "vision"})
+    r = recommend([plain, vision])
+    _check("best_for_vision picked the vision model", r["best_for_vision"] is vision)
+    _check("plain model not picked for vision", r["best_for_vision"] is not plain)
+
+
+def test_recommend_picks_code_model() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import recommend
+    code = ModelInfo(id="coder-34b", is_free=False, context_length=32_000)
+    code.capabilities = frozenset({"text", "code"})
+    chat = ModelInfo(id="chat-7b", is_free=False, context_length=8_000)
+    chat.capabilities = frozenset({"text"})
+    r = recommend([chat, code])
+    _check("best_for_code picked coder", r["best_for_code"] is code)
+
+
+def test_recommend_picks_image_gen_model() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import recommend
+    dalle = ModelInfo(id="dall-e-3", is_free=False)
+    dalle.capabilities = frozenset({"image_generation"})
+    flux = ModelInfo(id="flux-dev", is_free=False)
+    flux.capabilities = frozenset({"image_generation"})
+    r = recommend([dalle, flux])
+    _check("best_for_image picked an image-gen model",
+           r["best_for_image"] in (dalle, flux))
+
+
+def test_recommend_picks_video_model() -> None:
+    from models.catalog import ModelInfo
+    from models.capabilities import recommend
+    sora = ModelInfo(id="sora")
+    sora.capabilities = frozenset({"video"})
+    r = recommend([sora])
+    _check("best_for_video picked sora", r["best_for_video"] is sora)
+    _check("best_for_text is None (sora has no text)", r["best_for_text"] is None)
+
+
+def test_recommend_empty_models_returns_all_none() -> None:
+    from models.capabilities import recommend, RECOMMEND_CATEGORIES
+    r = recommend([])
+    _check("empty input → all None", all(v is None for v in r.values()))
+    _check("empty input has all categories",
+           set(r.keys()) == set(RECOMMEND_CATEGORIES.keys()))
+
+
+def test_recommend_categories_have_labels() -> None:
+    from models.capabilities import RECOMMEND_CATEGORIES
+    for cat, cfg in RECOMMEND_CATEGORIES.items():
+        _check(f"{cat} has label", bool(cfg.get("label")))
+        _check(f"{cat} label is Chinese or English",
+               any(ord(c) > 127 for c in cfg.get("label", "")) or
+               cfg.get("label", "").isascii())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 14. LLMProvider integration with resolver / recommender
+# ══════════════════════════════════════════════════════════════════════════
+def test_provider_list_known_providers() -> None:
+    import models as _models_pkg
+    p = _models_pkg.LLMProvider()
+    known = p.list_known_providers()
+    _check("list_known is dict", isinstance(known, dict))
+    _check("list_known has sensenova", "sensenova" in known)
+    _check("list_known has openai", "openai" in known)
+    _check("list_known has 20+ providers", len(known) >= 20,
+           f"got {len(known)}")
+
+
+def test_provider_get_provider_url_known() -> None:
+    import models as _models_pkg
+    p = _models_pkg.LLMProvider()
+    _check("sensenova url contains sensenova.cn",
+           "sensenova.cn" in (p.get_provider_url("sensenova") or ""))
+    _check("openai url is api.openai.com",
+           p.get_provider_url("openai") == "https://api.openai.com/v1")
+    _check("ollama is localhost", "localhost" in (p.get_provider_url("ollama") or ""))
+
+
+def test_provider_get_provider_url_unknown_returns_none() -> None:
+    import models as _models_pkg
+    p = _models_pkg.LLMProvider()
+    _check("unknown returns None",
+           p.get_provider_url("nonexistent-xyz-abc-123") is None)
+
+
+def test_provider_recommend_for_with_mock() -> None:
+    """recommend_for() returns structured recommendations via mock transport."""
+    import json
+    import httpx
+    import models as _models_pkg
+    from models.catalog import ModelCatalog
+    p = _models_pkg.LLMProvider()
+    p._api_keys = {"testprov": "sk-test"}
+    p._provider_base_urls["testprov"] = "https://testprov.example/v1"
+
+    fake = {
+        "data": [
+            {"id": "testprov/cheap", "pricing": {"prompt": 0.0},
+             "context_length": 4_096, "supported_features": []},
+            {"id": "testprov/expensive", "pricing": {"prompt": 0.01},
+             "context_length": 200_000, "supported_features": ["vision", "tools"]},
+            {"id": "testprov/coder", "pricing": {"prompt": 0.005},
+             "context_length": 32_000, "supported_features": ["tools"]},
+        ]
+    }
+    body = json.dumps(fake).encode()
+
+    class T:
+        async def handle_async_request(self, req):
+            return httpx.Response(200, content=body)
+
+    original_init = ModelCatalog.__init__
+
+    def patched_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(T().handle_async_request))
+
+    ModelCatalog.__init__ = patched_init
+    p._client = httpx.AsyncClient(timeout=5)
+    try:
+        r = asyncio.run(p.recommend_for("testprov"))
+        _check("recommend_for ok", r.get("ok") is True)
+        recs = r.get("recommendations", {})
+        _check("best_paid set", recs.get("best_paid") is not None)
+        _check("best_free set", recs.get("best_free") is not None)
+        _check("best_paid is expensive model",
+               recs["best_paid"]["id"] == "testprov/expensive")
+        _check("best_free is cheap model",
+               recs["best_free"]["id"] == "testprov/cheap")
+        _check("best_for_vision set",
+               recs.get("best_for_vision", {}).get("id") == "testprov/expensive")
+        _check("model_count correct", r.get("model_count") == 3)
+    finally:
+        ModelCatalog.__init__ = original_init
+        asyncio.run(p._client.aclose())
+
+
+def test_provider_recommend_for_no_key() -> None:
+    import models as _models_pkg
+    p = _models_pkg.LLMProvider()
+    p._api_keys = {}
+    p._provider_base_urls.pop("nokeyprov", None)
+    r = asyncio.run(p.recommend_for("nokeyprov"))
+    _check("no key → ok=False", r.get("ok") is False)
+    _check("no key → empty recommendations", r.get("recommendations") == {})
+
+
+def test_provider_set_api_key_uses_resolver_for_unknown_provider() -> None:
+    """set_api_key with a non-registry provider should fall back to the
+    resolver — and the URL should end up in _provider_base_urls (either
+    via the registry or after a probe)."""
+    import models as _models_pkg
+    p = _models_pkg.LLMProvider()
+    # Pick a provider that's in the resolver registry
+    p._api_keys = {}
+    res = p.set_api_key("sensenova", "sk-test")
+    _check("set_api_key ok", res["ok"] is True)
+    _check("sensenova registered", "sensenova" in p._provider_base_urls)
+    _check("sensenova url has sensenova.cn",
+           "sensenova.cn" in p._provider_base_urls["sensenova"])
+
+
 if __name__ == "__main__":
     print("=== unit tests ===\n")
 
@@ -951,6 +1367,48 @@ if __name__ == "__main__":
     test_get_catalog_triggers_deferred_auto_classify()
     test_setup_runs_auto_classify_in_event_loop()
     test_rebuild_tiers_no_user_action_does_what_user_would()
+
+    print("\n─ provider resolver (auto-fill base URL) ─")
+    test_resolver_registry_known_providers()
+    test_resolver_registry_includes_china_providers()
+    test_resolver_lookup_sync()
+    test_resolver_candidate_hosts_generates_expected_hosts()
+    test_resolver_async_probe_finds_working_url()
+    test_resolver_async_probe_handles_all_failures()
+    test_resolver_empty_provider_returns_not_found()
+    test_resolver_cache_repeats_return_same()
+
+    print("\n─ capability detection (model abilities) ─")
+    test_capability_text_default()
+    test_capability_vision_from_name()
+    test_capability_image_generation_dalle()
+    test_capability_video_sora()
+    test_capability_audio_in_whisper()
+    test_capability_audio_out_tts()
+    test_capability_embeddings_excludes_text()
+    test_capability_reasoning_o1()
+    test_capability_code_codellama()
+    test_capability_tools_from_metadata()
+    test_capability_long_context_200k()
+    test_capability_describe_chinese_labels()
+
+    print("\n─ recommendation engine ─")
+    test_recommend_picks_paid_over_free()
+    test_recommend_picks_free_for_best_free()
+    test_recommend_picks_vision_model()
+    test_recommend_picks_code_model()
+    test_recommend_picks_image_gen_model()
+    test_recommend_picks_video_model()
+    test_recommend_empty_models_returns_all_none()
+    test_recommend_categories_have_labels()
+
+    print("\n─ LLMProvider resolver integration ─")
+    test_provider_list_known_providers()
+    test_provider_get_provider_url_known()
+    test_provider_get_provider_url_unknown_returns_none()
+    test_provider_recommend_for_with_mock()
+    test_provider_recommend_for_no_key()
+    test_provider_set_api_key_uses_resolver_for_unknown_provider()
 
     print("\n" + "─" * 60)
     ok = _summary()

@@ -62,10 +62,17 @@ class ModelInfo:
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
     # Populated by auto_classify_tier()
     tier: str = ""
+    # Populated by detect_capabilities() — what the model can do
+    # (text / vision / image_generation / video / audio_in / audio_out /
+    #  embeddings / code / tools / reasoning / long_context / etc.)
+    capabilities: "frozenset[str]" = field(default_factory=frozenset, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
         d.pop("raw", None)
+        # capabilities is a frozenset — make it JSON-friendly
+        if "capabilities" in d and d["capabilities"] is not None:
+            d["capabilities"] = sorted(d["capabilities"])
         return d
 
 
@@ -220,6 +227,14 @@ class ModelCatalog:
             tags=self._derive_tags(ctx, is_free, features, in_mod),
             raw=item,
         )
+        # Detect what the model can do (vision / video / tools / ...) and
+        # store as a frozenset on the ModelInfo so ``recommend()`` and
+        # CLI listings can filter by capability without re-scanning names.
+        try:
+            from .capabilities import detect_capabilities
+            info.capabilities = frozenset(detect_capabilities(info))
+        except Exception:  # noqa: BLE001
+            info.capabilities = frozenset()
         return info
 
     @staticmethod
@@ -394,6 +409,31 @@ class ModelCatalog:
         chosen = items[idx]
         print(f"  → picked: {chosen.id} (tier={chosen.tier or '?'})")
         return chosen
+
+    # ---------------------------------------------------------- recommend
+    def recommend(self) -> Dict[str, Optional[ModelInfo]]:
+        """Pick the best model for each common use-case.
+
+        Returns a dict keyed by category (``best_paid``, ``best_free``,
+        ``best_for_text``, ``best_for_vision``, ``best_for_image``,
+        ``best_for_video``, ``best_for_audio``, ``best_for_code``,
+        ``best_for_agent``, ``best_for_reasoning``,
+        ``best_for_long_context``, ``best_for_embeddings``).  Categories
+        with no qualifying model get ``None``.
+
+        Re-runs ``detect_capabilities()`` for every model so a freshly-
+        added model is reflected immediately — this is cheap (one regex
+        sweep per model) and avoids stale data when the catalog was
+        loaded before a new feature flag was added.
+        """
+        from .capabilities import detect_capabilities, recommend as _recommend
+        # Refresh capabilities — cheap and idempotent
+        for m in self._models.values():
+            try:
+                m.capabilities = frozenset(detect_capabilities(m))
+            except Exception:  # noqa: BLE001
+                m.capabilities = frozenset()
+        return _recommend(self._models.values())
 
 
 # ============================================================
