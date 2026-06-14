@@ -381,6 +381,14 @@ async def _interactive(app: OneAgentApp) -> None:
         "settings": [
             r"设置|配置|修改设置|查看设置|更改|切换模型|改模型|改温度|开启|关闭|启用|禁用|把.*改|set.*to|change|configure",
         ],
+        "models": [
+            r"\bmodels?\b|模型列表|有哪些模型|看模型|看.*模型|可.*模型|所有模型|免费模型|列出模型|列出.*模型|model.*list",
+        ],
+        # 智能分层：把 provider 的全部模型按 free/paid、context、features 自动分配到 4 层
+        "rebuild_tiers": [
+            r"智能分层|自动分层|自动分配|重新分层|刷新分层|rebuild.?tiers|auto.?tier|"
+            r"分层|分类|分档|auto.?classif|smart.?tier|分配.*模型|模型.*分配",
+        ],
     }
 
     def _match_intent(text: str) -> Optional[str]:
@@ -463,6 +471,81 @@ async def _interactive(app: OneAgentApp) -> None:
             from skills import _process_settings_command
             result = _process_settings_command(line, app.config)
             print(result)
+            continue
+        if intent == "models":
+            # 模型发现：拉取当前 provider 的模型列表并按需过滤
+            llm = getattr(app, "llm", None)
+            if llm is None:
+                print("[llm provider not available]")
+                continue
+            # 解析意图过滤
+            spec: Dict = {}
+            low = line.lower()
+            if any(k in low for k in ("free", "免费")):
+                spec["free_only"] = True
+            if any(k in low for k in ("paid", "收费")):
+                spec["paid_only"] = True
+            import re as _re
+            m = _re.search(r"(\d+)\s*k\b", low)
+            if m:
+                spec["min_context"] = int(m.group(1)) * 1000
+            models = await llm.list_models(**spec)
+            if not models:
+                print("[no models found — check API key / network]")
+                continue
+            print(f"\n{len(models)} models from '{llm._infer_primary_provider()}':")
+            for i, m in enumerate(models, 1):
+                ctx = f" ctx={m['context_length']:,}" if m.get("context_length") else ""
+                free = " [FREE]" if m.get("is_free") else ""
+                feats = f" ({','.join(m.get('features', [])[:3])})" if m.get("features") else ""
+                print(f"  {i:2d}. {m['id']}{free}{ctx}{feats}")
+            print()
+            continue
+        if intent == "rebuild_tiers":
+            # 智能分层：拉取 provider 全部模型 → 自动分类到 4 层
+            llm = getattr(app, "llm", None)
+            if llm is None:
+                print("[llm provider not available]")
+                continue
+            # 解析用户是否指定了 provider（默认当前 primary）
+            import re as _re
+            prov = None
+            prov_match = _re.search(
+                r"(?:provider|提供商|从|用|on)\s*[:：=]?\s*([a-z][a-z0-9_\-]*)",
+                line, _re.IGNORECASE,
+            )
+            if prov_match:
+                prov = prov_match.group(1)
+            else:
+                # 试中文提供商名（如果 resolver 可用）
+                try:
+                    from models.resolver import _extract_provider_hint
+                    hint = _extract_provider_hint(line)
+                    if hint and hint not in ("unknown", ""):
+                        prov = hint
+                except Exception:
+                    pass
+            try:
+                result = await llm.rebuild_tiers(provider=prov)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[rebuild_tiers error: {exc}]")
+                continue
+            if not result.get("ok"):
+                print(f"[rebuild_tiers failed: {result.get('error')}]")
+                continue
+            print(f"\n✓ 已为 provider '{result['provider']}' 重新分层"
+                  f"（共 {result['model_count']} 个模型）:")
+            for tier in ("trivial", "simple", "complex", "expert"):
+                models_in_tier = result["tiers"].get(tier, [])
+                print(f"  [{tier:8s}] {len(models_in_tier)} 个")
+                for mid in models_in_tier:
+                    print(f"           · {mid}")
+            diff = result.get("diff", {})
+            added = sum(len(v.get("added", [])) for v in diff.values())
+            removed = sum(len(v.get("removed", [])) for v in diff.values())
+            if added or removed:
+                print(f"\n  diff: +{added} added / -{removed} removed")
+            print()
             continue
         try:
             reply = await asyncio.wait_for(

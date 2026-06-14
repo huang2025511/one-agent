@@ -208,6 +208,117 @@ class LLMProvider(Plugin):
                 return model
         return self._default_model
 
+    async def rebuild_tiers(
+        self,
+        provider: Optional[str] = None,
+        max_per_tier: int = 4,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        """Auto-classify every model on the given provider into 4 tiers.
+
+        Pulls the live model list from the provider's ``/v1/models`` endpoint,
+        runs ``auto_classify_tier()`` on each entry, and rewrites
+        ``MODEL_TIERS`` so that adding a new model automatically slots it
+        into the right tier (free / small → ``trivial``; paid big →
+        ``complex`` / ``expert``; etc.).
+
+        Returns a dict with the new tier map + a per-tier diff vs the old
+        one so the CLI can show "I added X to expert, removed Y from complex".
+        """
+        from .catalog import ModelCatalog, rebuild_tiers as _rebuild, diff_tiers as _diff
+        prov = provider or self._infer_primary_provider()
+        cat = self.get_catalog(prov)
+        if cat is None:
+            return {
+                "ok": False,
+                "error": f"no API key configured for provider '{prov}'",
+                "provider": prov,
+            }
+        try:
+            n = await cat.refresh(force=True)
+            if n == 0:
+                return {
+                    "ok": False,
+                    "error": f"could not fetch model list from {prov}",
+                    "provider": prov,
+                }
+            old = {k: list(v) for k, v in MODEL_TIERS.items()}
+            new = _rebuild(
+                cat.all(),
+                provider_prefix=prov,
+                existing=old,
+                max_per_tier=max_per_tier,
+            )
+            # Mutate the module-level MODEL_TIERS so model_for_tier() picks it up
+            for k, v in new.items():
+                MODEL_TIERS[k] = list(v)
+            if persist:
+                try:
+                    cfg = getattr(self, "_config", None) or {}
+                    if isinstance(cfg, dict):
+                        cfg.setdefault("llm", {})["model_tiers"] = {
+                            k: list(v) for k, v in new.items()
+                        }
+                        self._config = cfg
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("rebuild_tiers persist failed: %s", exc)
+            return {
+                "ok": True,
+                "provider": prov,
+                "model_count": n,
+                "tiers": new,
+                "diff": _diff(old, new),
+            }
+        finally:
+            await cat.aclose()
+
+    # ---------------------------------------------------------- catalog access
+    def get_catalog(self, provider: Optional[str] = None) -> Any:
+        """Return a ModelCatalog for the given provider (or current default).
+
+        Lazy-creates the catalog using the configured base URL and API key
+        for that provider.  Returns ``None`` if no API key is available.
+        """
+        from .catalog import ModelCatalog
+        prov = provider or self._infer_primary_provider()
+        base = self._provider_base_urls.get(prov)
+        if not base:
+            return None
+        api_key = self._api_keys.get(prov) or self._api_keys.get("openrouter")
+        if not api_key or "${" in (api_key or ""):
+            return None
+        return ModelCatalog(base_url=base, api_key=api_key, provider=prov)
+
+    def _infer_primary_provider(self) -> str:
+        m = self._default_model or ""
+        if "/" in m:
+            return m.split("/", 1)[0]
+        return "openai"
+
+    async def list_models(
+        self,
+        provider: Optional[str] = None,
+        free_only: bool = False,
+        paid_only: bool = False,
+        min_context: int = 0,
+        feature: Optional[str] = None,
+        keyword: Optional[str] = None,
+        tier: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        cat = self.get_catalog(provider)
+        if cat is None:
+            return []
+        try:
+            await cat.refresh()
+            items = cat.filter(
+                free_only=free_only, paid_only=paid_only,
+                min_context=min_context, feature=feature, keyword=keyword,
+                tier=tier,
+            )
+            return [m.to_dict() for m in items]
+        finally:
+            await cat.aclose()
+
     async def chat_completion(
         self,
         messages: List[Dict[str, Any]],
