@@ -57,6 +57,7 @@ class LLMConfig(BaseModel):
     default_max_tokens: int = Field(default=2048, ge=1)
     timeout: int = Field(default=60, ge=5)
     retries: int = Field(default=3, ge=1, le=10)
+    cost_tracking: Dict[str, Any] = Field(default_factory=lambda: {"daily_budget": 1.0, "monthly_budget": 20.0, "db_path": "data/memory/costs.db"})
 
 
 class RouterConfig(BaseModel):
