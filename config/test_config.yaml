@@ -6,7 +6,6 @@ agent:
   log_level: WARNING
   timezone: Asia/Shanghai
   language: en
-
 llm:
   primary_provider: sensenova
   primary_model: sensenova/deepseek-v4-flash
@@ -14,12 +13,16 @@ llm:
   local_endpoint: http://localhost:11434
   local_model: qwen2.5:7b
   api_keys:
+    openrouter: null
+    openai: null
+    anthropic: null
+    deepseek: null
+    dashscope: null
     sensenova: sk-6HEk7kCx2aBkMIcv75LoVrvIubXTXRhT
   default_temperature: 0.3
   default_max_tokens: 2048
   timeout: 30
   retries: 1
-
 router:
   enabled: true
   task_complexity_thresholds:
@@ -33,53 +36,42 @@ router:
     enabled: false
   self_evolution:
     enabled: false
-
 memory:
   short_term:
     max_turns: 20
     max_tokens: 8000
   long_term:
     enabled: true
-    embedding_model: all-MiniLM-L6-v2
-    similarity_threshold: 0.75
-    max_facts: 1000
-
-rest:
-  enabled: true
-  host: 127.0.0.1
-  port: 18792
-  api_key: ""
-  rate_limit_per_minute: 10000
-  max_chat_bytes: 65536
-  cors_origins:
-    - "*"
-
-web:
-  enabled: true
-  host: 127.0.0.1
-  port: 18791
-
-monitor:
-  enabled: true
-  host: 127.0.0.1
-  port: 18793
-
+    storage: sqlite-fts5
+    max_results: 5
+    relevance_threshold: 0.6
+    decay_enabled: true
+  procedural:
+    enabled: true
+    auto_create_skills: true
+    min_usage_before_skill: 3
+    skill_storage: markdown
 skills:
   enabled: true
   auto_discover: true
   search_paths:
-    - ./skills
-
-executor:
-  shell:
-    enabled: true
-    timeout: 5
-    max_output_bytes: 1048576
-  docker:
-    enabled: false
-  browser:
-    enabled: false
-
+  - ./skills
+gateways: {}
+execution: {}
+scheduler: {}
+security: {}
+rest:
+  enabled: true
+  host: 127.0.0.1
+  port: 18792
+  api_key: ''
+  rate_limit_per_minute: 10000
+  max_chat_bytes: 65536
+  cors_origins:
+  - '*'
+monitoring: {}
+multimodal: {}
 marketplace:
   enabled: true
-  registry_url: ""
+  registry_url: ''
+llm_cache: {}
