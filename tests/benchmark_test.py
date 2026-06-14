@@ -4,8 +4,8 @@ import json
 import os
 import sys
 import time
-import urllib.request as urlreq
 
+import httpx
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -13,30 +13,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from one_agent import OneAgentApp
 
 
-def _post(url: str, data: bytes, timeout: int = 10):
-    req = urlreq.Request(url, data=data, headers={"Content-Type": "application/json"})
-    r = urlreq.urlopen(req, timeout=timeout)
-    body = r.read().decode()
-    return r.status, body
-
-
 @pytest.mark.asyncio
 async def test_concurrent_chat_requests(app):
     """Test 50 concurrent chat requests complete successfully."""
-    async def send_chat(idx: int):
-        data = json.dumps({"text": f"test message {idx}", "session_id": f"bench-{idx}"}).encode()
+    async def send_chat(client, idx: int):
         try:
-            status, body = await asyncio.to_thread(
-                _post, "http://127.0.0.1:18792/api/chat", data, 30
+            r = await client.post(
+                "http://127.0.0.1:18792/api/chat",
+                json={"text": f"test message {idx}", "session_id": f"bench-{idx}"},
+                timeout=30.0
             )
-            return status == 200
+            return r.status_code == 200
         except Exception:
             return False
 
     # Launch 50 concurrent requests
     start = time.time()
-    tasks = [send_chat(i) for i in range(50)]
-    results = await asyncio.gather(*tasks)
+    async with httpx.AsyncClient() as client:
+        tasks = [send_chat(client, i) for i in range(50)]
+        results = await asyncio.gather(*tasks)
     elapsed = time.time() - start
 
     success_count = sum(1 for r in results if r)
@@ -54,16 +49,18 @@ async def test_rapid_sequential_requests(app):
     success_count = 0
     start = time.time()
 
-    for i in range(100):
-        data = json.dumps({"text": f"seq test {i}", "session_id": f"seq-{i}"}).encode()
-        try:
-            status, _ = await asyncio.to_thread(
-                _post, "http://127.0.0.1:18792/api/chat", data, 10
-            )
-            if status == 200:
-                success_count += 1
-        except Exception:
-            pass
+    async with httpx.AsyncClient() as client:
+        for i in range(100):
+            try:
+                r = await client.post(
+                    "http://127.0.0.1:18792/api/chat",
+                    json={"text": f"seq test {i}", "session_id": f"seq-{i}"},
+                    timeout=10.0
+                )
+                if r.status_code == 200:
+                    success_count += 1
+            except Exception:
+                pass
 
     elapsed = time.time() - start
     success_rate = success_count / 100
@@ -78,21 +75,21 @@ async def test_rapid_sequential_requests(app):
 @pytest.mark.asyncio
 async def test_memory_search_performance(app):
     """Test memory search endpoint under load."""
-    async def search_memory(query: str):
+    async def search_memory(client, query: str):
         try:
-            status, _ = await asyncio.to_thread(
-                urlreq.urlopen,
+            r = await client.get(
                 f"http://127.0.0.1:18792/api/memory/search?q={query}",
-                5
+                timeout=5.0
             )
-            return status == 200
+            return r.status_code == 200
         except Exception:
             return False
 
     # 30 concurrent search requests
     start = time.time()
-    tasks = [search_memory(f"test{i}") for i in range(30)]
-    results = await asyncio.gather(*tasks)
+    async with httpx.AsyncClient() as client:
+        tasks = [search_memory(client, f"test{i}") for i in range(30)]
+        results = await asyncio.gather(*tasks)
     elapsed = time.time() - start
 
     success_count = sum(1 for r in results if r)
@@ -105,21 +102,18 @@ async def test_memory_search_performance(app):
 @pytest.mark.asyncio
 async def test_skills_endpoint_performance(app):
     """Test skills list endpoint can handle concurrent access."""
-    async def get_skills():
+    async def get_skills(client):
         try:
-            status, body = await asyncio.to_thread(
-                urlreq.urlopen,
-                "http://127.0.0.1:18792/api/skills",
-                5
-            )
-            return status == 200 and "echo" in body
+            r = await client.get("http://127.0.0.1:18792/api/skills", timeout=5.0)
+            return r.status_code == 200 and "echo" in r.text
         except Exception:
             return False
 
     # 50 concurrent requests
     start = time.time()
-    tasks = [get_skills() for _ in range(50)]
-    results = await asyncio.gather(*tasks)
+    async with httpx.AsyncClient() as client:
+        tasks = [get_skills(client) for _ in range(50)]
+        results = await asyncio.gather(*tasks)
     elapsed = time.time() - start
 
     success_count = sum(1 for r in results if r)
@@ -132,24 +126,21 @@ async def test_skills_endpoint_performance(app):
 @pytest.mark.asyncio
 async def test_metrics_endpoint_performance(app):
     """Test metrics endpoint under concurrent load."""
-    async def get_metrics():
+    async def get_metrics(client):
         try:
-            status, body = await asyncio.to_thread(
-                urlreq.urlopen,
-                "http://127.0.0.1:18792/api/metrics",
-                5
-            )
-            if status != 200:
+            r = await client.get("http://127.0.0.1:18792/api/metrics", timeout=5.0)
+            if r.status_code != 200:
                 return False
-            data = json.loads(body)
+            data = r.json()
             return "bus" in data and "llm" in data
         except Exception:
             return False
 
     # 50 concurrent requests
     start = time.time()
-    tasks = [get_metrics() for _ in range(50)]
-    results = await asyncio.gather(*tasks)
+    async with httpx.AsyncClient() as client:
+        tasks = [get_metrics(client) for _ in range(50)]
+        results = await asyncio.gather(*tasks)
     elapsed = time.time() - start
 
     success_count = sum(1 for r in results if r)

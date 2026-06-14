@@ -1,307 +1,204 @@
-# ============================================
-# One-Agent 主配置文件
-# 融合 OpenClaw + Hermes + OpenSquilla 的设计优势
-# ============================================
-
-# ---------- 全局设置 ----------
 agent:
-  name: "One-Agent"
-  description: "Token-efficient self-evolving microkernel AI agent"
-  version: "2.0.0"
-  data_dir: "./data"
-  log_level: "INFO"
-  timezone: "Asia/Shanghai"
-  language: "zh"  # 语言设置: en (English) | zh (中文)
-
-# ---------- LLM 提供商配置（支持20+模型） ----------
+  name: One-Agent
+  description: Token-efficient self-evolving microkernel AI agent
+  version: 2.0.0
+  data_dir: ./data
+  log_level: INFO
+  timezone: Asia/Shanghai
+  language: en
 llm:
-  # 默认主模型（复杂推理用）
-  primary_provider: "openrouter"
-  primary_model: "anthropic/claude-3.5-sonnet"
-
-  # 轻量模型（简单问答用）
-  lightweight_model: "gpt-4o-mini"
-
-  # 本地模型（可选）
-  local_endpoint: "http://localhost:11434"
-  local_model: "qwen2.5:7b"
-
-  # API Keys（通过环境变量覆盖更安全）
+  primary_provider: openrouter
+  primary_model: anthropic/claude-3.5-sonnet
+  lightweight_model: gpt-4o-mini
+  local_endpoint: http://localhost:11434
+  local_model: qwen2.5:7b
   api_keys:
-    openrouter: "${OPENROUTER_API_KEY}"
-    openai: "${OPENAI_API_KEY}"
-    anthropic: "${ANTHROPIC_API_KEY}"
-    deepseek: "${DEEPSEEK_API_KEY}"
-    dashscope: "${DASHSCOPE_API_KEY}"
-
-  # 通用参数
+    openrouter: ${OPENROUTER_API_KEY}
+    openai: ${OPENAI_API_KEY}
+    anthropic: ${ANTHROPIC_API_KEY}
+    deepseek: ${DEEPSEEK_API_KEY}
+    dashscope: ${DASHSCOPE_API_KEY}
   default_temperature: 0.3
   default_max_tokens: 2048
   timeout: 60
   retries: 3
-
-# ---------- 四层 Token 智能调度 ----------
 router:
   enabled: true
-  # 任务难度分类阈值
   task_complexity_thresholds:
-    trivial: 0.2    # < 0.2 → 轻量模型
-    simple: 0.5     # 0.2-0.5 → 中等模型
-    complex: 0.8    # 0.5-0.8 → 主模型
-    expert: 1.0     # > 0.8 → 专家模型
-
-  # 上下文压缩
+    trivial: 0.2
+    simple: 0.5
+    complex: 0.8
+    expert: 1.0
   context_compression:
     enabled: true
     min_tokens_before_compress: 2000
     compression_ratio: 0.4
-    strategy: "semantic-ranking"  # semantic-ranking | summarization | hybrid
-
-  # 技能按需加载（避免所有技能常驻）
+    strategy: semantic-ranking
   skill_lazy_loading:
     enabled: true
     max_skills_per_turn: 5
     ttl_seconds: 300
-
-  # 自进化开关
   self_evolution:
     enabled: true
     min_samples_before_adjust: 50
     review_interval_hours: 24
-
-# ---------- 三层记忆系统 ----------
 memory:
-  # 第一层：短期记忆（当前会话）
   short_term:
     max_turns: 20
     max_tokens: 8000
-
-  # 第二层：长期记忆（FTS5 全文检索）
   long_term:
     enabled: true
-    storage: "sqlite-fts5"  # sqlite-fts5 | chroma | faiss
+    storage: sqlite-fts5
     max_results: 5
     relevance_threshold: 0.6
-    decay_enabled: true     # 旧记忆权重衰减
-
-  # 第三层：技能/程序记忆（自动生成的 Skill）
+    decay_enabled: true
   procedural:
     enabled: true
     auto_create_skills: true
     min_usage_before_skill: 3
-    skill_storage: "markdown"  # SKILL.md 格式
-
-# ---------- MetaSkill + MCP 技能编排 ----------
+    skill_storage: markdown
 skills:
-  # 内置技能目录
-  builtin_skills_dir: "./data/skills/builtin"
-  # 用户技能目录
-  user_skills_dir: "./data/skills/user"
-  # 社区技能目录
-  community_skills_dir: "./data/skills/community"
-
-  # 技能执行安全策略
+  builtin_skills_dir: ./data/skills/builtin
+  user_skills_dir: ./data/skills/user
+  community_skills_dir: ./data/skills/community
   security:
     sandbox_code: true
     allow_network: true
     allow_file_write: true
-    file_write_root: "./data/workspace"
+    file_write_root: ./data/workspace
     require_human_approval_for:
-      - "shell:rm"
-      - "shell:sudo"
-      - "file:delete"
-
-  # MCP 服务器配置（Model Context Protocol）
+    - shell:rm
+    - shell:sudo
+    - file:delete
   mcp_servers:
-    - name: "filesystem"
-      command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "./data/workspace"]
-    - name: "github"
-      command: "npx"
-      args: ["-y", "@modelcontextprotocol/server-github"]
-      env:
-        GITHUB_TOKEN: "${GITHUB_TOKEN}"
-
-# ---------- 多平台消息网关 ----------
+  - name: filesystem
+    command: npx
+    args:
+    - -y
+    - '@modelcontextprotocol/server-filesystem'
+    - ./data/workspace
+  - name: github
+    command: npx
+    args:
+    - -y
+    - '@modelcontextprotocol/server-github'
+    env:
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
 gateways:
-  # 命令行（总是启用）
   cli:
     enabled: true
-    prompt: "one-agent> "
-
-  # Web 管理界面
+    prompt: 'one-agent> '
   web:
     enabled: true
-    host: "127.0.0.1"
+    host: 127.0.0.1
     port: 18791
-    # WARNING: Set to true in production! Disabling auth exposes the chat UI
-    # to anyone with network access. Consider using API key or OAuth.
     auth_required: false
-
-  # Telegram Bot
   telegram:
     enabled: false
-    bot_token: "${TELEGRAM_BOT_TOKEN}"
-    allowed_users: []  # 留空表示允许所有人
-
-  # 企业微信（WeCom）
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    allowed_users: []
   wecom:
     enabled: false
-    # 模式选择: webhook（群机器人推送）| app（自建应用收发消息）
-    mode: "webhook"
-    # --- webhook 模式（只需配置此项）---
-    # 在群聊中添加机器人后获取 Webhook Key
-    webhook_key: "${WECOM_WEBHOOK_KEY}"
-    # --- app 模式（需企业微信管理员配置）---
-    corp_id: "${WECOM_CORP_ID}"
-    agent_id: "${WECOM_AGENT_ID}"
-    secret: "${WECOM_SECRET}"
-    # 回调验证（企业微信后台配置）
-    callback_token: "${WECOM_CALLBACK_TOKEN}"
-    encoding_aes_key: "${WECOM_ENCODING_AES_KEY}"
-    callback_host: "0.0.0.0"
+    mode: webhook
+    webhook_key: ${WECOM_WEBHOOK_KEY}
+    corp_id: ${WECOM_CORP_ID}
+    agent_id: ${WECOM_AGENT_ID}
+    secret: ${WECOM_SECRET}
+    callback_token: ${WECOM_CALLBACK_TOKEN}
+    encoding_aes_key: ${WECOM_ENCODING_AES_KEY}
+    callback_host: 0.0.0.0
     callback_port: 18794
-
-  # 钉钉（DingTalk）
   dingtalk:
     enabled: false
-    # 模式选择: webhook（群机器人推送）| stream（企业内部应用收发消息）
-    mode: "webhook"
-    # --- webhook 模式 ---
-    # 群聊添加机器人后获取 Webhook URL
-    webhook_url: "${DINGTALK_WEBHOOK_URL}"
-    # 安全设置中的加签 Secret（可选但推荐）
-    secret: "${DINGTALK_SECRET}"
-    # --- stream 模式（需钉钉开发者后台配置）---
-    client_id: "${DINGTALK_CLIENT_ID}"
-    client_secret: "${DINGTALK_CLIENT_SECRET}"
-
-  # 飞书（Feishu / Lark）
+    mode: webhook
+    webhook_url: ${DINGTALK_WEBHOOK_URL}
+    secret: ${DINGTALK_SECRET}
+    client_id: ${DINGTALK_CLIENT_ID}
+    client_secret: ${DINGTALK_CLIENT_SECRET}
   feishu:
     enabled: false
-    # 模式选择: webhook（群机器人推送）| app（自建应用收发消息）
-    mode: "webhook"
-    # --- webhook 模式 ---
-    # 群聊添加机器人后获取 Webhook URL
-    webhook_url: "${FEISHU_WEBHOOK_URL}"
-    # 安全设置中的签名 Secret（可选但推荐）
-    secret: "${FEISHU_SECRET}"
-    # --- app 模式（需飞书开发者后台配置）---
-    app_id: "${FEISHU_APP_ID}"
-    app_secret: "${FEISHU_APP_SECRET}"
-    verification_token: "${FEISHU_VERIFICATION_TOKEN}"
-    encrypt_key: "${FEISHU_ENCRYPT_KEY}"
-    callback_host: "0.0.0.0"
+    mode: webhook
+    webhook_url: ${FEISHU_WEBHOOK_URL}
+    secret: ${FEISHU_SECRET}
+    app_id: ${FEISHU_APP_ID}
+    app_secret: ${FEISHU_APP_SECRET}
+    verification_token: ${FEISHU_VERIFICATION_TOKEN}
+    encrypt_key: ${FEISHU_ENCRYPT_KEY}
+    callback_host: 0.0.0.0
     callback_port: 18795
-
-  # Discord Bot
   discord:
     enabled: false
-    bot_token: "${DISCORD_BOT_TOKEN}"
-    # 允许的频道 ID 列表，留空表示监听所有文本频道
+    bot_token: ${DISCORD_BOT_TOKEN}
     allowed_channels: []
-
-  # Slack Bot
   slack:
     enabled: false
-    bot_token: "${SLACK_BOT_TOKEN}"        # xoxb-...
-    app_token: "${SLACK_APP_TOKEN}"        # xapp-... (Socket Mode, 可选)
-    # 允许的频道 ID 列表，留空表示监听所有已加入频道
+    bot_token: ${SLACK_BOT_TOKEN}
+    app_token: ${SLACK_APP_TOKEN}
     allowed_channels: []
-
-  # 跨平台会话继续（Hermes 特性）
   cross_platform_continue: true
-
-# ---------- 执行环境 ----------
 execution:
-  # 本地 Shell 执行
   local_shell:
     enabled: true
     default_timeout: 60
-    allowed_commands: ["ls", "cat", "grep", "find", "python", "node"]
-
-  # Docker 沙箱（推荐生产环境）
+    allowed_commands:
+    - ls
+    - cat
+    - grep
+    - find
+    - python
+    - node
   docker:
     enabled: false
-    image: "python:3.12-slim"
+    image: python:3.12-slim
     memory_limit_mb: 512
     timeout: 120
-
-  # SSH 远程执行
   ssh:
     enabled: false
     hosts: []
-
-  # 浏览器自动化
   browser:
     enabled: false
     playwright_headless: true
-
-# ---------- 主动式调度器 ----------
 scheduler:
   enabled: true
-  # 内置任务
   builtin_jobs:
-    - name: "memory_housekeeping"
-      cron: "0 3 * * *"  # 每天凌晨3点
-      enabled: true
-    - name: "skill_pattern_mining"
-      cron: "0 4 * * 0"  # 每周日凌晨4点
-      enabled: true
-    - name: "router_statistics"
-      cron: "*/30 * * * *"  # 每30分钟
-      enabled: true
-
-  # 用户自定义任务（通过 Web UI 添加）
-  user_jobs_file: "./data/scheduler/jobs.yaml"
-
-# ---------- 安全与审计 ----------
+  - name: memory_housekeeping
+    cron: 0 3 * * *
+    enabled: true
+  - name: skill_pattern_mining
+    cron: 0 4 * * 0
+    enabled: true
+  - name: router_statistics
+    cron: '*/30 * * * *'
+    enabled: true
+  user_jobs_file: ./data/scheduler/jobs.yaml
 security:
   audit_log:
     enabled: true
-    path: "./data/logs/audit.log"
+    path: ./data/logs/audit.log
     retention_days: 90
-
   conversation_persistence:
     enabled: true
-    path: "./data/logs/conversations"
-
+    path: ./data/logs/conversations
   data_encryption:
     enabled: false
-    key_env: "ONE_AGENT_ENCRYPTION_KEY"
-
-  # 是否允许通过聊天窗口修改敏感配置（如 API Key）
-  # 默认 false — 敏感项只能通过编辑配置文件修改
-  # 设为 true 后可在对话中直接修改 API Key 等（方便但需注意安全）
+    key_env: ONE_AGENT_ENCRYPTION_KEY
   allow_sensitive_chat_settings: false
-
-# ---------- REST API ----------
 rest:
   enabled: true
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 18792
-  # WARNING: Empty string = no authentication required. Set a strong API key
-  # for production use. Requests must include header: X-API-Key: <your-key>
-  api_key: ""
-
-# ---------- 监控仪表盘 ----------
+  api_key: ''
 monitoring:
   enabled: true
   port: 18793
-
-# ---------- 多模态 ----------
 multimodal:
-  enabled: false      # 设为 true 并配置 API key 后启用
-  image_model: "openai/dall-e-3"
-  vision_model: "openai/gpt-4o"
-  tts_model: "openai/tts-1"
-
-# ---------- 插件市场 ----------
+  enabled: false
+  image_model: openai/dall-e-3
+  vision_model: openai/gpt-4o
+  tts_model: openai/tts-1
 marketplace:
-  community_hub: "https://raw.githubusercontent.com/huang2025511/one-agent-skills/main/"
-  install_dir: "./data/skills/community"
-
-# ---------- LLM 缓存 ----------
+  community_hub: https://raw.githubusercontent.com/huang2025511/one-agent-skills/main/
+  install_dir: ./data/skills/community
 llm_cache:
   enabled: true
   max_size: 500

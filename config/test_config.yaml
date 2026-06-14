@@ -1,0 +1,89 @@
+agent:
+  name: One-Agent-Test
+  description: Test configuration for One-Agent
+  version: 2.0.0
+  data_dir: ./data
+  log_level: WARNING
+  timezone: Asia/Shanghai
+  language: en
+
+llm:
+  primary_provider: openrouter
+  primary_model: anthropic/claude-3.5-sonnet
+  lightweight_model: gpt-4o-mini
+  local_endpoint: http://localhost:11434
+  local_model: qwen2.5:7b
+  api_keys:
+    openrouter: test-key-not-real
+    openai: test-key-not-real
+    anthropic: test-key-not-real
+    deepseek: test-key-not-real
+    dashscope: test-key-not-real
+  default_temperature: 0.3
+  default_max_tokens: 2048
+  timeout: 5
+  retries: 1
+
+router:
+  enabled: true
+  task_complexity_thresholds:
+    trivial: 0.2
+    simple: 0.5
+    complex: 0.8
+    expert: 1.0
+  context_compression:
+    enabled: false
+  skill_lazy_loading:
+    enabled: false
+  self_evolution:
+    enabled: false
+
+memory:
+  short_term:
+    max_turns: 20
+    max_tokens: 8000
+  long_term:
+    enabled: true
+    embedding_model: all-MiniLM-L6-v2
+    similarity_threshold: 0.75
+    max_facts: 1000
+
+rest:
+  enabled: true
+  host: 127.0.0.1
+  port: 18792
+  api_key: ""
+  rate_limit_per_minute: 10000
+  max_chat_bytes: 65536
+  cors_origins:
+    - "*"
+
+web:
+  enabled: true
+  host: 127.0.0.1
+  port: 18791
+
+monitor:
+  enabled: true
+  host: 127.0.0.1
+  port: 18793
+
+skills:
+  enabled: true
+  auto_discover: true
+  search_paths:
+    - ./skills
+
+executor:
+  shell:
+    enabled: true
+    timeout: 5
+    max_output_bytes: 1048576
+  docker:
+    enabled: false
+  browser:
+    enabled: false
+
+marketplace:
+  enabled: true
+  registry_url: ""
