@@ -242,6 +242,26 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            
+            # Auto-detect language from user input
+            if text:
+                from i18n import detect_language, set_language, get_language
+                detected_lang = detect_language(text)
+                current_lang = get_language()
+                if detected_lang != current_lang:
+                    set_language(detected_lang)
+                    logger.info(f"Auto-detected language: {detected_lang} from API request")
+                    # Persist language preference to config
+                    if _ctx:
+                        try:
+                            config = _ctx.config
+                            if config.get("agent", {}).get("language") != detected_lang:
+                                config.setdefault("agent", {})["language"] = detected_lang
+                                from skills import _save_config
+                                _save_config(config)
+                        except Exception as exc:
+                            logger.warning("failed to persist language: %s", exc)
+            
             if _agent is None:
                 raise HTTPException(503, _("agent_not_ready"))
             reply = await _agent(text, source="api", session_id=session_id)

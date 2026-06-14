@@ -48,11 +48,38 @@ class Coordinator(Plugin):
         self._llm = llm
         self._skills = skills
 
+    def _persist_language(self, lang: str) -> None:
+        """Persist detected language to config file so it survives restarts."""
+        try:
+            if self.ctx is None:
+                return
+            config = self.ctx.config
+            if config.get("agent", {}).get("language") == lang:
+                return  # already matches
+            config.setdefault("agent", {})["language"] = lang
+            from skills import _save_config
+            _save_config(config)
+            logger.info("persisted language '%s' to config", lang)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("failed to persist language: %s", exc)
+
     # ------------------------------------------------------------ handlers
     async def _on_routed(self, event: Event) -> None:
         turn: TurnContext | None = event.get("turn")
         if turn is None or turn.result is not None or turn.error is not None:
             return
+        
+        # Auto-detect language from user input
+        if turn.input_text:
+            from i18n import detect_language, set_language, get_language
+            detected_lang = detect_language(turn.input_text)
+            current_lang = get_language()
+            if detected_lang != current_lang:
+                set_language(detected_lang)
+                logger.info(f"Auto-detected language: {detected_lang} from user input")
+                # Persist language preference to config
+                self._persist_language(detected_lang)
+        
         # avoid double-processing — if something already published a reply,
         # skip this turn entirely
         try:
@@ -70,6 +97,11 @@ class Coordinator(Plugin):
         """
         text = event.get("text") or ""
         session_id = event.get("session_id") or event.get("chat_id") or "ext"
+        
+        # Auto-detect language on first user message
+        from i18n import auto_detect_and_switch
+        auto_detect_and_switch(text)
+        
         turn = TurnContext(input_text=text, source=event.get("source", "ext"), session_id=str(session_id))
         # publish user_message so the router classifies this — routing
         # publishes turn_routed which eventually reaches _on_routed above.

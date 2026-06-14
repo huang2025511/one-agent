@@ -72,7 +72,12 @@ class CLIGateway(Plugin):
     async def run_loop(self, send_to_agent) -> None:
         """Run the interactive REPL.  ``send_to_agent(text)`` should be an
         async function that triggers the agent pipeline."""
+        from i18n import _, auto_detect_and_switch
+        
+        # Auto-detect language on first interaction
         print("One-Agent — 自然语言即可操作，输入 '帮助' 查看功能。")
+        first_message = True
+        
         while True:
             try:
                 line = input(self._prompt)
@@ -85,16 +90,17 @@ class CLIGateway(Plugin):
             line = line.strip()
             if not line:
                 continue
+            
+            # Auto-detect language on first user message
+            if first_message:
+                auto_detect_and_switch(line)
+                first_message = False
+            
             intent = _match_cli_intent(line)
             if intent == "exit":
                 return
             if intent == "help":
-                print("你可以用自然语言操作，也可以用精准命令：")
-                print("  退出/再见/bye     → 退出程序")
-                print("  帮助/怎么用/help  → 显示帮助")
-                print("  状态/运行情况     → 系统状态")
-                print("  清屏/clear        → 清除屏幕")
-                print("  其他任何文字      → 与 AI 对话")
+                print(_("cli_help_content"))
                 continue
             if intent == "status":
                 print(f"session {self._session_id} up {int(time.monotonic())}s")
@@ -108,7 +114,7 @@ class CLIGateway(Plugin):
             try:
                 await asyncio.wait_for(self._reply_available.wait(), timeout=120)
             except asyncio.TimeoutError:
-                print("[no reply in time]")
+                print(_("timeout"))
                 continue
             print(self._last_reply)
 

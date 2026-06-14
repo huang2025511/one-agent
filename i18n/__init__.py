@@ -1,21 +1,26 @@
 """Internationalization (i18n) module — multi-language support.
 
 Provides:
-  - Language detection from config
+  - Language detection from config and user input
   - Translation function _() for user-facing messages
   - Built-in translations for Chinese and English
   - Runtime language switching
+  - Auto-detection of user language from input text
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict
 
 logger = logging.getLogger(__name__)
 
 # Current language (default: English)
 _current_lang = "en"
+
+# Track if language was auto-detected (to avoid repeated switching)
+_auto_detected = False
 
 # Translation dictionaries
 _translations: Dict[str, Dict[str, str]] = {
@@ -38,15 +43,17 @@ _translations: Dict[str, Dict[str, str]] = {
         "internal_error": "internal server error",
         "agent_not_ready": "agent not ready",
         "alert_manager_not_available": "alert manager not available",
+        "need_key_and_value": "need key and value",
         
         # Model errors
         "no_api_key": "[no API key configured for provider '{provider}']",
         "service_unavailable": "[service temporarily unavailable — please retry later]",
         
         # CLI messages
-        "welcome": "╔══════════════════════════════════════════════╗\n║  One-Agent v2 — 自然语言即可操作，输入 '帮助'   ║\n╚══════════════════════════════════════════════╝",
+        "welcome": "╔══════════════════════════════════════════════╗\n║  One-Agent v2 — Natural language interface, type 'help'   ║\n╚══════════════════════════════════════════════╝",
         "timeout": "[timeout — try again]",
         "shutting_down": "[shutting down...]",
+        "cli_help_content": "You can use natural language or precise commands:\n  exit/quit/bye       → Exit program\n  help/?              → Show help\n  status              → System status\n  clear               → Clear screen\n  Any other text      → Chat with AI",
         
         # Common
         "ok": "ok",
@@ -73,6 +80,7 @@ _translations: Dict[str, Dict[str, str]] = {
         "internal_error": "内部服务器错误",
         "agent_not_ready": "代理未就绪",
         "alert_manager_not_available": "告警管理器不可用",
+        "need_key_and_value": "需要提供 key 和 value",
         
         # Model errors
         "no_api_key": "[未配置提供商 '{provider}' 的 API 密钥]",
@@ -82,6 +90,7 @@ _translations: Dict[str, Dict[str, str]] = {
         "welcome": "╔══════════════════════════════════════════════╗\n║  One-Agent v2 — 自然语言即可操作，输入 '帮助'   ║\n╚══════════════════════════════════════════════╝",
         "timeout": "[超时 — 请重试]",
         "shutting_down": "[正在关闭...]",
+        "cli_help_content": "你可以用自然语言操作，也可以用精准命令：\n  退出/再见/bye     → 退出程序\n  帮助/怎么用/help  → 显示帮助\n  状态/运行情况     → 系统状态\n  清屏/clear        → 清除屏幕\n  其他任何文字      → 与 AI 对话",
         
         # Common
         "ok": "正常",
@@ -98,9 +107,10 @@ def set_language(lang: str) -> None:
     Args:
         lang: Language code ('en' or 'zh')
     """
-    global _current_lang
+    global _current_lang, _auto_detected
     if lang in _translations:
         _current_lang = lang
+        _auto_detected = False  # Manual set, not auto-detected
         logger.info("language set to: %s", lang)
     else:
         logger.warning("unsupported language: %s, falling back to English", lang)
@@ -109,6 +119,62 @@ def set_language(lang: str) -> None:
 
 def get_language() -> str:
     """Get the current language code."""
+    return _current_lang
+
+
+def detect_language(text: str) -> str:
+    """Detect language from input text.
+    
+    Uses character-based heuristics to determine the language:
+    - If text contains CJK characters, it's likely Chinese
+    - Otherwise, default to English
+    
+    Args:
+        text: Input text to analyze
+        
+    Returns:
+        Detected language code ('en' or 'zh')
+    """
+    if not text:
+        return "en"
+    
+    # Count CJK (Chinese/Japanese/Korean) characters
+    # Unicode ranges for CJK:
+    # - CJK Unified Ideographs: U+4E00 to U+9FFF
+    # - CJK Extension A: U+3400 to U+4DBF
+    # - CJK Compatibility Ideographs: U+F900 to U+FAFF
+    cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]')
+    cjk_chars = len(cjk_pattern.findall(text))
+    
+    # If more than 10% of characters are CJK, assume Chinese
+    total_chars = len(text.strip())
+    if total_chars > 0 and (cjk_chars / total_chars) > 0.1:
+        return "zh"
+    
+    return "en"
+
+
+def auto_detect_and_switch(text: str) -> str:
+    """Auto-detect language from text and switch if needed.
+    
+    This function is called on every user message to automatically
+    set the system language to match the user's current language.
+    
+    Args:
+        text: User input text
+        
+    Returns:
+        The detected language code
+    """
+    global _current_lang
+    
+    detected_lang = detect_language(text)
+    
+    # Switch language if different from current
+    if detected_lang != _current_lang and detected_lang in _translations:
+        logger.info("auto-detected language: %s (switching from %s)", detected_lang, _current_lang)
+        _current_lang = detected_lang
+    
     return _current_lang
 
 
