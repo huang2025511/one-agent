@@ -282,29 +282,6 @@ class SmartRouter(Plugin):
         return self._session_history.get(session_id, [])
 
 
-class HistoryRecorder(Plugin):
-    """DEPRECATED: kept for backwards-compat with auto-discovery.
-    SmartRouter now handles per-session history directly via _session_history.
-    """
-
-    name = "router_history"
-    depends_on = ["router"]
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._sessions: Dict[str, List[Dict[str, Any]]] = {}
-
-    async def setup(self, ctx) -> None:
-        await super().setup(ctx)
-        self.bus.subscribe("turn_completed", self._on_done)
-
-    async def _on_done(self, event: Event) -> None:
-        turn: TurnContext | None = event.get("turn")
-        if turn is None:
-            return
-        self._sessions.setdefault(turn.session_id, []).append({
-            "input": turn.input_text,
-            "reply": turn.result,
-            "t": time.time(),
-        })
-        self._sessions[turn.session_id] = self._sessions[turn.session_id][-20:]
+# NOTE: ``HistoryRecorder`` was removed in v2.1 — it duplicated
+# ``SmartRouter._session_history`` and caused two writes per turn.
+# SmartRouter is now the single source of per-session history.

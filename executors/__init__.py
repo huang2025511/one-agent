@@ -188,6 +188,9 @@ class DockerExecutor(Plugin):
         self._timeout = 120
         self._mem_limit_mb = 512
         self._cpu_quota = 50000  # 50% of one CPU
+        # Reuse the shell executor's allow-list — the same regex policy
+        # applies to commands we run inside a hardened container.
+        self._patterns = ALLOWED_PATTERNS
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)

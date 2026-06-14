@@ -1309,6 +1309,227 @@ def test_provider_set_api_key_uses_resolver_for_unknown_provider() -> None:
            "sensenova.cn" in p._provider_base_urls["sensenova"])
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 15. Fix-regression tests (audit 2026-06-14)
+# ══════════════════════════════════════════════════════════════════════════
+def test_resolver_extract_provider_hint_chinese() -> None:
+    """Chinese provider aliases should map to the canonical provider name."""
+    from models.resolver import _extract_provider_hint
+    for phrase, expected in [
+        ("为商汤重建分层", "sensenova"),
+        ("商汤的模型", "sensenova"),
+        ("日日新是哪个", "sensenova"),
+        ("智谱怎么用", "glm"),
+        ("通义的最新模型", "qwen"),
+        ("百川好用吗", "baichuan"),
+        ("豆包支持vision吗", "doubao"),
+        ("文心一言", "wenxin"),
+        ("混元大模型", "hunyuan"),
+        ("讯飞星火", "spark"),
+        ("月之暗面", "kimi"),
+        ("零一万物", "yi"),
+        ("minimaxi", "minimax"),  # multi-char match wins over 'minimax'
+    ]:
+        got = _extract_provider_hint(phrase)
+        _check(f"'{phrase}' -> {expected}", got == expected,
+               f"got {got!r}")
+
+
+def test_resolver_extract_provider_hint_english() -> None:
+    from models.resolver import _extract_provider_hint
+    for phrase, expected in [
+        ("use gpt-4o", "openai"),
+        ("claude 3.5 is great", "anthropic"),
+        ("deploy on gemini", "google"),
+        ("try qwen-max", "qwen"),
+        ("kimi k2 is amazing", "kimi"),
+    ]:
+        got = _extract_provider_hint(phrase)
+        _check(f"'{phrase}' -> {expected}", got == expected,
+               f"got {got!r}")
+
+
+def test_resolver_extract_provider_hint_no_match() -> None:
+    from models.resolver import _extract_provider_hint
+    _check("no alias returns None", _extract_provider_hint("hello world") is None)
+    _check("empty returns None", _extract_provider_hint("") is None)
+
+
+def test_history_recorder_removed_from_router() -> None:
+    """HistoryRecorder should be gone — SmartRouter is the single writer."""
+    import router as _router
+    _check("HistoryRecorder not exported",
+           not hasattr(_router, "HistoryRecorder"))
+    from router import SmartRouter
+    p = SmartRouter()
+    _check("SmartRouter has _session_history attr",
+           hasattr(p, "_session_history"))
+
+
+def test_multimodal_unknown_provider_raises() -> None:
+    """Unknown provider should raise ValueError, NOT silently use OpenAI."""
+    from multimodal import MultimodalPlugin
+    p = MultimodalPlugin()
+    # No setup() — _api_keys is empty, but _base_urls is also empty.
+    try:
+        result = p._resolve("nonexistent-xyz-abc/fake-model")
+        _check("should have raised ValueError", False)
+    except ValueError as exc:
+        _check("error mentions unsupported",
+               "unsupported provider" in str(exc))
+
+
+def test_multimodal_strip_prefix_for_tts() -> None:
+    """After resolution, the model name passed to OpenAI endpoints must
+    NOT contain the provider prefix."""
+    from multimodal import MultimodalPlugin
+    p = MultimodalPlugin()
+    p._api_keys = {"openai": "sk-test"}
+    p._base_urls = {"openai": "https://api.openai.com/v1"}
+    provider, model_name, _, _, _ = p._resolve("openai/tts-1")
+    _check("provider is openai", provider == "openai")
+    _check("model_name is tts-1 (no prefix)", model_name == "tts-1")
+
+
+def test_docker_executor_init_has_patterns() -> None:
+    """DockerExecutor.__init__ must set self._patterns — otherwise
+    can_run() raises AttributeError."""
+    from executors import DockerExecutor
+    p = DockerExecutor()
+    _check("DockerExecutor has _patterns", hasattr(p, "_patterns"))
+    _check("_patterns is a list/sequence", len(p._patterns) > 0)
+
+
+def test_models_strip_provider_prefix_in_payload() -> None:
+    """The OpenAI-compatible chat path must strip "<provider>/" prefix
+    from the model id so sensenova/zhipu/moonshot don't get a request
+    with model='sensenova/deepseek-v4-flash'."""
+    import json
+    import httpx
+    import models as _models_pkg
+    from models.catalog import ModelCatalog
+    p = _models_pkg.LLMProvider()
+    p._api_keys = {"testprov": "sk-test"}
+    p._provider_base_urls["testprov"] = "https://testprov.example/v1"
+
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [
+                {"id": "testprov/foo", "context_length": 8000}
+            ]})
+        if req.url.path == "/v1/chat/completions":
+            captured.update(json.loads(req.content))
+            return httpx.Response(200, json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"total_tokens": 7},
+            })
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    p._client = httpx.AsyncClient(transport=transport)
+    try:
+        async def run():
+            return await p.chat_completion(
+                messages=[{"role": "user", "content": "hi"}],
+                model="testprov/foo",
+            )
+        r = asyncio.run(run())
+        _check("got text", r.get("text") == "ok")
+        _check("payload used bare model name (no prefix)",
+               captured.get("model") == "foo",
+               f"got {captured.get('model')!r}")
+    finally:
+        asyncio.run(p._client.aclose())
+
+
+def test_api_rate_buckets_in_init() -> None:
+    """The rate-limit bucket must live on the instance, not in start()."""
+    from api import RESTAPIGateway
+    p = RESTAPIGateway()
+    _check("has _rate_buckets", hasattr(p, "_rate_buckets"))
+    _check("_rate_buckets is dict", isinstance(p._rate_buckets, dict))
+    _check("has _max_chat_bytes", p._max_chat_bytes == 64 * 1024)
+    _check("has _cors_origins list", isinstance(p._cors_origins, list))
+
+
+def test_memory_search_no_relevance_threshold() -> None:
+    """search() should NOT accept relevance_threshold (dead param)."""
+    import inspect
+    from memory import LongTermMemory
+    sig = inspect.signature(LongTermMemory.search)
+    _check("search() no longer has relevance_threshold",
+           "relevance_threshold" not in sig.parameters)
+
+
+def test_eventbus_metrics_includes_by_type() -> None:
+    """EventBus.metrics() should include per-event-type counters."""
+    from core.events import EventBus
+    bus = EventBus()
+    bus.publish({"type": "x", "payload": {}})
+    bus.publish({"type": "x", "payload": {}})
+    bus.publish({"type": "y", "payload": {}})
+    m = bus.metrics()
+    _check("metrics has by_type", "by_type" in m)
+    _check("by_type is dict", isinstance(m["by_type"], dict))
+    # Top-10 (x appears 2x, y appears 1x)
+    by_type = m["by_type"]
+    if "x" in by_type:
+        _check("by_type counts x as 2", by_type["x"] == 2,
+               f"got {by_type.get('x')}")
+    if "y" in by_type:
+        _check("by_type counts y as 1", by_type["y"] == 1)
+
+
+def test_llm_uses_httpx_limits() -> None:
+    """LLMProvider's httpx client should be created with connection limits."""
+    import models as _models_pkg
+    import httpx
+    p = _models_pkg.LLMProvider()
+    # Construct a fake ctx so setup() runs minimally
+    from core.context import AgentContext
+    from core.events import EventBus
+    ctx = AgentContext(
+        config={"llm": {"default_model": "openai/gpt-4o", "api_keys": {}}},
+        bus=EventBus(),
+    )
+    # Spy on httpx.AsyncClient.__init__ to capture kwargs
+    captured: dict = {}
+    orig_init = httpx.AsyncClient.__init__
+
+    def patched_init(self, *a, **kw):
+        captured.update(kw)
+        orig_init(self, *a, **kw)
+
+    httpx.AsyncClient.__init__ = patched_init
+    try:
+        asyncio.run(p.setup(ctx))
+        asyncio.run(p.stop())
+        _check("client was created with limits kwarg",
+               "limits" in captured,
+               f"captured: {list(captured.keys())}")
+        if "limits" in captured:
+            _check("limits has max_connections=20",
+                   captured["limits"].max_connections == 20,
+                   f"got {captured['limits']}")
+    finally:
+        httpx.AsyncClient.__init__ = orig_init
+
+
+def test_paginate_facts_wrapper_exists() -> None:
+    """MemoryPlugin.paginate_facts should be a public wrapper that doesn't
+    reach into _long directly from external callers."""
+    from memory import MemoryPlugin
+    p = MemoryPlugin()
+    _check("has paginate_facts", hasattr(p, "paginate_facts"))
+    _check("paginate_facts is callable", callable(p.paginate_facts))
+    # Calling without setup should return safe empty (no AttributeError)
+    out = p.paginate_facts(page=1, page_size=10)
+    _check("empty store returns items=[]", out.get("items") == [])
+    _check("returns total=0", out.get("total") == 0)
+
+
 if __name__ == "__main__":
     print("=== unit tests ===\n")
 
@@ -1409,6 +1630,21 @@ if __name__ == "__main__":
     test_provider_recommend_for_with_mock()
     test_provider_recommend_for_no_key()
     test_provider_set_api_key_uses_resolver_for_unknown_provider()
+
+    print("\n─ fix regressions (audit 2026-06-14) ─")
+    test_resolver_extract_provider_hint_chinese()
+    test_resolver_extract_provider_hint_english()
+    test_resolver_extract_provider_hint_no_match()
+    test_history_recorder_removed_from_router()
+    test_multimodal_unknown_provider_raises()
+    test_multimodal_strip_prefix_for_tts()
+    test_docker_executor_init_has_patterns()
+    test_models_strip_provider_prefix_in_payload()
+    test_api_rate_buckets_in_init()
+    test_memory_search_no_relevance_threshold()
+    test_eventbus_metrics_includes_by_type()
+    test_llm_uses_httpx_limits()
+    test_paginate_facts_wrapper_exists()
 
     print("\n" + "─" * 60)
     ok = _summary()

@@ -329,8 +329,14 @@ class OneAgentApp:
             "payload": {"turn": turn, "session_id": session_id},
             "source": source,
         })
-        deadline = asyncio.get_event_loop().time() + 180
-        while asyncio.get_event_loop().time() < deadline:
+        # Use ``time.monotonic()`` instead of ``asyncio.get_event_loop().time()``
+        # — the latter is deprecated since Python 3.10 and raises
+        # ``RuntimeError`` in 3.12+ when no event loop is currently
+        # associated with the thread.  ``time.monotonic()`` works
+        # everywhere and is the right primitive for measuring elapsed time.
+        import time as _time
+        deadline = _time.monotonic() + 180
+        while _time.monotonic() < deadline:
             if turn.result is not None or turn.error is not None:
                 break
             await asyncio.sleep(0.1)
@@ -565,7 +571,10 @@ async def main() -> None:
     await app.start()
 
     # register graceful shutdown on SIGINT/SIGTERM
-    loop = asyncio.get_event_loop()
+    # Use ``get_running_loop()`` — we're inside ``asyncio.run()`` so a
+    # loop is guaranteed to exist (unlike ``get_event_loop()`` which is
+    # deprecated in 3.10+ and raises in 3.12+ when no loop is set).
+    loop = asyncio.get_running_loop()
     _shutdown_triggered = False
 
     def _on_signal():

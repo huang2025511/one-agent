@@ -5,12 +5,22 @@ Provides:
   - Image understanding (GPT-4V / Claude Vision via vision-capable models)
   - Text-to-speech (OpenAI TTS / ElevenLabs)
   - Base64-encoded image handling end-to-end
+
+Architectural notes (v2.1):
+  - Provider base URLs come from ``models.resolver`` — no local hardcoding
+    so sensenova / zhipu / moonshot / any new provider works automatically.
+  - One ``httpx.AsyncClient`` per provider (with ``base_url=``) for
+    connection-pool reuse across calls.
+  - Unknown providers raise ``ValueError`` instead of silently routing to
+    OpenAI (which would 401 and confuse the user).
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import mimetypes
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +31,15 @@ from core.plugin import Plugin
 logger = logging.getLogger(__name__)
 
 
+# Endpoint families — different OpenAI-compatible providers expose
+# different endpoint paths for the same logical operation.
+_ENDPOINT_FOR_TASK = {
+    "image_gen":   "/images/generations",
+    "vision":      "/chat/completions",
+    "tts":         "/audio/speech",
+}
+
+
 class MultimodalPlugin(Plugin):
     """Handles image generation, vision, and TTS."""
 
@@ -28,37 +47,80 @@ class MultimodalPlugin(Plugin):
 
     def __init__(self) -> None:
         super().__init__()
-        self._client: Optional[httpx.AsyncClient] = None
         self._api_keys: Dict[str, str] = {}
         self._timeout = 60
+        # Per-provider httpx clients (lazily created so disabled providers
+        # don't open sockets).  Keyed by provider name.
+        self._clients: Dict[str, httpx.AsyncClient] = {}
+        # Provider → base URL (populated from resolver at setup)
+        self._base_urls: Dict[str, str] = {}
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         llm_cfg = ctx.config.get("llm", {}) or {}
         self._api_keys = llm_cfg.get("api_keys", {}) or {}
-        self._timeout = llm_cfg.get("timeout", 60)
-        self._client = httpx.AsyncClient(timeout=self._timeout)
+        self._timeout = int(llm_cfg.get("timeout", 60))
+        # Pull the full provider registry so we recognise sensenova/zhipu/etc.
+        try:
+            from models.resolver import list_known
+            self._base_urls.update(list_known())
+        except Exception:  # noqa: BLE001
+            # Fallback to a tiny built-in table
+            self._base_urls = {
+                "openai": "https://api.openai.com/v1",
+                "openrouter": "https://openrouter.ai/api/v1",
+                "anthropic": "https://api.anthropic.com/v1",
+            }
+        # Config-level overrides win
+        custom = llm_cfg.get("base_urls", {}) or {}
+        self._base_urls.update(custom)
+        logger.info("multimodal ready, providers=%d", len(self._base_urls))
 
     async def stop(self) -> None:
-        if self._client:
-            await self._client.aclose()
+        for cli in self._clients.values():
+            try:
+                await cli.aclose()
+            except Exception:
+                pass
+        self._clients.clear()
         await super().stop()
 
-    def _resolve_provider(self, model: str):
-        """Return (api_key, base_url) for the given model identifier."""
+    # ------------------------------------------------------- provider dispatch
+    def _resolve(self, model: str):
+        """Return (provider, model_name, api_key, base_url, client).
+
+        Raises ``ValueError`` for unknown providers instead of silently
+        falling back to OpenAI.
+        """
         provider, model_name = model.split("/", 1) if "/" in model else ("openai", model)
         api_key = (
             self._api_keys.get(provider)
             or self._api_keys.get("openrouter", "")
             or self._api_keys.get("openai", "")
         )
-        base_urls = {
-            "openrouter": "https://openrouter.ai/api/v1",
-            "openai": "https://api.openai.com/v1",
-            "anthropic": "https://api.anthropic.com",
-        }
-        base = base_urls.get(provider, "https://api.openai.com/v1")
-        return provider, model_name, api_key, base
+        base = self._base_urls.get(provider)
+        if not base:
+            raise ValueError(
+                f"unsupported provider '{provider}' for multimodal — "
+                f"set llm.base_urls.{provider} or use one of "
+                f"{sorted(self._base_urls.keys())[:5]}…"
+            )
+        if not api_key or "${" in api_key:
+            raise ValueError(f"no API key configured for provider '{provider}'")
+        return provider, model_name, api_key, base, self._client_for(base)
+
+    def _client_for(self, base_url: str) -> httpx.AsyncClient:
+        """One pooled client per base_url.  Keeps the per-provider
+        connection pool warm for subsequent calls."""
+        cli = self._clients.get(base_url)
+        if cli is None:
+            cli = httpx.AsyncClient(
+                base_url=base_url.rstrip("/"),
+                timeout=self._timeout,
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
+            self._clients[base_url] = cli
+        return cli
 
     # --------------------------------------------------------- image generation
     async def generate_image(
@@ -69,19 +131,15 @@ class MultimodalPlugin(Plugin):
         quality: str = "standard",
         n: int = 1,
     ) -> Dict[str, Any]:
-        """Generate images from a text prompt.
-
-        Supports models via OpenAI DALL-E or compatible endpoints.
-        Returns a dict with a base64-encoded image or URL.
-        """
-        if self._client is None:
-            return {"error": "client not initialized"}
-
-        provider, model_name, api_key, base = self._resolve_provider(model)
+        """Generate images from a text prompt.  Returns base64 image data."""
+        try:
+            _provider, model_name, api_key, _base, cli = self._resolve(model)
+        except ValueError as exc:
+            return {"error": str(exc), "images": []}
 
         try:
-            resp = await self._client.post(
-                f"{base}/images/generations",
+            resp = await cli.post(
+                _ENDPOINT_FOR_TASK["image_gen"],
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -99,8 +157,10 @@ class MultimodalPlugin(Plugin):
             data = resp.json()
             images = []
             for item in data.get("data", []):
-                b64 = item.get("b64_json", "")
-                images.append({"b64_json": b64, "revised_prompt": item.get("revised_prompt", "")})
+                images.append({
+                    "b64_json": item.get("b64_json", ""),
+                    "revised_prompt": item.get("revised_prompt", ""),
+                })
             return {"model": model, "images": images, "error": None}
         except Exception as exc:  # noqa: BLE001
             logger.warning("image generation failed: %s", exc)
@@ -113,32 +173,31 @@ class MultimodalPlugin(Plugin):
         prompt: str = "Describe this image in detail.",
         model: str = "openai/gpt-4o",
     ) -> Dict[str, Any]:
-        """Analyze an image given as base64 or a URL.
+        """Analyze an image (base64, URL, or local file path)."""
+        try:
+            _provider, model_name, api_key, _base, cli = self._resolve(model)
+        except ValueError as exc:
+            return {"error": str(exc), "analysis": ""}
 
-        Passes it to a vision-capable model.
-        """
-        if self._client is None:
-            return {"error": "client not initialized"}
-
-        # Detect format: base64 or URL
-        if image_data.startswith("http"):
+        # Detect format: URL, data URI, file path, or raw base64
+        if image_data.startswith("http://") or image_data.startswith("https://"):
+            image_payload: Dict[str, Any] = {"url": image_data}
+        elif image_data.startswith("data:"):
             image_payload = {"url": image_data}
-        elif image_data.startswith("/") or image_data.startswith("data:"):
-            # Local file path or data URI
-            if image_data.startswith("data:"):
-                image_payload = {"data": image_data}
-            else:
-                b64 = base64.b64encode(Path(image_data).read_bytes()).decode()
-                image_payload = {"data": f"data:image/png;base64,{b64}"}
+        elif image_data.startswith("/") or image_data.startswith("./"):
+            # Local file path → base64 with correct MIME type
+            p = Path(image_data)
+            mime, _ = mimetypes.guess_type(str(p))
+            mime = mime or "image/png"
+            b64 = base64.b64encode(p.read_bytes()).decode()
+            image_payload = {"url": f"data:{mime};base64,{b64}"}
         else:
-            # Assume raw base64
-            image_payload = {"data": f"data:image/png;base64,{image_data}"}
-
-        provider, model_name, api_key, base = self._resolve_provider(model)
+            # Assume raw base64 (PNG default for backwards-compat)
+            image_payload = {"url": f"data:image/png;base64,{image_data}"}
 
         try:
-            resp = await self._client.post(
-                f"{base}/chat/completions",
+            resp = await cli.post(
+                _ENDPOINT_FOR_TASK["vision"],
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -175,19 +234,21 @@ class MultimodalPlugin(Plugin):
         response_format: str = "mp3",
     ) -> Dict[str, Any]:
         """Convert text to speech, returns base64-encoded audio."""
-        if self._client is None:
-            return {"error": "client not initialized"}
-        _provider, _model_name, api_key, base = self._resolve_provider(model)
-
         try:
-            resp = await self._client.post(
-                f"{base}/audio/speech",
+            _provider, model_name, api_key, _base, cli = self._resolve(model)
+        except ValueError as exc:
+            return {"error": str(exc), "b64_audio": ""}
+        try:
+            resp = await cli.post(
+                _ENDPOINT_FOR_TASK["tts"],
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": model,
+                    # Use the un-prefixed model name — OpenAI-compatible
+                    # TTS endpoints expect "tts-1", not "openai/tts-1".
+                    "model": model_name,
                     "input": text,
                     "voice": voice,
                     "response_format": response_format,
@@ -208,6 +269,5 @@ class MultimodalPlugin(Plugin):
         model: str = "openai/gpt-4o",
     ) -> List[Dict[str, Any]]:
         """Analyze multiple images in parallel."""
-        import asyncio
         tasks = [self.analyze_image(img, prompt, model) for img in images]
         return await asyncio.gather(*tasks, return_exceptions=True)

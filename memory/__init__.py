@@ -31,9 +31,17 @@ class LongTermMemory:
     def __init__(self, path: str, decay_enabled: bool = True, decay_factor: float = 0.95) -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._path = path
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        # Enable WAL so concurrent readers (e.g. /api/memory/page) don't
+        # block writers from the event-bus turn handler.
+        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.DatabaseError:
+            pass
         self._decay_enabled = decay_enabled
         self._decay_factor = decay_factor
+        self._has_weight_col: Optional[bool] = None
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -54,10 +62,16 @@ class LongTermMemory:
 
     def add(self, content: str, source: str = "user", tags: str = "", weight: float = 1.0) -> None:
         c = self._conn.cursor()
-        # Check if weight column exists
-        c.execute("PRAGMA table_info(memory)")
-        columns = {row[1] for row in c.fetchall()}
-        if "weight" in columns:
+        # Cache the column-presence check so we don't run PRAGMA on every
+        # insert.  The schema is fixed for the lifetime of the connection
+        # (no ALTER TABLE happens in this codebase), so caching is safe.
+        if self._has_weight_col is None:
+            try:
+                c.execute("PRAGMA table_info(memory)")
+                self._has_weight_col = "weight" in {row[1] for row in c.fetchall()}
+            except sqlite3.DatabaseError:
+                self._has_weight_col = False
+        if self._has_weight_col:
             c.execute(
                 "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
                 (content, source, tags, time.time(), weight),
@@ -67,16 +81,21 @@ class LongTermMemory:
                 "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
                 (content, source, tags, time.time()),
             )
-        self._conn.commit()
+        # Auto-commit (we're in autocommit mode for WAL concurrency)
 
     def search(
         self,
         query: str,
         limit: int = 5,
         offset: int = 0,
-        relevance_threshold: float = 0.0,
     ) -> List[Dict[str, Any]]:
-        """Paginated FTS5 search with optional decay weighting."""
+        """Paginated FTS5 search with optional decay weighting.
+
+        Note: ``relevance_threshold`` was removed in v2.1 — it was a
+        dead parameter (FTS5 bm25 returns negative ranks; the filtering
+        is done by passing limit=1 to discover any match).  Callers
+        should set ``limit=1`` for a boolean "does it match?" check.
+        """
         c = self._conn.cursor()
         try:
             # FTS5 rank(): bm25 returns negative values; more negative = more relevant.
@@ -176,6 +195,10 @@ class ProceduralMemory:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._index_path = self._dir / "_index.json"
         self._index: Dict[str, Any] = self._load_index()
+        # Batch-write hint: only persist to disk after this many dirty
+        # mutations.  Keeps the lookup→update→write hot path cheap.
+        self._dirty_count = 0
+        self._dirty_threshold = 20
 
     def _load_index(self) -> Dict[str, Any]:
         if self._index_path.exists():
@@ -195,8 +218,14 @@ class ProceduralMemory:
             "created_at": time.time(),
             "uses": 0,
         }
-        self._persist_index()
-        logger.info("saved skill %s (%d triggers)", safe, len(triggers))
+        # Mark dirty — persist happens on the next threshold flush or
+        # explicit flush() call.  Saves the JSON write on every save().
+        self._dirty_count += 1
+        if self._dirty_count >= self._dirty_threshold:
+            self._persist_index()
+        else:
+            logger.info("saved skill %s (%d triggers, %d dirty)",
+                        safe, len(triggers), self._dirty_count)
 
     def lookup(self, text: str) -> Optional[Dict[str, Any]]:
         best: Optional[Dict[str, Any]] = None
@@ -210,14 +239,23 @@ class ProceduralMemory:
             return None
         body = Path(best["path"]).read_text(encoding="utf-8")
         best["uses"] += 1
-        self._persist_index()
+        # Increment dirty count; only persist on the next flush.
+        self._dirty_count += 1
+        if self._dirty_count >= self._dirty_threshold:
+            self._persist_index()
         return {"id": skill_id, "body": body, "meta": best}
 
     def list(self) -> List[str]:
         return list(self._index["skills"].keys())
 
+    def flush(self) -> None:
+        """Force-persist any pending dirty mutations to disk."""
+        if self._dirty_count > 0:
+            self._persist_index()
+
     def _persist_index(self) -> None:
         self._index_path.write_text(json.dumps(self._index, indent=2), encoding="utf-8")
+        self._dirty_count = 0
 
 
 # ---------- public plugin --------------------------------------------------
@@ -258,9 +296,7 @@ class MemoryPlugin(Plugin):
         turn: TurnContext | None = event.get("turn")
         if turn is None or self._long is None:
             return
-        cfg = self.ctx.config.get("memory", {}) if self.ctx else {}
-        threshold = (cfg.get("long_term") or {}).get("relevance_threshold", 0.6)
-        hits = self._long.search(turn.input_text, limit=self._max_results, relevance_threshold=threshold)
+        hits = self._long.search(turn.input_text, limit=self._max_results)
         if hits:
             snippets = "\n".join(f"- {h['content'][:160]}" for h in hits)
             turn.meta["memory_snippets"] = snippets
@@ -311,6 +347,19 @@ class MemoryPlugin(Plugin):
             return []
         return self._long.search(query, limit=limit, offset=offset)
 
+    def paginate_facts(self, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        """Paginated view over the entire long-term store.
+
+        Public wrapper so external callers (REST API, monitor) don't have
+        to reach into ``_long`` directly.  Returns
+        ``{items, page, page_size, total, total_pages}`` or an empty
+        ``items`` list if the store hasn't been initialised.
+        """
+        if self._long is None:
+            return {"items": [], "page": page, "page_size": page_size,
+                    "total": 0, "total_pages": 0}
+        return self._long.paginate(page=page, page_size=page_size)
+
     def stats(self) -> Dict[str, Any]:
         return {
             "long_term": self._long.stats() if self._long else {},
@@ -318,7 +367,14 @@ class MemoryPlugin(Plugin):
         }
 
     async def stop(self) -> None:
-        # close SQLite connection to flush WAL and release file locks
+        # Flush pending procedural-memory writes (so we don't lose the last
+        # ~20 dirty mutations) and close the SQLite connection (flushes
+        # WAL and releases file locks).
+        if self._procedural is not None:
+            try:
+                self._procedural.flush()
+            except Exception:
+                pass
         if self._long is not None:
             try:
                 self._long.close()

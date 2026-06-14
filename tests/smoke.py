@@ -174,7 +174,7 @@ def test_coordinator():
     from core.events import EventBus
     from core.coordinator import Coordinator
     from models import LLMProvider
-    from router import SmartRouter, HistoryRecorder
+    from router import SmartRouter
     from memory import MemoryPlugin
     from skills import SkillManager
 
@@ -189,16 +189,15 @@ def test_coordinator():
         ctx = AgentContext(config=cfg.model_dump(), bus=bus)  # type: ignore[attr-defined]
         llm = StubLLM()
         router = SmartRouter()
-        history = HistoryRecorder()
         memory = MemoryPlugin()
         skills = SkillManager()
         coord = Coordinator()
 
         from core.plugin import PluginManager
         pm = PluginManager()
-        for p in (llm, router, history, memory, skills, coord):
+        for p in (llm, router, memory, skills, coord):
             pm.register(p)
-        ctx._plugins = [llm, router, history, memory, skills, coord]
+        ctx._plugins = [llm, router, memory, skills, coord]
 
         await bus.start()
         await pm.setup_all(ctx)

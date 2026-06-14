@@ -48,6 +48,18 @@ class RESTAPIGateway(Plugin):
         self._app = None
         self._api_key = ""
         self._agent_callback = None
+        # Per-IP rate-limit buckets — must live on the instance so they
+        # survive any restart of the underlying FastAPI app (e.g. dev
+        # mode auto-reload).  Format: {ip: [timestamp, ...]}
+        self._rate_buckets: Dict[str, list] = {}
+        # Default rate limit (overridden in setup() from config)
+        self._rate_limit = 60
+        # Max accepted chat request body size (bytes) — protects the
+        # server from a single client streaming gigabytes of input.
+        self._max_chat_bytes = 64 * 1024  # 64 KB
+        # CORS: default to wildcard in dev; setup() reads config to
+        # restrict to a real origin list for production deployments.
+        self._cors_origins: List[str] = ["*"]
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -56,10 +68,16 @@ class RESTAPIGateway(Plugin):
         self._port = int(cfg.get("port", self._port))
         self._enabled = bool(cfg.get("enabled", True))
         self._api_key = cfg.get("api_key", "")
+        self._rate_limit = int(cfg.get("rate_limit_per_minute", self._rate_limit))
+        self._max_chat_bytes = int(cfg.get("max_chat_bytes", self._max_chat_bytes))
         import os as _os
         self._api_key = _os.environ.get("ONE_AGENT_API_KEY", self._api_key)
-        logger.info("REST API configured on %s:%s auth=%s",
-                    self._host, self._port, bool(self._api_key))
+        # CORS: restrict to configured origins in production.  Falls back
+        # to a wildcard when no origins are configured (developer mode).
+        self._cors_origins = cfg.get("cors_origins") or ["*"]
+        logger.info("REST API configured on %s:%s auth=%s rate_limit=%d/min max_chat=%dB cors=%s",
+                    self._host, self._port, bool(self._api_key),
+                    self._rate_limit, self._max_chat_bytes, self._cors_origins)
 
     def bind_callback(self, cb) -> None:
         self._agent_callback = cb
@@ -82,26 +100,39 @@ class RESTAPIGateway(Plugin):
         )
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=self._cors_origins,
             allow_credentials=False,
-            allow_methods=["*"],
+            allow_methods=["GET", "POST"],
             allow_headers=["*"],
         )
-
-        # Simple in-process rate limiter (per-IP, sliding window)
-        _rate_buckets: Dict[str, list] = {}
-        _rate_limit = int((self.ctx.config or {}).get("rest", {}).get("rate_limit_per_minute", 60))
 
         @app.middleware("http")
         async def rate_limit_middleware(request, call_next):
             ip = request.client.host if request.client else "unknown"
             now = time.time()
-            bucket = _rate_buckets.setdefault(ip, [])
+            bucket = self._rate_buckets.setdefault(ip, [])
             # evict entries older than 60s
             bucket[:] = [t for t in bucket if now - t < 60]
-            if len(bucket) >= _rate_limit:
+            if len(bucket) >= self._rate_limit:
                 return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
             bucket.append(now)
+            return await call_next(request)
+
+        # Reject chat requests with absurdly large bodies before FastAPI
+        # even tries to parse JSON — protects the server from accidental
+        # 100 MB /chat posts.
+        @app.middleware("http")
+        async def body_size_middleware(request, call_next):
+            if request.url.path == "/api/chat":
+                cl = request.headers.get("content-length")
+                try:
+                    if cl is not None and int(cl) > self._max_chat_bytes:
+                        return JSONResponse(
+                            {"error": f"request body too large ({cl} > {self._max_chat_bytes})"},
+                            status_code=413,
+                        )
+                except ValueError:
+                    pass
             return await call_next(request)
 
         _agent = self._agent_callback
@@ -182,7 +213,7 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             if _memory is None:
                 raise HTTPException(503, "memory not available")
-            return _memory._long.paginate(page=page, page_size=page_size)  # type: ignore[union-attr]
+            return _memory.paginate_facts(page=page, page_size=page_size)
 
         @app.get("/api/skills")
         async def skills_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -268,4 +299,11 @@ class RESTAPIGateway(Plugin):
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                # We don't care about shutdown errors — just make sure
+                # the task is awaited so we don't leak the unhandled
+                # "Task was destroyed but it is pending" warning.
+                pass
         await super().stop()

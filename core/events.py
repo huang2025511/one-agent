@@ -141,6 +141,9 @@ class EventBus:
             "errors": 0,
             "started_at": time.time(),
         }
+        # Per-event-type counters (v2.1) — lets the monitor dashboard
+        # see "which events fired and how often".  Cheap dict, no TTL.
+        self._by_type: Dict[str, int] = {}
 
     # ---------------------------------------------------------------- public
     def subscribe(self, event_type: str, handler: Handler) -> None:
@@ -166,6 +169,8 @@ class EventBus:
         # Track the event
         self._track(evt)
         self._metrics["published"] += 1
+        # Per-type counter (cheap; safe for the hot publish path)
+        self._by_type[evt.type] = self._by_type.get(evt.type, 0) + 1
 
         if not self._running:
             logger.debug("bus not running — queueing %s", evt.type)
@@ -288,6 +293,10 @@ class EventBus:
     # ---------------------------------------------------------------- metrics
     def metrics(self) -> Dict[str, Any]:
         uptime = time.time() - self._metrics["started_at"]
+        # Top-10 event types so the monitor JSON stays small
+        top_types = sorted(
+            self._by_type.items(), key=lambda kv: kv[1], reverse=True,
+        )[:10]
         return {
             **self._metrics,
             "uptime_seconds": round(uptime, 2),
@@ -297,4 +306,5 @@ class EventBus:
             "events_per_second": round(self._metrics["published"] / uptime, 3)
             if uptime > 1
             else 0,
+            "by_type": dict(top_types),
         }

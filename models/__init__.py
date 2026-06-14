@@ -49,14 +49,49 @@ MODEL_TIERS: Dict[str, List[str]] = {
     ],
 }
 
-# Rough per-token cost (USD) for statistics
+# Rough per-token cost (USD per 1K tokens) for statistics
 MODEL_COST: Dict[str, float] = {
+    # Anthropic
     "anthropic/claude-3.5-sonnet-20241022": 0.003,
-    "openai/gpt-4o": 0.005,
-    "openai/gpt-4o-mini": 0.00015,
-    "google/gemini-2.5-pro-exp-03-25": 0.00125,
-    "deepseek/deepseek-chat": 0.00014,
+    "anthropic/claude-3.5-haiku-20241022":  0.0008,
+    "anthropic/claude-haiku-latest":         0.0008,
+    "anthropic/claude-4.5-sonnet-20250514":  0.003,
+    # OpenAI
+    "openai/gpt-4o":                0.005,
+    "openai/gpt-4o-mini":           0.00015,
+    "openai/gpt-4-turbo":           0.01,
+    "openai/o3":                    0.015,
+    "openai/o1":                    0.015,
+    # Google
+    "google/gemini-2.5-pro-exp-03-25":  0.00125,
+    "google/gemini-2.0-flash":          0.0001,
+    "google/gemini-2.5-pro-preview-05-15": 0.00125,
+    # DeepSeek
+    "deepseek/deepseek-chat":  0.00014,
+    "deepseek/deepseek-reasoner": 0.00055,
+    # Qwen / DashScope (Tongyi)
+    "qwen/qwen-max":                  0.002,
+    "qwen/qwen-plus":                 0.0008,
+    "qwen/qwen-2.5-72b-instruct":     0.0004,
+    "qwen/qwen-2.5-7b-instruct":      0.0001,
+    # SenseNova (商汤)
+    "sensenova/DeepSeek-V4-Flash":    0.0001,
+    "sensenova/SenseNova-6.7-Flash-Lite": 0.0001,
+    "sensenova/SenseNova-U1-Fast":    0.0001,
+    # Zhipu GLM (智谱)
+    "glm/glm-4":                      0.001,
+    "glm/glm-4-plus":                 0.001,
+    # Moonshot / Kimi
+    "kimi/kimi-k2-0711-preview":      0.0006,
+    "kimi/moonshot-v1-128k":          0.001,
+    # Yi (零一万物)
+    "yi/yi-large":                    0.0008,
+    # OpenRouter passthrough
+    "openrouter/meta-llama/llama-3-8b-instruct": 0.0002,
 }
+
+# HTTP status codes that are safe to retry.
+_RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
 class _CacheEntry:
@@ -208,7 +243,17 @@ class LLMProvider(Plugin):
         for k, v in custom_endpoints.items():
             self._provider_base_urls[k] = v
 
-        self._client = httpx.AsyncClient(timeout=self._timeout)
+        # Connection pool limits — keep the agent from exhausting
+        # a provider's keep-alive slots when several plugins call in
+        # parallel.  ``max_connections=20`` is enough for typical workloads
+        # (router + memory + monitor + rest) without starving any one.
+        self._client = httpx.AsyncClient(
+            timeout=self._timeout,
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=10,
+            ),
+        )
         logger.info("LLM provider ready, default model=%s, cache=%s",
                     self._default_model, self._cache_enabled)
         # ── Auto-classify every provider that has a non-empty key ──────
@@ -718,6 +763,11 @@ class LLMProvider(Plugin):
         provider = model.split("/", 1)[0] if "/" in model else "openai"
         base = self._provider_base_urls.get(provider, self._provider_base_urls["openrouter"])
         api_key = self._api_keys.get(provider) or self._api_keys.get("openrouter")
+        # Strip the "<provider>/" prefix from the model id — OpenAI-compatible
+        # endpoints expect the bare model name (e.g. "deepseek-v4-flash",
+        # not "sensenova/deepseek-v4-flash").  Anthropic keeps the prefix
+        # stripped in its own branch below.
+        bare_model = model.split("/", 1)[1] if "/" in model else model
 
         # If no API key is available, fail fast instead of retrying 3 times
         if not api_key:
@@ -750,9 +800,39 @@ class LLMProvider(Plugin):
                 return result
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
-                logger.warning("llm call attempt %d failed: %s", attempt, exc)
+                # Classify: non-retryable errors (4xx auth/bad-request) exit
+                # immediately to avoid wasting time on invalid requests.
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                retryable = (
+                    status is None
+                    or status in _RETRYABLE_STATUS
+                    or isinstance(exc, (asyncio.TimeoutError, ConnectionError))
+                )
+                if not retryable:
+                    logger.warning("llm call non-retryable error (status=%s): %s", status, exc)
+                    break
                 if attempt < self._retry_count:
-                    await asyncio.sleep(1.2 * attempt)
+                    # Respect Retry-After hint when present, otherwise
+                    # exponential backoff with full jitter (1.2^n seconds,
+                    # 0..1.2^n uniform random).
+                    import random as _rnd
+                    retry_after = None
+                    if getattr(exc, "response", None) is not None:
+                        try:
+                            retry_after = float(exc.response.headers.get("Retry-After", "").strip())
+                        except (TypeError, ValueError):
+                            retry_after = None
+                    if retry_after is not None and retry_after > 0:
+                        delay = min(retry_after, 30.0)
+                    else:
+                        delay = _rnd.uniform(0, 1.2 * (2 ** (attempt - 1)))
+                    logger.warning(
+                        "llm call attempt %d/%d failed (status=%s), retrying in %.2fs: %s",
+                        attempt, self._retry_count, status, delay, exc,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error("llm call gave up after %d attempts: %s", self._retry_count, exc)
 
         return {
             "text": f"[upstream unreachable: {last_err}]",
@@ -837,7 +917,7 @@ class LLMProvider(Plugin):
 
         # Default — OpenAI compatible
         payload = {
-            "model": model,
+            "model": bare_model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,

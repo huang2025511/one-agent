@@ -260,3 +260,72 @@ async def resolve(
 def clear_cache() -> None:
     """Clear the in-process probe cache (mostly for tests)."""
     _PROBE_CACHE.clear()
+
+
+# ============================================================
+# Best-effort provider alias extraction from a user phrase.
+# Used by the CLI's `/rebuild_tiers` command so users can type
+# Chinese provider names like "为商汤重建分层" and have the
+# correct provider be picked.
+# ============================================================
+# Chinese / English alias map — the key is the alias, the value
+# is the canonical provider name (matching KNOWN_PROVIDERS).
+_PROVIDER_ALIASES: Dict[str, str] = {
+    # English
+    "openai": "openai", "gpt": "openai", "chatgpt": "openai",
+    "anthropic": "anthropic", "claude": "anthropic", "sonnet": "anthropic",
+    "haiku": "anthropic", "opus": "anthropic",
+    "google": "google", "gemini": "google", "bard": "google",
+    "deepseek": "deepseek", "ds": "deepseek",
+    "qwen": "qwen", "tongyi": "qwen", "dashscope": "qwen", "通义": "qwen",
+    "glm": "glm", "zhipu": "glm", "chatglm": "glm", "智谱": "glm",
+    "kimi": "kimi", "moonshot": "kimi", "月之暗面": "kimi",
+    "yi": "yi", "lingyi": "yi", "零一": "yi", "零一万物": "yi",
+    "sensenova": "sensenova", "商汤": "sensenova", "日日新": "sensenova",
+    "doubao": "doubao", "volcengine": "doubao", "ark": "doubao", "豆包": "doubao",
+    "hunyuan": "hunyuan", "tencent": "hunyuan", "混元": "hunyuan",
+    "spark": "spark", "xfyun": "spark", "iflytek": "spark", "讯飞": "spark",
+    "wenxin": "wenxin", "qianfan": "wenxin", "ernie": "wenxin", "文心": "wenxin",
+    "baichuan": "baichuan", "百川": "baichuan",
+    "stepfun": "stepfun", "阶跃": "stepfun",
+    "minimax": "minimax", "minimaxi": "minimax", "abab": "minimax",
+    "ollama": "ollama", "local": "ollama", "本地": "ollama",
+    "openrouter": "openrouter",
+    "groq": "groq", "together": "together", "fireworks": "fireworks",
+    "mistral": "mistral", "cohere": "cohere", "xai": "xai", "grok": "xai",
+    "perplexity": "perplexity", "huggingface": "huggingface",
+    "replicate": "replicate",
+}
+
+
+def _extract_provider_hint(text: str) -> Optional[str]:
+    """Best-effort: pull a provider alias out of a user phrase.
+
+    Returns the canonical provider name (matching ``KNOWN_PROVIDERS``) or
+    ``None`` if nothing matches.  Used by the CLI to map Chinese phrases
+    like "为商汤重建分层" to ``"sensenova"`` without forcing the user to
+    type a precise English name.
+
+    Matching is done in two passes:
+      1. **Substring** — any alias (Chinese or English) found anywhere in
+         the input wins.
+      2. **Word** — only if pass 1 missed, try a whole-word match (regex
+         with word boundaries) so we don't confuse, e.g., "gpt" inside
+         "egpt-3".
+    """
+    if not text:
+        return None
+    t = text.strip().lower()
+    # Pass 1: substring (Chinese names are 2-3 chars, so substring is safe)
+    # Prefer longer aliases first so "minimaxi" beats "minimax".
+    for alias in sorted(_PROVIDER_ALIASES.keys(), key=len, reverse=True):
+        if alias.lower() in t:
+            return _PROVIDER_ALIASES[alias]
+    # Pass 2: whole-word match for English aliases
+    for alias in sorted(_PROVIDER_ALIASES.keys(), key=len, reverse=True):
+        if not any("\u4e00" <= c <= "\u9fff" for c in alias):
+            # Build a word-boundary regex; alias is ASCII so \b works.
+            import re as _re
+            if _re.search(rf"\b{_re.escape(alias.lower())}\b", t):
+                return _PROVIDER_ALIASES[alias]
+    return None
