@@ -103,6 +103,7 @@ class MCPServer:
                     timeout=MCP_CONNECTION_TIMEOUT
                 )
             except asyncio.TimeoutError:
+                await self.close()  # Fix Bug #15: Close client on timeout
                 raise TimeoutError(f"Connection to MCP server '{self.name}' timed out after {MCP_CONNECTION_TIMEOUT:.0f}s")
             response.raise_for_status()
             
@@ -115,6 +116,7 @@ class MCPServer:
         except TimeoutError:
             raise
         except Exception as e:
+            await self.close()  # Fix Bug #15: Close client on any error
             logger.error("Failed to connect to MCP server '%s': %s", self.name, e)
             return False
     

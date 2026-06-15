@@ -127,7 +127,10 @@ class ShellExecutor(Plugin):
             logger.warning("shell command rejected: %s", exc)
             return False
         import re
-        if not re.fullmatch(r"[0-9a-zA-Z\s_./:@#\-='\"\\-]+", command.strip()):
+        # Fix Bug #14: Remove duplicate backslash escape in character class
+        # Original: [0-9a-zA-Z\s_./:@#\-='\"\\-]+ had \\- which is wrong
+        # Fixed: [0-9a-zA-Z\s_./:@#='\"\-]+ - backslash at end, no need to escape dash
+        if not re.fullmatch(r"[0-9a-zA-Z\s_./:@#='\"\-]+", command.strip()):
             return False
         for name, pattern in self._patterns.items():
             if re.fullmatch(pattern, command.strip()):

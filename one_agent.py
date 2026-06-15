@@ -328,7 +328,8 @@ class OneAgentApp:
             self.discord, self.slack, self.web,
             self.multimodal, self.rest_api, self.monitor, self.marketplace,
         ):
-            self._pm.register(p)
+            if p is not None:
+                self._pm.register(p)
 
         self.ctx: Optional[AgentContext] = None
 

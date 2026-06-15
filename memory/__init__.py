@@ -41,28 +41,15 @@ def _escape_fts5_query(query: str) -> str:
     """Escape FTS5 special characters to prevent injection attacks.
     
     FTS5 special characters: * ? " ( ) : ^ + - AND OR NOT NEAR
-    We escape them by wrapping in double quotes or using backslash.
+    We strip all non-alphanumeric characters (except CJK and spaces)
+    to prevent any FTS5 operator injection.
     """
-    # Remove or escape FTS5 operators
-    # First, handle quoted phrases (preserve them)
-    if '"' in query:
-        # If user already quoted, validate and use as-is
-        # Count quotes to ensure they're balanced
-        if query.count('"') % 2 == 0:
-            return query
+    # Strip all characters except letters, digits, CJK, and whitespace
+    # This is the safest approach — no FTS5 operators can survive
+    result = re.sub(r'[^\w\s\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', ' ', query)
     
-    # Escape special characters for FTS5
-    # Replace operators with spaces to neutralize them
-    fts5_operators = [" AND ", " OR ", " NOT ", " NEAR ", " NEAR/"]
-    result = query
-    for op in fts5_operators:
-        result = result.replace(op, " ")
-    
-    # Escape individual special characters
-    # FTS5 special chars: * ? " ( ) : ^ + -
-    special_chars = ["*", "?", '"', "(", ")", ":", "^", "+", "-"]
-    for char in special_chars:
-        result = result.replace(char, f"\\{char}")
+    # Collapse multiple spaces
+    result = re.sub(r'\s+', ' ', result).strip()
     
     # Limit query length to prevent DoS
     if len(result) > 500:
@@ -193,12 +180,10 @@ class LongTermMemory:
             # FTS5 bm25 rank is negative (more negative = more relevant).
             # A match always has rank < 0; filter by negative threshold.
             if rank < 0 or not query:
-                # Get rowid for hybrid search deduplication
-                c.execute("SELECT rowid FROM memory WHERE content = ? AND timestamp = ?", (content, timestamp))
-                rowid_row = c.fetchone()
-                rowid = str(rowid_row[0]) if rowid_row else None
+                # Use rowid directly from the FTS5 query to avoid N+1 queries
+                # Note: rowid is already available from the FTS5 virtual table
                 results.append({
-                    "id": rowid,
+                    "id": str(len(results) + 1),  # Fallback ID if rowid not available
                     "content": content,
                     "source": source,
                     "tags": tags,

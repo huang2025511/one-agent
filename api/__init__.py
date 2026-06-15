@@ -133,6 +133,8 @@ class RESTAPIGateway(Plugin):
         # CORS: default to localhost only for security; setup() reads config to
         # allow additional origins for production deployments.
         self._cors_origins: List[str] = ["http://localhost", "http://127.0.0.1"]
+        # Trusted proxies for X-Forwarded-For (empty = don't trust any proxy)
+        self._trusted_proxies: set = set()
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -148,9 +150,12 @@ class RESTAPIGateway(Plugin):
         # CORS: restrict to configured origins in production.  Falls back
         # to a wildcard when no origins are configured (developer mode).
         self._cors_origins = cfg.get("cors_origins") or ["*"]
-        logger.info("REST API configured on %s:%s auth=%s rate_limit=%d/min max_chat=%dB cors=%s",
+        # Trusted proxies for X-Forwarded-For header validation
+        # Only trust these IPs when extracting real client IP from X-Forwarded-For
+        self._trusted_proxies = set(cfg.get("trusted_proxies", []))
+        logger.info("REST API configured on %s:%s auth=%s rate_limit=%d/min max_chat=%dB cors=%s trusted_proxies=%s",
                     self._host, self._port, _mask_api_key(self._api_key),
-                    self._rate_limit, self._max_chat_bytes, self._cors_origins)
+                    self._rate_limit, self._max_chat_bytes, self._cors_origins, self._trusted_proxies)
 
     def bind_callback(self, cb) -> None:
         self._agent_callback = cb
@@ -184,15 +189,22 @@ class RESTAPIGateway(Plugin):
 
         @app.middleware("http")
         async def rate_limit_middleware(request, call_next):
-            # Get real client IP from X-Forwarded-For header (if behind reverse proxy)
-            # or fall back to request.client.host
-            forwarded_for = request.headers.get("X-Forwarded-For")
-            if forwarded_for:
-                # X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
-                # Take the first one (original client)
-                ip = forwarded_for.split(",")[0].strip()
+            # Get real client IP from X-Forwarded-For header
+            # Only trust X-Forwarded-For if request comes from a trusted proxy
+            client_ip = request.client.host if request.client else "unknown"
+            
+            if client_ip in self._trusted_proxies:
+                # Request from trusted proxy - use X-Forwarded-For
+                forwarded_for = request.headers.get("X-Forwarded-For")
+                if forwarded_for:
+                    # X-Forwarded-For format: client, proxy1, proxy2
+                    # Take the first IP (original client)
+                    ip = forwarded_for.split(",")[0].strip()
+                else:
+                    ip = client_ip
             else:
-                ip = request.client.host if request.client else "unknown"
+                # Direct connection or untrusted proxy - use client IP directly
+                ip = client_ip
             
             now = time.time()
             bucket = self._rate_buckets.setdefault(ip, [])
@@ -229,7 +241,7 @@ class RESTAPIGateway(Plugin):
         _bus = _ctx.bus if _ctx else None
 
         def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
-            if self._api_key and x_api_key != self._api_key:
+            if self._api_key and not hmac.compare_digest(x_api_key or "", self._api_key):
                 raise HTTPException(401, _("invalid_api_key"))
 
         # ---------------------------------------------------------------- Health & Readiness
@@ -260,7 +272,7 @@ class RESTAPIGateway(Plugin):
             
             checks = {
                 "database": _check_database(),
-                "llm_configured": bool(_ctx.config.get("api_keys", {}).get("sensenova")) if _ctx else False,
+                "llm_configured": bool(_ctx.config.get("llm", {}).get("api_keys", {}).get("sensenova")) if _ctx else False,
                 "memory_available": _memory_plugin is not None,
             }
             all_ok = all(checks.values())
@@ -329,8 +341,9 @@ class RESTAPIGateway(Plugin):
 
         # ── Dashboard ──────────────────────────────────────────────────
         @app.get("/dashboard")
-        async def dashboard():
+        async def dashboard(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Serve the monitoring dashboard."""
+            auth(x_api_key)
             from fastapi.responses import HTMLResponse
             from api.dashboard import get_dashboard_html
             return HTMLResponse(content=get_dashboard_html())
@@ -483,10 +496,19 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            
+            # Security restrictions: limit parameters to prevent abuse
             model = body.get("model")
             temperature = body.get("temperature")
+            if temperature is not None:
+                temperature = max(0.0, min(2.0, float(temperature)))
+            
             max_tokens = body.get("max_tokens")
-            tools = body.get("tools")
+            if max_tokens is not None:
+                max_tokens = max(50, min(8192, int(max_tokens)))
+            
+            # Ignore tools parameter for security - stream endpoint should be simple
+            tools = None
 
             # Validate text input
             try:
@@ -513,6 +535,9 @@ class RESTAPIGateway(Plugin):
                 if body.get("system"):
                     msgs.insert(0, {"role": "system", "content": body["system"]})
                 yield f"data: {json.dumps({'status': 'thinking', 'session_id': session_id})}\n\n"
+                
+                # Check client connection periodically during streaming
+                chunks_sent = 0
                 async for chunk in _llm.chat_completion_stream(
                     messages=msgs,
                     model=model,
@@ -520,7 +545,13 @@ class RESTAPIGateway(Plugin):
                     max_tokens=max_tokens,
                     tools=tools,
                 ):
+                    # Check every 10 chunks if client disconnected
+                    if chunks_sent % 10 == 0:
+                        if await request.is_disconnected():
+                            break
                     yield f"data: {json.dumps(chunk)}\n\n"
+                    chunks_sent += 1
+                    
                 yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
 
             return StreamingResponse(
@@ -592,7 +623,42 @@ class RESTAPIGateway(Plugin):
             mp = getattr(_ctx, "marketplace", None) if _ctx else None
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
-            pkg = mp.publish(dirpath)
+            
+            # Security: validate path is within allowed directories
+            import os
+            from pathlib import Path
+            
+            # Get allowed base directories
+            workspace_root = Path.cwd().resolve()
+            skills_dir = workspace_root / "skills"
+            
+            # Resolve the provided path
+            try:
+                resolved_path = Path(dirpath).resolve()
+            except Exception:
+                raise HTTPException(400, "Invalid path")
+            
+            # Check if path is within allowed directories
+            allowed = False
+            for allowed_dir in [skills_dir, workspace_root / "data" / "skills"]:
+                try:
+                    resolved_path.relative_to(allowed_dir)
+                    allowed = True
+                    break
+                except ValueError:
+                    continue
+            
+            if not allowed:
+                raise HTTPException(
+                    403, 
+                    f"Path must be within skills directory. Allowed: {skills_dir}"
+                )
+            
+            # Additional check: ensure path exists and is a directory
+            if not resolved_path.exists() or not resolved_path.is_dir():
+                raise HTTPException(400, "Path does not exist or is not a directory")
+            
+            pkg = mp.publish(str(resolved_path))
             if pkg is None:
                 raise HTTPException(400, _("invalid_skill_package", path=dirpath))
             return {"published": True, "package": pkg.to_dict()}
