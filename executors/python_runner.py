@@ -17,16 +17,42 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import contextlib
 import io
 import logging
 import sys
 import time
 from contextlib import redirect_stdout, redirect_stderr
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from core.plugin import Plugin
 
 logger = logging.getLogger(__name__)
+
+# Python executor configuration
+DEFAULT_EXECUTION_TIMEOUT = 10
+DEFAULT_MAX_OUTPUT = 10_000
+
+
+@contextlib.contextmanager
+def capture_output() -> Tuple[io.StringIO, io.StringIO]:
+    """Context manager to capture stdout/stderr with guaranteed cleanup.
+    
+    Ensures sys.stdout and sys.stderr are always restored even if an
+    exception occurs during code execution.
+    """
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    try:
+        sys.stdout = stdout_capture
+        sys.stderr = stderr_capture
+        yield stdout_capture, stderr_capture
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+
 
 # Save reference to the real __import__ before we override it
 _real_import = builtins.__import__
@@ -133,14 +159,14 @@ class PythonExecutor(Plugin):
 
     def __init__(self) -> None:
         super().__init__()
-        self._timeout = 10  # seconds
-        self._max_output = 10_000  # chars
+        self._timeout = DEFAULT_EXECUTION_TIMEOUT
+        self._max_output = DEFAULT_MAX_OUTPUT
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         cfg = ctx.config.get("execution", {}).get("python", {})
-        self._timeout = cfg.get("timeout", 10)
-        self._max_output = cfg.get("max_output", 10_000)
+        self._timeout = cfg.get("timeout", DEFAULT_EXECUTION_TIMEOUT)
+        self._max_output = cfg.get("max_output", DEFAULT_MAX_OUTPUT)
 
     async def execute(
         self,
@@ -162,6 +188,10 @@ class PythonExecutor(Plugin):
                 "duration_ms": float,
             }
         """
+        assert code, "code cannot be empty"
+        assert isinstance(code, str), "code must be a string"
+        assert timeout is None or timeout > 0, "timeout must be positive"
+        
         timeout = timeout or self._timeout
         start = time.time()
 

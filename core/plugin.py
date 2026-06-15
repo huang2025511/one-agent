@@ -84,9 +84,9 @@ def _collect_from_module(
             seen.add(attr)
             try:
                 pm.register(attr())
-                logger.debug("auto-discovered plugin: %s", attr.__name__)
-            except Exception:
-                logger.exception("failed to instantiate plugin %s — skipping", attr.__name__)
+                logger.info("auto-discovered plugin: %s", attr.__name__)
+            except (TypeError, ValueError, RuntimeError) as exc:
+                logger.error("failed to instantiate plugin %s: %s", attr.__name__, exc, exc_info=True)
 
 
 class PluginManager:
@@ -161,11 +161,19 @@ class PluginManager:
             await plugin.start()
 
     async def stop_all(self) -> None:
+        errors: list[Exception] = []
         for plugin in reversed(self._plugins):
             try:
                 await plugin.stop()
-            except Exception:
-                logger.exception("failed to stop %s", plugin.name)
+            except (RuntimeError, asyncio.TimeoutError, OSError) as exc:
+                logger.error("failed to stop %s: %s", plugin.name, exc, exc_info=True)
+                errors.append(exc)
+            except Exception as exc:
+                logger.error("failed to stop %s with unexpected error: %s", plugin.name, exc, exc_info=True)
+                errors.append(exc)
+        if errors:
+            # Re-raise on critical shutdown path so callers know teardown was incomplete
+            raise RuntimeError(f"{len(errors)} plugin(s) failed to stop: {[str(e) for e in errors]}")
 
     def get_by_name(self, name: str) -> Optional[Plugin]:
         for p in self._plugins:

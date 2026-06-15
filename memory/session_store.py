@@ -1,16 +1,18 @@
 """Session persistence — store/retrieve chat sessions in SQLite."""
 
+import asyncio
 import json
 import logging
 import sqlite3
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .base_store import BaseSQLiteStore
 
 logger = logging.getLogger(__name__)
 
 
-class SessionStore:
+class SessionStore(BaseSQLiteStore):
     """Thread-safe SQLite-backed session store.
 
     Persists chat sessions and their messages so they survive restarts.
@@ -19,13 +21,9 @@ class SessionStore:
     """
 
     def __init__(self, db_path: str = "data/memory/sessions.db") -> None:
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._migrate()
+        super().__init__(db_path)
 
-    def _migrate(self) -> None:
+    def _init_db(self) -> None:
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -64,6 +62,9 @@ class SessionStore:
 
     def create_session(self, session_id: str, title: str = "") -> None:
         """Create a new session record (idempotent — upsert)."""
+        assert session_id, "session_id cannot be empty"
+        assert isinstance(session_id, str), "session_id must be a string"
+        
         now = time.time()
         try:
             self._conn.execute(
@@ -82,59 +83,93 @@ class SessionStore:
         content: str,
         meta: Optional[dict] = None,
         tokens: int = 0,
+        message_id: Optional[str] = None,
     ) -> None:
-        """Append a message to a session and update counters.
+        """Append a message to a session and update counters with idempotency support.
 
         If the session does not exist yet, it is created automatically.
         The title is auto-generated from the first user message (first 80 chars).
+        
+        Args:
+            session_id: Session identifier
+            role: Message role (user/assistant/system)
+            content: Message content
+            meta: Optional metadata dictionary
+            tokens: Token count for this message
+            message_id: Optional unique message ID for idempotency. If provided and
+                       a message with this ID already exists, the operation is skipped.
         """
+        assert session_id, "session_id cannot be empty"
+        assert role in ("user", "assistant", "system"), "role must be user/assistant/system"
+        assert isinstance(content, str), "content must be a string"
+        assert tokens >= 0, "tokens must be non-negative"
+        
         now = time.time()
         meta_json = json.dumps(meta or {})
 
         try:
-            # Ensure session exists (auto-create)
-            self._conn.execute(
-                "INSERT OR IGNORE INTO sessions(id, created_at, updated_at) "
-                "VALUES (?, ?, ?)",
-                (session_id, now, now),
-            )
-
-            # Auto-title from first user message
-            if role == "user":
+            # Idempotency check: if message_id provided, check if it already exists
+            if message_id:
                 cur = self._conn.execute(
-                    "SELECT title, message_count FROM sessions WHERE id = ?",
-                    (session_id,),
+                    "SELECT id FROM messages WHERE id = ?", (message_id,)
                 )
-                row = cur.fetchone()
-                if row and row["message_count"] == 0 and not row["title"]:
-                    title = content[:80].replace("\n", " ").strip()
+                if cur.fetchone():
+                    return  # Message already exists, skip insertion
+            
+            with self._conn:  # automatic transaction
+                # Ensure session exists (auto-create)
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO sessions(id, created_at, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (session_id, now, now),
+                )
+
+                # Auto-title from first user message
+                if role == "user":
+                    cur = self._conn.execute(
+                        "SELECT title, message_count FROM sessions WHERE id = ?",
+                        (session_id,),
+                    )
+                    row = cur.fetchone()
+                    if row and row["message_count"] == 0 and not row["title"]:
+                        title = content[:80].replace("\n", " ").strip()
+                        self._conn.execute(
+                            "UPDATE sessions SET title = ? WHERE id = ?",
+                            (title, session_id),
+                        )
+
+                # Insert message with optional ID
+                if message_id:
                     self._conn.execute(
-                        "UPDATE sessions SET title = ? WHERE id = ?",
-                        (title, session_id),
+                        "INSERT INTO messages(id, session_id, role, content, meta, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (message_id, session_id, role, content, meta_json, now),
+                    )
+                else:
+                    self._conn.execute(
+                        "INSERT INTO messages(session_id, role, content, meta, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (session_id, role, content, meta_json, now),
                     )
 
-            # Insert message
-            self._conn.execute(
-                "INSERT INTO messages(session_id, role, content, meta, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, role, content, meta_json, now),
-            )
-
-            # Update session counters
-            self._conn.execute(
-                "UPDATE sessions SET "
-                "updated_at = ?, "
-                "message_count = message_count + 1, "
-                "total_tokens = total_tokens + ? "
-                "WHERE id = ?",
-                (now, tokens, session_id),
-            )
-            self._conn.commit()
+                # Update session counters
+                self._conn.execute(
+                    "UPDATE sessions SET "
+                    "updated_at = ?, "
+                    "message_count = message_count + 1, "
+                    "total_tokens = total_tokens + ? "
+                    "WHERE id = ?",
+                    (now, tokens, session_id),
+                )
         except sqlite3.Error as exc:
-            logger.error("add_message(%s) failed: %s", session_id, exc)
+            logger.error("add_message(%s) transaction failed: %s", session_id, exc)
+            raise
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a session with all its messages."""
+        assert session_id, "session_id cannot be empty"
+        assert isinstance(session_id, str), "session_id must be a string"
+        
         try:
             cur = self._conn.execute(
                 "SELECT * FROM sessions WHERE id = ?", (session_id,)
@@ -164,6 +199,9 @@ class SessionStore:
 
     def list_sessions(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """List recent sessions ordered by last update time."""
+        assert limit > 0, "limit must be positive"
+        assert offset >= 0, "offset must be non-negative"
+        
         try:
             cur = self._conn.execute(
                 "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
@@ -176,6 +214,9 @@ class SessionStore:
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all its messages. Returns True if deleted."""
+        assert session_id, "session_id cannot be empty"
+        assert isinstance(session_id, str), "session_id must be a string"
+        
         try:
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?", (session_id,)
@@ -198,13 +239,6 @@ class SessionStore:
             logger.error("get_session_count failed: %s", exc)
             return 0
 
-    def close(self) -> None:
-        """Close the database connection."""
-        try:
-            self._conn.close()
-        except Exception:
-            pass
-
     def fork_session(self, session_id: str, fork_point: int, new_session_id: Optional[str] = None) -> Optional[str]:
         """从指定消息位置分叉会话，创建新的对话分支。
 
@@ -221,18 +255,22 @@ class SessionStore:
             new_id = store.fork_session("abc123", 5)
             # 新会话包含原会话的前 5 条消息
         """
+        assert session_id, "session_id cannot be empty"
+        assert isinstance(session_id, str), "session_id must be a string"
+        assert fork_point >= 0, "fork_point must be non-negative"
+        
         import uuid
 
         try:
             # 获取原始会话
             original = self.get_session(session_id)
             if not original:
-                logger.error(f"fork_session: session {session_id} not found")
+                logger.error("fork_session: session %s not found", session_id)
                 return None
 
             messages = original.get("messages", [])
             if fork_point < 0 or fork_point > len(messages):
-                logger.error(f"fork_session: invalid fork_point {fork_point} (max {len(messages)})")
+                logger.error("fork_session: invalid fork_point %d (max %d)", fork_point, len(messages))
                 return None
 
             # 生成新会话 ID
@@ -265,11 +303,11 @@ class SessionStore:
             )
 
             self._conn.commit()
-            logger.info(f"fork_session: created {new_session_id} from {session_id} at point {fork_point}")
+            logger.info("fork_session: created %s from %s at point %d", new_session_id, session_id, fork_point)
             return new_session_id
 
         except sqlite3.Error as exc:
-            logger.error(f"fork_session({session_id}) failed: {exc}")
+            logger.error("fork_session(%s) failed: %s", session_id, exc)
             self._conn.rollback()
             return None
 
@@ -282,6 +320,9 @@ class SessionStore:
         Returns:
             包含 parent_id, children, fork_point 的树结构
         """
+        assert session_id, "session_id cannot be empty"
+        assert isinstance(session_id, str), "session_id must be a string"
+        
         try:
             # 获取当前会话
             cur = self._conn.execute(
@@ -315,5 +356,48 @@ class SessionStore:
             return tree
 
         except sqlite3.Error as exc:
-            logger.error(f"get_session_tree({session_id}) failed: {exc}")
+            logger.error("get_session_tree(%s) failed: %s", session_id, exc)
             return {}
+
+    # -------------------------------------------------------- async wrappers
+
+    async def create_session_async(self, session_id: str, title: str = "") -> None:
+        """Async wrapper for create_session"""
+        await asyncio.to_thread(self.create_session, session_id, title)
+
+    async def add_message_async(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        meta: Optional[dict] = None,
+        tokens: int = 0,
+    ) -> None:
+        """Async wrapper for add_message"""
+        await asyncio.to_thread(self.add_message, session_id, role, content, meta, tokens)
+
+    async def get_session_async(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Async wrapper for get_session"""
+        return await asyncio.to_thread(self.get_session, session_id)
+
+    async def list_sessions_async(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        """Async wrapper for list_sessions"""
+        return await asyncio.to_thread(self.list_sessions, limit, offset)
+
+    async def delete_session_async(self, session_id: str) -> bool:
+        """Async wrapper for delete_session"""
+        return await asyncio.to_thread(self.delete_session, session_id)
+
+    async def get_session_count_async(self) -> int:
+        """Async wrapper for get_session_count"""
+        return await asyncio.to_thread(self.get_session_count)
+
+    async def fork_session_async(
+        self, session_id: str, fork_point: int, new_session_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Async wrapper for fork_session"""
+        return await asyncio.to_thread(self.fork_session, session_id, fork_point, new_session_id)
+
+    async def get_session_tree_async(self, session_id: str) -> Dict[str, Any]:
+        """Async wrapper for get_session_tree"""
+        return await asyncio.to_thread(self.get_session_tree, session_id)

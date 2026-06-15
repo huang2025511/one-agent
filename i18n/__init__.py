@@ -18,9 +18,12 @@ from typing import Dict
 logger = logging.getLogger(__name__)
 
 # Lock for thread-safe access to global state
-_lock = threading.Lock()
+_lock = threading.RLock()
 
-# Current language (default: English)
+# Thread-local storage for per-thread language preference
+_thread_local = threading.local()
+
+# Current language (default: English) — global default
 _current_lang = "en"
 
 # Track if language was auto-detected (to avoid repeated switching)
@@ -140,6 +143,10 @@ def set_language(lang: str) -> None:
 
 def get_language() -> str:
     """Get the current language code."""
+    # Check thread-local first, then fall back to global
+    thread_lang = getattr(_thread_local, 'lang', None)
+    if thread_lang:
+        return thread_lang
     with _lock:
         return _current_lang
 
@@ -219,7 +226,8 @@ def _(key: str, **kwargs) -> str:
     """
     # Get translation for current language, fall back to English
     with _lock:
-        lang_dict = _translations.get(_current_lang, _translations["en"])
+        lang = get_language()
+        lang_dict = _translations.get(lang, _translations["en"])
     message = lang_dict.get(key, _translations["en"].get(key, key))
     
     # Format with kwargs if provided
@@ -240,9 +248,10 @@ def add_translation(lang: str, key: str, message: str) -> None:
         key: Message key
         message: Translated message
     """
-    if lang not in _translations:
-        _translations[lang] = {}
-    _translations[lang][key] = message
+    with _lock:
+        if lang not in _translations:
+            _translations[lang] = {}
+        _translations[lang][key] = message
 
 
 def load_translations_from_dict(translations: Dict[str, Dict[str, str]]) -> None:
@@ -251,7 +260,8 @@ def load_translations_from_dict(translations: Dict[str, Dict[str, str]]) -> None
     Args:
         translations: Dict of {lang: {key: message}}
     """
-    for lang, messages in translations.items():
-        if lang not in _translations:
-            _translations[lang] = {}
-        _translations[lang].update(messages)
+    with _lock:
+        for lang, messages in translations.items():
+            if lang not in _translations:
+                _translations[lang] = {}
+            _translations[lang].update(messages)

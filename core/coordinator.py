@@ -25,6 +25,12 @@ from skills import SkillManager
 
 logger = logging.getLogger(__name__)
 
+# Coordinator configuration constants
+MAX_TOOL_ITERATIONS = 5
+DEFAULT_MAX_TOKENS = 2048
+MAX_SKILL_FAILURES = 3
+TURN_COMPLETION_TIMEOUT = 120.0
+
 
 class Coordinator(Plugin):
     """Runs the per-turn conversation loop."""
@@ -36,8 +42,8 @@ class Coordinator(Plugin):
         super().__init__()
         self._llm: Optional[LLMProvider] = None
         self._skills: Optional[SkillManager] = None
-        self._max_tool_iterations = 5
-        self._max_tokens = 2048
+        self._max_tool_iterations = MAX_TOOL_ITERATIONS
+        self._max_tokens = DEFAULT_MAX_TOKENS
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -176,7 +182,7 @@ class Coordinator(Plugin):
             current_lang = get_language()
             if detected_lang != current_lang:
                 set_language(detected_lang)
-                logger.info(f"Auto-detected language: {detected_lang} from user input")
+                logger.info("Auto-detected language: %s from user input", detected_lang)
                 # Persist language preference to config
                 self._persist_language(detected_lang)
         
@@ -185,7 +191,7 @@ class Coordinator(Plugin):
         try:
             await self._run_turn(turn)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("coordinator failed")
+            logger.error("coordinator failed: %s", exc, exc_info=True)
             turn.record_failure(str(exc))
             self.publish("turn_completed", turn=turn)
 
@@ -206,22 +212,66 @@ class Coordinator(Plugin):
         # publish user_message so the router classifies this — routing
         # publishes turn_routed which eventually reaches _on_routed above.
         self.publish("user_message", turn=turn, session_id=turn.session_id)
-        # wait until turn.result is populated — small polling loop
-        deadline = time.time() + 120
-        while time.time() < deadline:
-            if turn.result is not None or turn.error is not None:
-                break
-            await asyncio.sleep(0.1)
+        
+        # Event-driven wait: subscribe to turn_completed for this specific turn
+        # instead of polling with asyncio.sleep
+        completion_event = asyncio.Event()
+        
+        def _on_turn_completed(evt: Event) -> None:
+            completed_turn = evt.get("turn")
+            if completed_turn is turn:
+                completion_event.set()
+        
+        self.bus.subscribe("turn_completed", _on_turn_completed)
+        try:
+            await asyncio.wait_for(completion_event.wait(), timeout=TURN_COMPLETION_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning("Turn completion timeout for session %s", session_id)
+        finally:
+            self.bus.unsubscribe("turn_completed", _on_turn_completed)
 
     # --------------------------------------------------------- main loop
     async def _run_turn(self, turn: TurnContext) -> None:
+        """Execute a single turn: think → compress → delegate/tool-loop → reply."""
+        assert turn is not None, "turn cannot be None"
+        assert turn.input_text is not None, "turn.input_text cannot be None"
+        
         if self._llm is None:
             turn.record_failure("LLM provider not bound")
             self.publish("turn_completed", turn=turn)
             return
 
+        assert turn.model is not None, "Model must be set before execution"
+
+        messages = self._prepare_messages(turn)
+        tools = self._prepare_tools(turn)
+
+        # Think phase
+        await self._think_phase(messages, turn)
+
+        # Context compression
+        await self._compress_context(messages, turn)
+
+        # Delegation check
+        if await self._try_delegation(turn, messages):
+            return
+
+        # Tool-call loop
+        await self._tool_loop(messages, turn, tools)
+
+        # Auto-extract entities
+        self._extract_entities(turn)
+
+        self.publish("turn_completed", turn=turn)
+        logger.info("reply produced (%d tokens, %.2fs)",
+                    turn.tokens_used, turn.duration_seconds or 0)
+
+    def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
+        """Prepare message list with memory snippets if present."""
+        assert turn is not None, "turn cannot be None"
+        assert turn.input_text is not None, "turn.input_text cannot be None"
+        
         messages = list(turn.messages)
-        # inject memory snippets (tier-2 recall) if present
         if turn.meta.get("memory_snippets"):
             mem_note = (
                 "\n\nRelevant past interactions (use them to keep context):\n"
@@ -231,12 +281,15 @@ class Coordinator(Plugin):
                 messages[-1] = {"role": "user", "content": turn.input_text + mem_note}
             else:
                 messages.append({"role": "user", "content": turn.input_text + mem_note})
+        return messages
 
-        # pick skills for this turn (lazy loading — tier-3)
+    def _prepare_tools(self, turn: TurnContext) -> List[Dict[str, Any]]:
+        """Pick relevant skills and prepare tool schemas."""
+        assert turn is not None, "turn cannot be None"
+        
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
             chosen = self._skills.pick_relevant(turn.input_text, limit=4)
-            # Always include web_search as a core capability
             web_search = self._skills.get("web_search")
             if web_search and web_search not in chosen:
                 chosen.insert(0, web_search)
@@ -244,102 +297,117 @@ class Coordinator(Plugin):
             tools = [s.schema for s in chosen]
         else:
             turn.skills = []
+        return tools
 
-        # ── Think Phase: 先想清楚再动手 ──
-        # 先让 LLM 输出思考过程，拆解任务步骤、确定工具使用策略。
-        # 思考内容会展示给用户，对简单问候也只需 ~1s。
-        thinking_text = ""
-        # Always do a quick think phase — it's cheap and provides crucial
-        # context for multi-step tasks. For trivial greetings it takes ~1s.
-        if True:
-            think_prompt = (
-                "[思考阶段] 在动手之前，请用 2-4 句话快速思考：\n"
-                "1. 用户真正要什么？（一句话）\n"
-                "2. 需要分几步？用什么工具？\n"
-                "3. 先执行，不要在这步就给出最终答案，思考完直接开始调用工具。"
+    async def _think_phase(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
+        """Execute thinking phase to plan approach."""
+        assert messages is not None, "messages cannot be None"
+        assert turn is not None, "turn cannot be None"
+        
+        think_prompt = (
+            "[思考阶段] 在动手之前，请用 2-4 句话快速思考：\n"
+            "1. 用户真正要什么？（一句话）\n"
+            "2. 需要分几步？用什么工具？\n"
+            "3. 先执行，不要在这步就给出最终答案，思考完直接开始调用工具。"
+        )
+        try:
+            think_resp = await self._llm.chat_completion(
+                messages=messages + [{"role": "user", "content": think_prompt}],
+                model=turn.model,
+                max_tokens=min(turn.token_budget, 512),
+                tools=None,
             )
-            try:
-                think_resp = await self._llm.chat_completion(
-                    messages=messages + [{"role": "user", "content": think_prompt}],
-                    model=turn.model,
-                    max_tokens=min(turn.token_budget, 512),
-                    tools=None,  # No tools during thinking — think first, act later
-                )
-                thinking_text = think_resp.get("text", "").strip()
-                if thinking_text:
-                    # Store for frontend display
-                    turn.meta["thinking"] = thinking_text
-                    # Append thinking to message history as assistant message
-                    messages.append({
-                        "role": "assistant",
-                        "content": f"[思考]\n{thinking_text}",
-                    })
-                    logger.debug("think phase completed (%d chars)", len(thinking_text))
-            except Exception as exc:
-                logger.info("think phase skipped: %s", exc)
-                turn.meta["thinking"] = ""
+            thinking_text = think_resp.get("text", "").strip()
+            if thinking_text:
+                turn.meta["thinking"] = thinking_text
+                messages.append({
+                    "role": "assistant",
+                    "content": f"[思考]\n{thinking_text}",
+                })
+                logger.debug("think phase completed (%d chars)", len(thinking_text))
+        except Exception as exc:
+            logger.warning("think phase skipped: %s", exc)
+            turn.meta["thinking"] = ""
 
-        # ── Context compression ──
-        if self.ctx and self.ctx.config:
-            compression_enabled = self.ctx.config.get("router", {}).get("context_compression", {}).get("enabled", True)
-            if compression_enabled:
-                max_tokens = self.ctx.config.get("memory", {}).get("short_term", {}).get("max_tokens", 8000)
-                # Estimate token count (rough: 1 token ≈ 4 chars)
-                estimated_tokens = sum(len(str(m.get("content", ""))) // 4 for m in messages)
-                if estimated_tokens > max_tokens * 0.8:
-                    # Compress early messages
-                    summary = await self._compress_messages(messages, turn)
-                    if summary:
-                        # Replace early messages with a summary system message
-                        keep_recent = max(4, len(messages) // 3)  # Keep last 1/3
-                        early = messages[:len(messages) - keep_recent]
-                        recent = messages[len(messages) - keep_recent:]
-                        messages = [
-                            {"role": "system", "content": f"[对话历史摘要]\n{summary}"}
-                        ] + recent
-                        turn.meta["context_compressed"] = True
-                        turn.meta["compressed_messages"] = len(early)
+    async def _compress_context(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
+        """Compress context if approaching token limit."""
+        assert messages is not None, "messages cannot be None"
+        assert turn is not None, "turn cannot be None"
+        
+        if not (self.ctx and self.ctx.config):
+            return
 
-        # ── Delegation check ──
-        if turn.meta.get("enable_delegation") or self._detect_complex_task(turn.input_text):
+        compression_enabled = self.ctx.config.get("router", {}).get("context_compression", {}).get("enabled", True)
+        if not compression_enabled:
+            return
+
+        max_tokens = self.ctx.config.get("memory", {}).get("short_term", {}).get("max_tokens", 8000)
+        estimated_tokens = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+
+        if estimated_tokens <= max_tokens * 0.8:
+            return
+
+        summary = await self._compress_messages(messages, turn)
+        if summary:
+            keep_recent = max(4, len(messages) // 3)
+            early = messages[:len(messages) - keep_recent]
+            recent = messages[len(messages) - keep_recent:]
+            messages.clear()
+            messages.append({"role": "system", "content": f"[对话历史摘要]\n{summary}"})
+            messages.extend(recent)
+            turn.meta["context_compressed"] = True
+            turn.meta["compressed_messages"] = len(early)
+
+    async def _try_delegation(self, turn: TurnContext, messages: List[Dict[str, Any]]) -> bool:
+        """Try delegation for complex tasks. Returns True if delegation was used."""
+        assert turn is not None, "turn cannot be None"
+        assert messages is not None, "messages cannot be None"
+        
+        if not (turn.meta.get("enable_delegation") or self._detect_complex_task(turn.input_text)):
+            return False
+
+        try:
             from core.sub_agent import DelegationManager
-            try:
-                delegator = DelegationManager(self._llm, self._skills)
-                result = await delegator.execute(turn.input_text, turn.model)
-                if result.get("parallel"):
-                    turn.result = result["result"]
-                    turn.meta["delegation_used"] = True
-                    turn.meta["subtask_count"] = len(result["subtasks"])
-                    turn.meta["delegation_total_tokens"] = result["total_tokens"]
-                    turn.record_success(result["result"], result.get("total_tokens", 0))
+            delegator = DelegationManager(self._llm, self._skills)
+            result = await delegator.execute(turn.input_text, turn.model)
 
-                    # Auto-extract entities for knowledge graph
-                    if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
-                        full_text = f"{turn.input_text}\n{result['result']}"
-                        try:
-                            count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
-                            if count > 0:
-                                logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
-                        except Exception as exc:
-                            logger.debug("KG extraction failed: %s", exc)
-                            pass
+            if result.get("parallel"):
+                turn.result = result["result"]
+                turn.meta["delegation_used"] = True
+                turn.meta["subtask_count"] = len(result["subtasks"])
+                turn.meta["delegation_total_tokens"] = result["total_tokens"]
+                turn.record_success(result["result"], result.get("total_tokens", 0))
 
-                    self.publish("turn_completed", turn=turn)
-                    logger.info("delegation completed (%d subtasks, %d tokens, %.2fs)",
-                                result.get("subtask_count", 0),
-                                result.get("total_tokens", 0),
-                                result.get("duration_ms", 0) / 1000)
-                    return  # Skip normal tool loop
-            except Exception as exc:
-                logger.warning("delegation failed, falling back to normal flow: %s", exc)
+                # Auto-extract entities
+                if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
+                    full_text = f"{turn.input_text}\n{result['result']}"
+                    try:
+                        count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
+                        if count > 0:
+                            logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
+                    except Exception as exc:
+                        logger.debug("KG extraction failed: %s", exc)
 
-        # ── Tool-call loop ──
-        # force a final reply.  This mirrors the classic ReAct loop but we
-        # keep it dead simple (no scratchpad, no tree of thought).
+                self.publish("turn_completed", turn=turn)
+                logger.info("delegation completed (%d subtasks, %d tokens, %.2fs)",
+                            result.get("subtask_count", 0),
+                            result.get("total_tokens", 0),
+                            result.get("duration_ms", 0) / 1000)
+                return True
+        except Exception as exc:
+            logger.warning("delegation failed, falling back to normal flow: %s", exc)
+
+        return False
+
+    async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
+        """Execute tool-call loop until final reply."""
+        assert messages is not None, "messages cannot be None"
+        assert turn is not None, "turn cannot be None"
+        assert tools is not None, "tools cannot be None"
+        
         final_text = ""
         total_tokens = 0
-        _failed_skills: Dict[str, int] = {}  # Track consecutive failures per skill
-        _MAX_SKILL_FAILURES = 3  # Max consecutive failures before forcing skip
+        _failed_skills: Dict[str, int] = {}
 
         for i in range(self._max_tool_iterations):
             resp = await self._llm.chat_completion(
@@ -350,61 +418,18 @@ class Coordinator(Plugin):
             )
             total_tokens += int(resp.get("tokens_used") or 0)
             tool_calls = resp.get("tool_calls") or []
+
             if not tool_calls:
-                # final text reply — record in message history
                 final_text = resp.get("text", "") or ""
                 if final_text:
                     messages.append({"role": "assistant", "content": final_text})
                 break
 
-            provider = turn.model.split("/")[0] if turn.model and "/" in turn.model else "openai"
+            await self._execute_tool_calls(messages, turn, tool_calls, _failed_skills, i)
 
-            # Append the assistant's tool call request to message history
-            if provider == "anthropic":
-                for idx, tc in enumerate(tool_calls):
-                    name = tc.get("name") or ""
-                    args = tc.get("args") or {}
-                    result = await self._dispatch_smart(tc, name, args, _failed_skills)
-                    if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
-                        self.ctx.self_improver.record_failure(
-                            user_input=turn.input_text,
-                            error_type="tool_unavailable",
-                            error_detail=f"Tool {name} unavailable",
-                        )
-                    turn.meta.setdefault("tool_results", []).append(result)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id") or f"call_{idx}",
-                        "content": result.to_message(),
-                    })
-            else:
-                raw_tool_calls = resp.get("tool_calls_raw") or tool_calls
-                messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": raw_tool_calls,
-                })
-                for tc in tool_calls:
-                    name = tc.get("name") or ""
-                    args = tc.get("args") or {}
-                    result = await self._dispatch_smart(tc, name, args, _failed_skills)
-                    if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
-                        self.ctx.self_improver.record_failure(
-                            user_input=turn.input_text,
-                            error_type="tool_unavailable",
-                            error_detail=f"Tool {name} unavailable",
-                        )
-                    turn.meta.setdefault("tool_results", []).append(result)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.get("id") or "",
-                        "name": name,
-                        "content": result.to_message(),
-                    })
-            # If ALL called skills in this iteration failed, and we're past iteration 1,
-            # inject a hint to nudge the model to synthesize rather than retry
+            # Check if all skills failed
             if i >= 1 and all(
-                name in _failed_skills and _failed_skills[name] >= _MAX_SKILL_FAILURES
+                name in _failed_skills and _failed_skills[name] >= MAX_SKILL_FAILURES
                 for name in [tc.get("name", "") for tc in tool_calls]
             ):
                 messages.append({
@@ -416,61 +441,140 @@ class Coordinator(Plugin):
                 })
 
         else:
-            # loop exhausted — force a plain text call with explicit synthesis instruction
-            messages.append({
-                "role": "user",
-                "content": (
-                    "[系统提示：工具调用已达上限。请根据你已有的知识和前面获取的信息，"
-                    "直接给用户一个完整、有用的最终答复。不要提及工具不可用或搜索失败。]"
-                ),
-            })
-
-            # After tool loop exhaustion: apply self-improvement
-            if self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
-                patterns = self.ctx.self_improver.analyze_patterns()
-                if patterns:
-                    for p in patterns[:2]:  # Apply top 2 suggestions
-                        suggestion = p.get("suggestion", "")
-                        if suggestion:
-                            turn.meta["improvement_suggestion"] = suggestion
-                            # Inject the suggestion as a system message for the next attempt
-                            inject_msg = {"role": "system", "content": f"[自改进提示] {suggestion}"}
-                            if inject_msg not in messages:
-                                messages.insert(-2, inject_msg)
-
+            # Loop exhausted
+            await self._handle_loop_exhaustion(messages, turn)
             resp = await self._llm.chat_completion(
                 messages=messages, model=turn.model, max_tokens=self._max_tokens,
             )
             final_text = resp.get("text", "") or "(no reply)"
             total_tokens += int(resp.get("tokens_used") or 0)
 
-        # After tool loop exhaustion: record failure for self-improvement
+        # Record failure for self-improvement
         if turn.result is None and turn.error:
-            if self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
-                error_type = turn.error if isinstance(turn.error, str) else turn.error.get("type", "unknown") if isinstance(turn.error, dict) else "unknown"
-                error_detail = turn.error if isinstance(turn.error, str) else turn.error.get("detail", str(turn.error)) if isinstance(turn.error, dict) else str(turn.error)
-                self.ctx.self_improver.record_failure(
-                    user_input=turn.input_text,
-                    error_type=error_type,
-                    error_detail=error_detail,
-                    turn_meta=turn.meta,
-                )
+            self._record_self_improvement(turn)
 
         if not final_text:
             final_text = "(no reply produced)"
         turn.record_success(final_text, total_tokens)
 
-        # Auto-extract entities for knowledge graph
-        if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
-            full_text = f"{turn.input_text}\n{final_text}"
-            try:
-                count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
-                if count > 0:
-                    logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
-            except Exception as exc:
-                logger.debug("KG extraction failed: %s", exc)
-                pass
+    async def _execute_tool_calls(
+        self,
+        messages: List[Dict[str, Any]],
+        turn: TurnContext,
+        tool_calls: List[Dict[str, Any]],
+        failed_skills: Dict[str, int],
+        iteration: int,
+    ) -> None:
+        """Execute tool calls and append results to messages."""
+        assert messages is not None, "messages cannot be None"
+        assert turn is not None, "turn cannot be None"
+        assert tool_calls is not None, "tool_calls cannot be None"
+        assert failed_skills is not None, "failed_skills cannot be None"
+        assert iteration >= 0, "iteration must be non-negative"
+        
+        provider = turn.model.split("/")[0] if turn.model and "/" in turn.model else "openai"
 
-        self.publish("turn_completed", turn=turn)
-        logger.info("reply produced (%d tokens, %.2fs)",
-                    turn.tokens_used, turn.duration_seconds or 0)
+        if provider == "anthropic":
+            for idx, tc in enumerate(tool_calls):
+                name = tc.get("name") or ""
+                args = tc.get("args") or {}
+                result = await self._dispatch_smart(tc, name, args, failed_skills)
+
+                if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+                    self.ctx.self_improver.record_failure(
+                        user_input=turn.input_text,
+                        error_type="tool_unavailable",
+                        error_detail=f"Tool {name} unavailable",
+                    )
+
+                turn.meta.setdefault("tool_results", []).append(result)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id") or f"call_{idx}",
+                    "content": result.to_message(),
+                })
+        else:
+            raw_tool_calls = turn.meta.get("tool_calls_raw") or tool_calls
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": raw_tool_calls,
+            })
+            for tc in tool_calls:
+                name = tc.get("name") or ""
+                args = tc.get("args") or {}
+                result = await self._dispatch_smart(tc, name, args, failed_skills)
+
+                if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+                    self.ctx.self_improver.record_failure(
+                        user_input=turn.input_text,
+                        error_type="tool_unavailable",
+                        error_detail=f"Tool {name} unavailable",
+                    )
+
+                turn.meta.setdefault("tool_results", []).append(result)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id") or "",
+                    "name": name,
+                    "content": result.to_message(),
+                })
+
+    async def _handle_loop_exhaustion(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
+        """Handle when tool loop reaches max iterations."""
+        assert messages is not None, "messages cannot be None"
+        assert turn is not None, "turn cannot be None"
+        
+        messages.append({
+            "role": "user",
+            "content": (
+                "[系统提示：工具调用已达上限。请根据你已有的知识和前面获取的信息，"
+                "直接给用户一个完整、有用的最终答复。不要提及工具不可用或搜索失败。]"
+            ),
+        })
+
+        # Apply self-improvement suggestions
+        if self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+            patterns = self.ctx.self_improver.analyze_patterns()
+            if patterns:
+                for p in patterns[:2]:
+                    suggestion = p.get("suggestion", "")
+                    if suggestion:
+                        turn.meta["improvement_suggestion"] = suggestion
+                        inject_msg = {"role": "system", "content": f"[自改进提示] {suggestion}"}
+                        if inject_msg not in messages:
+                            messages.insert(-2, inject_msg)
+
+    def _record_self_improvement(self, turn: TurnContext) -> None:
+        """Record failure for self-improvement analysis."""
+        assert turn is not None, "turn cannot be None"
+        
+        if not (self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver):
+            return
+
+        error_type = turn.error if isinstance(turn.error, str) else turn.error.get("type", "unknown") if isinstance(turn.error, dict) else "unknown"
+        error_detail = turn.error if isinstance(turn.error, str) else turn.error.get("detail", str(turn.error)) if isinstance(turn.error, dict) else str(turn.error)
+
+        self.ctx.self_improver.record_failure(
+            user_input=turn.input_text,
+            error_type=error_type,
+            error_detail=error_detail,
+            turn_meta=turn.meta,
+        )
+
+    def _extract_entities(self, turn: TurnContext) -> None:
+        """Auto-extract entities from turn for knowledge graph."""
+        assert turn is not None, "turn cannot be None"
+        
+        if not (self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg):
+            return
+
+        final_text = turn.result or ""
+        full_text = f"{turn.input_text}\n{final_text}"
+
+        try:
+            count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
+            if count > 0:
+                logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
+        except Exception as exc:
+            logger.debug("KG extraction failed: %s", exc)

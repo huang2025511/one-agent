@@ -2,20 +2,34 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Union
 from dataclasses import dataclass
+
+_VALID_STATUSES = frozenset({"success", "error", "timeout", "unavailable", "skipped"})
 
 
 @dataclass
 class ToolResult:
     """Structured result from a skill/tool execution."""
     tool_name: str
-    status: str = "success"  # success | error | unavailable | skipped
-    data: Any = None
+    status: str = "success"  # success | error | timeout | unavailable | skipped
+    data: Optional[Union[Dict[str, Any], str]] = None
     error: Optional[str] = None
     tokens_used: int = 0
     duration_ms: float = 0.0
     truncated: bool = False
+
+    def __post_init__(self):
+        """Validate field types and values."""
+        if self.status not in _VALID_STATUSES:
+            raise ValueError(
+                f'Invalid status: {self.status!r}. '
+                f'Must be one of: {", ".join(sorted(_VALID_STATUSES))}'
+            )
+        if self.data is not None and not isinstance(self.data, (dict, str)):
+            raise ValueError(
+                f'data must be a dict, str, or None, got {type(self.data).__name__}'
+            )
 
     # -- backward-compat: allow ToolResult to quack like a string ----------
     def __str__(self) -> str:

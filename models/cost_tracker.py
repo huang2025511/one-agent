@@ -204,3 +204,20 @@ class CostTracker:
             "SELECT COALESCE(SUM(tokens_prompt + tokens_completion), 0) AS total FROM cost_log"
         ).fetchone()
         return int(row["total"]) if row else 0
+
+    def close(self) -> None:
+        """Close the database connection."""
+        try:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+        except Exception:
+            pass
+
+    def __del__(self):
+        """Ensure connection is closed on garbage collection."""
+        if hasattr(self, '_conn') and self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass

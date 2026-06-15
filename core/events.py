@@ -16,11 +16,20 @@ import enum
 import logging
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 
 logger = logging.getLogger(__name__)
+
+# Event bus configuration constants
+MAX_QUEUE_SIZE = 1000
+MAX_PAYLOAD_SIZE = 1_000_000  # 1MB
+DEAD_LETTER_QUEUE_LIMIT = 500
+TRACKER_LIMIT = 2000
+TRACKER_TTL = 3600  # 1 hour
+TRACKER_CLEANUP_INTERVAL = 60
 
 
 class EventPriority(enum.IntEnum):
@@ -43,7 +52,6 @@ class EventStatus(enum.Enum):
     PARTIAL = "partial"  # Some handlers succeeded, some failed
     FAILED = "failed"
     DEAD_LETTER = "dead_letter"
-
 
 @dataclass
 class Event:
@@ -136,24 +144,26 @@ class EventBus:
         "startup",
         # User interaction
         "user_message",
-        # Test events (can be removed in production if needed)
-        "orphan_event", "x", "y",
     }
 
-    def __init__(self, max_queue_size: int = 1000) -> None:
+    def __init__(self, max_queue_size: int = MAX_QUEUE_SIZE) -> None:
         self._subscribers: Dict[str, List[Handler]] = {}
         self._wildcards: List[Handler] = []
         self._queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=max_queue_size)
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
-        # Dead-letter queue for unhandled events
-        self._dead_letter_queue: List[Event] = []
-        self._dlq_limit = 500
+        # Dead-letter queue for unhandled events (bounded deque to prevent memory leak)
+        self._dead_letter_queue: deque[Event] = deque(maxlen=DEAD_LETTER_QUEUE_LIMIT)
+        self._dlq_limit = DEAD_LETTER_QUEUE_LIMIT
 
-        # Message tracker: id -> Event
+        # Message tracker: id -> Event, with TTL-based expiration
         self._tracker: Dict[str, Event] = {}
-        self._tracker_limit = 2000
+        self._tracker_timestamps: Dict[str, float] = {}
+        self._tracker_limit = TRACKER_LIMIT
+        self._tracker_ttl = TRACKER_TTL
+        self._tracker_cleanup_interval = TRACKER_CLEANUP_INTERVAL
+        self._tracker_ops_since_cleanup = 0
 
         # Metrics
         self._metrics = {
@@ -169,8 +179,13 @@ class EventBus:
 
     # ---------------------------------------------------------------- public
     def subscribe(self, event_type: str, handler: Handler) -> None:
+        assert event_type, "event_type cannot be empty"
+        assert isinstance(event_type, str), "event_type must be a string"
+        assert handler is not None, "handler cannot be None"
+        assert callable(handler), "handler must be callable"
+        
         self._subscribers.setdefault(event_type, []).append(handler)
-        logger.debug("subscribed %s to %s", handler, event_type)
+        logger.info("subscribed %s to %s", handler, event_type)
 
     def subscribe_all(self, handler: Handler) -> None:
         self._wildcards.append(handler)
@@ -199,7 +214,7 @@ class EventBus:
 
         # Validate payload size to prevent DoS
         payload_size = len(str(evt.payload))
-        if payload_size > 1_000_000:  # 1MB limit
+        if payload_size > MAX_PAYLOAD_SIZE:
             logger.warning(
                 "rejected oversized payload (%d bytes) for event type '%s'",
                 payload_size, evt.type
@@ -281,8 +296,12 @@ class EventBus:
                 result = handler(event)
                 if asyncio.iscoroutine(result):
                     await result
-            except Exception:
-                logger.exception("handler %s failed on %s", handler, event.type)
+            except (ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
+                logger.error("handler %s failed on %s: %s", handler, event.type, exc, exc_info=True)
+                handler_errors.append(str(handler))
+                self._metrics["errors"] += 1
+            except Exception as exc:
+                logger.error("handler %s failed on %s with unexpected error: %s", handler, event.type, exc, exc_info=True)
                 handler_errors.append(str(handler))
                 self._metrics["errors"] += 1
 
@@ -305,13 +324,21 @@ class EventBus:
     # ---------------------------------------------------------------- DLQ
     def _add_to_dlq(self, event: Event) -> None:
         event.status = EventStatus.DEAD_LETTER
+        # deque automatically evicts oldest when maxlen is reached
         self._dead_letter_queue.append(event)
-        if len(self._dead_letter_queue) > self._dlq_limit:
-            self._dead_letter_queue.pop(0)
 
     # ---------------------------------------------------------------- tracker
     def _track(self, event: Event) -> None:
         self._tracker[event.id] = event
+        self._tracker_timestamps[event.id] = time.time()
+
+        # Periodically clean up expired tracker entries
+        self._tracker_ops_since_cleanup += 1
+        if self._tracker_ops_since_cleanup >= self._tracker_cleanup_interval:
+            self._cleanup_tracker()
+            self._tracker_ops_since_cleanup = 0
+
+        # If still over limit after cleanup, evict oldest entries
         if len(self._tracker) > self._tracker_limit:
             # Remove oldest done/failed events in insertion order
             done_ids = [
@@ -325,10 +352,25 @@ class EventBus:
             victims = done_ids[:excess] if len(done_ids) >= excess else done_ids
             for eid in victims:
                 del self._tracker[eid]
+                self._tracker_timestamps.pop(eid, None)
             # If we still overflow (e.g. all events are in-flight), drop from front
             while len(self._tracker) > self._tracker_limit:
                 oldest_id = next(iter(self._tracker))
                 del self._tracker[oldest_id]
+                self._tracker_timestamps.pop(oldest_id, None)
+
+    def _cleanup_tracker(self) -> None:
+        """Remove expired tracker entries based on TTL."""
+        now = time.time()
+        expired = [
+            eid for eid, ts in self._tracker_timestamps.items()
+            if now - ts > self._tracker_ttl
+        ]
+        for eid in expired:
+            del self._tracker[eid]
+            del self._tracker_timestamps[eid]
+        if expired:
+            logger.debug("cleaned up %d expired tracker entries", len(expired))
 
     def get_tracked(self, event_id: str) -> Optional[Event]:
         return self._tracker.get(event_id)

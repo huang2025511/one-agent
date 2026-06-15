@@ -14,14 +14,43 @@ MCP 是 Anthropic 发布的开放协议，允许 Agent 连接外部工具服务�
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
+import socket
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# MCP client configuration
+MCP_CONNECTION_TIMEOUT = 30.0
+MCP_REQUEST_TIMEOUT = 30.0
+
+
+def _is_private_ip(ip_str: str) -> bool:
+    """Check if IP address is private/internal.
+    
+    Args:
+        ip_str: IP address string (IPv4 or IPv6)
+        
+    Returns:
+        True if IP is private/internal, False otherwise
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        # Check if IP is private, loopback, link-local, or reserved
+        return (
+            ip.is_private or
+            ip.is_loopback or
+            ip.is_link_local or
+            ip.is_reserved or
+            ip.is_multicast
+        )
+    except ValueError:
+        return True  # If we can't parse it, treat as private for safety
 
 
 class MCPServer:
@@ -36,17 +65,17 @@ class MCPServer:
         # Block private/internal IPs to prevent SSRF
         hostname = parsed.hostname
         if hostname:
-            import socket
+            # Try to resolve hostname to IP
             try:
-                ip = socket.gethostbyname(hostname)
-                # Block private IP ranges
-                if (ip.startswith('10.') or 
-                    ip.startswith('172.16.') or ip.startswith('172.31.') or
-                    ip.startswith('192.168.') or 
-                    ip.startswith('127.') or ip == 'localhost'):
-                    raise ValueError(f"Private/internal IP not allowed: {ip}")
+                # Use getaddrinfo to handle both IPv4 and IPv6
+                addr_infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+                for addr_info in addr_infos:
+                    ip = addr_info[4][0]
+                    if _is_private_ip(ip):
+                        raise ValueError(f"Private/internal IP not allowed: {ip} (resolved from {hostname})")
             except socket.gaierror:
-                pass  # DNS resolution failed, will fail on connect anyway
+                # DNS resolution failed - will fail on connect anyway
+                pass
         
         self.name = name
         self.url = url
@@ -57,28 +86,36 @@ class MCPServer:
     async def connect(self) -> bool:
         """连接到 MCP 服务器并发现工具。"""
         try:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            self._client = httpx.AsyncClient(timeout=MCP_REQUEST_TIMEOUT)
             
             # 获取服务器信息
             headers = {}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             
-            # 发现工具
-            response = await self._client.get(
-                f"{self.url}/tools",
-                headers=headers
-            )
+            # 发现工具 — wrap with asyncio.wait_for for timeout safety
+            try:
+                response = await asyncio.wait_for(
+                    self._client.get(
+                        f"{self.url}/tools",
+                        headers=headers
+                    ),
+                    timeout=MCP_CONNECTION_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"Connection to MCP server '{self.name}' timed out after {MCP_CONNECTION_TIMEOUT:.0f}s")
             response.raise_for_status()
             
             data = response.json()
             self.tools = data.get("tools", [])
             
-            logger.info(f"MCP server '{self.name}' connected: {len(self.tools)} tools")
+            logger.info("MCP server '%s' connected: %d tools", self.name, len(self.tools))
             return True
             
+        except TimeoutError:
+            raise
         except Exception as e:
-            logger.error(f"Failed to connect to MCP server '{self.name}': {e}")
+            logger.error("Failed to connect to MCP server '%s': %s", self.name, e)
             return False
     
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
@@ -102,7 +139,7 @@ class MCPServer:
             return result.get("result")
             
         except Exception as e:
-            logger.error(f"MCP tool call failed: {tool_name} - {e}")
+            logger.error("MCP tool call failed: %s - %s", tool_name, e)
             raise
     
     async def close(self):
@@ -121,7 +158,7 @@ class MCPClient:
     async def add_server(self, name: str, url: str, api_key: Optional[str] = None) -> bool:
         """添加并连接 MCP 服务器。"""
         if name in self.servers:
-            logger.warning(f"MCP server '{name}' already exists")
+            logger.warning("MCP server '%s' already exists", name)
             return False
         
         server = MCPServer(name, url, api_key)

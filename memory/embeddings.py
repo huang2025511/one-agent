@@ -16,14 +16,16 @@ import logging
 import sqlite3
 import struct
 import time
-from pathlib import Path
 from typing import List, Optional, Tuple, Union
+
+from .base_store import BaseSQLiteStore
 
 logger = logging.getLogger(__name__)
 
 # Embedding model configuration
 EMBEDDING_DIM = 384
 MODEL_NAME = "all-MiniLM-L6-v2"
+MODEL_LOAD_TIMEOUT = 30.0
 
 
 def _dot_product(a: List[float], b: List[float]) -> float:
@@ -56,7 +58,7 @@ def _blob_to_vector(blob: bytes) -> List[float]:
     return list(struct.unpack(f'{count}f', blob))
 
 
-class EmbeddingStore:
+class EmbeddingStore(BaseSQLiteStore):
     """Vector store for semantic memory search."""
 
     def __init__(self, db_path: str = "data/memory/embeddings.db"):
@@ -65,19 +67,12 @@ class EmbeddingStore:
         Args:
             db_path: Path to SQLite database for vector storage
         """
-        self.db_path = db_path
         self._model = None
-        self._conn: Optional[sqlite3.Connection] = None
-        self._init_db()
+        super().__init__(db_path)
         self._load_model()
 
     def _init_db(self):
         """Initialize SQLite database with vector storage schema."""
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-
         # Create tables
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS embeddings (
@@ -89,19 +84,35 @@ class EmbeddingStore:
             CREATE INDEX IF NOT EXISTS idx_memory_id ON embeddings(memory_id);
         """)
         self._conn.commit()
-        logger.info("Embedding store initialized at %s", self.db_path)
+        logger.debug("Embedding store initialized at %s", self.db_path)
 
     def _load_model(self):
-        """Load the embedding model lazily."""
+        """Load the embedding model lazily with timeout."""
         try:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(MODEL_NAME)
-            logger.info("Loaded embedding model: %s", MODEL_NAME)
+            import concurrent.futures
+            
+            # Load model with timeout to prevent blocking
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(SentenceTransformer, MODEL_NAME)
+                try:
+                    self._model = future.result(timeout=MODEL_LOAD_TIMEOUT)
+                    logger.debug("Loaded embedding model: %s", MODEL_NAME)
+                except concurrent.futures.TimeoutError:
+                    logger.warning(
+                        "Embedding model loading timed out after %.0fs. "
+                        "Semantic search will be disabled.",
+                        MODEL_LOAD_TIMEOUT
+                    )
+                    self._model = None
         except ImportError:
             logger.warning(
                 "sentence-transformers not installed. "
                 "Run: pip install sentence-transformers"
             )
+            self._model = None
+        except Exception as e:
+            logger.warning("Failed to load embedding model: %s", e)
             self._model = None
 
     def embed(self, text: str) -> Optional[List[float]]:
@@ -113,13 +124,16 @@ class EmbeddingStore:
         Returns:
             list of floats (EMBEDDING_DIM,) or None if model unavailable
         """
+        assert text, "text cannot be empty"
+        assert isinstance(text, str), "text must be a string"
+        
         if self._model is None:
             return None
         try:
             embedding = self._model.encode(text, convert_to_numpy=True)
             return embedding.tolist()
         except Exception as e:
-            logger.error("Embedding failed: %s", e)
+            logger.warning("Embedding failed: %s", e)
             return None
 
     def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
@@ -131,13 +145,17 @@ class EmbeddingStore:
         Returns:
             List of float lists (or None for failures)
         """
+        assert texts is not None, "texts cannot be None"
+        assert isinstance(texts, list), "texts must be a list"
+        assert all(isinstance(t, str) for t in texts), "all texts must be strings"
+        
         if self._model is None:
             return [None] * len(texts)
         try:
             embeddings = self._model.encode(texts, convert_to_numpy=True)
             return [emb.tolist() for emb in embeddings]
         except Exception as e:
-            logger.error("Batch embedding failed: %s", e)
+            logger.warning("Batch embedding failed: %s", e)
             return [None] * len(texts)
 
     def store(self, memory_id: str, vector: List[float]):
@@ -147,6 +165,12 @@ class EmbeddingStore:
             memory_id: Unique identifier for the memory
             vector: Embedding vector (EMBEDDING_DIM,)
         """
+        assert memory_id, "memory_id cannot be empty"
+        assert isinstance(memory_id, str), "memory_id must be a string"
+        assert vector is not None, "vector cannot be None"
+        assert isinstance(vector, list), "vector must be a list"
+        assert len(vector) == EMBEDDING_DIM, f"vector must have {EMBEDDING_DIM} dimensions"
+        
         try:
             vector_blob = _vector_to_blob(vector)
             self._conn.execute(
@@ -156,7 +180,7 @@ class EmbeddingStore:
             )
             self._conn.commit()
         except Exception as e:
-            logger.error("Failed to store embedding for %s: %s", memory_id, e)
+            logger.warning("Failed to store embedding for %s: %s", memory_id, e)
 
     def search(self, query_vector: List[float], top_k: int = 10) -> List[Tuple[str, float]]:
         """Search for similar memories using cosine similarity.
@@ -168,6 +192,11 @@ class EmbeddingStore:
         Returns:
             List of (memory_id, similarity_score) tuples, sorted by score desc
         """
+        assert query_vector is not None, "query_vector cannot be None"
+        assert isinstance(query_vector, list), "query_vector must be a list"
+        assert len(query_vector) == EMBEDDING_DIM, f"query_vector must have {EMBEDDING_DIM} dimensions"
+        assert top_k > 0, "top_k must be positive"
+        
         try:
             # Load all embeddings
             cursor = self._conn.execute(
@@ -188,7 +217,7 @@ class EmbeddingStore:
             return results[:top_k]
 
         except Exception as e:
-            logger.error("Embedding search failed: %s", e)
+            logger.warning("Embedding search failed: %s", e)
             return []
 
     def delete(self, memory_id: str):
@@ -197,6 +226,9 @@ class EmbeddingStore:
         Args:
             memory_id: Unique identifier for the memory
         """
+        assert memory_id, "memory_id cannot be empty"
+        assert isinstance(memory_id, str), "memory_id must be a string"
+        
         try:
             self._conn.execute(
                 "DELETE FROM embeddings WHERE memory_id = ?",
@@ -204,7 +236,7 @@ class EmbeddingStore:
             )
             self._conn.commit()
         except Exception as e:
-            logger.error("Failed to delete embedding for %s: %s", memory_id, e)
+            logger.warning("Failed to delete embedding for %s: %s", memory_id, e)
 
     def count(self) -> int:
         """Return total number of stored embeddings."""
@@ -212,11 +244,5 @@ class EmbeddingStore:
             cursor = self._conn.execute("SELECT COUNT(*) FROM embeddings")
             return cursor.fetchone()[0]
         except Exception as e:
-            logger.error("Failed to count embeddings: %s", e)
+            logger.warning("Failed to count embeddings: %s", e)
             return 0
-
-    def close(self):
-        """Close database connection."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None

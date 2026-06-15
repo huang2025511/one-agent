@@ -24,11 +24,37 @@ from typing import Dict, Optional
 import httpx
 
 from core.plugin import Plugin
+from core.exceptions import SecurityError, InputValidationError
 from executors.python_runner import PythonExecutor
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["ShellExecutor", "DockerExecutor", "BrowserExecutor", "PythonExecutor"]
+
+
+# Shell metacharacters that enable command injection — always reject
+_SHELL_DANGEROUS_CHARS = {";", "|", "&", "$", "`", "(", ")", "{", "}", "<", ">", "\n", "\r", "\0"}
+
+
+def _validate_shell_command(command: str) -> None:
+    """Validate a shell command for safety before execution.
+
+    Raises InputValidationError or SecurityError on problems.
+    """
+    if not isinstance(command, str):
+        raise InputValidationError("Command must be a string")
+    stripped = command.strip()
+    if not stripped:
+        raise InputValidationError("Command cannot be empty")
+    if len(stripped) > 2000:
+        raise InputValidationError("Command too long (max 2000 characters)")
+    # Reject shell metacharacters that enable injection
+    bad = [c for c in stripped if c in _SHELL_DANGEROUS_CHARS]
+    if bad:
+        raise SecurityError(f"Command contains disallowed characters: {bad!r}")
+    # Reject path traversal attempts
+    if ".." in stripped:
+        raise SecurityError("Command contains path traversal sequence '..'")
 
 
 # Regex patterns for allowed shell commands (much safer than word lists)
@@ -93,6 +119,12 @@ class ShellExecutor(Plugin):
 
     def can_run(self, command: str) -> bool:
         if not self._enabled:
+            return False
+        # Run structural validation first — reject injection attempts early
+        try:
+            _validate_shell_command(command)
+        except (InputValidationError, SecurityError) as exc:
+            logger.warning("shell command rejected: %s", exc)
             return False
         import re
         if not re.fullmatch(r"[0-9a-zA-Z\s_./:@#\-='\"\\-]+", command.strip()):
@@ -248,6 +280,12 @@ class DockerExecutor(Plugin):
     def can_run(self, command: str) -> bool:
         """Validate command before executing in Docker container."""
         if not self._enabled:
+            return False
+        # Run structural validation — reject injection attempts early
+        try:
+            _validate_shell_command(command)
+        except (InputValidationError, SecurityError) as exc:
+            logger.warning("docker command rejected: %s", exc)
             return False
         import re
         # Basic safety: only allow printable ASCII with common shell-safe chars

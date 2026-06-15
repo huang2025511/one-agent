@@ -27,6 +27,15 @@ from .embeddings import EmbeddingStore  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "MemoryPlugin",
+    "LongTermMemory",
+    "ProceduralMemory",
+    "KnowledgeGraph",
+    "SessionStore",
+    "EmbeddingStore",
+]
+
 
 def _escape_fts5_query(query: str) -> str:
     """Escape FTS5 special characters to prevent injection attacks.
@@ -44,16 +53,16 @@ def _escape_fts5_query(query: str) -> str:
     
     # Escape special characters for FTS5
     # Replace operators with spaces to neutralize them
-    fts5_operators = [' AND ', ' OR ', ' NOT ', ' NEAR ', ' NEAR/']
+    fts5_operators = [" AND ", " OR ", " NOT ", " NEAR ", " NEAR/"]
     result = query
     for op in fts5_operators:
-        result = result.replace(op, ' ')
+        result = result.replace(op, " ")
     
     # Escape individual special characters
     # FTS5 special chars: * ? " ( ) : ^ + -
-    special_chars = ['*', '?', '"', '(', ')', ':', '^', '+', '-']
+    special_chars = ["*", "?", '"', "(", ")", ":", "^", "+", "-"]
     for char in special_chars:
-        result = result.replace(char, f'\\{char}')
+        result = result.replace(char, f"\\{char}")
     
     # Limit query length to prevent DoS
     if len(result) > 500:
@@ -256,8 +265,8 @@ class LongTermMemory:
         """Close the SQLite connection (called from MemoryPlugin.stop)."""
         try:
             self._conn.close()
-        except Exception:
-            pass
+        except sqlite3.Error as exc:
+            logger.error("failed to close SQLite connection: %s", exc, exc_info=True)
 
 
 # ---------- tier 3: procedural memory (auto-generated skills) --------------
@@ -278,7 +287,8 @@ class ProceduralMemory:
         if self._index_path.exists():
             try:
                 return json.loads(self._index_path.read_text(encoding="utf-8"))
-            except Exception:
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.error("failed to load procedural memory index: %s", exc, exc_info=True)
                 return {"skills": {}}
         return {"skills": {}}
 
@@ -370,8 +380,8 @@ class MemoryPlugin(Plugin):
                     db_path=os.path.join(data_dir, "memory/embeddings.db")
                 )
                 logger.info("Embedding store initialized for hybrid search")
-            except Exception as exc:
-                logger.warning("Failed to initialize embedding store: %s", exc)
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.error("failed to initialize embedding store: %s", exc, exc_info=True)
                 self._hybrid_search = False
         
         self._max_results = mem_cfg.get("max_results", 5)
@@ -426,8 +436,8 @@ class MemoryPlugin(Plugin):
                     hits = merged_hits[:self._max_results]
                 else:
                     hits = fts_hits
-            except Exception as exc:
-                logger.warning("Hybrid search failed, falling back to FTS: %s", exc)
+            except (RuntimeError, ValueError, OSError) as exc:
+                logger.error("hybrid search failed, falling back to FTS: %s", exc, exc_info=True)
                 hits = fts_hits
         else:
             hits = fts_hits
@@ -539,21 +549,21 @@ class MemoryPlugin(Plugin):
         if self._procedural is not None:
             try:
                 self._procedural.flush()
-            except Exception:
-                pass
+            except OSError as exc:
+                logger.error("failed to flush procedural memory: %s", exc, exc_info=True)
         if self._long is not None:
             try:
                 self._long.close()
-            except Exception:
-                pass
+            except sqlite3.Error as exc:
+                logger.error("failed to close long-term memory: %s", exc, exc_info=True)
         if self._kg is not None:
             try:
                 self._kg.close()
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as exc:
+                logger.error("failed to close knowledge graph: %s", exc, exc_info=True)
         if self._embeddings is not None:
             try:
                 self._embeddings.close()
-            except Exception:
-                pass
+            except (OSError, RuntimeError) as exc:
+                logger.error("failed to close embedding store: %s", exc, exc_info=True)
         await super().stop()

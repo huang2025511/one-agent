@@ -24,10 +24,67 @@ from models.cache import LLMCache
 from models.cost_tracker import CostTracker
 from models.recommend import RecommendationMixin
 
+
+def _sanitize_log_message(msg: str) -> str:
+    """Remove sensitive information from log messages.
+
+    Filters out API keys, bearer tokens, passwords, and other secrets.
+    """
+    import re
+    # Remove OpenAI-style API keys (sk-...)
+    msg = re.sub(r"sk-[a-zA-Z0-9]{20,}", "***", msg)
+    # Remove Bearer tokens
+    msg = re.sub(r"Bearer [a-zA-Z0-9\-\.]+", "Bearer ***", msg)
+    # Remove Anthropic-style API keys (sk-ant-...)
+    msg = re.sub(r"sk-ant-[a-zA-Z0-9\-]+", "***", msg)
+    # Remove generic API key patterns
+    msg = re.sub(r"api[_-]?key[=:]\s*[\"']?[a-zA-Z0-9]{20,}[\"']?", "api_key=***", msg, flags=re.IGNORECASE)
+    # Remove passwords
+    msg = re.sub(r"password[=:]\s*\S+", "password=***", msg, flags=re.IGNORECASE)
+    return msg
+
+
+class _SensitiveInfoFilter(logging.Filter):
+    """Automatically filter sensitive information from log messages."""
+    def filter(self, record):
+        if isinstance(record.msg, str):
+            record.msg = _sanitize_log_message(record.msg)
+        if record.args:
+            if isinstance(record.args, tuple):
+                record.args = tuple(_sanitize_log_message(str(arg)) for arg in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: _sanitize_log_message(str(v)) for k, v in record.args.items()}
+        return True
+
+
 logger = logging.getLogger(__name__)
+logger.addFilter(_SensitiveInfoFilter())
+
+# Default timeout values in seconds
+DEFAULT_TIMEOUT = 60
+DEFAULT_CACHE_TTL = 3600
+DEFAULT_RETRY_COUNT = 3
+
+# Circuit breaker configuration
+CIRCUIT_BREAKER_FAILURE_THRESHOLD = 5
+CIRCUIT_BREAKER_RECOVERY_TIMEOUT = 60.0
+
+# Connection pool limits
+MAX_CONNECTIONS = 20
+MAX_KEEPALIVE_CONNECTIONS = 10
+
+# Stats limits
+MAX_CALL_STATS_SIZE = 1000
+CALL_STATS_TRIM_SIZE = 500
 
 
 from models.tiers import MODEL_TIERS  # re-export for backward compatibility
+
+__all__ = [
+    "LLMProvider",
+    "MODEL_TIERS",
+    "MODEL_COST",
+]
 
 # Rough per-token cost (USD per 1K tokens) for statistics
 MODEL_COST: Dict[str, float] = {
@@ -73,6 +130,60 @@ MODEL_COST: Dict[str, float] = {
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 
+class CircuitBreaker:
+    """断路器模式：防止对故障服务的重复调用。
+    
+    状态转换：
+    - CLOSED（正常）：连续失败达到阈值时转为 OPEN
+    - OPEN（熔断）：快速失败，不尝试调用。超时后转为 HALF_OPEN
+    - HALF_OPEN（半开）：尝试一次调用，成功则转为 CLOSED，失败则回到 OPEN
+    """
+    
+    def __init__(self, failure_threshold: int = CIRCUIT_BREAKER_FAILURE_THRESHOLD, 
+                 recovery_timeout: float = CIRCUIT_BREAKER_RECOVERY_TIMEOUT):
+        assert failure_threshold > 0, "failure_threshold must be positive"
+        assert recovery_timeout >= 0, "recovery_timeout must be non-negative"
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failure_count = 0
+        self.last_failure_time = 0.0
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+    
+    def can_execute(self) -> bool:
+        """检查是否允许执行调用。"""
+        if self.state == "CLOSED":
+            return True
+        elif self.state == "OPEN":
+            # 检查是否超过恢复时间
+            if time.time() - self.last_failure_time >= self.recovery_timeout:
+                self.state = "HALF_OPEN"
+                return True
+            return False
+        else:  # HALF_OPEN
+            return True
+    
+    def record_success(self):
+        """记录成功调用。"""
+        self.failure_count = 0
+        self.state = "CLOSED"
+    
+    def record_failure(self):
+        """记录失败调用。"""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        
+        if self.state == "HALF_OPEN":
+            # 半开状态失败，回到 OPEN
+            self.state = "OPEN"
+        elif self.failure_count >= self.failure_threshold:
+            # 连续失败达到阈值，转为 OPEN
+            self.state = "OPEN"
+            logger.error(
+                "Circuit breaker OPEN after %d failures (will recover in %.0fs)",
+                self.failure_count, self.recovery_timeout
+            )
+
+
 class LLMProvider(RecommendationMixin, Plugin):
     """Central LLM caller with caching and cost tracking."""
 
@@ -86,11 +197,11 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._default_model: str = "anthropic/claude-3.5-sonnet-20241022"
         self._default_temperature = 0.3
         self._default_max_tokens = 2048
-        self._timeout = 60
-        self._retry_count = 3
+        self._timeout = DEFAULT_TIMEOUT
+        self._retry_count = DEFAULT_RETRY_COUNT
         self._cache: Optional[LLMCache] = None
         self._cache_enabled = True
-        self._cache_ttl = 3600
+        self._cache_ttl = DEFAULT_CACHE_TTL
         self._call_stats: List[Dict[str, Any]] = []
         self._cost_total: float = 0.0
         self._cost_tracker: Optional[CostTracker] = None
@@ -103,6 +214,8 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._model_name_cache: Dict[str, Dict[str, str]] = {}
         # Endpoint fallback guard: count attempts per provider (max 2)
         self._fallback_count: Dict[str, int] = {}
+        # Circuit breakers per provider: {provider: CircuitBreaker}
+        self._circuit_breakers: Dict[str, CircuitBreaker] = {}
         # If setup() can't find an event loop, defer the first auto-classify
         # to the next chat_completion() / get_catalog() call.
         self._pending_auto_classify: bool = False
@@ -171,8 +284,8 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
             limits=httpx.Limits(
-                max_connections=20,
-                max_keepalive_connections=10,
+                max_connections=MAX_CONNECTIONS,
+                max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
             ),
         )
         logger.info("LLM provider ready, default model=%s, cache=%s",
@@ -204,11 +317,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                             ran = True
                         finally:
                             new_loop.close()
-                    except Exception:
+                    except (RuntimeError, OSError) as exc:
                         # Final safety net: avoid "coroutine was never awaited"
+                        logger.error("auto-classify setup failed: %s", exc, exc_info=True)
                         try:
                             coro.close()
-                        except Exception:
+                        except (RuntimeError, AttributeError):
                             pass
             if not ran:
                 # Defer to the first chat_completion() / get_catalog() call
@@ -292,10 +406,10 @@ class LLMProvider(RecommendationMixin, Plugin):
                         finally:
                             new_loop.close()
                         self._on_provider_resolved(provider, hint_info)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                    except (RuntimeError, OSError) as exc:
+                        logger.error("set_api_key: failed to resolve provider %s: %s", provider, exc, exc_info=True)
+            except ImportError as exc:
+                logger.error("set_api_key: resolver module missing for %s: %s", provider, exc)
         # Fire-and-forget background reclassify
         ran = False
         import asyncio as _asyncio
@@ -319,10 +433,11 @@ class LLMProvider(RecommendationMixin, Plugin):
                         ran = True
                     finally:
                         new_loop.close()
-                except Exception:
+                except (RuntimeError, OSError) as exc:
+                    logger.error("set_api_key: failed to run auto-classify for %s: %s", provider, exc, exc_info=True)
                     try:
                         coro.close()
-                    except Exception:
+                    except (RuntimeError, AttributeError):
                         pass
         return {"ok": True, "provider": provider, "key_set": bool(key), "reclassified": ran}
 
@@ -333,8 +448,8 @@ class LLMProvider(RecommendationMixin, Plugin):
         try:
             if hint_info.found and hint_info.base_url:
                 self._provider_base_urls[provider] = hint_info.base_url
-        except Exception:
-            pass
+        except AttributeError as exc:
+            logger.error("_on_provider_resolved: invalid hint_info for %s: %s", provider, exc, exc_info=True)
 
     def list_known_providers(self) -> Dict[str, str]:
         """Return the resolver's known provider registry.
@@ -425,10 +540,11 @@ class LLMProvider(RecommendationMixin, Plugin):
                             new_loop.run_until_complete(coro)
                         finally:
                             new_loop.close()
-                    except Exception:
+                    except (RuntimeError, OSError) as exc:
+                        logger.error("get_catalog: deferred auto-classify failed: %s", exc, exc_info=True)
                         try:
                             coro.close()
-                        except Exception:
+                        except (RuntimeError, AttributeError):
                             pass
         return ModelCatalog(base_url=base, api_key=api_key, provider=prov)
 
@@ -654,6 +770,11 @@ class LLMProvider(RecommendationMixin, Plugin):
         use_cache: bool = True,
     ) -> Dict[str, Any]:
         """Call the LLM, with optional caching and automatic retries."""
+        assert isinstance(messages, list), "messages must be a list"
+        assert len(messages) > 0, "messages cannot be empty"
+        assert temperature is None or (0.0 <= temperature <= 2.0), "temperature must be between 0 and 2"
+        assert max_tokens is None or max_tokens > 0, "max_tokens must be positive"
+        
         model = model or self._default_model
         temperature = self._default_temperature if temperature is None else temperature
         max_tokens = self._default_max_tokens if max_tokens is None else max_tokens
@@ -665,7 +786,7 @@ class LLMProvider(RecommendationMixin, Plugin):
         if use_cache and self._cache is not None:
             cached = self._cache.get(messages, model, tools, temperature)
             if cached is not None:
-                logger.debug("cache hit for model=%s (tools=%s)", model, bool(tools))
+                logger.info("cache hit for model=%s (tools=%s)", model, bool(tools))
                 return cached
 
         # Budget check: if exceeded, auto-downgrade to cheapest free model
@@ -717,8 +838,31 @@ class LLMProvider(RecommendationMixin, Plugin):
                 bare_model = corrected
                 # Rebuild the full model string with provider prefix
                 model = f"{provider}/{bare_model}"
-        except Exception:
-            pass  # Best-effort — fall through to original name
+        except (ValueError, KeyError, httpx.RequestError, httpx.TimeoutException) as exc:
+            logger.warning("auto-heal model name normalization failed for %s: %s", provider, exc, exc_info=True)
+        except Exception as exc:
+            logger.warning("auto-heal model name normalization failed with unexpected error for %s: %s", provider, exc, exc_info=True)
+
+        # --- Circuit breaker check ---
+        # Get or create circuit breaker for this provider
+        if provider not in self._circuit_breakers:
+            self._circuit_breakers[provider] = CircuitBreaker()
+        circuit_breaker = self._circuit_breakers[provider]
+        
+        if not circuit_breaker.can_execute():
+            logger.warning(
+                "Circuit breaker OPEN for provider %s, skipping call",
+                provider
+            )
+            return {
+                "text": f"服务暂时不可用（{provider}），请稍后重试",
+                "tool_calls": [],
+                "tool_calls_raw": [],
+                "tokens_used": 0,
+                "model": model,
+                "failed": True,
+                "circuit_breaker_open": True,
+            }
 
         last_err: Optional[Exception] = None
         for attempt in range(1, self._retry_count + 1):
@@ -728,6 +872,10 @@ class LLMProvider(RecommendationMixin, Plugin):
                     messages=messages, temperature=temperature,
                     max_tokens=max_tokens, tools=tools, provider=provider,
                 )
+                
+                # Record success in circuit breaker
+                circuit_breaker.record_success()
+                
                 # Record cost
                 cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
                 self._cost_total += cost
@@ -745,16 +893,20 @@ class LLMProvider(RecommendationMixin, Plugin):
                             tokens_completion=result.get("tokens_completion", 0),
                         )
                         result["cost_usd"] = cost_tracked
-                    except Exception:
-                        logger.debug("cost_tracker record failed", exc_info=True)
+                    except (ValueError, KeyError, OSError) as exc:
+                        logger.error("cost_tracker record failed: %s", exc, exc_info=True)
 
                 # Store in cache (tools included in key; stateful tools should use use_cache=False)
                 if use_cache and self._cache is not None:
                     self._cache.set(messages, model, tools or [], result, temperature)
 
                 return result
-            except Exception as exc:  # noqa: BLE001
+            except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError, asyncio.TimeoutError, ConnectionError) as exc:
                 last_err = exc
+                
+                # Record failure in circuit breaker
+                circuit_breaker.record_failure()
+                
                 # Classify: non-retryable errors (4xx auth/bad-request) exit
                 # immediately to avoid wasting time on invalid requests.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -788,20 +940,20 @@ class LLMProvider(RecommendationMixin, Plugin):
                                         tokens_completion=result.get("tokens_completion", 0),
                                     )
                                     result["cost_usd"] = cost_tracked
-                                except Exception:
-                                    pass
+                                except (ValueError, KeyError, OSError) as exc:
+                                    logger.error("cost_tracker record failed in retry: %s", exc, exc_info=True)
                             if use_cache and self._cache is not None:
                                 self._cache.set(messages, model, [], result, temperature)
                             return result
-                        except Exception as retry_exc:
+                        except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as retry_exc:
                             retry_status = getattr(getattr(retry_exc, "response", None), "status_code", None)
                             retry_body = ""
                             try:
                                 resp_obj = getattr(retry_exc, "response", None)
                                 if resp_obj and hasattr(resp_obj, "text"):
                                     retry_body = resp_obj.text[:300]
-                            except Exception:
-                                pass
+                            except AttributeError as exc:
+                                logger.error("failed to extract retry response body: %s", exc, exc_info=True)
                             logger.warning("retry without tools also failed: status=%s body=%s", 
                                           retry_status, retry_body)
                             # Last resort: retry with minimal prompt (no system message)
@@ -839,12 +991,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                                                 tokens_completion=result.get("tokens_completion", 0),
                                             )
                                             result["cost_usd"] = cost_tracked
-                                        except Exception:
-                                            pass
+                                        except (ValueError, KeyError, OSError) as exc:
+                                            logger.error("cost_tracker record failed in last resort: %s", exc, exc_info=True)
                                     logger.info("last resort succeeded")
                                     return result
-                                except Exception as last_exc:
-                                    logger.warning("last resort failed: %s", last_exc)
+                                except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as last_exc:
+                                    logger.error("last resort failed: %s", last_exc, exc_info=True)
 
                     # --- Auto-heal: endpoint fallback ---
                     # When we get 403/404, try probing alternative URLs.
@@ -863,8 +1015,8 @@ class LLMProvider(RecommendationMixin, Plugin):
                                 if corrected != bare_model:
                                     bare_model = corrected
                                     model = f"{provider}/{bare_model}"
-                            except Exception:
-                                pass
+                            except (ValueError, KeyError, httpx.RequestError, httpx.TimeoutException) as exc:
+                                logger.error("failed to rebuild model name map after fallback: %s", exc, exc_info=True)
                             # Retry once with the new endpoint
                             try:
                                 result = await self._do_call(
@@ -885,13 +1037,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                                             tokens_completion=result.get("tokens_completion", 0),
                                         )
                                         result["cost_usd"] = cost_tracked
-                                    except Exception:
-                                        pass
+                                    except (ValueError, KeyError, OSError) as exc:
+                                        logger.error("cost_tracker record failed in fallback: %s", exc, exc_info=True)
                                 if use_cache and self._cache is not None:
                                     self._cache.set(messages, model, tools or [], result, temperature)
                                 return result
-                            except Exception:
-                                pass  # Fallback also failed, continue to error path
+                            except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                                logger.error("fallback retry failed: %s", exc, exc_info=True)
                     logger.warning("llm call non-retryable error (status=%s): %s", status, exc)
                     break
                 if attempt < self._retry_count:
@@ -1017,10 +1169,13 @@ class LLMProvider(RecommendationMixin, Plugin):
             except httpx.HTTPStatusError as exc:
                 yield {"delta": "", "done": True, "error": f"stream error: {exc.response.status_code}"}
                 return
-            except (httpx.RequestError, httpx.TimeoutException, Exception) as exc:
-                logger.warning("stream error for anthropic %s: %s", bare_model, exc)
+            except (httpx.RequestError, httpx.TimeoutException) as exc:
+                logger.error("stream error for anthropic %s: %s", bare_model, exc, exc_info=True)
                 yield {"delta": "", "done": True, "error": str(exc)}
                 return
+            except Exception as exc:
+                logger.error("stream error for anthropic %s with unexpected error: %s", bare_model, exc, exc_info=True)
+                raise
         else:
             # Default — OpenAI-compatible
             payload = {
@@ -1074,10 +1229,13 @@ class LLMProvider(RecommendationMixin, Plugin):
             except httpx.HTTPStatusError as exc:
                 yield {"delta": "", "done": True, "error": f"stream error: {exc.response.status_code}"}
                 return
-            except (httpx.RequestError, httpx.TimeoutException, Exception) as exc:
-                logger.warning("stream error for %s/%s: %s", provider, bare_model, exc)
+            except (httpx.RequestError, httpx.TimeoutException) as exc:
+                logger.error("stream error for %s/%s: %s", provider, bare_model, exc, exc_info=True)
                 yield {"delta": "", "done": True, "error": str(exc)}
                 return
+            except Exception as exc:
+                logger.error("stream error for %s/%s with unexpected error: %s", provider, bare_model, exc, exc_info=True)
+                raise
 
     def stats(self) -> Dict[str, Any]:
         total = len(self._call_stats)
@@ -1190,8 +1348,8 @@ class LLMProvider(RecommendationMixin, Plugin):
             }
             self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
             # Cap stats to prevent unbounded memory growth
-            if len(self._call_stats) > 1000:
-                self._call_stats = self._call_stats[-500:]
+            if len(self._call_stats) > MAX_CALL_STATS_SIZE:
+                self._call_stats = self._call_stats[-CALL_STATS_TRIM_SIZE:]
             return result
 
         # Default — OpenAI compatible
@@ -1234,8 +1392,8 @@ class LLMProvider(RecommendationMixin, Plugin):
         tokens_completion = usage.get("completion_tokens", 0)
         self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
         # Cap stats to prevent unbounded memory growth
-        if len(self._call_stats) > 1000:
-            self._call_stats = self._call_stats[-500:]
+        if len(self._call_stats) > MAX_CALL_STATS_SIZE:
+            self._call_stats = self._call_stats[-CALL_STATS_TRIM_SIZE:]
         return {
             "text": text.strip(),
             "tool_calls": tool_calls,

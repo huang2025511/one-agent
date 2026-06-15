@@ -26,6 +26,12 @@ from models.tiers import MODEL_TIERS
 
 logger = logging.getLogger(__name__)
 
+# Default complexity thresholds for task classification
+DEFAULT_TRIVIAL_THRESHOLD = 0.2
+DEFAULT_SIMPLE_THRESHOLD = 0.5
+DEFAULT_COMPLEX_THRESHOLD = 0.8
+MAX_COMPLEXITY = 100
+
 
 _KEYWORDS_BY_TIER = {
     "trivial": re.compile(
@@ -70,6 +76,7 @@ class SmartRouter(Plugin):
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         self._cfg = ctx.config.get("router", {}) or {}
+        assert self._cfg is not None, "Router configuration must be initialized"
         # LLM will be bound via bind_llm() call in OneAgentApp.start()
         self._session_history: Dict[str, Any] = {}
         self._max_sessions = 500  # cap total sessions to prevent unbounded growth
@@ -142,7 +149,11 @@ class SmartRouter(Plugin):
         sid = turn.session_id
         hist = self._session_history.setdefault(sid, [])
         hist.append({"input": turn.input_text, "reply": turn.result})
-        self._session_history[sid] = hist[-20:]
+        # Bounds check: ensure we don't keep more than 20 entries
+        if len(hist) > 20:
+            self._session_history[sid] = hist[-20:]
+        else:
+            self._session_history[sid] = hist
         # global cap: evict oldest session when total exceeds limit
         if len(self._session_history) > self._max_sessions:
             oldest_key = next(iter(self._session_history))
@@ -184,11 +195,11 @@ class SmartRouter(Plugin):
 
     def _tier_for_complexity(self, c: float) -> str:
         thresholds = self._cfg.get("task_complexity_thresholds", {}) or {}
-        if c < thresholds.get("trivial", 0.2):
+        if c < thresholds.get("trivial", DEFAULT_TRIVIAL_THRESHOLD):
             return "trivial"
-        if c < thresholds.get("simple", 0.5):
+        if c < thresholds.get("simple", DEFAULT_SIMPLE_THRESHOLD):
             return "simple"
-        if c < thresholds.get("complex", 0.8):
+        if c < thresholds.get("complex", DEFAULT_COMPLEX_THRESHOLD):
             return "complex"
         return "expert"
 
@@ -201,9 +212,9 @@ class SmartRouter(Plugin):
         """
         thresholds = self._cfg.setdefault("task_complexity_thresholds", {})
         # Ensure defaults exist
-        thresholds.setdefault("trivial", 0.2)
-        thresholds.setdefault("simple", 0.5)
-        thresholds.setdefault("complex", 0.8)
+        thresholds.setdefault("trivial", DEFAULT_TRIVIAL_THRESHOLD)
+        thresholds.setdefault("simple", DEFAULT_SIMPLE_THRESHOLD)
+        thresholds.setdefault("complex", DEFAULT_COMPLEX_THRESHOLD)
 
         # Analyse recent history (last 200 turns) for failure rates per tier
         recent = self._history[-200:]

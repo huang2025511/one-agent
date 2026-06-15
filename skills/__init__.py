@@ -18,10 +18,11 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from core.events import Event
 from core.plugin import Plugin
+from core.exceptions import SkillExecutionError, InputValidationError
 
 from .document_search import DocumentStore
 from multimodal import make_transcribe_handler, make_image_handler
@@ -33,6 +34,11 @@ logger = logging.getLogger(__name__)
 # Module-level singleton — shared between skill handler and API
 _doc_store = DocumentStore()
 
+__all__ = [
+    "Skill",
+    "SkillManager",
+]
+
 
 class Skill:
     """Single-responsibility skill wrapper.
@@ -41,8 +47,15 @@ class Skill:
     Python callables or shell commands declared in the skill's header.
     """
 
-    def __init__(self, id: str, title: str, description: str, schema: Dict[str, Any],
-                 handler, directory: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        id: str,
+        title: str,
+        description: str,
+        schema: Dict[str, Any],
+        handler: Callable[[Dict[str, Any]], Any],
+        directory: Optional[str] = None,
+    ) -> None:
         self.id = id
         self.title = title
         self.description = description
@@ -56,9 +69,36 @@ class Skill:
         self.uses += 1
         self.last_used = time.time()
         try:
+            # Validate args before execution
+            self._validate_args(args)
             return await self.handler(args)
-        except Exception as exc:  # noqa: BLE001
+        except (ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
+            logger.error("skill %s execution failed: %s", self.id, exc, exc_info=True)
             return f"[skill:{self.id} error] {exc}"
+        except InputValidationError as exc:
+            logger.warning("skill %s input validation failed: %s", self.id, exc)
+            return f"[skill:{self.id} validation error] {exc}"
+        except Exception as exc:
+            logger.error("skill %s execution failed with unexpected error: %s", self.id, exc, exc_info=True)
+            raise
+
+    def _validate_args(self, args: Dict[str, Any]) -> None:
+        """Validate skill arguments against schema."""
+        if not isinstance(args, dict):
+            raise InputValidationError("Arguments must be a dictionary")
+        
+        # Check required parameters
+        required = self.schema.get("function", {}).get("parameters", {}).get("required", [])
+        for param in required:
+            if param not in args or args[param] is None:
+                raise InputValidationError(f"Missing required parameter: {param}")
+        
+        # Validate string parameters length
+        properties = self.schema.get("function", {}).get("parameters", {}).get("properties", {})
+        for key, value in args.items():
+            if key in properties and properties[key].get("type") == "string":
+                if isinstance(value, str) and len(value) > 10000:
+                    raise InputValidationError(f"Parameter '{key}' too long (max 10000 characters)")
 
 
 class SkillManager(Plugin):
@@ -153,8 +193,11 @@ class SkillManager(Plugin):
                 skill = self._parse_markdown_skill(path, body)
                 if skill is not None:
                     self._skills[skill.id] = skill
-            except Exception:
-                logger.exception("failed to load %s", path)
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.error("failed to load %s: %s", path, exc, exc_info=True)
+            except Exception as exc:
+                logger.error("failed to load %s with unexpected error: %s", path, exc, exc_info=True)
+                raise
 
     def _parse_markdown_skill(self, path: Path, body: str) -> Optional[Skill]:
         # Expect a YAML front-matter block at the top:
@@ -270,7 +313,8 @@ class SkillManager(Plugin):
             try:
                 tree = ast.parse(expr, mode="eval")
                 return str(_eval(tree.body))
-            except Exception as exc:  # noqa: BLE001
+            except (ValueError, TypeError, SyntaxError) as exc:
+                logger.error("math expression evaluation failed: %s", exc, exc_info=True)
                 return f"[math error: {exc}]"
         self.register(Skill(
             id="calc", title="Calculator",
@@ -734,12 +778,15 @@ def _get_nested(d: dict, path: str, default=None):
 def _set_nested(d: dict, path: str, value) -> None:
     """按点分隔路径设置嵌套字典值。"""
     keys = path.split(".")
+    if not keys:
+        raise ValueError("Path cannot be empty")
     current = d
     for k in keys[:-1]:
         if k not in current or not isinstance(current[k], dict):
             current[k] = {}
         current = current[k]
-    current[keys[-1]] = value
+    if keys[-1]:
+        current[keys[-1]] = value
 
 
 def _parse_bool_value(text: str) -> Optional[bool]:
@@ -906,7 +953,7 @@ def _save_config(config: dict) -> None:
     lock_path = config_path + ".lock"
     try:
         # Acquire file lock to prevent race conditions
-        lock_fd = open(lock_path, 'w')
+        lock_fd = open(lock_path, "w")
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             
@@ -928,13 +975,13 @@ def _save_config(config: dict) -> None:
             lock_fd.close()
             try:
                 os.unlink(lock_path)
-            except Exception:
-                pass
-    except Exception as exc:
-        logger.warning("保存配置失败: %s", exc)
+            except OSError as exc:
+                logger.error("failed to unlink lock file %s: %s", lock_path, exc, exc_info=True)
+    except (OSError, IOError) as exc:
+        logger.error("保存配置失败: %s", exc, exc_info=True)
         # Clean up temp file on error
         try:
             if 'temp_path' in locals():
                 os.unlink(temp_path)
-        except Exception:
-            pass
+        except OSError as exc2:
+            logger.error("failed to clean up temp file %s: %s", temp_path, exc2, exc_info=True)

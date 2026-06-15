@@ -58,6 +58,11 @@ class TurnContext:
 
     meta: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        """Validate meta field type."""
+        if not isinstance(self.meta, dict):
+            raise ValueError('meta must be a dict')
+
     # ----------------------------------------------------------- convenience
     @property
     def tool_results(self) -> list:

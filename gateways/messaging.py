@@ -23,8 +23,68 @@ from core.plugin import Plugin
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_log_message(msg: str) -> str:
+    """Remove sensitive information from log messages.
+
+    Filters out webhook URLs, tokens, passwords, and other secrets.
+    """
+    import re
+    # Remove webhook URLs with key parameters (e.g. ?key=xxx)
+    msg = re.sub(r'https?://[^\s]*\?key=[a-zA-Z0-9\-]+', 'https://***?key=***', msg)
+    # Remove webhook URLs with access_token parameters
+    msg = re.sub(r'https?://[^\s]*\?access_token=[a-zA-Z0-9\-_\.]+', 'https://***?access_token=***', msg)
+    # Remove any URL with ?key= or &key= query parameters
+    msg = re.sub(r'[?&]key=[a-zA-Z0-9\-_]+', '?key=***', msg)
+    # Remove webhook URLs (contain /webhook/)
+    msg = re.sub(r'https?://[^\s]*webhook[^\s]*', 'https://***webhook***', msg)
+    # Remove bot tokens
+    msg = re.sub(r'bot[_-]?token[=:]\s*["\']?[a-zA-Z0-9:]+["\']?', 'bot_token=***', msg, flags=re.IGNORECASE)
+    # Remove Bearer tokens
+    msg = re.sub(r'Bearer [a-zA-Z0-9\-\.]+', 'Bearer ***', msg)
+    # Remove passwords
+    msg = re.sub(r'password[=:]\s*\S+', 'password=***', msg, flags=re.IGNORECASE)
+    # Remove secret/token query parameters in URLs
+    msg = re.sub(r'[?&](secret|token|access_token|app_secret|client_secret)=[^\s&]+', r'?***=***', msg, flags=re.IGNORECASE)
+    return msg
+
+
+class _SensitiveInfoFilter(logging.Filter):
+    """Automatically filter sensitive information from log messages."""
+    def filter(self, record):
+        if isinstance(record.msg, str):
+            record.msg = _sanitize_log_message(record.msg)
+        if record.args:
+            if isinstance(record.args, tuple):
+                record.args = tuple(_sanitize_log_message(str(arg)) for arg in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: _sanitize_log_message(str(v)) for k, v in record.args.items()}
+        return True
+
+
+logger.addFilter(_SensitiveInfoFilter())
+
+
+class BaseMessagingGateway(Plugin):
+    """Base class for all messaging gateways with common message handling logic."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._sessions: Dict[str, asyncio.Event] = {}
+        self._replies: Dict[str, str] = {}
+
+    async def _on_done(self, event) -> None:
+        """Common message completion handler."""
+        turn = event.get("turn")
+        if turn is None:
+            return
+        sid = turn.session_id
+        if sid in self._sessions:
+            self._replies[sid] = turn.result or f"[error: {turn.error}]"
+            self._sessions[sid].set()
+
+
 # ------------- Telegram ---------------------------------------------------
-class TelegramGateway(Plugin):
+class TelegramGateway(BaseMessagingGateway):
     """Minimal long-poll Telegram bot.  Set TELEGRAM_BOT_TOKEN to use."""
 
     name = "gateway_telegram"
@@ -36,8 +96,6 @@ class TelegramGateway(Plugin):
         self._base = "https://api.telegram.org"
         self._client: Optional[httpx.AsyncClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._sessions: Dict[str, asyncio.Event] = {}
-        self._replies: Dict[str, str] = {}
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -126,18 +184,9 @@ class TelegramGateway(Plugin):
             json={"chat_id": chat_id, "text": text[:4000]},
         )
 
-    async def _on_done(self, event) -> None:
-        turn = event.get("turn")
-        if turn is None:
-            return
-        session_id = turn.session_id
-        if session_id in self._sessions:
-            self._replies[session_id] = turn.result or f"[error: {turn.error}]"
-            self._sessions[session_id].set()
-
 
 # ------------- WeCom (企业微信) -------------------------------------------
-class WeComGateway(Plugin):
+class WeComGateway(BaseMessagingGateway):
     """企业微信机器人网关，支持两种模式：
 
     1. Webhook 模式（群机器人）：只需配置 webhook_key，向群聊推送消息。
@@ -165,8 +214,6 @@ class WeComGateway(Plugin):
         # common
         self._client: Optional[httpx.AsyncClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._sessions: Dict[str, asyncio.Event] = {}
-        self._replies: Dict[str, str] = {}
         self._callback_host: str = "0.0.0.0"
         self._callback_port: int = 18794
 
@@ -401,18 +448,9 @@ class WeComGateway(Plugin):
         msg_len = int.from_bytes(decrypted[16:20], "big")
         return decrypted[20:20 + msg_len].decode("utf-8")
 
-    async def _on_done(self, event) -> None:
-        turn = event.get("turn")
-        if turn is None:
-            return
-        session_id = turn.session_id
-        if session_id in self._sessions:
-            self._replies[session_id] = turn.result or f"[error: {turn.error}]"
-            self._sessions[session_id].set()
-
 
 # ------------- DingTalk (钉钉) -------------------------------------------
-class DingTalkGateway(Plugin):
+class DingTalkGateway(BaseMessagingGateway):
     """钉钉机器人网关，支持两种模式：
 
     1. Webhook 模式（群机器人）：配置 webhook_url + secret，向群聊推送消息。
@@ -435,8 +473,6 @@ class DingTalkGateway(Plugin):
         # common
         self._client: Optional[httpx.AsyncClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._sessions: Dict[str, asyncio.Event] = {}
-        self._replies: Dict[str, str] = {}
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -609,18 +645,9 @@ class DingTalkGateway(Plugin):
                 logger.warning("dingtalk stream error: %s", exc)
                 await asyncio.sleep(5)
 
-    async def _on_done(self, event) -> None:
-        turn = event.get("turn")
-        if turn is None:
-            return
-        sid = turn.session_id
-        if sid in self._sessions:
-            self._replies[sid] = turn.result or f"[error: {turn.error}]"
-            self._sessions[sid].set()
-
 
 # ------------- Feishu / Lark (飞书) ---------------------------------------
-class FeishuGateway(Plugin):
+class FeishuGateway(BaseMessagingGateway):
     """飞书机器人网关，支持两种模式：
 
     1. Webhook 模式（群机器人）：配置 webhook_url + secret，向群聊推送消息。
@@ -645,8 +672,6 @@ class FeishuGateway(Plugin):
         # common
         self._client: Optional[httpx.AsyncClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._sessions: Dict[str, asyncio.Event] = {}
-        self._replies: Dict[str, str] = {}
         self._callback_host: str = "0.0.0.0"
         self._callback_port: int = 18795
 
@@ -832,18 +857,9 @@ class FeishuGateway(Plugin):
         server = uvicorn.Server(config)
         await server.serve()
 
-    async def _on_done(self, event) -> None:
-        turn = event.get("turn")
-        if turn is None:
-            return
-        sid = turn.session_id
-        if sid in self._sessions:
-            self._replies[sid] = turn.result or f"[error: {turn.error}]"
-            self._sessions[sid].set()
-
 
 # ------------- Discord -----------------------------------------------------
-class DiscordGateway(Plugin):
+class DiscordGateway(BaseMessagingGateway):
     """Discord Bot 网关，通过 Gateway WebSocket 长连接接收消息。
 
     使用 Discord Bot Token + httpx 轮询方式实现，无需 discord.py 依赖。
@@ -858,8 +874,6 @@ class DiscordGateway(Plugin):
         self._base = "https://discord.com/api/v10"
         self._client: Optional[httpx.AsyncClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._sessions: Dict[str, asyncio.Event] = {}
-        self._replies: Dict[str, str] = {}
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -975,18 +989,9 @@ class DiscordGateway(Plugin):
         except Exception as exc:
             logger.warning("discord send failed: %s", exc)
 
-    async def _on_done(self, event) -> None:
-        turn = event.get("turn")
-        if turn is None:
-            return
-        sid = turn.session_id
-        if sid in self._sessions:
-            self._replies[sid] = turn.result or f"[error: {turn.error}]"
-            self._sessions[sid].set()
-
 
 # ------------- Slack -------------------------------------------------------
-class SlackGateway(Plugin):
+class SlackGateway(BaseMessagingGateway):
     """Slack Bot 网关，通过 Socket Mode 长连接接收消息。
 
     使用 Slack Web API + httpx 实现，无需 slack-sdk 依赖。
@@ -1002,8 +1007,6 @@ class SlackGateway(Plugin):
         self._base = "https://slack.com/api"
         self._client: Optional[httpx.AsyncClient] = None
         self._task: Optional[asyncio.Task] = None
-        self._sessions: Dict[str, asyncio.Event] = {}
-        self._replies: Dict[str, str] = {}
         self._bot_user_id: str = ""
 
     async def setup(self, ctx) -> None:
@@ -1108,12 +1111,3 @@ class SlackGateway(Plugin):
             )
         except Exception as exc:
             logger.warning("slack send failed: %s", exc)
-
-    async def _on_done(self, event) -> None:
-        turn = event.get("turn")
-        if turn is None:
-            return
-        sid = turn.session_id
-        if sid in self._sessions:
-            self._replies[sid] = turn.result or f"[error: {turn.error}]"
-            self._sessions[sid].set()

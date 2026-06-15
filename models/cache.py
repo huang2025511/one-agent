@@ -26,7 +26,8 @@ class LLMCache:
     """LRU cache with TTL for LLM responses."""
 
     def __init__(self, max_size: int = 500, ttl_seconds: float = 3600) -> None:
-        self._max_size = max_size
+        # Enforce reasonable bounds on cache size to prevent memory issues
+        self._max_size = min(max(max_size, 1), 10000)  # Clamp between 1 and 10000
         self._ttl = ttl_seconds
         self._store: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._hits = 0

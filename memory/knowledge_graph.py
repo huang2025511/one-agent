@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -10,22 +11,18 @@ import time
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from .base_store import BaseSQLiteStore
+
 logger = logging.getLogger(__name__)
 
 
-class KnowledgeGraph:
+class KnowledgeGraph(BaseSQLiteStore):
     """Lightweight entity-relationship graph on SQLite."""
 
     def __init__(self, db_path: str = "data/memory/kg.db"):
-        parent = os.path.dirname(db_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._migrate()
+        super().__init__(db_path)
 
-    def _migrate(self):
+    def _init_db(self):
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS entities (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,27 +44,33 @@ class KnowledgeGraph:
                 FOREIGN KEY (object_id) REFERENCES entities(id)
             );
             CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
+            CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
             CREATE INDEX IF NOT EXISTS idx_relations_subj ON relations(subject_id);
             CREATE INDEX IF NOT EXISTS idx_relations_obj ON relations(object_id);
+            CREATE INDEX IF NOT EXISTS idx_relations_predicate ON relations(predicate);
         """)
         self._conn.commit()
 
     def add_entity(self, name: str, etype: str = "unknown", source: str = "") -> int:
-        """Add or update an entity. Returns entity id."""
-        # Validate entity name to prevent injection attacks
+        """Add or update an entity with validation. Returns entity id."""
+        # Validate entity name
         if not name or not isinstance(name, str):
-            logger.warning("Invalid entity name: %s", name)
-            return -1
+            raise ValueError("Entity name must be a non-empty string")
         
-        # Remove potentially dangerous characters
         name = name.strip()
+        if not name:
+            raise ValueError("Entity name cannot be empty after trimming")
+        
         if len(name) > 200:
-            name = name[:200]
+            raise ValueError("Entity name too long (max 200 chars)")
+        
+        # Validate characters - allow word chars, whitespace, hyphens, dots
+        if not re.match(r'^[\w\s\-\.]+$', name):
+            raise ValueError("Entity name contains invalid characters")
         
         # Block HTML tags and script injection
         if re.search(r'<[^>]*>', name):
-            logger.warning("Entity name contains HTML tags: %s", name)
-            return -1
+            raise ValueError("Entity name contains HTML tags")
         
         # Normalize whitespace
         name = re.sub(r'\s+', ' ', name)
@@ -90,27 +93,42 @@ class KnowledgeGraph:
 
     def add_relation(self, subject: str, predicate: str, obj: str,
                     weight: float = 1.0, source: str = "") -> bool:
-        """Add a relationship between two entities."""
+        """Add a relationship between two entities with transaction support."""
+        # Validate predicate
+        if not predicate or not isinstance(predicate, str):
+            raise ValueError("Predicate must be a non-empty string")
+        predicate = predicate.strip()
+        if len(predicate) > 200:
+            raise ValueError("Predicate too long (max 200 chars)")
+        
+        # Validate weight
+        if not isinstance(weight, (int, float)) or weight < 0:
+            raise ValueError("Weight must be a non-negative number")
+        
         subj_id = self.add_entity(subject, source=source)
         obj_id = self.add_entity(obj, source=source)
 
-        # Check if relation already exists
-        cur = self._conn.execute(
-            "SELECT id FROM relations WHERE subject_id = ? AND predicate = ? AND object_id = ?",
-            (subj_id, predicate, obj_id)
-        )
-        if cur.fetchone():
-            # Update weight
-            self._conn.execute(
-                "UPDATE relations SET weight = weight + ? WHERE subject_id = ? AND predicate = ? AND object_id = ?",
-                (weight, subj_id, predicate, obj_id)
-            )
-        else:
-            self._conn.execute(
-                "INSERT INTO relations (subject_id, predicate, object_id, weight, source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (subj_id, predicate, obj_id, weight, source, time.time())
-            )
-        self._conn.commit()
+        try:
+            with self._conn:  # automatic transaction
+                # Check if relation already exists
+                cur = self._conn.execute(
+                    "SELECT id FROM relations WHERE subject_id = ? AND predicate = ? AND object_id = ?",
+                    (subj_id, predicate, obj_id)
+                )
+                if cur.fetchone():
+                    # Update weight
+                    self._conn.execute(
+                        "UPDATE relations SET weight = weight + ? WHERE subject_id = ? AND predicate = ? AND object_id = ?",
+                        (weight, subj_id, predicate, obj_id)
+                    )
+                else:
+                    self._conn.execute(
+                        "INSERT INTO relations (subject_id, predicate, object_id, weight, source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (subj_id, predicate, obj_id, weight, source, time.time())
+                    )
+        except sqlite3.Error as e:
+            logger.error("Transaction failed in add_relation: %s", e)
+            raise
         return True
 
     def query_entity(self, name: str) -> Optional[Dict[str, Any]]:
@@ -149,6 +167,10 @@ class KnowledgeGraph:
 
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search entities by name (LIKE)."""
+        assert query, "query cannot be empty"
+        assert isinstance(query, str), "query must be a string"
+        assert limit > 0, "limit must be positive"
+        
         cur = self._conn.execute(
             "SELECT * FROM entities WHERE name LIKE ? LIMIT ?",
             (f"%{query}%", limit)
@@ -157,6 +179,10 @@ class KnowledgeGraph:
 
     def get_neighbors(self, name: str, depth: int = 1) -> List[Dict[str, Any]]:
         """Get all entities within N hops of the given entity."""
+        assert name, "name cannot be empty"
+        assert isinstance(name, str), "name must be a string"
+        assert depth > 0, "depth must be positive"
+        
         entity = self.query_entity(name)
         if not entity:
             return []
@@ -188,6 +214,9 @@ class KnowledgeGraph:
 
     def extract_from_text(self, text: str, source: str = "") -> int:
         """Simple rule-based entity extraction from text."""
+        assert text, "text cannot be empty"
+        assert isinstance(text, str), "text must be a string"
+        
         count = 0
 
         # Extract proper nouns (capitalized words, Chinese names)
@@ -218,12 +247,38 @@ class KnowledgeGraph:
             "relations": relation_count,
         }
 
-    def close(self) -> None:
-        """Close the SQLite connection."""
-        try:
-            self._conn.close()
-        except Exception:
-            pass
+    # -------------------------------------------------------- async wrappers
+
+    async def add_entity_async(self, name: str, etype: str = "unknown", source: str = "") -> int:
+        """Async wrapper for add_entity"""
+        return await asyncio.to_thread(self.add_entity, name, etype, source)
+
+    async def add_relation_async(
+        self, subject: str, predicate: str, obj: str,
+        weight: float = 1.0, source: str = ""
+    ) -> bool:
+        """Async wrapper for add_relation"""
+        return await asyncio.to_thread(self.add_relation, subject, predicate, obj, weight, source)
+
+    async def query_entity_async(self, name: str) -> Optional[Dict[str, Any]]:
+        """Async wrapper for query_entity"""
+        return await asyncio.to_thread(self.query_entity, name)
+
+    async def search_async(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Async wrapper for search"""
+        return await asyncio.to_thread(self.search, query, limit)
+
+    async def get_neighbors_async(self, name: str, depth: int = 1) -> List[Dict[str, Any]]:
+        """Async wrapper for get_neighbors"""
+        return await asyncio.to_thread(self.get_neighbors, name, depth)
+
+    async def extract_from_text_async(self, text: str, source: str = "") -> int:
+        """Async wrapper for extract_from_text"""
+        return await asyncio.to_thread(self.extract_from_text, text, source)
+
+    async def stats_async(self) -> Dict[str, Any]:
+        """Async wrapper for stats"""
+        return await asyncio.to_thread(self.stats)
 
 
 # ------------------------------------------------------------------ skill handler factory

@@ -33,9 +33,63 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.plugin import Plugin
+from core.exceptions import InputValidationError
 from i18n import _
 
 logger = logging.getLogger(__name__)
+
+# API configuration constants
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 18792
+DEFAULT_RATE_LIMIT = 60
+MAX_CHAT_BODY_SIZE = 64 * 1024  # 64 KB
+MAX_CHAT_TEXT_LENGTH = 10000
+
+
+def _sanitize_log_message(msg: str) -> str:
+    """Remove sensitive information from log messages.
+
+    Filters out API keys, bearer tokens, passwords, and other secrets.
+    """
+    import re
+    # Remove OpenAI-style API keys (sk-...)
+    msg = re.sub(r'sk-[a-zA-Z0-9]{20,}', '***', msg)
+    # Remove Bearer tokens
+    msg = re.sub(r'Bearer [a-zA-Z0-9\-\.]+', 'Bearer ***', msg)
+    # Remove Anthropic-style API keys (sk-ant-...)
+    msg = re.sub(r'sk-ant-[a-zA-Z0-9\-]+', '***', msg)
+    # Remove generic API key patterns
+    msg = re.sub(r'api[_-]?key[=:]\s*["\']?[a-zA-Z0-9]{20,}["\']?', 'api_key=***', msg, flags=re.IGNORECASE)
+    # Remove passwords
+    msg = re.sub(r'password[=:]\s*\S+', 'password=***', msg, flags=re.IGNORECASE)
+    return msg
+
+
+class _SensitiveInfoFilter(logging.Filter):
+    """Automatically filter sensitive information from log messages."""
+    def filter(self, record):
+        if isinstance(record.msg, str):
+            record.msg = _sanitize_log_message(record.msg)
+        if record.args:
+            if isinstance(record.args, tuple):
+                record.args = tuple(_sanitize_log_message(str(arg)) for arg in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: _sanitize_log_message(str(v)) for k, v in record.args.items()}
+        return True
+
+
+logger.addFilter(_SensitiveInfoFilter())
+
+
+def _validate_chat_text(text: str) -> str:
+    """Validate chat text input: max 10000 chars, cannot be empty/whitespace."""
+    if not isinstance(text, str):
+        raise InputValidationError("Text must be a string")
+    if not text.strip():
+        raise InputValidationError("Text cannot be empty")
+    if len(text) > MAX_CHAT_TEXT_LENGTH:
+        raise InputValidationError(f"Text too long (max {MAX_CHAT_TEXT_LENGTH} characters)")
+    return text
 
 
 def _mask_api_key(key: str) -> str:
@@ -60,8 +114,8 @@ class RESTAPIGateway(Plugin):
 
     def __init__(self) -> None:
         super().__init__()
-        self._host = "0.0.0.0"
-        self._port = 18792
+        self._host = DEFAULT_HOST
+        self._port = DEFAULT_PORT
         self._enabled = True
         self._task = None
         self._app = None
@@ -72,10 +126,10 @@ class RESTAPIGateway(Plugin):
         # mode auto-reload).  Format: {ip: [timestamp, ...]}
         self._rate_buckets: Dict[str, list] = {}
         # Default rate limit (overridden in setup() from config)
-        self._rate_limit = 60
+        self._rate_limit = DEFAULT_RATE_LIMIT
         # Max accepted chat request body size (bytes) — protects the
         # server from a single client streaming gigabytes of input.
-        self._max_chat_bytes = 64 * 1024  # 64 KB
+        self._max_chat_bytes = MAX_CHAT_BODY_SIZE
         # CORS: default to localhost only for security; setup() reads config to
         # allow additional origins for production deployments.
         self._cors_origins: List[str] = ["http://localhost", "http://127.0.0.1"]
@@ -177,6 +231,44 @@ class RESTAPIGateway(Plugin):
         def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
             if self._api_key and x_api_key != self._api_key:
                 raise HTTPException(401, _("invalid_api_key"))
+
+        # ---------------------------------------------------------------- Health & Readiness
+        _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
+
+        @app.get("/health")
+        async def health_check():
+            """Basic health check - service is alive"""
+            return {
+                "status": "healthy",
+                "timestamp": time.time(),
+                "version": "2.1"
+            }
+
+        @app.get("/ready")
+        async def readiness_check():
+            """Readiness check - service can handle requests"""
+            def _check_database():
+                """Check database connectivity."""
+                try:
+                    _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+                    if _session_store:
+                        _session_store.get_session_count()
+                        return True
+                except Exception:
+                    pass
+                return False
+            
+            checks = {
+                "database": _check_database(),
+                "llm_configured": bool(_ctx.config.get("api_keys", {}).get("sensenova")) if _ctx else False,
+                "memory_available": _memory_plugin is not None,
+            }
+            all_ok = all(checks.values())
+            return {
+                "status": "ready" if all_ok else "not_ready",
+                "checks": checks,
+                "timestamp": time.time()
+            }
 
         @app.get("/api/health")
         async def health():
@@ -349,6 +441,12 @@ class RESTAPIGateway(Plugin):
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
             
+            # Validate text input
+            try:
+                _validate_chat_text(text)
+            except InputValidationError as exc:
+                raise HTTPException(400, str(exc))
+            
             # Auto-detect language from user input
             if text:
                 from i18n import detect_language, set_language, get_language
@@ -358,7 +456,7 @@ class RESTAPIGateway(Plugin):
                     set_language(detected_lang)
                     # Sanitize language value to prevent log injection
                     safe_lang = str(detected_lang).replace('\n', '\\n').replace('\r', '\\r')
-                    logger.info(f"Auto-detected language: {safe_lang} from API request")
+                    logger.info("Auto-detected language: %s from API request", safe_lang)
                     # Persist language preference to config
                     if _ctx:
                         try:
@@ -389,6 +487,12 @@ class RESTAPIGateway(Plugin):
             temperature = body.get("temperature")
             max_tokens = body.get("max_tokens")
             tools = body.get("tools")
+
+            # Validate text input
+            try:
+                _validate_chat_text(text)
+            except InputValidationError as exc:
+                raise HTTPException(400, str(exc))
 
             # Auto-detect language from user input
             if text:
@@ -1014,13 +1118,31 @@ class RESTAPIGateway(Plugin):
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):
             from starlette.exceptions import HTTPException as StarletteHTTPException
+            from core.exceptions import OneAgentError, InputValidationError, SecurityError
+            
             if isinstance(exc, StarletteHTTPException):
-                # Return proper HTTP response instead of re-raising so uvicorn
-                # doesn't interfere with the exception propagation.
                 return JSONResponse(
                     {"detail": exc.detail},
                     status_code=getattr(exc, "status_code", 500),
                 )
+            # Handle custom One-Agent exceptions
+            if isinstance(exc, InputValidationError):
+                return JSONResponse(
+                    {"error": f"validation_error: {str(exc)}"},
+                    status_code=400,
+                )
+            if isinstance(exc, SecurityError):
+                return JSONResponse(
+                    {"error": f"security_error: {str(exc)}"},
+                    status_code=403,
+                )
+            if isinstance(exc, OneAgentError):
+                logger.exception("one-agent error: %s", exc)
+                return JSONResponse(
+                    {"error": f"agent_error: {str(exc)}"},
+                    status_code=500,
+                )
+            # Generic exception handler
             logger.exception("api error: %s", exc)
             return JSONResponse({"error": _("internal_error")}, status_code=500)
 
