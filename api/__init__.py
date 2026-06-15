@@ -38,6 +38,13 @@ from i18n import _
 logger = logging.getLogger(__name__)
 
 
+def _mask_api_key(key: str) -> str:
+    """Mask API key for safe logging. Show only first 4 and last 4 chars."""
+    if not key or len(key) <= 8:
+        return "***"
+    return f"{key[:4]}...{key[-4:]}"
+
+
 def _check_auth(api_key: Optional[str], required_key: str) -> bool:
     """Compare API keys using constant-time comparison to prevent timing attacks."""
     if not required_key:
@@ -69,9 +76,9 @@ class RESTAPIGateway(Plugin):
         # Max accepted chat request body size (bytes) — protects the
         # server from a single client streaming gigabytes of input.
         self._max_chat_bytes = 64 * 1024  # 64 KB
-        # CORS: default to wildcard in dev; setup() reads config to
-        # restrict to a real origin list for production deployments.
-        self._cors_origins: List[str] = ["*"]
+        # CORS: default to localhost only for security; setup() reads config to
+        # allow additional origins for production deployments.
+        self._cors_origins: List[str] = ["http://localhost", "http://127.0.0.1"]
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -88,7 +95,7 @@ class RESTAPIGateway(Plugin):
         # to a wildcard when no origins are configured (developer mode).
         self._cors_origins = cfg.get("cors_origins") or ["*"]
         logger.info("REST API configured on %s:%s auth=%s rate_limit=%d/min max_chat=%dB cors=%s",
-                    self._host, self._port, bool(self._api_key),
+                    self._host, self._port, _mask_api_key(self._api_key),
                     self._rate_limit, self._max_chat_bytes, self._cors_origins)
 
     def bind_callback(self, cb) -> None:
@@ -123,7 +130,16 @@ class RESTAPIGateway(Plugin):
 
         @app.middleware("http")
         async def rate_limit_middleware(request, call_next):
-            ip = request.client.host if request.client else "unknown"
+            # Get real client IP from X-Forwarded-For header (if behind reverse proxy)
+            # or fall back to request.client.host
+            forwarded_for = request.headers.get("X-Forwarded-For")
+            if forwarded_for:
+                # X-Forwarded-For can contain multiple IPs: client, proxy1, proxy2
+                # Take the first one (original client)
+                ip = forwarded_for.split(",")[0].strip()
+            else:
+                ip = request.client.host if request.client else "unknown"
+            
             now = time.time()
             bucket = self._rate_buckets.setdefault(ip, [])
             # evict entries older than 60s
@@ -340,7 +356,9 @@ class RESTAPIGateway(Plugin):
                 current_lang = get_language()
                 if detected_lang != current_lang:
                     set_language(detected_lang)
-                    logger.info(f"Auto-detected language: {detected_lang} from API request")
+                    # Sanitize language value to prevent log injection
+                    safe_lang = str(detected_lang).replace('\n', '\\n').replace('\r', '\\r')
+                    logger.info(f"Auto-detected language: {safe_lang} from API request")
                     # Persist language preference to config
                     if _ctx:
                         try:
@@ -482,8 +500,17 @@ class RESTAPIGateway(Plugin):
             mp = getattr(_ctx, "marketplace", None) if _ctx else None
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
+            
+            # Security: restrict target_dir to prevent path traversal
             if not target_dir:
                 target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
+            else:
+                # Validate path is within allowed directory
+                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
+                target_real = os.path.realpath(target_dir)
+                if not target_real.startswith(allowed_base):
+                    raise HTTPException(403, "target_dir must be within skills directory")
+            
             ok = mp.install(name, target_dir)
             if not ok:
                 raise HTTPException(404, _("skill_not_found", name=name))
@@ -499,8 +526,17 @@ class RESTAPIGateway(Plugin):
             mp = getattr(_ctx, "marketplace", None) if _ctx else None
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
+            
+            # Security: restrict target_dir to prevent path traversal
             if not target_dir:
                 target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
+            else:
+                # Validate path is within allowed directory
+                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
+                target_real = os.path.realpath(target_dir)
+                if not target_real.startswith(allowed_base):
+                    raise HTTPException(403, "target_dir must be within skills directory")
+            
             ok = mp.uninstall(name, target_dir)
             if not ok:
                 raise HTTPException(404, _("skill_not_found", name=name))
@@ -741,6 +777,9 @@ class RESTAPIGateway(Plugin):
         async def config_backup_get(filename: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get backup content."""
             auth(x_api_key)
+            # Validate filename to prevent path traversal
+            if not filename or '/' in filename or '\\' in filename or '..' in filename:
+                raise HTTPException(400, "invalid_filename")
             import os
             from config_backup import ConfigBackupManager
             cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
@@ -754,6 +793,9 @@ class RESTAPIGateway(Plugin):
         async def config_backup_delete(filename: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Delete a config backup."""
             auth(x_api_key)
+            # Validate filename to prevent path traversal
+            if not filename or '/' in filename or '\\' in filename or '..' in filename:
+                raise HTTPException(400, "invalid_filename")
             import os
             from config_backup import ConfigBackupManager
             cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
@@ -769,6 +811,7 @@ class RESTAPIGateway(Plugin):
                                   x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             from skills import _doc_store
+            
             if file is not None:
                 import tempfile
                 import shutil
@@ -780,9 +823,22 @@ class RESTAPIGateway(Plugin):
                 finally:
                     os.unlink(tmp_path)
                 return {"ingested": True, "name": file.filename, "chunks": count}
+            
             if path:
-                count = _doc_store.ingest_file(path)
-                return {"ingested": True, "name": Path(path).name, "chunks": count}
+                # Security: restrict path to data/documents directory only
+                import os.path
+                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "documents"))
+                path_real = os.path.realpath(path)
+                if not path_real.startswith(allowed_base):
+                    raise HTTPException(403, "path must be within data/documents directory")
+                
+                # Also check file exists and is a regular file
+                if not os.path.isfile(path_real):
+                    raise HTTPException(404, "file not found")
+                
+                count = _doc_store.ingest_file(path_real)
+                return {"ingested": True, "name": Path(path_real).name, "chunks": count}
+            
             raise HTTPException(400, _("need_file_or_path"))
 
         @app.get("/api/documents")

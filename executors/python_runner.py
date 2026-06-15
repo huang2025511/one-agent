@@ -36,7 +36,7 @@ _SAFE_IMPORTS = {
     "math",
     "random",
     "datetime",
-    "time",
+    # "time",  # Removed: time.sleep() can be used for DoS attacks
     "collections",
     "itertools",
     "functools",

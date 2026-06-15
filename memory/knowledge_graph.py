@@ -54,6 +54,24 @@ class KnowledgeGraph:
 
     def add_entity(self, name: str, etype: str = "unknown", source: str = "") -> int:
         """Add or update an entity. Returns entity id."""
+        # Validate entity name to prevent injection attacks
+        if not name or not isinstance(name, str):
+            logger.warning("Invalid entity name: %s", name)
+            return -1
+        
+        # Remove potentially dangerous characters
+        name = name.strip()
+        if len(name) > 200:
+            name = name[:200]
+        
+        # Block HTML tags and script injection
+        if re.search(r'<[^>]*>', name):
+            logger.warning("Entity name contains HTML tags: %s", name)
+            return -1
+        
+        # Normalize whitespace
+        name = re.sub(r'\s+', ' ', name)
+        
         now = time.time()
         cur = self._conn.execute("SELECT id FROM entities WHERE name = ?", (name,))
         row = cur.fetchone()

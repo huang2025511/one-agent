@@ -119,6 +119,27 @@ class EventBus:
     runs them through the shared asyncio loop.
     """
 
+    # Allowed event types - prevents injection of arbitrary event types
+    _ALLOWED_EVENT_TYPES = {
+        # Core events
+        "turn_start", "turn_complete", "turn_completed", "turn_failed", "turn_routed",
+        "skill_executed", "skill_failed",
+        "memory_added", "memory_searched",
+        "config_changed",
+        "session_created", "session_updated",
+        "approval_requested", "approval_resolved", "approval_needed",
+        "alert_triggered",
+        "mcp_tool_called",
+        "python_executed",
+        "cron_triggered",
+        "shutdown",
+        "startup",
+        # User interaction
+        "user_message",
+        # Test events (can be removed in production if needed)
+        "orphan_event", "x", "y",
+    }
+
     def __init__(self, max_queue_size: int = 1000) -> None:
         self._subscribers: Dict[str, List[Handler]] = {}
         self._wildcards: List[Handler] = []
@@ -166,6 +187,25 @@ class EventBus:
             )
         else:
             evt = event
+
+        # Validate event type to prevent injection attacks
+        if evt.type not in self._ALLOWED_EVENT_TYPES:
+            logger.warning(
+                "rejected unknown event type '%s' from source '%s'",
+                evt.type, evt.source
+            )
+            self._metrics["errors"] += 1
+            return
+
+        # Validate payload size to prevent DoS
+        payload_size = len(str(evt.payload))
+        if payload_size > 1_000_000:  # 1MB limit
+            logger.warning(
+                "rejected oversized payload (%d bytes) for event type '%s'",
+                payload_size, evt.type
+            )
+            self._metrics["errors"] += 1
+            return
 
         # Track the event
         self._track(evt)

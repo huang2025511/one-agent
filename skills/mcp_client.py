@@ -28,6 +28,26 @@ class MCPServer:
     """单个 MCP 服务器连接。"""
     
     def __init__(self, name: str, url: str, api_key: Optional[str] = None):
+        # Security: Validate URL to prevent SSRF attacks
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            raise ValueError(f"Invalid URL scheme: {parsed.scheme}. Only http/https allowed.")
+        
+        # Block private/internal IPs to prevent SSRF
+        hostname = parsed.hostname
+        if hostname:
+            import socket
+            try:
+                ip = socket.gethostbyname(hostname)
+                # Block private IP ranges
+                if (ip.startswith('10.') or 
+                    ip.startswith('172.16.') or ip.startswith('172.31.') or
+                    ip.startswith('192.168.') or 
+                    ip.startswith('127.') or ip == 'localhost'):
+                    raise ValueError(f"Private/internal IP not allowed: {ip}")
+            except socket.gaierror:
+                pass  # DNS resolution failed, will fail on connect anyway
+        
         self.name = name
         self.url = url
         self.api_key = api_key

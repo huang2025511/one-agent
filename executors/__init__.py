@@ -40,7 +40,8 @@ ALLOWED_PATTERNS = {
     # git: safe read-only operations only
     "git": r"^git\s+(clone|pull|status|log|diff|show|ls-files|rev-parse)\s+[\w./:@#-]+$",
     # curl: fetch remote content (no file upload / POST data with secrets)
-    "curl": r"^curl\s+(-[sSLIo]|--silent|--show-error|--location)?\s*https?://[\w./:@\-_?=&]+(?:/[\w./:@\-_?=&-]+)*(\?[\w=&]+)?$",
+    # Removed -o (file write), -I (header leak), -O (remote name write) for security
+    "curl": r"^curl\s+(-[sSL]|--silent|--show-error|--location)?\s*https?://[\w./:@\-_?=&]+(?:/[\w./:@\-_?=&-]+)*(\?[\w=&]+)?$",
     # ls / cat / grep / find: safe read operations
     "ls": r"^ls(\s+(-l|-a|-R|--color=auto)[\w./-]*)*\s+[\w./-]*$",
     "cat": r"^cat\s+[\w./-]+$",

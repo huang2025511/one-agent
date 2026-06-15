@@ -28,6 +28,40 @@ from .embeddings import EmbeddingStore  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
+def _escape_fts5_query(query: str) -> str:
+    """Escape FTS5 special characters to prevent injection attacks.
+    
+    FTS5 special characters: * ? " ( ) : ^ + - AND OR NOT NEAR
+    We escape them by wrapping in double quotes or using backslash.
+    """
+    # Remove or escape FTS5 operators
+    # First, handle quoted phrases (preserve them)
+    if '"' in query:
+        # If user already quoted, validate and use as-is
+        # Count quotes to ensure they're balanced
+        if query.count('"') % 2 == 0:
+            return query
+    
+    # Escape special characters for FTS5
+    # Replace operators with spaces to neutralize them
+    fts5_operators = [' AND ', ' OR ', ' NOT ', ' NEAR ', ' NEAR/']
+    result = query
+    for op in fts5_operators:
+        result = result.replace(op, ' ')
+    
+    # Escape individual special characters
+    # FTS5 special chars: * ? " ( ) : ^ + -
+    special_chars = ['*', '?', '"', '(', ')', ':', '^', '+', '-']
+    for char in special_chars:
+        result = result.replace(char, f'\\{char}')
+    
+    # Limit query length to prevent DoS
+    if len(result) > 500:
+        result = result[:500]
+    
+    return result
+
+
 # ---------- tier 2: long-term memory (cross-session FTS) ------------------
 class LongTermMemory:
     """FTS5-backed store with pagination and weight decay."""
@@ -107,6 +141,9 @@ class LongTermMemory:
         is done by passing limit=1 to discover any match).  Callers
         should set ``limit=1`` for a boolean "does it match?" check.
         """
+        # Escape FTS5 special characters to prevent injection attacks
+        query = _escape_fts5_query(query)
+        
         c = self._conn.cursor()
         try:
             # FTS5 rank(): bm25 returns negative values; more negative = more relevant.

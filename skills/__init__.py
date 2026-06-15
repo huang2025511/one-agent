@@ -898,24 +898,38 @@ def _process_settings_command(input_text: str, config: dict) -> str:
 
 
 def _save_config(config: dict) -> None:
-    """将配置写回 YAML 文件（原子写入）。"""
+    """将配置写回 YAML 文件（原子写入，带文件锁）。"""
     import yaml
     import tempfile
+    import fcntl
     config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+    lock_path = config_path + ".lock"
     try:
-        # Write to temp file first, then atomically rename
-        dir_name = os.path.dirname(config_path) or "."
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            suffix=".yaml",
-            dir=dir_name,
-            delete=False,
-        ) as f:
-            yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-            temp_path = f.name
-        # Atomic rename
-        os.replace(temp_path, config_path)
+        # Acquire file lock to prevent race conditions
+        lock_fd = open(lock_path, 'w')
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            
+            # Write to temp file first, then atomically rename
+            dir_name = os.path.dirname(config_path) or "."
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".yaml",
+                dir=dir_name,
+                delete=False,
+            ) as f:
+                yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                temp_path = f.name
+            # Atomic rename
+            os.replace(temp_path, config_path)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+            try:
+                os.unlink(lock_path)
+            except Exception:
+                pass
     except Exception as exc:
         logger.warning("保存配置失败: %s", exc)
         # Clean up temp file on error
