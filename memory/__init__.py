@@ -71,6 +71,8 @@ class LongTermMemory:
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
+            # Set busy timeout to wait up to 5 seconds for locks
+            self._conn.execute("PRAGMA busy_timeout=5000")
         except sqlite3.DatabaseError:
             pass
         self._decay_enabled = decay_enabled
@@ -95,39 +97,60 @@ class LongTermMemory:
         self._conn.commit()
 
     def add(self, content: str, source: str = "user", tags: str = "", weight: float = 1.0) -> None:
+        """Add a memory entry with retry logic for transient lock errors."""
         c = self._conn.cursor()
         # Cache the column-presence check so we don't run PRAGMA on every
         # insert.  The schema is fixed for the lifetime of the connection
         # (no ALTER TABLE happens in this codebase), so caching is safe.
         # Wrap in a transaction so the schema check and insert are atomic
         # (autocommit mode would otherwise interleave them).
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            if self._has_weight_col is None:
-                try:
-                    # Use a separate cursor for schema check to avoid state issues
-                    schema_cursor = self._conn.cursor()
-                    schema_cursor.execute("PRAGMA table_info(memory)")
-                    self._has_weight_col = "weight" in {row[1] for row in schema_cursor.fetchall()}
-                    schema_cursor.close()
-                except sqlite3.DatabaseError:
-                    self._has_weight_col = False
-            if self._has_weight_col:
-                c.execute(
-                    "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
-                    (content, source, tags, time.time(), weight),
-                )
-            else:
-                c.execute(
-                    "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
-                    (content, source, tags, time.time()),
-                )
-            self._conn.commit()
-        except sqlite3.Error as exc:
-            self._conn.rollback()
-            logger.error("memory add failed: %s", exc)
-        finally:
-            c.close()
+        
+        # Retry logic for "database is locked" errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                if self._has_weight_col is None:
+                    try:
+                        # Use a separate cursor for schema check to avoid state issues
+                        schema_cursor = self._conn.cursor()
+                        schema_cursor.execute("PRAGMA table_info(memory)")
+                        self._has_weight_col = "weight" in {row[1] for row in schema_cursor.fetchall()}
+                        schema_cursor.close()
+                    except sqlite3.DatabaseError:
+                        self._has_weight_col = False
+                if self._has_weight_col:
+                    c.execute(
+                        "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
+                        (content, source, tags, time.time(), weight),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
+                        (content, source, tags, time.time()),
+                    )
+                self._conn.commit()
+                break  # Success
+            except sqlite3.OperationalError as exc:
+                self._conn.rollback()
+                if "locked" in str(exc).lower() and attempt < max_retries - 1:
+                    import time as time_module
+                    delay = min(0.01 * (2 ** attempt), 0.1)  # 10ms, 20ms, 40ms
+                    logger.warning(
+                        "memory add: database locked (attempt %d/%d), retrying in %.0fms: %s",
+                        attempt + 1, max_retries, delay * 1000, exc
+                    )
+                    time_module.sleep(delay)
+                    continue
+                # Non-lock error or final attempt
+                logger.error("memory add failed: %s", exc)
+                raise
+            except sqlite3.Error as exc:
+                self._conn.rollback()
+                logger.error("memory add failed: %s", exc)
+                raise
+            finally:
+                c.close()
 
     def search(
         self,
