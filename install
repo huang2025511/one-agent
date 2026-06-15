@@ -86,22 +86,35 @@ fi
 if $USE_VENV; then
     if [[ ! -d venv ]]; then
         if ! $PY -m venv venv 2>/dev/null; then
-            echo ""
-            echo "  ⚠  创建虚拟环境失败，请先安装 python3-venv:"
-            echo "      apt install -y python3-venv"
-            echo "      然后重新运行 ./install"
-            exit 1
+            # 尝试 --without-pip
+            if ! $PY -m venv --without-pip venv 2>/dev/null; then
+                warn "无法创建虚拟环境，使用 --break-system-packages 模式"
+                USE_VENV=false
+            fi
         fi
     fi
-    source venv/bin/activate
-    PY=python
-    # 确保 venv 里有 pip
-    if ! $PY -m pip --version &>/dev/null; then
-        warn "venv 中缺少 pip，正在修复..."
-        $PY -m ensurepip --upgrade 2>/dev/null || \
-            curl -sS https://bootstrap.pypa.io/get-pip.py | $PY 2>/dev/null
+    if $USE_VENV; then
+        source venv/bin/activate
+        PY=python
+        # 确保 venv 里有 pip
+        if ! $PY -m pip --version &>/dev/null; then
+            warn "venv 中缺少 pip，正在修复..."
+            $PY -m ensurepip --upgrade 2>/dev/null || \
+                curl -sS https://bootstrap.pypa.io/get-pip.py | $PY 2>/dev/null
+        fi
+        ok "虚拟环境已激活 (venv)"
     fi
-    ok "虚拟环境已激活 (venv)"
+fi
+
+# 如果不用 venv 但系统是 externally-managed，使用 --break-system-packages
+if ! $USE_VENV && _detect_need_venv; then
+    _pip() {
+        if [[ -n "$MIRROR" ]]; then
+            $PY -m pip install --quiet --break-system-packages -i "$MIRROR" --trusted-host "${MIRROR#https://}" "$@"
+        else
+            $PY -m pip install --quiet --break-system-packages "$@"
+        fi
+    }
 fi
 
 # ----- 安装依赖 -----
