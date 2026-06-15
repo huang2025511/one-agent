@@ -85,7 +85,13 @@ fi
 
 if $USE_VENV; then
     if [[ ! -d venv ]]; then
-        $PY -m venv venv
+        if ! $PY -m venv venv 2>&1; then
+            echo ""
+            echo "  ⚠  创建虚拟环境失败，请先安装 python3-venv:"
+            echo "      apt install -y python3-venv"
+            echo "      然后重新运行 ./install"
+            exit 1
+        fi
     fi
     source venv/bin/activate
     PY=python
