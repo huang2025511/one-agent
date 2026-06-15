@@ -189,14 +189,36 @@ if $INTERACTIVE; then
     echo "  1) OpenAI  2) DeepSeek  3) 商汤  4) 跳过"
     echo -n "选择 [4]: "; read -r ans
     case "${ans:-4}" in
-        1) _PROVIDER="OPENAI_API_KEY" ;;
-        2) _PROVIDER="DEEPSEEK_API_KEY" ;;
-        3) _PROVIDER="SENSENOVA_API_KEY" ;;
-        *) _PROVIDER="" ;;
+        1) _PROVIDER="OPENAI_API_KEY" ; _PROVIDER_KEY="openai"
+           _MODELS=("gpt-4o" "gpt-4o-mini" "gpt-3.5-turbo") ;;
+        2) _PROVIDER="DEEPSEEK_API_KEY" ; _PROVIDER_KEY="deepseek"
+           _MODELS=("deepseek-chat" "deepseek-reasoner") ;;
+        3) _PROVIDER="SENSENOVA_API_KEY" ; _PROVIDER_KEY="sensenova"
+           _MODELS=("deepseek-v4-flash" "sensenova-default" "deepseek-v4") ;;
+        *) _PROVIDER="" ; _PROVIDER_KEY="" ; _MODELS=() ;;
     esac
     if [[ -n "$_PROVIDER" ]]; then
         echo -n "API Key: "; read -r _KEY
         [[ -n "$_KEY" ]] && echo "${_PROVIDER}=${_KEY}" >> .env && ok "Key 已保存"
+        # 选择模型
+        echo -e "\n可用模型:"
+        for i in "${!_MODELS[@]}"; do
+            echo "  $((i+1))) ${_MODELS[$i]}"
+        done
+        echo "  $(( ${#_MODELS[@]} + 1 ))) 自定义"
+        echo -n "选择模型 [默认 1]: "; read -r _M
+        if [[ -z "$_M" || "$_M" == "1" ]]; then
+            _MODEL="${_MODELS[0]}"
+        elif [[ "$_M" -le "${#_MODELS[@]}" ]] 2>/dev/null; then
+            _MODEL="${_MODELS[$((_M-1))]}"
+        else
+            echo -n "输入模型名: "; read -r _MODEL
+        fi
+        if [[ -f config/default_config.yaml ]]; then
+            sed -i "s|primary_provider: .*|primary_provider: ${_PROVIDER_KEY}|" config/default_config.yaml
+            sed -i "s|primary_model: .*|primary_model: ${_PROVIDER_KEY}/${_MODEL}|" config/default_config.yaml
+        fi
+        ok "模型: ${_PROVIDER_KEY}/${_MODEL}"
     fi
 
     echo -e "\n设置系统命令执行密码（可选，回车跳过）"

@@ -133,14 +133,20 @@ def run_cli_setup() -> bool:
 
     choice = _prompt("  请选择 [1-7, 默认 1]: ", "1")
 
-    provider_map = {
-        "1": ("SENSENOVA_API_KEY", "SenseNova", "sk-"),
-        "2": ("DEEPSEEK_API_KEY", "DeepSeek", "sk-"),
-        "3": ("DASHSCOPE_API_KEY", "DashScope", "sk-"),
-        "4": ("OPENAI_API_KEY", "OpenAI", "sk-"),
-        "5": ("ANTHROPIC_API_KEY", "Anthropic", "sk-"),
-        "6": ("OLLAMA_HOST", "Ollama", "http://localhost:11434"),
-        "7": (None, None, None),
+    provider_map: Dict[str, Tuple[str, str, str, List[str]]] = {
+        "1": ("SENSENOVA_API_KEY", "sensenova", "SenseNova", "sk-",
+              ["deepseek-v4-flash", "sensenova-default", "deepseek-v4"]),
+        "2": ("DEEPSEEK_API_KEY", "deepseek", "DeepSeek", "sk-",
+              ["deepseek-chat", "deepseek-reasoner"]),
+        "3": ("DASHSCOPE_API_KEY", "dashscope", "DashScope", "sk-",
+              ["qwen-plus", "qwen-max", "qwen-turbo"]),
+        "4": ("OPENAI_API_KEY", "openai", "OpenAI", "sk-",
+              ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"]),
+        "5": ("ANTHROPIC_API_KEY", "anthropic", "Anthropic", "sk-",
+              ["claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"]),
+        "6": ("OLLAMA_HOST", "ollama", "Ollama", "http://localhost:11434",
+              ["qwen2.5:7b", "llama3", "deepseek-r1:7b"]),
+        "7": (None, None, None, None, []),
     }
 
     info = provider_map.get(choice)
@@ -150,7 +156,7 @@ def run_cli_setup() -> bool:
         print("  (Skipped. Edit .env file later or re-run one-agent.)\n")
         return False
 
-    env_var, name, suggested = info
+    env_var, provider_key, name, suggested, models = info
     print(f"\n  {name} API Key 设置")
     if env_var == "OLLAMA_HOST":
         ans = _prompt(f"  Ollama 地址 [默认 {suggested}]: ", suggested)
@@ -167,8 +173,25 @@ def run_cli_setup() -> bool:
     # Write to .env
     _write_env(env_var, ans)
 
+    # ---- 选择模型 ----
+    print(f"\n  可用的 {name} 模型:")
+    for i, model in enumerate(models, 1):
+        default_mark = " (默认)" if i == 1 else ""
+        print(f"    {i}. {model}{default_mark}")
+    print(f"    {len(models) + 1}. 自定义输入 (Custom)")
+    model_choice = _prompt(f"  请选择模型 [默认 1]: ", "1")
+    try:
+        idx = int(model_choice) - 1
+        if 0 <= idx < len(models):
+            selected_model = models[idx]
+        else:
+            selected_model = _prompt("  请输入模型名称: ", models[0])
+    except ValueError:
+        selected_model = _prompt("  请输入模型名称: ", models[0])
+    print(f"  ✓ 模型: {selected_model}")
+
     # Also write default config if missing
-    _ensure_config()
+    _ensure_config(provider_key, selected_model)
 
     print("\n  ✅ 设置完成！正在启动 One-Agent...\n")
     return True
@@ -193,13 +216,16 @@ def _write_env(key: str, value: str) -> None:
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
-def _ensure_config() -> None:
+def _ensure_config(provider: str = "sensenova", model: str = "deepseek-v4-flash") -> None:
     """Ensure config/default_config.yaml exists with sensible defaults."""
     config_path = Path("config/default_config.yaml")
     if config_path.exists() and config_path.stat().st_size > 50:
         return
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(_MINIMAL_CONFIG, encoding="utf-8")
+    config_path.write_text(
+        _MINIMAL_CONFIG.format(provider=provider, model=f"{provider}/{model}"),
+        encoding="utf-8",
+    )
 
 
 _MINIMAL_CONFIG = """\
@@ -212,8 +238,8 @@ agent:
   language: zh
 
 llm:
-  primary_provider: sensenova
-  primary_model: default
+  primary_provider: {provider}
+  primary_model: {model}
   default_temperature: 0.3
   default_max_tokens: 2048
   timeout: 60
