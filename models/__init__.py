@@ -251,6 +251,12 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._default_max_tokens = llm_cfg.get("default_max_tokens", 2048)
         self._timeout = llm_cfg.get("timeout", 60)
         self._retry_count = llm_cfg.get("retries", 3)
+        
+        # Fallback chain configuration
+        self._fallback_chain = llm_cfg.get("fallback_chain", []) or []
+        if self._fallback_chain:
+            logger.info("LLM fallback chain configured: %s", self._fallback_chain)
+        
         # Cache config: read from dedicated llm_cache section first, fall back to llm inline
         cache_cfg = ctx.config.get("llm_cache") or {}
         self._cache_enabled = cache_cfg.get("enabled", llm_cfg.get("cache_enabled", True))
@@ -769,8 +775,13 @@ class LLMProvider(RecommendationMixin, Plugin):
         max_tokens: Optional[int] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         use_cache: bool = True,
+        _skip_fallback: bool = False,
     ) -> Dict[str, Any]:
-        """Call the LLM, with optional caching and automatic retries."""
+        """Call the LLM, with optional caching and automatic retries.
+        
+        Args:
+            _skip_fallback: Internal flag to prevent recursive fallback attempts.
+        """
         assert isinstance(messages, list), "messages must be a list"
         assert len(messages) > 0, "messages cannot be empty"
         assert temperature is None or (0.0 <= temperature <= 2.0), "temperature must be between 0 and 2"
@@ -1071,6 +1082,32 @@ class LLMProvider(RecommendationMixin, Plugin):
                     logger.error("llm call gave up after %d attempts: %s", self._retry_count, exc)
 
         from i18n import _
+        
+        # --- Fallback chain: try alternative providers if primary fails ---
+        if not _skip_fallback and self._fallback_chain:
+            for fallback_model in self._fallback_chain:
+                if fallback_model == model:
+                    continue  # Skip if it's the same model
+                
+                logger.info("Trying fallback provider: %s", fallback_model)
+                try:
+                    result = await self.chat_completion(
+                        messages=messages,
+                        model=fallback_model,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        tools=tools,
+                        use_cache=use_cache,
+                        _skip_fallback=True,  # Prevent recursive fallback
+                    )
+                    if not result.get("failed"):
+                        result["fallback_used"] = fallback_model
+                        logger.info("Fallback succeeded with %s", fallback_model)
+                        return result
+                except Exception as exc:
+                    logger.warning("Fallback %s failed: %s", fallback_model, exc)
+                    continue
+        
         return {
             "text": _("service_unavailable"),
             "tool_calls": [],

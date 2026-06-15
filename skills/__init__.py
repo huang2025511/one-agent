@@ -55,6 +55,8 @@ class Skill:
         schema: Dict[str, Any],
         handler: Callable[[Dict[str, Any]], Any],
         directory: Optional[str] = None,
+        version: str = "1.0.0",
+        changelog: Optional[List[str]] = None,
     ) -> None:
         self.id = id
         self.title = title
@@ -62,6 +64,8 @@ class Skill:
         self.schema = schema
         self.handler = handler
         self.directory = directory
+        self.version = version  # Semantic version (e.g., "1.2.3")
+        self.changelog = changelog or []  # List of version notes
         self.uses = 0
         self.last_used: Optional[float] = None
 

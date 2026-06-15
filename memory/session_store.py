@@ -401,3 +401,164 @@ class SessionStore(BaseSQLiteStore):
     async def get_session_tree_async(self, session_id: str) -> Dict[str, Any]:
         """Async wrapper for get_session_tree"""
         return await asyncio.to_thread(self.get_session_tree, session_id)
+
+    # -------------------------------------------------------- export/import
+
+    def export_session(self, session_id: str, format: str = "json") -> Optional[str]:
+        """导出会话为 JSON 或 Markdown 格式。
+
+        Args:
+            session_id: 会话 ID
+            format: 导出格式 ("json" 或 "markdown")
+
+        Returns:
+            导出的字符串内容，失败返回 None
+        """
+        assert session_id, "session_id cannot be empty"
+        assert isinstance(session_id, str), "session_id must be a string"
+        assert format in ("json", "markdown"), "format must be 'json' or 'markdown'"
+
+        session = self.get_session(session_id)
+        if not session:
+            logger.error("export_session: session %s not found", session_id)
+            return None
+
+        if format == "json":
+            return json.dumps(session, ensure_ascii=False, indent=2)
+        else:  # markdown
+            lines = [
+                f"# {session.get('title', 'Untitled Session')}",
+                "",
+                f"**Session ID**: `{session_id}`",
+                f"**Created**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(session.get('created_at', 0)))}",
+                f"**Messages**: {session.get('message_count', 0)}",
+                f"**Tokens**: {session.get('total_tokens', 0)}",
+                "",
+                "---",
+                "",
+            ]
+            for msg in session.get("messages", []):
+                role = msg.get("role", "unknown").upper()
+                content = msg.get("content", "")
+                lines.append(f"## {role}")
+                lines.append("")
+                lines.append(content)
+                lines.append("")
+            return "\n".join(lines)
+
+    def import_session(self, data: str, format: str = "json", new_session_id: Optional[str] = None) -> Optional[str]:
+        """从 JSON 或 Markdown 导入会话。
+
+        Args:
+            data: 导入的字符串内容
+            format: 导入格式 ("json" 或 "markdown")
+            new_session_id: 新会话 ID（可选，不传则自动生成）
+
+        Returns:
+            新会话 ID，失败返回 None
+        """
+        assert isinstance(data, str), "data must be a string"
+        assert format in ("json", "markdown"), "format must be 'json' or 'markdown'"
+
+        import uuid
+
+        try:
+            if format == "json":
+                session = json.loads(data)
+                if not isinstance(session, dict):
+                    raise ValueError("JSON must be an object")
+                if "id" not in session or "messages" not in session:
+                    raise ValueError("JSON must contain 'id' and 'messages' fields")
+
+                # Use provided ID or generate new one
+                session_id = new_session_id or f"import_{uuid.uuid4().hex[:8]}"
+                title = session.get("title", "Imported Session")
+
+                # Create session
+                self.create_session(session_id, title)
+
+                # Import messages
+                for msg in session.get("messages", []):
+                    self.add_message(
+                        session_id=session_id,
+                        role=msg.get("role", "user"),
+                        content=msg.get("content", ""),
+                        meta=msg.get("meta", {}),
+                        tokens=msg.get("tokens", 0),
+                    )
+
+                logger.info("import_session: imported %s from JSON", session_id)
+                return session_id
+
+            else:  # markdown
+                # Parse markdown format
+                lines = data.split("\n")
+                if not lines:
+                    raise ValueError("Markdown is empty")
+
+                # Extract title from first H1
+                title = "Imported Session"
+                if lines[0].startswith("# "):
+                    title = lines[0][2:].strip()
+
+                # Extract messages (H2 headers followed by content)
+                messages = []
+                current_role = None
+                current_content = []
+
+                for line in lines:
+                    if line.startswith("## "):
+                        # Save previous message if exists
+                        if current_role and current_content:
+                            messages.append({
+                                "role": current_role.lower(),
+                                "content": "\n".join(current_content).strip(),
+                            })
+                        # Start new message
+                        current_role = line[3:].strip()
+                        current_content = []
+                    elif current_role:
+                        current_content.append(line)
+
+                # Save last message
+                if current_role and current_content:
+                    messages.append({
+                        "role": current_role.lower(),
+                        "content": "\n".join(current_content).strip(),
+                    })
+
+                if not messages:
+                    raise ValueError("No messages found in markdown")
+
+                # Create session
+                session_id = new_session_id or f"import_{uuid.uuid4().hex[:8]}"
+                self.create_session(session_id, title)
+
+                # Import messages
+                for msg in messages:
+                    if msg["role"] in ("user", "assistant", "system"):
+                        self.add_message(
+                            session_id=session_id,
+                            role=msg["role"],
+                            content=msg["content"],
+                        )
+
+                logger.info("import_session: imported %s from markdown", session_id)
+                return session_id
+
+        except (json.JSONDecodeError, ValueError, KeyError) as exc:
+            logger.error("import_session failed: %s", exc)
+            return None
+        except sqlite3.Error as exc:
+            logger.error("import_session database error: %s", exc)
+            return None
+
+    async def export_session_async(self, session_id: str, format: str = "json") -> Optional[str]:
+        """Async wrapper for export_session"""
+        return await asyncio.to_thread(self.export_session, session_id, format)
+
+    async def import_session_async(
+        self, data: str, format: str = "json", new_session_id: Optional[str] = None
+    ) -> Optional[str]:
+        """Async wrapper for import_session"""
+        return await asyncio.to_thread(self.import_session, data, format, new_session_id)

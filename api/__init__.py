@@ -127,6 +127,8 @@ class RESTAPIGateway(Plugin):
         self._rate_buckets: Dict[str, list] = {}
         # Default rate limit (overridden in setup() from config)
         self._rate_limit = DEFAULT_RATE_LIMIT
+        # Audit log for tracking operations
+        self._audit_log = None
         # Max accepted chat request body size (bytes) — protects the
         # server from a single client streaming gigabytes of input.
         self._max_chat_bytes = MAX_CHAT_BODY_SIZE
@@ -153,6 +155,11 @@ class RESTAPIGateway(Plugin):
         # Trusted proxies for X-Forwarded-For header validation
         # Only trust these IPs when extracting real client IP from X-Forwarded-For
         self._trusted_proxies = set(cfg.get("trusted_proxies", []))
+        
+        # Initialize audit log
+        from core.audit_log import AuditLog
+        self._audit_log = AuditLog()
+        
         logger.info("REST API configured on %s:%s auth=%s rate_limit=%d/min max_chat=%dB cors=%s trusted_proxies=%s",
                     self._host, self._port, _mask_api_key(self._api_key),
                     self._rate_limit, self._max_chat_bytes, self._cors_origins, self._trusted_proxies)
@@ -299,58 +306,115 @@ class RESTAPIGateway(Plugin):
 
         @app.get("/api/health")
         async def health():
+            """Enhanced health check with subsystem status for K8s probes."""
             if _ctx is None:
-                return {"status": "not_ready", "uptime": 0}
-            uptime = int(time.time() - _ctx.started_at)
-
-            # Per-component health check
-            components = {}
-            # LLM provider
-            if _llm is not None:
-                llm_s = _llm.stats()
-                components["llm"] = {
-                    "status": "ok" if not llm_s.get("failed") else "degraded",
-                    "calls": llm_s.get("calls", 0),
+                return {
+                    "status": "not_ready",
+                    "uptime": 0,
+                    "timestamp": time.time(),
+                    "version": "2.1",
+                    "components": {}
                 }
+            
+            uptime = int(time.time() - _ctx.started_at)
+            components = {}
+            
+            # Database connectivity check
+            try:
+                _session_store = getattr(_ctx, "session_store", None)
+                if _session_store:
+                    _session_store.get_session_count()
+                    components["database"] = {"status": "ok", "type": "sqlite"}
+                else:
+                    components["database"] = {"status": "unavailable"}
+            except Exception as e:
+                components["database"] = {"status": "error", "message": str(e)}
+            
+            # LLM provider connectivity and stats
+            if _llm is not None:
+                try:
+                    llm_s = _llm.stats()
+                    components["llm"] = {
+                        "status": "ok" if not llm_s.get("failed") else "degraded",
+                        "calls": llm_s.get("calls", 0),
+                        "tokens_used": llm_s.get("tokens_used", 0),
+                        "cache_hit_rate": llm_s.get("cache", {}).get("hit_rate", 0),
+                        "provider": getattr(_llm, '_primary_provider', 'unknown')
+                    }
+                except Exception as e:
+                    components["llm"] = {"status": "error", "message": str(e)}
             else:
                 components["llm"] = {"status": "unavailable"}
 
-            # Memory
+            # Memory subsystem
             if _memory is not None:
-                components["memory"] = {"status": "ok"}
+                try:
+                    mem_stats = _memory.stats() if hasattr(_memory, 'stats') else {}
+                    components["memory"] = {
+                        "status": "ok",
+                        "long_term_rows": mem_stats.get("rows", 0)
+                    }
+                except Exception as e:
+                    components["memory"] = {"status": "error", "message": str(e)}
             else:
                 components["memory"] = {"status": "unavailable"}
 
-            # Event bus
+            # Event bus health
             if _bus is not None:
-                bus_m = _bus.metrics()
-                components["bus"] = {
-                    "status": "ok",
-                    "queue_depth": bus_m.get("queue_depth", 0),
-                    "errors": bus_m.get("errors", 0),
-                }
+                try:
+                    bus_m = _bus.metrics()
+                    components["bus"] = {
+                        "status": "ok",
+                        "queue_depth": bus_m.get("queue_depth", 0),
+                        "errors": bus_m.get("errors", 0),
+                        "published": bus_m.get("published", 0),
+                        "processed": bus_m.get("processed", 0)
+                    }
+                except Exception as e:
+                    components["bus"] = {"status": "error", "message": str(e)}
             else:
                 components["bus"] = {"status": "unavailable"}
 
-            # Skills
+            # Skills subsystem
             if _skills is not None:
-                components["skills"] = {
-                    "status": "ok",
-                    "count": len(_skills.all_skill_ids()),
-                }
+                try:
+                    skill_ids = _skills.all_skill_ids()
+                    components["skills"] = {
+                        "status": "ok",
+                        "count": len(skill_ids),
+                        "sample": skill_ids[:5] if skill_ids else []
+                    }
+                except Exception as e:
+                    components["skills"] = {"status": "error", "message": str(e)}
             else:
                 components["skills"] = {"status": "unavailable"}
+            
+            # MCP client status
+            if _app_instance and hasattr(_app_instance, 'mcp_client'):
+                try:
+                    mcp = _app_instance.mcp_client
+                    tools = mcp.list_tools() if hasattr(mcp, 'list_tools') else []
+                    components["mcp"] = {
+                        "status": "ok",
+                        "tools_count": len(tools)
+                    }
+                except Exception as e:
+                    components["mcp"] = {"status": "error", "message": str(e)}
+            else:
+                components["mcp"] = {"status": "unavailable"}
 
-            # Overall status: ok if at least llm + bus are ok
-            all_ok = all(
-                c.get("status") in ("ok", "unavailable")
-                for c in components.values()
+            # Overall status: ok if critical components (database, llm, bus) are ok
+            critical_ok = all(
+                components.get(k, {}).get("status") in ("ok", "unavailable")
+                for k in ["database", "llm", "bus"]
             )
-            overall = "ok" if all_ok else "degraded"
+            overall = "ok" if critical_ok else "degraded"
 
             return {
                 "status": overall,
                 "uptime": uptime,
+                "timestamp": time.time(),
+                "version": "2.1",
                 "components": components,
             }
 
@@ -362,6 +426,72 @@ class RESTAPIGateway(Plugin):
             from fastapi.responses import HTMLResponse
             from api.dashboard import get_dashboard_html
             return HTMLResponse(content=get_dashboard_html())
+
+        # ── Configuration Management ───────────────────────────────────
+        @app.post("/api/config/reload")
+        async def reload_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Hot reload configuration without restarting the service.
+            
+            Reloads the config file and updates runtime settings for:
+            - LLM provider settings
+            - Rate limits
+            - CORS origins
+            - Trusted proxies
+            """
+            auth(x_api_key)
+            
+            if _ctx is None:
+                raise HTTPException(503, "Context not initialized")
+            
+            try:
+                # Reload configuration from file
+                from one_agent import load_config
+                import os
+                
+                config_path = os.environ.get("ONE_AGENT_CONFIG", "config.yaml")
+                new_config = load_config(config_path)
+                
+                # Update context config
+                _ctx.config = new_config
+                
+                # Update API-specific settings
+                if hasattr(self, '_setup_from_config'):
+                    self._setup_from_config(new_config)
+                
+                logger.info("Configuration reloaded successfully")
+                
+                return {
+                    "status": "ok",
+                    "message": "Configuration reloaded",
+                    "timestamp": time.time()
+                }
+            except Exception as e:
+                logger.error("Failed to reload config: %s", e, exc_info=True)
+                raise HTTPException(500, f"Config reload failed: {str(e)}")
+
+        @app.get("/api/config")
+        async def get_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get current runtime configuration (sanitized)."""
+            auth(x_api_key)
+            
+            if _ctx is None:
+                raise HTTPException(503, "Context not initialized")
+            
+            # Return a sanitized view of config (no secrets)
+            config = _ctx.config.copy() if _ctx.config else {}
+            
+            # Mask sensitive fields
+            if "llm" in config and "api_keys" in config["llm"]:
+                config["llm"]["api_keys"] = {
+                    k: "***" if v else None 
+                    for k, v in config["llm"]["api_keys"].items()
+                }
+            
+            return {
+                "config": config,
+                "timestamp": time.time()
+            }
+
 
         # ── Dashboard API endpoints ────────────────────────────────────
         @app.get("/api/sessions/list")
@@ -463,8 +593,109 @@ class RESTAPIGateway(Plugin):
                 "memory": _memory.stats() if _memory else {},
             }
 
+        # ── Prometheus Metrics Endpoint ────────────────────────────────
+        @app.get("/metrics")
+        async def prometheus_metrics():
+            """Prometheus-compatible metrics endpoint.
+            
+            Returns metrics in Prometheus text format for scraping.
+            """
+            lines = []
+            
+            # System metrics
+            if _ctx:
+                uptime = time.time() - _ctx.started_at
+                lines.append(f"# HELP one_agent_uptime_seconds Time since agent started")
+                lines.append(f"# TYPE one_agent_uptime_seconds gauge")
+                lines.append(f"one_agent_uptime_seconds {uptime:.2f}")
+            
+            # LLM metrics
+            if _llm:
+                stats = _llm.stats()
+                lines.append(f"# HELP one_agent_llm_calls_total Total LLM API calls")
+                lines.append(f"# TYPE one_agent_llm_calls_total counter")
+                lines.append(f"one_agent_llm_calls_total {stats.get('calls', 0)}")
+                
+                lines.append(f"# HELP one_agent_llm_tokens_total Total tokens used")
+                lines.append(f"# TYPE one_agent_llm_tokens_total counter")
+                lines.append(f"one_agent_llm_tokens_total {stats.get('tokens_used', 0)}")
+                
+                lines.append(f"# HELP one_agent_llm_errors_total Total LLM errors")
+                lines.append(f"# TYPE one_agent_llm_errors_total counter")
+                lines.append(f"one_agent_llm_errors_total {stats.get('failed', 0)}")
+                
+                cache_stats = stats.get('cache', {})
+                lines.append(f"# HELP one_agent_cache_hits_total Cache hits")
+                lines.append(f"# TYPE one_agent_cache_hits_total counter")
+                lines.append(f"one_agent_cache_hits_total {cache_stats.get('hits', 0)}")
+                
+                lines.append(f"# HELP one_agent_cache_misses_total Cache misses")
+                lines.append(f"# TYPE one_agent_cache_misses_total counter")
+                lines.append(f"one_agent_cache_misses_total {cache_stats.get('misses', 0)}")
+            
+            # Event bus metrics
+            if _bus:
+                bus_m = _bus.metrics()
+                lines.append(f"# HELP one_agent_events_published_total Total events published")
+                lines.append(f"# TYPE one_agent_events_published_total counter")
+                lines.append(f"one_agent_events_published_total {bus_m.get('published', 0)}")
+                
+                lines.append(f"# HELP one_agent_events_processed_total Total events processed")
+                lines.append(f"# TYPE one_agent_events_processed_total counter")
+                lines.append(f"one_agent_events_processed_total {bus_m.get('processed', 0)}")
+                
+                lines.append(f"# HELP one_agent_events_errors_total Total event errors")
+                lines.append(f"# TYPE one_agent_events_errors_total counter")
+                lines.append(f"one_agent_events_errors_total {bus_m.get('errors', 0)}")
+            
+            # Memory metrics
+            if _memory:
+                mem_stats = _memory.stats()
+                lines.append(f"# HELP one_agent_memory_rows Long-term memory rows")
+                lines.append(f"# TYPE one_agent_memory_rows gauge")
+                lines.append(f"one_agent_memory_rows {mem_stats.get('rows', 0)}")
+            
+            # Skills metrics
+            if _skills:
+                lines.append(f"# HELP one_agent_skills_loaded Number of skills loaded")
+                lines.append(f"# TYPE one_agent_skills_loaded gauge")
+                lines.append(f"one_agent_skills_loaded {len(_skills.all_skill_ids())}")
+            
+            # Audit log metrics
+            if self._audit_log:
+                audit_stats = self._audit_log.stats()
+                lines.append(f"# HELP one_agent_audit_entries_total Total audit log entries")
+                lines.append(f"# TYPE one_agent_audit_entries_total counter")
+                lines.append(f"one_agent_audit_entries_total {audit_stats.get('total_entries', 0)}")
+            
+            return "\n".join(lines) + "\n"
+
+
+        # ── Audit Log Endpoints ────────────────────────────────────────
+        @app.get("/api/audit")
+        async def audit_query(
+            action: Optional[str] = None,
+            actor: Optional[str] = None,
+            limit: int = 100,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """Query audit log entries with optional filters."""
+            auth(x_api_key)
+            if not self._audit_log:
+                return {"entries": [], "message": "Audit log not initialized"}
+            entries = self._audit_log.query(action=action, actor=actor, limit=min(limit, 500))
+            return {"entries": entries, "count": len(entries)}
+
+        @app.get("/api/audit/stats")
+        async def audit_stats(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get audit log statistics."""
+            auth(x_api_key)
+            if not self._audit_log:
+                return {"error": "Audit log not initialized"}
+            return self._audit_log.stats()
+
         @app.post("/api/chat")
-        async def chat(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+        async def chat(body: dict, request: Request, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
@@ -473,7 +704,28 @@ class RESTAPIGateway(Plugin):
             try:
                 _validate_chat_text(text)
             except InputValidationError as exc:
+                # Log failed attempt
+                if self._audit_log:
+                    self._audit_log.log(
+                        action="api_call",
+                        actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
+                        resource="/api/chat",
+                        details={"error": str(exc), "text_length": len(text) if text else 0},
+                        ip_address=request.client.host if request.client else None,
+                        status="failure"
+                    )
                 raise HTTPException(400, str(exc))
+            
+            # Log successful API call
+            if self._audit_log:
+                self._audit_log.log(
+                    action="api_call",
+                    actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
+                    resource="/api/chat",
+                    details={"session_id": session_id, "text_length": len(text) if text else 0},
+                    ip_address=request.client.host if request.client else None,
+                    status="success"
+                )
             
             # Auto-detect language from user input
             if text:
