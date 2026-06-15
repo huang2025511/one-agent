@@ -311,12 +311,45 @@ class RESTAPIGateway(Plugin):
 
         @app.get("/api/stats")
         async def stats():
+            """System statistics for dashboard."""
+            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
+            
+            # Get session statistics
+            sessions_data = {}
+            if _session_store:
+                try:
+                    all_sessions = _session_store.list_sessions(limit=1000)
+                    active_count = sum(1 for s in all_sessions if s.get("status") == "active")
+                    total_messages = sum(s.get("message_count", 0) for s in all_sessions)
+                    sessions_data = {
+                        "active": active_count,
+                        "total": len(all_sessions)
+                    }
+                except Exception:
+                    sessions_data = {"active": 0, "total": 0}
+            
+            # Get knowledge graph entity count
+            kg_data = {}
+            if _memory_plugin and hasattr(_memory_plugin, "kg"):
+                try:
+                    kg = _memory_plugin.kg
+                    entity_count = len(kg.entities) if hasattr(kg, "entities") else 0
+                    kg_data = {"entities": entity_count}
+                except Exception:
+                    kg_data = {"entities": 0}
+            
             return {
                 "uptime_seconds": _ctx.uptime() if _ctx else 0,
                 "bus_metrics": _bus.metrics() if _bus else {},
                 "llm_stats": _llm.stats() if _llm else {},
                 "memory_stats": _memory.stats() if _memory else {},
                 "skills_count": len(_skills.all_skill_ids()) if _skills else 0,
+                # Dashboard-specific fields
+                "sessions": sessions_data,
+                "messages": {"total": sessions_data.get("total", 0)},
+                "knowledge_graph": kg_data,
+                "skills": {"installed": len(_skills.all_skill_ids()) if _skills else 0},
             }
 
         @app.get("/api/metrics")

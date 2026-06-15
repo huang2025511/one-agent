@@ -307,6 +307,10 @@ class OneAgentApp:
         self.monitor = MonitoringPlugin()
         self.marketplace = MarketplacePlugin()
 
+        # Initialize MCP client for external tool servers
+        from skills.mcp_client import MCPClient
+        self.mcp_client = MCPClient()
+
         # Initialize alert manager
         from alerting import AlertManager
         self._alert_manager = AlertManager()
@@ -318,7 +322,7 @@ class OneAgentApp:
         self._pm = PluginManager()
         for p in (
             self.llm, self.router, self.memory, self.skills,
-            self.exec_shell, self.exec_docker, self.exec_browser,
+            self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
             self.coordinator, self.scheduler,
             self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
             self.discord, self.slack, self.web,
@@ -378,7 +382,7 @@ class OneAgentApp:
 
         self.ctx._plugins = [
             self.llm, self.router, self.memory, self.skills,
-            self.exec_shell, self.exec_docker, self.exec_browser,
+            self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
             self.coordinator, self.scheduler,
             self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
             self.discord, self.slack, self.web,
@@ -388,6 +392,12 @@ class OneAgentApp:
 
         # Attach approval manager to agent context
         self.ctx.approval_manager = self._approval_manager
+
+        # Attach MCP client to agent context
+        self.ctx.mcp_client = self.mcp_client
+
+        # Attach Python executor to agent context (shared instance)
+        self.ctx.python_executor = self.exec_python
 
         await self.bus.start()
         await self._pm.setup_all(self.ctx)

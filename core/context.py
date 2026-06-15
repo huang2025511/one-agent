@@ -95,6 +95,12 @@ class AgentContext:
     # approval manager for human-in-the-loop (set by OneAgentApp.start)
     approval_manager: Any = None
 
+    # MCP client for external tool servers (set by OneAgentApp.start)
+    mcp_client: Any = None
+
+    # Python executor for code execution (set by OneAgentApp.start)
+    python_executor: Any = None
+
     def bump(self, name: str, by: int = 1) -> None:
         self.counters[name] = self.counters.get(name, 0) + by
 

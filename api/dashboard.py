@@ -98,6 +98,9 @@ DASHBOARD_HTML = """
         }
         .session-item:hover { background: #475569; }
         .session-title { font-weight: bold; margin-bottom: 5px; }
+        .session-actions { display: flex; gap: 8px; margin-top: 8px; }
+        .btn-small { padding: 4px 8px; font-size: 12px; }
+        .btn-fork { background: #3b82f6; color: white; }
         .session-meta { font-size: 0.9em; color: #94a3b8; }
         .approval-item {
             background: #7c2d12;
@@ -268,6 +271,9 @@ DASHBOARD_HTML = """
                         ${s.message_count} 条消息 · 
                         最后更新: ${new Date(s.updated_at * 1000).toLocaleString('zh-CN')}
                     </div>
+                    <div class="session-actions">
+                        <button class="btn btn-small btn-fork" onclick="forkSession('${s.id}', event)">分支</button>
+                    </div>
                 </div>
             `).join('');
         }
@@ -307,6 +313,26 @@ DASHBOARD_HTML = """
 
         function viewSession(id) {
             window.open(`${API_BASE}/sessions/${id}/replay`, '_blank');
+        }
+
+        async function forkSession(sessionId, event) {
+            event.stopPropagation();
+            const forkPoint = prompt('请输入分支点（消息索引，从0开始）:', '0');
+            if (forkPoint === null) return;
+            
+            const response = await fetch(`${API_BASE}/sessions/${sessionId}/fork`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fork_point: parseInt(forkPoint) })
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                alert(`分支成功！新会话ID: ${data.new_session_id}`);
+                updateSessions();
+            } else {
+                alert('分支失败: ' + response.statusText);
+            }
         }
 
         function showRefresh() {
