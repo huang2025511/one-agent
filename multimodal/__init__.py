@@ -189,11 +189,25 @@ class MultimodalPlugin(Plugin):
             image_payload = {"url": image_data}
         elif image_data.startswith("/") or image_data.startswith("./"):
             # Local file path → base64 with correct MIME type
-            p = Path(image_data)
-            mime, _ = mimetypes.guess_type(str(p))
-            mime = mime or "image/png"
-            b64 = base64.b64encode(p.read_bytes()).decode()
-            image_payload = {"url": f"data:{mime};base64,{b64}"}
+            # Security: validate path to prevent directory traversal
+            try:
+                p = Path(image_data).resolve()
+                # Only allow files in current directory or subdirectories
+                cwd = Path.cwd().resolve()
+                if not str(p).startswith(str(cwd)):
+                    return {"error": "access denied: path outside working directory", "analysis": ""}
+                # Validate file extension
+                allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+                if p.suffix.lower() not in allowed_ext:
+                    return {"error": f"invalid file type: {p.suffix}", "analysis": ""}
+                if not p.exists() or not p.is_file():
+                    return {"error": "file not found or not a regular file", "analysis": ""}
+                mime, _ = mimetypes.guess_type(str(p))
+                mime = mime or "image/png"
+                b64 = base64.b64encode(p.read_bytes()).decode()
+                image_payload = {"url": f"data:{mime};base64,{b64}"}
+            except (OSError, ValueError) as exc:
+                return {"error": f"invalid path: {exc}", "analysis": ""}
         else:
             # Assume raw base64 (PNG default for backwards-compat)
             image_payload = {"url": f"data:image/png;base64,{image_data}"}
@@ -281,6 +295,22 @@ class MultimodalPlugin(Plugin):
         if not os.path.exists(audio_path):
             return {"text": "", "error": f"audio file not found: {audio_path}"}
 
+        # Security: validate path to prevent directory traversal
+        try:
+            p = Path(audio_path).resolve()
+            cwd = Path.cwd().resolve()
+            if not str(p).startswith(str(cwd)):
+                return {"text": "", "error": "access denied: path outside working directory"}
+            # Validate file extension
+            allowed_ext = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
+            if p.suffix.lower() not in allowed_ext:
+                return {"text": "", "error": f"invalid file type: {p.suffix}"}
+            if not p.exists() or not p.is_file():
+                return {"text": "", "error": "file not found or not a regular file"}
+            audio_path = str(p)
+        except (OSError, ValueError) as exc:
+            return {"text": "", "error": f"invalid path: {exc}"}
+
         # Try local whisper CLI first (fast, offline)
         try:
             result = subprocess.run(
@@ -336,8 +366,15 @@ class MultimodalPlugin(Plugin):
         import mimetypes as _mt
         from pathlib import Path
 
-        path = Path(image_path)
-        if not path.exists():
+        path = Path(image_path).resolve()
+        # Security: validate path to prevent directory traversal
+        cwd = Path.cwd().resolve()
+        if not str(path).startswith(str(cwd)):
+            return {"error": "access denied: path outside working directory", "image_base64": "", "mime_type": "", "prompt": ""}
+        allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+        if path.suffix.lower() not in allowed_ext:
+            return {"error": f"invalid file type: {path.suffix}", "image_base64": "", "mime_type": "", "prompt": ""}
+        if not path.exists() or not path.is_file():
             return {"error": "image not found", "image_base64": "", "mime_type": "", "prompt": ""}
 
         ext = path.suffix.lower()
@@ -389,6 +426,23 @@ def make_transcribe_handler():
             return "请提供音频文件路径（path 或 input 参数）"
         import subprocess
         import os
+        from pathlib import Path
+        
+        # Security: validate path to prevent directory traversal
+        try:
+            p = Path(path).resolve()
+            cwd = Path.cwd().resolve()
+            if not str(p).startswith(str(cwd)):
+                return "access denied: path outside working directory"
+            allowed_ext = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
+            if p.suffix.lower() not in allowed_ext:
+                return f"invalid file type: {p.suffix}"
+            if not p.exists() or not p.is_file():
+                return "file not found or not a regular file"
+            path = str(p)
+        except (OSError, ValueError) as exc:
+            return f"invalid path: {exc}"
+        
         try:
             result = subprocess.run(
                 ["whisper", path, "--language", "zh", "--model", "tiny",
@@ -421,8 +475,22 @@ def make_image_handler():
             return "请提供图片路径（path 或 input 参数）"
         import os
         import base64
-        if not os.path.exists(path):
-            return f"图片不存在: {path}"
+        from pathlib import Path
+        
+        # Security: validate path to prevent directory traversal
+        try:
+            p = Path(path).resolve()
+            cwd = Path.cwd().resolve()
+            if not str(p).startswith(str(cwd)):
+                return "access denied: path outside working directory"
+            allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+            if p.suffix.lower() not in allowed_ext:
+                return f"invalid file type: {p.suffix}"
+            if not p.exists() or not p.is_file():
+                return "file not found or not a regular file"
+            path = str(p)
+        except (OSError, ValueError) as exc:
+            return f"invalid path: {exc}"
 
         ext = os.path.splitext(path)[1].lower()
         mime_map = {

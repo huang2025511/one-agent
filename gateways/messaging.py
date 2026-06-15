@@ -364,19 +364,41 @@ class WeComGateway(BaseMessagingGateway):
             timestamp = request.query_params.get("timestamp", "")
             nonce = request.query_params.get("nonce", "")
             echostr = request.query_params.get("echostr", "")
-            # 简化验证：直接返回 echostr（未加密模式）
-            # 生产环境应使用 encoding_aes_key 解密验证
+            
+            # Security: verify signature when token is configured
+            if gateway._token and msg_signature:
+                import hashlib
+                sort_list = sorted([gateway._token, timestamp, nonce, echostr])
+                expected_sig = hashlib.sha1("".join(sort_list).encode()).hexdigest()
+                if not hmac.compare_digest(expected_sig, msg_signature):
+                    logger.warning("wecom callback signature verification failed")
+                    return Response(content="signature verification failed", status_code=403)
+            
             if gateway._encoding_aes_key:
                 try:
                     echostr = gateway._decrypt_message(echostr, msg_signature, timestamp, nonce)
                 except Exception:
-                    pass
+                    logger.warning("wecom callback decryption failed")
+                    return Response(content="decryption failed", status_code=403)
             return Response(content=echostr, media_type="text/plain")
 
         @app.post("/wecom/callback")
         async def receive_message(request: Request):
             """接收企业微信消息推送（POST 请求）。"""
             body = await request.body()
+            
+            # Security: verify signature for POST messages
+            msg_signature = request.query_params.get("msg_signature", "")
+            timestamp = request.query_params.get("timestamp", "")
+            nonce = request.query_params.get("nonce", "")
+            if gateway._token and msg_signature:
+                import hashlib
+                sort_list = sorted([gateway._token, timestamp, nonce, body.decode("utf-8", errors="replace")])
+                expected_sig = hashlib.sha1("".join(sort_list).encode()).hexdigest()
+                if not hmac.compare_digest(expected_sig, msg_signature):
+                    logger.warning("wecom POST callback signature verification failed")
+                    return Response(content="signature verification failed", status_code=403)
+            
             try:
                 data = json.loads(body)
             except Exception:

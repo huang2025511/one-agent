@@ -325,11 +325,39 @@ class SmartRouter(Plugin):
                 "- Natural, not robotic."
             )
         history = self._history_tail(turn.session_id)
-        # compression: drop turns older than N when history is long
+        # Smart compression: keep recent turns + important context
         compression_cfg = self._cfg.get("context_compression", {}) or {}
         if compression_cfg.get("enabled", True) and len(history) > 6:
-            history = history[-6:]
-        messages = [{"role": "system", "content": system}]
+            # Keep last 6 turns, but try to preserve important context
+            # by summarizing older turns if available
+            recent_history = history[-6:]
+            
+            # If we have a summary capability, use it
+            if compression_cfg.get("summarize_old_turns", False) and len(history) > 6:
+                old_turns = history[:-6]
+                # Create a summary of old turns
+                summary_parts = []
+                for h in old_turns:
+                    if h.get("reply"):
+                        # Extract key points from old replies
+                        summary_parts.append(f"Earlier: {h['input'][:50]}...")
+                
+                if summary_parts:
+                    # Insert summary as first message
+                    summary_msg = {
+                        "role": "system",
+                        "content": "Previous context summary:\n" + "\n".join(summary_parts[-3:])
+                    }
+                    messages = [summary_msg]
+                else:
+                    messages = [{"role": "system", "content": system}]
+            else:
+                messages = [{"role": "system", "content": system}]
+            
+            history = recent_history
+        else:
+            messages = [{"role": "system", "content": system}]
+        
         for h in history:
             messages.append({"role": "user", "content": h["input"]})
             if h["reply"]:

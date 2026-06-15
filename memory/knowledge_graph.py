@@ -171,9 +171,12 @@ class KnowledgeGraph(BaseSQLiteStore):
         assert isinstance(query, str), "query must be a string"
         assert limit > 0, "limit must be positive"
         
+        # Escape LIKE wildcards to prevent unexpected matches
+        escaped_query = query.replace('%', '\\%').replace('_', '\\_')
+        
         cur = self._conn.execute(
-            "SELECT * FROM entities WHERE name LIKE ? LIMIT ?",
-            (f"%{query}%", limit)
+            "SELECT * FROM entities WHERE name LIKE ? ESCAPE '\\' LIMIT ?",
+            (f"%{escaped_query}%", limit)
         )
         return [dict(r) for r in cur.fetchall()]
 

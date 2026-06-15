@@ -147,11 +147,37 @@ class ModelCatalog:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        try:
-            resp = await self._client.get(url, headers=headers)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("catalog refresh GET %s failed: %s", url, exc)
-            return 0
+        
+        # Add explicit timeout and retry logic
+        max_retries = 3
+        retry_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                resp = await asyncio.wait_for(
+                    self._client.get(url, headers=headers),
+                    timeout=30.0
+                )
+                break
+            except asyncio.TimeoutError:
+                logger.warning("catalog refresh GET %s timeout (attempt %d/%d)", 
+                             url, attempt + 1, max_retries)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error("catalog refresh failed after %d attempts", max_retries)
+                    return 0
+            except httpx.HTTPError as exc:
+                logger.warning("catalog refresh GET %s failed: %s (attempt %d/%d)", 
+                             url, exc, attempt + 1, max_retries)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    logger.error("catalog refresh failed after %d attempts", max_retries)
+                    return 0
+        
         if resp.status_code >= 400:
             logger.warning("catalog refresh %s → HTTP %d", url, resp.status_code)
             return 0
