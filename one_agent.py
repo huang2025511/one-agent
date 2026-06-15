@@ -381,12 +381,14 @@ class OneAgentApp:
         self.bus.subscribe("turn_completed", _persist_turn)
 
         self.ctx._plugins = [
-            self.llm, self.router, self.memory, self.skills,
-            self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
-            self.coordinator, self.scheduler,
-            self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
-            self.discord, self.slack, self.web,
-            self.multimodal, self.rest_api, self.monitor, self.marketplace,
+            p for p in (
+                self.llm, self.router, self.memory, self.skills,
+                self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
+                self.coordinator, self.scheduler,
+                self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
+                self.discord, self.slack, self.web,
+                self.multimodal, self.rest_api, self.monitor, self.marketplace,
+            ) if p is not None
         ]
         self.ctx._alert_manager = self._alert_manager
 

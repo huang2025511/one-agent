@@ -60,10 +60,22 @@ skills:
   auto_discover: true
   search_paths:
   - ./skills
-gateways: {}
+gateways:
+  wechat_personal:
+    enabled: false
+    allowed_users: []
+    reply_prefix: ''
+    hot_reload: false
 execution: {}
 scheduler: {}
-security: {}
+security:
+  system_executor_password: ''
+  password_cache_minutes: 15
+  max_password_attempts: 3
+  lockout_minutes: 5
+  require_password_for_dangerous: true
+  command_timeout_seconds: 30
+  max_output_bytes: 65536
 rest:
   enabled: true
   host: 127.0.0.1
