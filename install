@@ -15,6 +15,7 @@ set -e
 
 MODE="${1:-default}"
 LANG="${LANG:-zh_CN}"
+USE_VENV=false
 
 # ----- 解析参数 -----
 INTERACTIVE=false
@@ -46,7 +47,6 @@ ok "Python $PY_VER"
 if [[ -n "${PIP_INDEX:-}" ]]; then
     MIRROR="$PIP_INDEX"
 else
-    # 自动检测：pypi.org 延迟 > 1.5s 则用清华源
     if command -v curl &>/dev/null; then
         elapsed=$(curl -s -o /dev/null -w '%{time_total}' --connect-timeout 2 https://pypi.org/simple/ 2>/dev/null || echo "5")
         if [[ "$(echo "$elapsed > 1.5" | bc 2>/dev/null || echo 1)" == "1" ]]; then
@@ -63,14 +63,33 @@ _pip() {
     fi
 }
 
-# ----- 虚拟环境（仅交互模式询问）-----
+# ----- 自动检测 externally-managed 环境并创建 venv -----
+_detect_need_venv() {
+    # 用 pip install --dry-run 探测，不实际安装
+    local out
+    out=$($PY -m pip install --dry-run --quiet pytz 2>&1 || true)
+    if echo "$out" | grep -q "externally-managed\|--break-system-packages"; then
+        return 0
+    fi
+    return 1
+}
+
 if $INTERACTIVE; then
     echo -n "是否创建虚拟环境？[Y/n] "
     read -r ans
-    if [[ -z "$ans" || "$ans" =~ ^[Yy] ]]; then
-        $PY -m venv venv && source venv/bin/activate && PY=python
-        ok "虚拟环境已创建"
+    if [[ -z "$ans" || "$ans" =~ ^[Yy] ]]; then USE_VENV=true; fi
+elif _detect_need_venv; then
+    warn "检测到 externally-managed 环境，自动创建虚拟环境..."
+    USE_VENV=true
+fi
+
+if $USE_VENV; then
+    if [[ ! -d venv ]]; then
+        $PY -m venv venv
     fi
+    source venv/bin/activate
+    PY=python
+    ok "虚拟环境已激活 (venv)"
 fi
 
 # ----- 安装依赖 -----
@@ -102,21 +121,36 @@ fi
 
 # ----- 注册 CLI 命令 (one-agent / one) -----
 info "注册 one-agent 命令..."
-if $PY -m pip install -e . 2>/dev/null; then
+if _pip install -e . 2>/dev/null; then
     ok "one-agent 命令已注册"
 else
     warn "pip 注册失败，创建 wrapper 脚本..."
     SCRIPT_DIR="$(pwd)"
-    for cmd in one-agent one; do
-        if [[ -w /usr/local/bin ]] || [[ "$(id -u)" == "0" ]]; then
-            cat > "/usr/local/bin/${cmd}" << EOF
+    # 如果用了 venv，wrapper 需要先激活 venv
+    if $USE_VENV; then
+        for cmd in one-agent one; do
+            if [[ -w /usr/local/bin ]] || [[ "$(id -u)" == "0" ]]; then
+                cat > "/usr/local/bin/${cmd}" << EOF
+#!/usr/bin/env bash
+source "${SCRIPT_DIR}/venv/bin/activate"
+cd "${SCRIPT_DIR}" && exec python one_agent.py "\$@"
+EOF
+                chmod +x "/usr/local/bin/${cmd}"
+                ok "已创建: /usr/local/bin/${cmd}"
+            fi
+        done
+    else
+        for cmd in one-agent one; do
+            if [[ -w /usr/local/bin ]] || [[ "$(id -u)" == "0" ]]; then
+                cat > "/usr/local/bin/${cmd}" << EOF
 #!/usr/bin/env bash
 cd "${SCRIPT_DIR}" && exec $PY one_agent.py "\$@"
 EOF
-            chmod +x "/usr/local/bin/${cmd}"
-            ok "已创建: /usr/local/bin/${cmd}"
-        fi
-    done
+                chmod +x "/usr/local/bin/${cmd}"
+                ok "已创建: /usr/local/bin/${cmd}"
+            fi
+        done
+    fi
 fi
 
 # ----- 数据目录 -----
@@ -126,7 +160,6 @@ ok "数据目录已就绪"
 
 # ----- 交互模式：额外配置 -----
 if $INTERACTIVE; then
-    # API Key
     echo -e "\n配置 LLM API Key（可选，回车跳过）"
     echo "  1) OpenAI  2) DeepSeek  3) 商汤  4) 跳过"
     echo -n "选择 [4]: "; read -r ans
@@ -141,7 +174,6 @@ if $INTERACTIVE; then
         [[ -n "$_KEY" ]] && echo "${_PROVIDER}=${_KEY}" >> .env && ok "Key 已保存"
     fi
 
-    # 系统密码
     echo -e "\n设置系统命令执行密码（可选，回车跳过）"
     echo -n "密码: "; read -r _PWD
     if [[ -n "$_PWD" ]]; then
@@ -157,9 +189,19 @@ echo -e "${G}╔═════════════════════�
 echo -e "${G}║   ✅ One-Agent 安装完成！     ║${R}"
 echo -e "${G}╚════════════════════════════════╝${R}"
 echo ""
-echo "  启动方式:"
-echo "    one-agent        # 直接输入即可启动"
-echo "    one               # 简写别名"
+if $USE_VENV; then
+    echo "  启动方式:"
+    echo "    one-agent            # 直接输入即可启动"
+    echo "    one                   # 简写别名"
+    echo ""
+    echo "  或者手动激活虚拟环境后启动:"
+    echo "    source venv/bin/activate"
+    echo "    one-agent"
+else
+    echo "  启动方式:"
+    echo "    one-agent            # 直接输入即可启动"
+    echo "    one                   # 简写别名"
+fi
 echo ""
 echo "  服务地址:"
 echo "    Web UI:    http://127.0.0.1:18791"
