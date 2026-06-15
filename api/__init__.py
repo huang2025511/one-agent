@@ -821,9 +821,13 @@ class RESTAPIGateway(Plugin):
         async def all_exception(request: Request, exc: Exception):
             from starlette.exceptions import HTTPException as StarletteHTTPException
             if isinstance(exc, StarletteHTTPException):
-                raise exc
+                # Return proper HTTP response instead of re-raising so uvicorn
+                # doesn't interfere with the exception propagation.
+                return JSONResponse(
+                    {"detail": exc.detail},
+                    status_code=getattr(exc, "status_code", 500),
+                )
             logger.exception("api error: %s", exc)
-            # Return generic error message to avoid leaking internal details
             return JSONResponse({"error": _("internal_error")}, status_code=500)
 
         self._app = app

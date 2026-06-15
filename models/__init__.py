@@ -374,6 +374,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                 if not loop.is_running():
                     return None
             except RuntimeError:
+                logger.debug("_spawn_bg: no running event loop, auto-classify deferred")
                 return None
         task = loop.create_task(coro)
         self._bg_tasks.add(task)

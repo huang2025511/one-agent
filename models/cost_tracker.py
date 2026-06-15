@@ -10,6 +10,7 @@ shared across async tasks without extra locking.
 from __future__ import annotations
 
 import os
+import sqlite3
 import time
 import logging
 from typing import Any, Dict, List
@@ -42,6 +43,7 @@ class CostTracker:
 
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._daily_budget = daily_budget
         self._monthly_budget = monthly_budget
         self._migrate()
@@ -105,8 +107,9 @@ class CostTracker:
                  cost, session_id, time.time()),
             )
             self._conn.commit()
-        except Exception:
-            logger.exception("cost_tracker: failed to persist cost entry")
+        except sqlite3.Error as exc:
+            logger.error("cost_tracker: failed to persist cost entry: %s", exc)
+            raise  # propagate so caller can fall back to estimated cost
 
         # Check budget (fire-and-forget — never block the caller)
         try:
@@ -132,11 +135,15 @@ class CostTracker:
         return start.timestamp()
 
     def _cost_since(self, since: float) -> float:
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_log WHERE created_at >= ?",
-            (since,),
-        ).fetchone()
-        return round(row["total"], 8) if row else 0.0
+        try:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_log WHERE created_at >= ?",
+                (since,),
+            ).fetchone()
+            return round(row["total"], 8) if row else 0.0
+        except sqlite3.Error as exc:
+            logger.error("cost_tracker query failed: %s", exc)
+            return 0.0
 
     def daily_cost(self) -> Dict[str, Any]:
         cost = self._cost_since(self._daily_start())

@@ -320,7 +320,8 @@ class Coordinator(Plugin):
                             count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
                             if count > 0:
                                 logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
-                        except Exception:
+                        except Exception as exc:
+                            logger.debug("KG extraction failed: %s", exc)
                             pass
 
                     self.publish("turn_completed", turn=turn)
@@ -466,7 +467,8 @@ class Coordinator(Plugin):
                 count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
                 if count > 0:
                     logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
-            except Exception:
+            except Exception as exc:
+                logger.debug("KG extraction failed: %s", exc)
                 pass
 
         self.publish("turn_completed", turn=turn)

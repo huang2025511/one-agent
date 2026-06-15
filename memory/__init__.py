@@ -68,23 +68,30 @@ class LongTermMemory:
         # Cache the column-presence check so we don't run PRAGMA on every
         # insert.  The schema is fixed for the lifetime of the connection
         # (no ALTER TABLE happens in this codebase), so caching is safe.
-        if self._has_weight_col is None:
-            try:
-                c.execute("PRAGMA table_info(memory)")
-                self._has_weight_col = "weight" in {row[1] for row in c.fetchall()}
-            except sqlite3.DatabaseError:
-                self._has_weight_col = False
-        if self._has_weight_col:
-            c.execute(
-                "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
-                (content, source, tags, time.time(), weight),
-            )
-        else:
-            c.execute(
-                "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
-                (content, source, tags, time.time()),
-            )
-        # Auto-commit (we're in autocommit mode for WAL concurrency)
+        # Wrap in a transaction so the schema check and insert are atomic
+        # (autocommit mode would otherwise interleave them).
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if self._has_weight_col is None:
+                try:
+                    c.execute("PRAGMA table_info(memory)")
+                    self._has_weight_col = "weight" in {row[1] for row in c.fetchall()}
+                except sqlite3.DatabaseError:
+                    self._has_weight_col = False
+            if self._has_weight_col:
+                c.execute(
+                    "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
+                    (content, source, tags, time.time(), weight),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
+                    (content, source, tags, time.time()),
+                )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            logger.error("memory add failed: %s", exc)
 
     def search(
         self,
