@@ -105,8 +105,11 @@ class LongTermMemory:
         try:
             if self._has_weight_col is None:
                 try:
-                    c.execute("PRAGMA table_info(memory)")
-                    self._has_weight_col = "weight" in {row[1] for row in c.fetchall()}
+                    # Use a separate cursor for schema check to avoid state issues
+                    schema_cursor = self._conn.cursor()
+                    schema_cursor.execute("PRAGMA table_info(memory)")
+                    self._has_weight_col = "weight" in {row[1] for row in schema_cursor.fetchall()}
+                    schema_cursor.close()
                 except sqlite3.DatabaseError:
                     self._has_weight_col = False
             if self._has_weight_col:
@@ -123,6 +126,8 @@ class LongTermMemory:
         except sqlite3.Error as exc:
             self._conn.rollback()
             logger.error("memory add failed: %s", exc)
+        finally:
+            c.close()
 
     def search(
         self,
@@ -143,47 +148,47 @@ class LongTermMemory:
         c = self._conn.cursor()
         try:
             # FTS5 rank(): bm25 returns negative values; more negative = more relevant.
-            # We drop the weight subquery because FTS5 virtual tables have no weight column.
+            # Include rowid directly to avoid N+1 queries
             c.execute(
-                "SELECT content, source, tags, timestamp, rank "
+                "SELECT rowid, content, source, tags, timestamp, rank "
                 "FROM memory WHERE memory MATCH ? "
                 "ORDER BY rank LIMIT ? OFFSET ?",
                 (query, limit, offset),
             )
             rows = c.fetchall()
-            # Normalize: (content, source, tags, timestamp, rank, weight=1.0)
-            normalized = [(r[0], r[1], r[2], r[3], r[4], 1.0) for r in rows]
+            # Normalize: (rowid, content, source, tags, timestamp, rank, weight=1.0)
+            normalized = [(r[0], r[1], r[2], r[3], r[4], r[5], 1.0) for r in rows]
         except sqlite3.OperationalError:
             c.execute(
-                "SELECT content, source, tags, timestamp FROM memory "
+                "SELECT rowid, content, source, tags, timestamp FROM memory "
                 "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
             rows = c.fetchall()
-            # normalize rows: (content, source, tags, timestamp, rank, weight)
+            # normalize rows: (rowid, content, source, tags, timestamp, rank=0, weight=1.0)
             normalized = []
             for r in rows:
-                content, source, tags, timestamp = r[0], r[1], r[2], r[3]
-                rank = r[4] if len(r) > 4 else 0
-                weight = r[5] if len(r) > 5 else 1.0
-                normalized.append((content, source, tags, timestamp, rank, weight))
+                rowid, content, source, tags, timestamp = r[0], r[1], r[2], r[3], r[4]
+                normalized.append((rowid, content, source, tags, timestamp, 0, 1.0))
 
         results = []
         for row in normalized:
-            content, source, tags, timestamp = row[0], row[1], row[2], row[3]
-            rank = row[4]
-            w = row[5] if len(row) > 5 else 1.0
+            rowid, content, source, tags, timestamp = row[0], row[1], row[2], row[3], row[4]
+            rank = row[5]
+            w = row[6] if len(row) > 6 else 1.0
             # Apply decay to old entries
             if self._decay_enabled:
+                # Use monotonic time for decay calculation to avoid wall clock issues
+                # Note: timestamp is stored as wall clock, but decay uses relative time
                 age_hours = (time.time() - timestamp) / 3600
-                w *= self._decay_factor ** min(age_hours / 24, 30)  # cap at 30 days
+                # Cap decay at 30 days to prevent underflow
+                age_hours = min(age_hours, 30 * 24)
+                w *= self._decay_factor ** (age_hours / 24)
             # FTS5 bm25 rank is negative (more negative = more relevant).
             # A match always has rank < 0; filter by negative threshold.
             if rank < 0 or not query:
-                # Use rowid directly from the FTS5 query to avoid N+1 queries
-                # Note: rowid is already available from the FTS5 virtual table
                 results.append({
-                    "id": str(len(results) + 1),  # Fallback ID if rowid not available
+                    "id": str(rowid),
                     "content": content,
                     "source": source,
                     "tags": tags,

@@ -93,12 +93,40 @@ class Skill:
             if param not in args or args[param] is None:
                 raise InputValidationError(f"Missing required parameter: {param}")
         
-        # Validate string parameters length
+        # Validate parameters against schema properties
         properties = self.schema.get("function", {}).get("parameters", {}).get("properties", {})
         for key, value in args.items():
-            if key in properties and properties[key].get("type") == "string":
-                if isinstance(value, str) and len(value) > 10000:
+            if key not in properties:
+                continue
+            prop = properties[key]
+            expected_type = prop.get("type")
+            
+            if expected_type == "string":
+                if not isinstance(value, str):
+                    raise InputValidationError(f"Parameter '{key}' must be a string")
+                if len(value) > 10000:
                     raise InputValidationError(f"Parameter '{key}' too long (max 10000 characters)")
+                # Validate enum if present
+                if "enum" in prop and value not in prop["enum"]:
+                    raise InputValidationError(f"Parameter '{key}' must be one of {prop['enum']}")
+            elif expected_type == "integer":
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise InputValidationError(f"Parameter '{key}' must be an integer")
+                if "minimum" in prop and value < prop["minimum"]:
+                    raise InputValidationError(f"Parameter '{key}' must be >= {prop['minimum']}")
+                if "maximum" in prop and value > prop["maximum"]:
+                    raise InputValidationError(f"Parameter '{key}' must be <= {prop['maximum']}")
+            elif expected_type == "number":
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise InputValidationError(f"Parameter '{key}' must be a number")
+            elif expected_type == "boolean":
+                if not isinstance(value, bool):
+                    raise InputValidationError(f"Parameter '{key}' must be a boolean")
+            elif expected_type == "array":
+                if not isinstance(value, list):
+                    raise InputValidationError(f"Parameter '{key}' must be an array")
+                if "maxItems" in prop and len(value) > prop["maxItems"]:
+                    raise InputValidationError(f"Parameter '{key}' has too many items (max {prop['maxItems']})")
 
 
 class SkillManager(Plugin):
@@ -195,9 +223,10 @@ class SkillManager(Plugin):
                     self._skills[skill.id] = skill
             except (OSError, UnicodeDecodeError) as exc:
                 logger.error("failed to load %s: %s", path, exc, exc_info=True)
+                continue
             except Exception as exc:
                 logger.error("failed to load %s with unexpected error: %s", path, exc, exc_info=True)
-                raise
+                continue
 
     def _parse_markdown_skill(self, path: Path, body: str) -> Optional[Skill]:
         # Expect a YAML front-matter block at the top:
@@ -948,14 +977,35 @@ def _save_config(config: dict) -> None:
     """将配置写回 YAML 文件（原子写入，带文件锁）。"""
     import yaml
     import tempfile
-    import fcntl
     config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
     lock_path = config_path + ".lock"
+    
+    # Cross-platform file locking
+    lock_fd = None
+    use_fcntl = False
+    try:
+        import fcntl
+        use_fcntl = True
+    except ImportError:
+        # Windows: use msvcrt or skip locking
+        try:
+            import msvcrt
+        except ImportError:
+            logger.warning("File locking not available on this platform")
+    
     try:
         # Acquire file lock to prevent race conditions
         lock_fd = open(lock_path, "w")
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if use_fcntl:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            else:
+                # Windows: try msvcrt locking
+                try:
+                    import msvcrt
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
+                except (ImportError, OSError):
+                    pass  # Skip locking if not available
             
             # Write to temp file first, then atomically rename
             dir_name = os.path.dirname(config_path) or "."
@@ -971,8 +1021,19 @@ def _save_config(config: dict) -> None:
             # Atomic rename
             os.replace(temp_path, config_path)
         finally:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
+            if use_fcntl and lock_fd:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+            elif lock_fd:
+                try:
+                    import msvcrt
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+                except (ImportError, OSError):
+                    pass
+            if lock_fd:
+                lock_fd.close()
             try:
                 os.unlink(lock_path)
             except OSError as exc:

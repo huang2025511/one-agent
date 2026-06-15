@@ -44,7 +44,8 @@ class TurnContext:
     source: str = "cli"
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     turn_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    created_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.monotonic)
+    wall_clock_at: float = field(default_factory=time.time)  # For logging/timestamps
 
     model: Optional[str] = None
     estimated_complexity: float = 0.0
@@ -72,11 +73,11 @@ class TurnContext:
     def record_success(self, answer: str, tokens_used: int) -> None:
         self.result = answer
         self.tokens_used = tokens_used
-        self.duration_seconds = time.time() - self.created_at
+        self.duration_seconds = time.monotonic() - self.created_at
 
     def record_failure(self, error: str) -> None:
         self.error = error
-        self.duration_seconds = time.time() - self.created_at
+        self.duration_seconds = time.monotonic() - self.created_at
 
 
 @dataclass

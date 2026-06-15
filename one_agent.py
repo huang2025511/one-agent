@@ -85,7 +85,6 @@ class MemoryLongTerm(BaseModel):
     enabled: bool = True
     storage: str = "sqlite-fts5"
     max_results: int = Field(default=5, ge=1)
-    relevance_threshold: float = Field(default=0.6, ge=0, le=1)
     decay_enabled: bool = True
 
 

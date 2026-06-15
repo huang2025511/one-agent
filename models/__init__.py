@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -202,7 +203,7 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._cache: Optional[LLMCache] = None
         self._cache_enabled = True
         self._cache_ttl = DEFAULT_CACHE_TTL
-        self._call_stats: List[Dict[str, Any]] = []
+        self._call_stats: deque[Dict[str, Any]] = deque(maxlen=MAX_CALL_STATS_SIZE)
         self._cost_total: float = 0.0
         self._cost_tracker: Optional[CostTracker] = None
         # Strong refs to background auto-classify tasks so they don't get
@@ -1245,7 +1246,7 @@ class LLMProvider(RecommendationMixin, Plugin):
             "tokens_used": tokens,
             "total_cost_usd": round(self._cost_total, 6),
             "cache": self._cache.stats() if self._cache else {},
-            "recent": self._call_stats[-30:],
+            "recent": list(self._call_stats)[-30:],
         }
 
     def clear_cache(self) -> Dict[str, Any]:
@@ -1347,9 +1348,6 @@ class LLMProvider(RecommendationMixin, Plugin):
                 "model": data.get("model", model),
             }
             self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
-            # Cap stats to prevent unbounded memory growth
-            if len(self._call_stats) > MAX_CALL_STATS_SIZE:
-                self._call_stats = self._call_stats[-CALL_STATS_TRIM_SIZE:]
             return result
 
         # Default — OpenAI compatible
@@ -1391,9 +1389,6 @@ class LLMProvider(RecommendationMixin, Plugin):
         tokens_prompt = usage.get("prompt_tokens", 0)
         tokens_completion = usage.get("completion_tokens", 0)
         self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
-        # Cap stats to prevent unbounded memory growth
-        if len(self._call_stats) > MAX_CALL_STATS_SIZE:
-            self._call_stats = self._call_stats[-CALL_STATS_TRIM_SIZE:]
         return {
             "text": text.strip(),
             "tool_calls": tool_calls,

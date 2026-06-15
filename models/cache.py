@@ -25,10 +25,12 @@ class _CacheEntry:
 class LLMCache:
     """LRU cache with TTL for LLM responses."""
 
-    def __init__(self, max_size: int = 500, ttl_seconds: float = 3600) -> None:
+    def __init__(self, max_size: int = 500, ttl_seconds: float = 3600, max_memory_mb: float = 100.0) -> None:
         # Enforce reasonable bounds on cache size to prevent memory issues
         self._max_size = min(max(max_size, 1), 10000)  # Clamp between 1 and 10000
         self._ttl = ttl_seconds
+        self._max_memory_bytes = int(max_memory_mb * 1024 * 1024)  # Convert MB to bytes
+        self._current_memory_bytes = 0
         self._store: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._hits = 0
         self._misses = 0
@@ -62,12 +64,27 @@ class LLMCache:
     def set(self, messages, model, tools, value: Dict[str, Any], temperature=None) -> None:
         key = self._make_key(messages, model, tools, temperature)
         entry = _CacheEntry(value, self._ttl)
+        
+        # Estimate memory usage of this entry (rough approximation)
+        entry_size = len(json.dumps(value).encode('utf-8'))
+        
         if key in self._store:
+            # Update existing entry
+            old_entry = self._store[key]
+            old_size = len(json.dumps(old_entry.value).encode('utf-8'))
+            self._current_memory_bytes -= old_size
             self._store.move_to_end(key)
+        else:
+            # New entry - check if we need to evict
+            while self._store and (len(self._store) >= self._max_size or 
+                                   self._current_memory_bytes + entry_size > self._max_memory_bytes):
+                # Evict oldest entry
+                evicted_key, evicted_entry = self._store.popitem(last=False)
+                evicted_size = len(json.dumps(evicted_entry.value).encode('utf-8'))
+                self._current_memory_bytes -= evicted_size
+        
         self._store[key] = entry
-        if len(self._store) > self._max_size:
-            # Evict oldest
-            self._store.popitem(last=False)
+        self._current_memory_bytes += entry_size
 
     def stats(self) -> Dict[str, Any]:
         total = self._hits + self._misses
@@ -77,6 +94,8 @@ class LLMCache:
             "hit_rate": round(self._hits / total, 3) if total > 0 else 0.0,
             "size": len(self._store),
             "max_size": self._max_size,
+            "memory_used_mb": round(self._current_memory_bytes / (1024 * 1024), 2),
+            "max_memory_mb": round(self._max_memory_bytes / (1024 * 1024), 2),
         }
 
     def clear(self) -> None:

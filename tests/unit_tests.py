@@ -299,8 +299,8 @@ def test_event_bus_dlq():
 
     async def run():
         await bus.start()
-        # Publish event with no subscriber
-        bus.publish({"type": "orphan_event", "payload": {"x": 1}, "source": "test"})
+        # Publish event with no subscriber (use allowed event type)
+        bus.publish({"type": "turn_start", "payload": {"x": 1}, "source": "test"})
         await asyncio.sleep(0.2)
         m = bus.metrics()
         _check("event bus published count", m["published"] == 1, f"got {m['published']}")

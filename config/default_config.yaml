@@ -48,7 +48,6 @@ memory:
     enabled: true
     storage: sqlite-fts5
     max_results: 5
-    relevance_threshold: 0.6
     decay_enabled: true
   procedural:
     enabled: true

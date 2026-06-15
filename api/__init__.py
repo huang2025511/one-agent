@@ -149,7 +149,7 @@ class RESTAPIGateway(Plugin):
         self._api_key = _os.environ.get("ONE_AGENT_API_KEY", self._api_key)
         # CORS: restrict to configured origins in production.  Falls back
         # to a wildcard when no origins are configured (developer mode).
-        self._cors_origins = cfg.get("cors_origins") or ["*"]
+        self._cors_origins = cfg.get("cors_origins") or ["http://localhost", "http://127.0.0.1"]
         # Trusted proxies for X-Forwarded-For header validation
         # Only trust these IPs when extracting real client IP from X-Forwarded-For
         self._trusted_proxies = set(cfg.get("trusted_proxies", []))
@@ -191,7 +191,20 @@ class RESTAPIGateway(Plugin):
         async def rate_limit_middleware(request, call_next):
             # Get real client IP from X-Forwarded-For header
             # Only trust X-Forwarded-For if request comes from a trusted proxy
-            client_ip = request.client.host if request.client else "unknown"
+            client_ip = None
+            if request.client:
+                client_ip = request.client.host
+            elif "client" in request.scope:
+                # Fallback to scope client info
+                client_info = request.scope["client"]
+                if client_info and len(client_info) > 0:
+                    client_ip = client_info[0]
+            
+            if not client_ip:
+                # Generate unique identifier for unknown clients to avoid shared bucket
+                import hashlib
+                client_ip = f"unknown_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
+                logger.warning("Rate limit: unable to determine client IP, using temporary ID")
             
             if client_ip in self._trusted_proxies:
                 # Request from trusted proxy - use X-Forwarded-For
@@ -266,8 +279,10 @@ class RESTAPIGateway(Plugin):
                     if _session_store:
                         _session_store.get_session_count()
                         return True
-                except Exception:
-                    pass
+                except sqlite3.Error as e:
+                    logger.error("Database check failed: %s", e)
+                except Exception as e:
+                    logger.error("Database check failed with unexpected error: %s", e)
                 return False
             
             checks = {

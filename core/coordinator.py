@@ -233,15 +233,18 @@ class Coordinator(Plugin):
     # --------------------------------------------------------- main loop
     async def _run_turn(self, turn: TurnContext) -> None:
         """Execute a single turn: think → compress → delegate/tool-loop → reply."""
-        assert turn is not None, "turn cannot be None"
-        assert turn.input_text is not None, "turn.input_text cannot be None"
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
+        if turn.input_text is None:
+            raise RuntimeError("turn.input_text cannot be None")
         
         if self._llm is None:
             turn.record_failure("LLM provider not bound")
             self.publish("turn_completed", turn=turn)
             return
 
-        assert turn.model is not None, "Model must be set before execution"
+        if turn.model is None:
+            raise RuntimeError("Model must be set before execution")
 
         messages = self._prepare_messages(turn)
         tools = self._prepare_tools(turn)
@@ -268,8 +271,10 @@ class Coordinator(Plugin):
 
     def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Prepare message list with memory snippets if present."""
-        assert turn is not None, "turn cannot be None"
-        assert turn.input_text is not None, "turn.input_text cannot be None"
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
+        if turn.input_text is None:
+            raise RuntimeError("turn.input_text cannot be None")
         
         messages = list(turn.messages)
         if turn.meta.get("memory_snippets"):
@@ -285,7 +290,8 @@ class Coordinator(Plugin):
 
     def _prepare_tools(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Pick relevant skills and prepare tool schemas."""
-        assert turn is not None, "turn cannot be None"
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
         
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
@@ -301,8 +307,10 @@ class Coordinator(Plugin):
 
     async def _think_phase(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Execute thinking phase to plan approach."""
-        assert messages is not None, "messages cannot be None"
-        assert turn is not None, "turn cannot be None"
+        if messages is None:
+            raise RuntimeError("messages cannot be None")
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
         
         think_prompt = (
             "[思考阶段] 在动手之前，请用 2-4 句话快速思考：\n"
@@ -331,8 +339,10 @@ class Coordinator(Plugin):
 
     async def _compress_context(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Compress context if approaching token limit."""
-        assert messages is not None, "messages cannot be None"
-        assert turn is not None, "turn cannot be None"
+        if messages is None:
+            raise RuntimeError("messages cannot be None")
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
         
         if not (self.ctx and self.ctx.config):
             return
@@ -360,8 +370,10 @@ class Coordinator(Plugin):
 
     async def _try_delegation(self, turn: TurnContext, messages: List[Dict[str, Any]]) -> bool:
         """Try delegation for complex tasks. Returns True if delegation was used."""
-        assert turn is not None, "turn cannot be None"
-        assert messages is not None, "messages cannot be None"
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
+        if messages is None:
+            raise RuntimeError("messages cannot be None")
         
         if not (turn.meta.get("enable_delegation") or self._detect_complex_task(turn.input_text)):
             return False
@@ -401,9 +413,12 @@ class Coordinator(Plugin):
 
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
         """Execute tool-call loop until final reply."""
-        assert messages is not None, "messages cannot be None"
-        assert turn is not None, "turn cannot be None"
-        assert tools is not None, "tools cannot be None"
+        if messages is None:
+            raise RuntimeError("messages cannot be None")
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
+        if tools is None:
+            raise RuntimeError("tools cannot be None")
         
         final_text = ""
         total_tokens = 0
@@ -466,11 +481,16 @@ class Coordinator(Plugin):
         iteration: int,
     ) -> None:
         """Execute tool calls and append results to messages."""
-        assert messages is not None, "messages cannot be None"
-        assert turn is not None, "turn cannot be None"
-        assert tool_calls is not None, "tool_calls cannot be None"
-        assert failed_skills is not None, "failed_skills cannot be None"
-        assert iteration >= 0, "iteration must be non-negative"
+        if messages is None:
+            raise RuntimeError("messages cannot be None")
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
+        if tool_calls is None:
+            raise RuntimeError("tool_calls cannot be None")
+        if failed_skills is None:
+            raise RuntimeError("failed_skills cannot be None")
+        if iteration < 0:
+            raise RuntimeError("iteration must be non-negative")
         
         provider = turn.model.split("/")[0] if turn.model and "/" in turn.model else "openai"
 

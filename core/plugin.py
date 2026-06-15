@@ -157,7 +157,8 @@ class PluginManager:
         logger.info("%d plugins set up (priority-sorted)", len(ordered))
 
     async def start_all(self) -> None:
-        for plugin in self._plugins:
+        ordered = self._topological(self._plugins)
+        for plugin in ordered:
             await plugin.start()
 
     async def stop_all(self) -> None:

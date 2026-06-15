@@ -128,6 +128,7 @@ class EventBus:
     """
 
     # Allowed event types - prevents injection of arbitrary event types
+    # Format: "<source>.<action>" or simple action names
     _ALLOWED_EVENT_TYPES = {
         # Core events
         "turn_start", "turn_complete", "turn_completed", "turn_failed", "turn_routed",
@@ -145,6 +146,26 @@ class EventBus:
         # User interaction
         "user_message",
     }
+
+    @classmethod
+    def _is_allowed_event_type(cls, event_type: str) -> bool:
+        """Check if event type is allowed.
+        
+        Accepts:
+        - Exact match in _ALLOWED_EVENT_TYPES
+        - Namespaced format: "<source>.<action>" where both parts are alphanumeric/underscore
+        """
+        if event_type in cls._ALLOWED_EVENT_TYPES:
+            return True
+        # Allow namespaced events like "router.turn_routed" or "skill.custom_action"
+        if "." in event_type:
+            parts = event_type.split(".", 1)
+            if len(parts) == 2:
+                source, action = parts
+                # Validate format: alphanumeric + underscore only
+                if source.replace("_", "").isalnum() and action.replace("_", "").isalnum():
+                    return True
+        return False
 
     def __init__(self, max_queue_size: int = MAX_QUEUE_SIZE) -> None:
         self._subscribers: Dict[str, List[Handler]] = {}
@@ -204,7 +225,7 @@ class EventBus:
             evt = event
 
         # Validate event type to prevent injection attacks
-        if evt.type not in self._ALLOWED_EVENT_TYPES:
+        if not self._is_allowed_event_type(evt.type):
             logger.warning(
                 "rejected unknown event type '%s' from source '%s'",
                 evt.type, evt.source
