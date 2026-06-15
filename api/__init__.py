@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 import time
@@ -227,30 +228,6 @@ class RESTAPIGateway(Plugin):
             return HTMLResponse(content=get_dashboard_html())
 
         # ── Dashboard API endpoints ────────────────────────────────────
-        @app.get("/api/costs/daily")
-        async def costs_daily(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """Get today's cost and budget."""
-            auth(x_api_key)
-            _cost_tracker = getattr(_ctx, "cost_tracker", None) if _ctx else None
-            if _cost_tracker is None:
-                return {"cost": 0.0, "budget": 0.0, "remaining": 0.0}
-            today_cost = _cost_tracker.cost_today()
-            daily_budget = getattr(_cost_tracker, "_daily_budget", 1.0)
-            return {
-                "cost": today_cost,
-                "budget": daily_budget,
-                "remaining": max(0, daily_budget - today_cost),
-            }
-
-        @app.get("/api/costs/monthly")
-        async def costs_monthly(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """Get this month's cost."""
-            auth(x_api_key)
-            _cost_tracker = getattr(_ctx, "cost_tracker", None) if _ctx else None
-            if _cost_tracker is None:
-                return {"cost": 0.0}
-            return {"cost": _cost_tracker.cost_this_month()}
-
         @app.get("/api/sessions/list")
         async def sessions_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List recent sessions."""
@@ -260,16 +237,6 @@ class RESTAPIGateway(Plugin):
                 return {"sessions": []}
             sessions = _session_store.list_sessions(limit=20)
             return {"sessions": sessions}
-
-        @app.get("/api/approvals/pending")
-        async def approvals_pending(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """List pending approval requests."""
-            auth(x_api_key)
-            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
-            if _approval_mgr is None:
-                return {"requests": []}
-            pending = _approval_mgr.list_pending()
-            return {"requests": pending}
 
         @app.post("/api/sessions/{session_id}/fork")
         async def fork_session(session_id: str, body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -331,9 +298,9 @@ class RESTAPIGateway(Plugin):
             
             # Get knowledge graph entity count
             kg_data = {}
-            if _memory_plugin and hasattr(_memory_plugin, "kg"):
+            if _memory_plugin and hasattr(_memory_plugin, "_kg"):
                 try:
-                    kg = _memory_plugin.kg
+                    kg = _memory_plugin._kg
                     entity_count = len(kg.entities) if hasattr(kg, "entities") else 0
                     kg_data = {"entities": entity_count}
                 except Exception:
@@ -347,7 +314,7 @@ class RESTAPIGateway(Plugin):
                 "skills_count": len(_skills.all_skill_ids()) if _skills else 0,
                 # Dashboard-specific fields
                 "sessions": sessions_data,
-                "messages": {"total": sessions_data.get("total", 0)},
+                "messages": {"total": total_messages},
                 "knowledge_graph": kg_data,
                 "skills": {"installed": len(_skills.all_skill_ids()) if _skills else 0},
             }

@@ -27,7 +27,6 @@ from .document_search import DocumentStore
 from multimodal import make_transcribe_handler, make_image_handler
 from skills.document_search import make_doc_search_handler
 from memory.knowledge_graph import make_graph_search_handler
-from .schema_gen import auto_tool_schema
 
 logger = logging.getLogger(__name__)
 
@@ -581,11 +580,16 @@ class SkillManager(Plugin):
         ))
 
         # ---------- Python 代码执行技能 ----------
-        # 使用全局共享的 PythonExecutor 实例（由 one_agent.py 创建）
+        # 使用全局共享的 PythonExecutor 实例（由 one_agent.py 创建并通过 ctx 传递）
         from executors.python_runner import make_python_handler
-        python_executor = getattr(self, '_python_executor', None)
+        python_executor = None
+        
+        # 尝试从 AgentContext 获取共享实例（在 start() 时设置）
+        if hasattr(self, '_ctx') and hasattr(self._ctx, 'python_executor'):
+            python_executor = self._ctx.python_executor
+        
         if python_executor is None:
-            # 如果未提供，创建新实例（向后兼容）
+            # 如果未提供，创建新实例（向后兼容或测试环境）
             from executors.python_runner import PythonExecutor
             python_executor = PythonExecutor()
         

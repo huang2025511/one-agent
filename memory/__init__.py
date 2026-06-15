@@ -147,7 +147,12 @@ class LongTermMemory:
             # FTS5 bm25 rank is negative (more negative = more relevant).
             # A match always has rank < 0; filter by negative threshold.
             if rank < 0 or not query:
+                # Get rowid for hybrid search deduplication
+                c.execute("SELECT rowid FROM memory WHERE content = ? AND timestamp = ?", (content, timestamp))
+                rowid_row = c.fetchone()
+                rowid = str(rowid_row[0]) if rowid_row else None
                 results.append({
+                    "id": rowid,
                     "content": content,
                     "source": source,
                     "tags": tags,
@@ -507,6 +512,11 @@ class MemoryPlugin(Plugin):
         if self._kg is not None:
             try:
                 self._kg.close()
+            except Exception:
+                pass
+        if self._embeddings is not None:
+            try:
+                self._embeddings.close()
             except Exception:
                 pass
         await super().stop()

@@ -282,12 +282,12 @@ DASHBOARD_HTML = """
             const data = await fetchJSON(`${API_BASE}/approvals/pending`);
             const container = document.getElementById('approval-queue');
             
-            if (!data || !data.requests || data.requests.length === 0) {
+            if (!data || !data.pending || data.pending.length === 0) {
                 container.innerHTML = '<div class="loading">暂无待审批项</div>';
                 return;
             }
             
-            container.innerHTML = data.requests.map(r => `
+            container.innerHTML = data.pending.map(r => `
                 <div class="approval-item">
                     <div><strong>${r.action}</strong></div>
                     <div style="font-size: 0.9em; color: #fbbf24;">${r.description}</div>

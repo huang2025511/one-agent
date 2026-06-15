@@ -16,6 +16,7 @@ Security:
 from __future__ import annotations
 
 import asyncio
+import builtins
 import io
 import logging
 import sys
@@ -27,7 +28,47 @@ from core.plugin import Plugin
 
 logger = logging.getLogger(__name__)
 
-# Safe builtins — exclude dangerous ones like eval, exec, compile, __import__
+# Save reference to the real __import__ before we override it
+_real_import = builtins.__import__
+
+# Whitelist of safe imports — no system/network access
+_SAFE_IMPORTS = {
+    "math",
+    "random",
+    "datetime",
+    "time",
+    "collections",
+    "itertools",
+    "functools",
+    "operator",
+    "string",
+    "re",
+    "json",
+    "csv",
+    "hashlib",
+    "base64",
+    "urllib.parse",
+    "decimal",
+    "fractions",
+    "statistics",
+    "typing",
+    "dataclasses",
+    "enum",
+    "copy",
+    "pprint",
+    "textwrap",
+    "unicodedata",
+}
+
+# Safe import wrapper that checks against whitelist
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """Safe import function that only allows whitelisted modules."""
+    # Check if module or its parent is in whitelist
+    if name not in _SAFE_IMPORTS and not any(name.startswith(s + ".") for s in _SAFE_IMPORTS):
+        raise ImportError(f"Import not allowed: {name}")
+    return _real_import(name, globals, locals, fromlist, level)
+
+# Safe builtins — exclude dangerous ones like eval, exec, compile
 _SAFE_BUILTINS = {
     "abs": abs,
     "all": all,
@@ -76,40 +117,11 @@ _SAFE_BUILTINS = {
     "str": str,
     "sum": sum,
     "tuple": tuple,
-    "type": type,
     "zip": zip,
     "True": True,
     "False": False,
     "None": None,
-}
-
-# Whitelist of safe imports — no system/network access
-_SAFE_IMPORTS = {
-    "math",
-    "random",
-    "datetime",
-    "time",
-    "collections",
-    "itertools",
-    "functools",
-    "operator",
-    "string",
-    "re",
-    "json",
-    "csv",
-    "hashlib",
-    "base64",
-    "urllib.parse",
-    "decimal",
-    "fractions",
-    "statistics",
-    "typing",
-    "dataclasses",
-    "enum",
-    "copy",
-    "pprint",
-    "textwrap",
-    "unicodedata",
+    "__import__": _safe_import,
 }
 
 
@@ -221,10 +233,14 @@ class PythonExecutor(Plugin):
             for line in code.split("\n"):
                 line = line.strip()
                 if line.startswith("import ") or line.startswith("from "):
-                    module = line.split()[1].split(".")[0]
-                    if module not in _SAFE_IMPORTS:
-                        result["error"] = f"Import not allowed: {module}"
-                        return result
+                    # Extract full module path (e.g., "urllib.parse" from "from urllib.parse import quote")
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        module = parts[1].split(".")[0] if parts[0] == "import" else parts[1]
+                        # Check if the full module path or its root is in whitelist
+                        if module not in _SAFE_IMPORTS and not any(module.startswith(s + ".") for s in _SAFE_IMPORTS):
+                            result["error"] = f"Import not allowed: {module}"
+                            return result
 
             # Compile and execute
             with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
