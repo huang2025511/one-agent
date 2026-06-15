@@ -68,6 +68,8 @@ async def test_chat_endpoint(app):
             "http://127.0.0.1:18792/api/chat",
             json={"text": "hello", "session_id": "test"}
         )
+        if r.status_code != 200:
+            print(f"DEBUG: status={r.status_code} body={r.text}")
         assert r.status_code == 200
 
 

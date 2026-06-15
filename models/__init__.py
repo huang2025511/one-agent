@@ -50,11 +50,18 @@ class _SensitiveInfoFilter(logging.Filter):
     def filter(self, record):
         if isinstance(record.msg, str):
             record.msg = _sanitize_log_message(record.msg)
+        # Only sanitize string args, preserve numeric types for % formatting
         if record.args:
             if isinstance(record.args, tuple):
-                record.args = tuple(_sanitize_log_message(str(arg)) for arg in record.args)
+                record.args = tuple(
+                    _sanitize_log_message(arg) if isinstance(arg, str) else arg
+                    for arg in record.args
+                )
             elif isinstance(record.args, dict):
-                record.args = {k: _sanitize_log_message(str(v)) for k, v in record.args.items()}
+                record.args = {
+                    k: _sanitize_log_message(v) if isinstance(v, str) else v
+                    for k, v in record.args.items()
+                }
         return True
 
 

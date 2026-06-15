@@ -32,6 +32,14 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Import FastAPI types at module level for type annotation resolution
+# (needed because of `from __future__ import annotations`)
+try:
+    from fastapi import Body, Request
+except ImportError:
+    # Will be handled in start() method
+    pass
+
 from core.plugin import Plugin
 from core.exceptions import InputValidationError
 from i18n import _
@@ -70,11 +78,18 @@ class _SensitiveInfoFilter(logging.Filter):
     def filter(self, record):
         if isinstance(record.msg, str):
             record.msg = _sanitize_log_message(record.msg)
+        # Only sanitize string args, preserve numeric types for % formatting
         if record.args:
             if isinstance(record.args, tuple):
-                record.args = tuple(_sanitize_log_message(str(arg)) for arg in record.args)
+                record.args = tuple(
+                    _sanitize_log_message(arg) if isinstance(arg, str) else arg
+                    for arg in record.args
+                )
             elif isinstance(record.args, dict):
-                record.args = {k: _sanitize_log_message(str(v)) for k, v in record.args.items()}
+                record.args = {
+                    k: _sanitize_log_message(v) if isinstance(v, str) else v
+                    for k, v in record.args.items()
+                }
         return True
 
 
@@ -174,7 +189,7 @@ class RESTAPIGateway(Plugin):
         if not self._enabled:
             return
         try:
-            from fastapi import FastAPI, HTTPException, Header, Request, UploadFile
+            from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, Body
             from fastapi.middleware.cors import CORSMiddleware
             from fastapi.responses import JSONResponse
         except ImportError:
@@ -695,7 +710,7 @@ class RESTAPIGateway(Plugin):
             return self._audit_log.stats()
 
         @app.post("/api/chat")
-        async def chat(body: dict, request: Request, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+        async def chat(request: Request, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
