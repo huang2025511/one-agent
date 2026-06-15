@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import mimetypes
+import os
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -373,3 +376,70 @@ class MultimodalPlugin(Plugin):
             else:
                 normalized.append(r)
         return normalized
+
+
+# ------------------------------------------------------------------ skill handler factories
+
+def make_transcribe_handler():
+    """Return a handler that transcribes audio files to text using Whisper."""
+
+    async def handler(args):
+        path = args.get("path", args.get("input", ""))
+        if not path:
+            return "请提供音频文件路径（path 或 input 参数）"
+        import subprocess
+        import os
+        try:
+            result = subprocess.run(
+                ["whisper", path, "--language", "zh", "--model", "tiny",
+                 "--output_format", "txt", "--output_dir", "/tmp"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                out_path = os.path.splitext(path)[0] + ".txt"
+                if os.path.exists(out_path):
+                    with open(out_path, encoding="utf-8") as f:
+                        return f.read().strip()
+            return f"[whisper 失败: {result.stderr[:200]}]"
+        except FileNotFoundError:
+            return "[whisper 未安装。请运行: pip install openai-whisper]"
+        except subprocess.TimeoutExpired:
+            return "[whisper 超时：音频文件可能过大]"
+        except Exception as exc:
+            return f"[转录失败: {exc}]"
+
+    return handler
+
+
+def make_image_handler():
+    """Return a handler that encodes an image for vision model analysis."""
+
+    async def handler(args):
+        path = args.get("path", args.get("input", ""))
+        question = args.get("question", "请描述这张图片")
+        if not path:
+            return "请提供图片路径（path 或 input 参数）"
+        import os
+        import base64
+        if not os.path.exists(path):
+            return f"图片不存在: {path}"
+
+        ext = os.path.splitext(path)[1].lower()
+        mime_map = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+        }
+        mime = mime_map.get(ext, "image/png")
+
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+
+        return json.dumps({
+            "type": "image_request",
+            "image_base64": b64,
+            "mime_type": mime,
+            "question": question,
+            "hint": "需要使用支持视觉的模型（如 GPT-4o、Claude 3 Vision）来回答",
+        }, ensure_ascii=False)
+
+    return handler

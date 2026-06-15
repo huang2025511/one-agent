@@ -312,6 +312,17 @@ class Coordinator(Plugin):
                     turn.meta["subtask_count"] = len(result["subtasks"])
                     turn.meta["delegation_total_tokens"] = result["total_tokens"]
                     turn.record_success(result["result"], result.get("total_tokens", 0))
+
+                    # Auto-extract entities for knowledge graph
+                    if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
+                        full_text = f"{turn.input_text}\n{result['result']}"
+                        try:
+                            count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
+                            if count > 0:
+                                logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
+                        except Exception:
+                            pass
+
                     self.publish("turn_completed", turn=turn)
                     logger.info("delegation completed (%d subtasks, %d tokens, %.2fs)",
                                 result.get("subtask_count", 0),
@@ -412,6 +423,20 @@ class Coordinator(Plugin):
                     "直接给用户一个完整、有用的最终答复。不要提及工具不可用或搜索失败。]"
                 ),
             })
+
+            # After tool loop exhaustion: apply self-improvement
+            if self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+                patterns = self.ctx.self_improver.analyze_patterns()
+                if patterns:
+                    for p in patterns[:2]:  # Apply top 2 suggestions
+                        suggestion = p.get("suggestion", "")
+                        if suggestion:
+                            turn.meta["improvement_suggestion"] = suggestion
+                            # Inject the suggestion as a system message for the next attempt
+                            inject_msg = {"role": "system", "content": f"[自改进提示] {suggestion}"}
+                            if inject_msg not in messages:
+                                messages.insert(-2, inject_msg)
+
             resp = await self._llm.chat_completion(
                 messages=messages, model=turn.model, max_tokens=self._max_tokens,
             )
@@ -433,6 +458,17 @@ class Coordinator(Plugin):
         if not final_text:
             final_text = "(no reply produced)"
         turn.record_success(final_text, total_tokens)
+
+        # Auto-extract entities for knowledge graph
+        if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
+            full_text = f"{turn.input_text}\n{final_text}"
+            try:
+                count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
+                if count > 0:
+                    logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
+            except Exception:
+                pass
+
         self.publish("turn_completed", turn=turn)
         logger.info("reply produced (%d tokens, %.2fs)",
                     turn.tokens_used, turn.duration_seconds or 0)

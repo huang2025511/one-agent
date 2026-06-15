@@ -253,7 +253,8 @@ class OneAgentApp:
         from models import LLMProvider
         from router import SmartRouter
         from memory import MemoryPlugin
-        from skills import SkillManager, make_graph_search_handler, Skill
+        from skills import SkillManager, Skill
+        from memory.knowledge_graph import make_graph_search_handler
         from executors import ShellExecutor, DockerExecutor, BrowserExecutor
         from scheduler import SchedulerPlugin
         from multimodal import MultimodalPlugin
@@ -392,7 +393,7 @@ class OneAgentApp:
         # Register knowledge graph search skill (KG is created by MemoryPlugin during setup)
         if self.memory._kg is not None:
             from skills import Skill as _Skill
-            from skills import make_graph_search_handler
+            from memory.knowledge_graph import make_graph_search_handler
             self.skills.register(_Skill(
                 id="graph_search",
                 title="知识图谱搜索",

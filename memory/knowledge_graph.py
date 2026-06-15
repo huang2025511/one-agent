@@ -205,3 +205,61 @@ class KnowledgeGraph:
             self._conn.close()
         except Exception:
             pass
+
+
+# ------------------------------------------------------------------ skill handler factory
+
+def make_graph_search_handler(kg):
+    """Create a handler for graph_search skill that queries the knowledge graph.
+
+    The handler expects ``kg`` to be a ``KnowledgeGraph`` instance (or any
+    object with ``search``, ``query_entity``, and ``get_neighbors`` methods).
+    """
+    async def handler(args):
+        action = args.get("action", "search")
+        if action == "search":
+            query = args.get("query", args.get("input", ""))
+            if not query:
+                return "请提供搜索关键词"
+            results = kg.search(query, limit=args.get("limit", 10))
+            if not results:
+                return f"未找到与 '{query}' 相关的实体"
+            lines = [f"实体搜索结果（{query}）："]
+            for r in results:
+                lines.append(f"  - {r['name']} (类型: {r.get('type', 'unknown')})")
+            return "\n".join(lines)
+        elif action == "entity":
+            name = args.get("name", args.get("input", ""))
+            if not name:
+                return "请提供实体名称"
+            entity = kg.query_entity(name)
+            if entity is None:
+                return f"未找到实体: {name}"
+            lines = [f"实体: {entity['name']} (类型: {entity['type']})"]
+            if entity["outgoing"]:
+                lines.append("  出边关系:")
+                for r in entity["outgoing"]:
+                    lines.append(f"    --[{r['predicate']}]--> {r['object_name']}")
+            if entity["incoming"]:
+                lines.append("  入边关系:")
+                for r in entity["incoming"]:
+                    lines.append(f"    {r['subject_name']} --[{r['predicate']}]-->")
+            return "\n".join(lines)
+        elif action == "neighbors":
+            name = args.get("name", args.get("input", ""))
+            if not name:
+                return "请提供实体名称"
+            depth = args.get("depth", 1)
+            neighbors = kg.get_neighbors(name, depth=depth)
+            if not neighbors:
+                return f"未找到与 '{name}' 相关的邻居"
+            lines = [f"邻居图谱（源于 {name}，深度 {depth}）："]
+            for n in neighbors:
+                if "relation" in n:
+                    lines.append(f"  {n['relation']}")
+                else:
+                    lines.append(f"  中心实体: {n['name']}")
+            return "\n".join(lines)
+        else:
+            return f"未知操作: {action}，支持: search, entity, neighbors"
+    return handler

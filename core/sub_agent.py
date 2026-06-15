@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 from core.context import TurnContext
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,7 @@ class SubAgent:
                 "error": None,
             }
         except Exception as exc:
+            logger.warning("SubAgent %s failed: %s", self.name, exc)
             return {
                 "result": f"[{self.name} 执行失败: {exc}]",
                 "tokens_used": 0,
@@ -81,7 +84,8 @@ class DelegationManager:
             text = resp.get("text", "")
             subtasks = [s.strip() for s in text.split("\n") if s.strip() and len(s.strip()) > 10]
             return subtasks[:self._max_parallel]
-        except Exception:
+        except (asyncio.TimeoutError, httpx.HTTPError, ValueError, KeyError) as exc:
+            logger.warning("DelegationManager decompose failed: %s", exc)
             return [task]
 
     async def execute(self, task: str, model: str = None) -> Dict[str, Any]:

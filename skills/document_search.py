@@ -94,14 +94,39 @@ class DocumentStore:
         ext = path.suffix.lower()
 
         if ext == '.pdf':
+            # Try multiple PDF parsing approaches
+            content = ""
+            # 1. Try pdftotext (system command)
             try:
                 import subprocess
-                result = subprocess.run(['pdftotext', '-layout', str(path), '-'],
-                                      capture_output=True, text=True, timeout=30)
-                content = result.stdout
-            except Exception:
-                # Fallback: try reading as text
-                content = path.read_text(encoding='utf-8', errors='ignore')
+                result = subprocess.run(
+                    ['pdftotext', '-layout', str(path), '-'],
+                    capture_output=True, text=True, timeout=30
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    content = result.stdout
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+                logger.debug("pdftotext failed: %s", exc)
+
+            # 2. Try PyPDF2
+            if not content.strip():
+                try:
+                    from PyPDF2 import PdfReader
+                    reader = PdfReader(str(path))
+                    content = "\n".join(
+                        page.extract_text() or "" for page in reader.pages
+                    )
+                except (ImportError, OSError, ValueError) as exc:
+                    logger.debug("PyPDF2 parse failed: %s", exc)
+                    pass
+
+            # 3. Fallback: read raw text
+            if not content.strip():
+                try:
+                    content = path.read_text(encoding='utf-8', errors='ignore')
+                except (OSError, UnicodeDecodeError) as exc:
+                    logger.warning("Failed to parse PDF: %s", name)
+                    content = f"[无法解析 PDF: {name}]"
         else:
             content = path.read_text(encoding='utf-8', errors='ignore')
 
@@ -165,3 +190,41 @@ class DocumentStore:
         self._conn.execute("DELETE FROM doc_chunks WHERE doc_id = ?", (doc_id,))
         self._conn.commit()
         return True
+
+
+# ------------------------------------------------------------------ skill handler factory
+
+def make_doc_search_handler(store):
+    async def handler(args):
+        action = args.get("action", "search")
+        if action == "search":
+            query = args.get("query", args.get("input", ""))
+            if not query:
+                return "请提供搜索关键词"
+            results = store.search(query, limit=args.get("limit", 5))
+            if not results:
+                return f"未找到与 '{query}' 相关的文档内容"
+            lines = [f"文档搜索结果（{query}）："]
+            for r in results:
+                lines.append(f"\n📄 {r['document']} (chunk {r['chunk']})")
+                lines.append(r['content'][:500])
+            return "\n".join(lines)
+        elif action == "list":
+            docs = store.list_documents()
+            if not docs:
+                return "暂无已上传的文档"
+            lines = ["已上传文档："]
+            for d in docs:
+                lines.append(f"  - {d['name']} ({d['type']}, {d['chunk_count']} chunks, {d['size_bytes']} bytes)")
+            return "\n".join(lines)
+        elif action == "ingest":
+            import asyncio as _asyncio
+            path = args.get("path", "")
+            if not path:
+                return "请提供文档路径"
+            loop = _asyncio.get_event_loop()
+            count = await loop.run_in_executor(None, store.ingest_file, path)
+            return f"已摄入文档，切分为 {count} 个 chunks"
+        else:
+            return f"未知操作: {action}，支持: search, list, ingest"
+    return handler

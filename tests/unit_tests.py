@@ -1834,6 +1834,381 @@ def test_web_search_skill_returns_fallback():
            f"got: {result[:120]}")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 20. ToolResult (core/tool_result.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_tool_result_success():
+    from core.tool_result import ToolResult
+    tr = ToolResult(tool_name="calc", status="success", data="42")
+    msg = tr.to_message()
+    _check("tr success contains calc", "calc" in msg)
+    _check("tr success contains 42", "42" in msg)
+    d = tr.to_dict()
+    _check("tr dict has tool_name=calc", d.get("tool_name") == "calc")
+    _check("tr dict has status=success", d.get("status") == "success")
+    _check("tr dict has data=42", d.get("data") == "42")
+
+
+def test_tool_result_error():
+    from core.tool_result import ToolResult
+    tr = ToolResult(tool_name="calc", status="error", error="division by zero")
+    msg = tr.to_message()
+    _check("tr error contains 执行失败", "执行失败" in msg)
+    _check("tr error contains error msg", "division by zero" in msg)
+
+
+def test_tool_result_unavailable():
+    from core.tool_result import ToolResult
+    tr = ToolResult(tool_name="search", status="unavailable")
+    msg = tr.to_message()
+    _check("tr unavailable contains 不可用", "不可用" in msg)
+
+
+def test_tool_result_str_compat():
+    from core.tool_result import ToolResult
+    tr = ToolResult(tool_name="echo", status="success", data="hello")
+    s = str(tr)
+    _check("tr str works", isinstance(s, str) and len(s) > 0)
+    _check("tr __eq__ with string", tr == "hello")
+    _check("tr __eq__ with different string", tr != "other")
+
+
+def test_tool_result_duration():
+    from core.tool_result import ToolResult
+    tr = ToolResult(tool_name="slow", status="success", data="done", duration_ms=1500.51)
+    msg = tr.to_message()
+    _check("tr duration contains 1501ms", "1501ms" in msg)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 21. ApprovalRequest (core/approval.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_approval_request_approve():
+    from core.approval import ApprovalRequest
+
+    async def run():
+        req = ApprovalRequest("test", "details")
+        req.approve()
+        result = await req.wait()
+        return result
+    _check("approval approve returns True", asyncio.run(run()) is True)
+
+
+def test_approval_request_deny():
+    from core.approval import ApprovalRequest
+
+    async def run():
+        req = ApprovalRequest("test", "details")
+        req.deny()
+        result = await req.wait()
+        return result
+    _check("approval deny returns False", asyncio.run(run()) is False)
+
+
+def test_approval_request_timeout():
+    from core.approval import ApprovalRequest
+
+    async def run():
+        req = ApprovalRequest("test", "details")
+        result = await req.wait(timeout=0.1)
+        return result
+    _check("approval timeout returns False", asyncio.run(run()) is False)
+
+
+def test_approval_manager_pending():
+    from core.approval import ApprovalManager
+    mgr = ApprovalManager()
+    mgr.request_approval("op1", "details1")
+    mgr.request_approval("op2", "details2")
+    pending = mgr.get_pending()
+    _check("approval mgr pending count", len(pending) == 2, f"got {len(pending)}")
+
+
+def test_approval_manager_approve():
+    from core.approval import ApprovalManager
+    mgr = ApprovalManager()
+    req = mgr.request_approval("op1", "details")
+    ok = mgr.approve(req.id)
+    _check("approval mgr approve returns True", ok is True)
+    pending = mgr.get_pending()
+    _check("approval mgr pending empty after approve", len(pending) == 0, f"got {len(pending)}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 22. SelfImprover (core/self_improve.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_self_improver_record():
+    from core.self_improve import SelfImprover
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_improver_{os.getpid()}.db")
+    si = SelfImprover(db_path)
+    si.record_failure("test input", "tool_error", "something broke")
+    stats = si.get_stats()
+    _check("si record failure count=1", stats["total_failures"] == 1, f"got {stats['total_failures']}")
+    si._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+def test_self_improver_patterns():
+    from core.self_improve import SelfImprover
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_improver_pat_{os.getpid()}.db")
+    si = SelfImprover(db_path)
+    for i in range(3):
+        si.record_failure(f"test input {i}", "tool_error", f"error {i}")
+    patterns = si.analyze_patterns()
+    _check("si patterns found", len(patterns) > 0, f"got {len(patterns)}")
+    pattern_types = [p["type"] for p in patterns]
+    _check("si pattern has frequent_error", "frequent_error" in pattern_types)
+    si._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+def test_self_improver_apply():
+    from core.self_improve import SelfImprover
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_improver_apply_{os.getpid()}.db")
+    si = SelfImprover(db_path)
+    si.apply_improvement("timeout", "增加超时重试机制")
+    improvements = si.get_improvements()
+    _check("si improvements not empty", len(improvements) > 0, f"got {len(improvements)}")
+    _check("si improvement pattern", improvements[0]["pattern"] == "timeout")
+    si._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 23. SubAgent delegation (_detect_complex_task in coordinator)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_sub_agent_detect_complex():
+    from core.coordinator import Coordinator
+    text = "请帮我详细比较 Python 和 Go 两种编程语言的性能差异，从并发处理模型、内存管理效率、编译速度等多个维度进行深入分析"
+    result = Coordinator._detect_complex_task(text)
+    _check("detect complex task returns True", result is True, f"len={len(text)}")
+
+
+def test_sub_agent_detect_simple():
+    from core.coordinator import Coordinator
+    result = Coordinator._detect_complex_task("你好")
+    _check("detect simple task returns False", result is False)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 24. KnowledgeGraph (memory/knowledge_graph.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_kg_add_entity():
+    from memory.knowledge_graph import KnowledgeGraph
+    kg = KnowledgeGraph(":memory:")
+    kg.add_entity("Python", etype="language")
+    results = kg.search("Python")
+    _check("kg search Python found", len(results) > 0 and results[0]["name"] == "Python")
+    kg.close()
+
+
+def test_kg_add_relation():
+    from memory.knowledge_graph import KnowledgeGraph
+    kg = KnowledgeGraph(":memory:")
+    kg.add_entity("Alice", etype="person")
+    kg.add_entity("Bob", etype="person")
+    kg.add_relation("Alice", "knows", "Bob")
+    entity = kg.query_entity("Alice")
+    _check("kg query Alice found", entity is not None)
+    outgoing_names = [r["object_name"] for r in entity["outgoing"]]
+    _check("kg Alice outgoing has Bob", "Bob" in outgoing_names)
+    kg.close()
+
+
+def test_kg_extract_from_text():
+    from memory.knowledge_graph import KnowledgeGraph
+    kg = KnowledgeGraph(":memory:")
+    count = kg.extract_from_text("Alice works at Google on Python projects")
+    _check("kg extract found entities", count > 0, f"extracted {count} entities")
+    kg.close()
+
+
+def test_kg_stats():
+    from memory.knowledge_graph import KnowledgeGraph
+    kg = KnowledgeGraph(":memory:")
+    kg.add_entity("Python")
+    kg.add_entity("Go")
+    s = kg.stats()
+    _check("kg stats entity count > 0", s["entities"] > 0, f"entities={s['entities']}")
+    kg.close()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 25. SessionStore (memory/session_store.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_session_create_and_get():
+    from memory.session_store import SessionStore
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_sessions_{os.getpid()}.db")
+    store = SessionStore(db_path)
+    store.create_session("s1", "Test Session")
+    store.add_message("s1", "user", "Hello world")
+    session = store.get_session("s1")
+    _check("session get returns not None", session is not None)
+    _check("session title", session["title"] == "Test Session" or "Test" in str(session.get("title", "")))
+    _check("session has messages", len(session.get("messages", [])) > 0)
+    store.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+def test_session_list():
+    from memory.session_store import SessionStore
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_sessions_list_{os.getpid()}.db")
+    store = SessionStore(db_path)
+    for i in range(3):
+        store.create_session(f"s{i}", f"Session {i}")
+    sessions = store.list_sessions()
+    _check("session list count=3", len(sessions) == 3, f"got {len(sessions)}")
+    store.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+def test_session_delete():
+    from memory.session_store import SessionStore
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_sessions_del_{os.getpid()}.db")
+    store = SessionStore(db_path)
+    store.create_session("s1", "To Delete")
+    deleted = store.delete_session("s1")
+    _check("session delete returns True", deleted is True)
+    session = store.get_session("s1")
+    _check("session get after delete is None", session is None)
+    store.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 26. CostTracker (models/cost_tracker.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_cost_record():
+    from models.cost_tracker import CostTracker
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_cost_{os.getpid()}.db")
+    ct = CostTracker(db_path)
+    ct.record("openai", "gpt-4o", tokens_prompt=100, tokens_completion=50)
+    daily = ct.daily_cost()
+    _check("cost record daily_cost > 0", daily["cost"] > 0, f"cost={daily['cost']}")
+    ct._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+def test_cost_budget():
+    from models.cost_tracker import CostTracker
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_cost_budget_{os.getpid()}.db")
+    ct = CostTracker(db_path, daily_budget=0.001)
+    ct.record("openai", "gpt-4o", tokens_prompt=300)
+    budget = ct.check_budget()
+    _check("cost budget exceeded", budget["daily"]["exceeded"] is True)
+    _check("cost budget overall_exceeded", budget["overall_exceeded"] is True)
+    ct._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+def test_cost_by_provider():
+    from models.cost_tracker import CostTracker
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_cost_prov_{os.getpid()}.db")
+    ct = CostTracker(db_path)
+    ct.record("openai", "gpt-4o", tokens_prompt=100)
+    ct.record("anthropic", "claude", tokens_prompt=100)
+    by_prov = ct.by_provider()
+    _check("cost by_provider has openai", "openai" in by_prov)
+    _check("cost by_provider has anthropic", "anthropic" in by_prov)
+    _check("cost by_provider 2 entries", len(by_prov) == 2, f"got {len(by_prov)}")
+    ct._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 27. DocumentStore (skills/document_search.py)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_doc_ingest_text():
+    from skills.document_search import DocumentStore
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_docs_{os.getpid()}.db")
+    ds = DocumentStore(db_path)
+    chunks = ds.ingest_text("test.txt", "Hello world from the test suite")
+    _check("doc ingest returns chunks > 0", chunks > 0, f"chunks={chunks}")
+    results = ds.search("Hello")
+    _check("doc search found Hello", len(results) > 0, f"got {len(results)} results")
+    ds._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+def test_doc_list():
+    from skills.document_search import DocumentStore
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_docs_list_{os.getpid()}.db")
+    ds = DocumentStore(db_path)
+    ds.ingest_text("doc1.txt", "Content one")
+    ds.ingest_text("doc2.txt", "Content two")
+    docs = ds.list_documents()
+    _check("doc list count=2", len(docs) == 2, f"got {len(docs)}")
+    ds._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+def test_doc_delete():
+    from skills.document_search import DocumentStore
+    import tempfile
+    db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_docs_del_{os.getpid()}.db")
+    ds = DocumentStore(db_path)
+    ds.ingest_text("to_delete.txt", "Some content")
+    ok = ds.delete_document("to_delete.txt")
+    _check("doc delete returns True", ok is True)
+    docs = ds.list_documents()
+    _check("doc not found after delete", not any(d["name"] == "to_delete.txt" for d in docs),
+           f"still found: {[d['name'] for d in docs]}")
+    ds._conn.close()
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
 if __name__ == "__main__":
     print("=== unit tests ===\n")
 
@@ -1966,6 +2341,50 @@ if __name__ == "__main__":
     print("\n─ web_search skill ─")
     test_web_search_skill_exists()
     test_web_search_skill_returns_fallback()
+
+    print("\n─ tool result ─")
+    test_tool_result_success()
+    test_tool_result_error()
+    test_tool_result_unavailable()
+    test_tool_result_str_compat()
+    test_tool_result_duration()
+
+    print("\n─ approval request ─")
+    test_approval_request_approve()
+    test_approval_request_deny()
+    test_approval_request_timeout()
+    test_approval_manager_pending()
+    test_approval_manager_approve()
+
+    print("\n─ self improver ─")
+    test_self_improver_record()
+    test_self_improver_patterns()
+    test_self_improver_apply()
+
+    print("\n─ sub-agent delegation ─")
+    test_sub_agent_detect_complex()
+    test_sub_agent_detect_simple()
+
+    print("\n─ knowledge graph ─")
+    test_kg_add_entity()
+    test_kg_add_relation()
+    test_kg_extract_from_text()
+    test_kg_stats()
+
+    print("\n─ session store ─")
+    test_session_create_and_get()
+    test_session_list()
+    test_session_delete()
+
+    print("\n─ cost tracker ─")
+    test_cost_record()
+    test_cost_budget()
+    test_cost_by_provider()
+
+    print("\n─ document store ─")
+    test_doc_ingest_text()
+    test_doc_list()
+    test_doc_delete()
 
     print("\n" + "─" * 60)
     ok = _summary()
