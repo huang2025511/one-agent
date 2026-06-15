@@ -250,10 +250,12 @@ class SessionStore:
 
             # 复制分叉点之前的消息
             for msg in messages[:fork_point]:
+                meta = msg.get("meta", {})
+                meta_json = json.dumps(meta) if isinstance(meta, dict) else (meta or "{}")
                 self._conn.execute(
                     "INSERT INTO messages(id, session_id, role, content, meta, created_at) "
                     "VALUES (NULL, ?, ?, ?, ?, ?)",
-                    (new_session_id, msg["role"], msg["content"], msg.get("meta", "{}"), msg["created_at"]),
+                    (new_session_id, msg["role"], msg["content"], meta_json, msg["created_at"]),
                 )
 
             # 更新消息计数和 token 统计
