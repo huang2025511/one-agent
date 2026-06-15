@@ -5,6 +5,10 @@
 # 用法：bash install.sh          # 中文
 #       bash install.sh en       # 英文
 #       LANG=en bash install.sh  # 英文（环境变量方式）
+#
+# 国内网络优化：
+#   - 自动检测是否在中国大陆，优先使用清华/阿里云 PyPI 镜像
+#   - 也可手动指定: PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple bash install.sh
 # ============================================================
 
 set -e
@@ -14,6 +18,67 @@ LANG_CODE="${1:-${LANG:-zh}}"
 if [[ "$LANG_CODE" != "en" ]]; then
     LANG_CODE="zh"
 fi
+
+# ---------- 国内镜像源检测 ----------
+# 优先级: 环境变量 > 自动检测 > 官方源
+_detect_china_network() {
+    # 如果用户已显式指定 PIP_INDEX，直接使用
+    if [[ -n "${PIP_INDEX:-}" ]]; then
+        echo "$PIP_INDEX"
+        return
+    fi
+    # 检查是否在中国大陆：通过连接 pypi.org 的超时时间判断
+    # 国内直连 pypi.org 通常 > 2s 或超时，用清华源更快
+    if command -v curl &>/dev/null; then
+        local elapsed
+        elapsed=$(curl -s -o /dev/null -w '%{time_total}' --connect-timeout 2 https://pypi.org/simple/ 2>/dev/null || echo "5")
+        if [[ "$(echo "$elapsed > 1.5" | bc 2>/dev/null || echo 1)" == "1" ]]; then
+            echo "https://pypi.tuna.tsinghua.edu.cn/simple"
+            return
+        fi
+    fi
+    # 检查系统语言环境辅助判断
+    if [[ "$LANG" =~ zh_CN ]] || [[ "$(locale 2>/dev/null | grep -i cn)" ]]; then
+        echo "https://pypi.tuna.tsinghua.edu.cn/simple"
+        return
+    fi
+    echo ""
+}
+
+PIP_MIRROR=$(_detect_china_network)
+_pip_install() {
+    if [[ -n "$PIP_MIRROR" ]]; then
+        $PY -m pip install --quiet -i "$PIP_MIRROR" --trusted-host pypi.tuna.tsinghua.edu.cn "$@"
+    else
+        $PY -m pip install --quiet "$@"
+    fi
+}
+
+# 配置 pip 全局镜像（持久化，方便后续安装）
+_configure_pip_mirror() {
+    if [[ -z "$PIP_MIRROR" ]]; then
+        return
+    fi
+    local pip_conf
+    if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+        pip_conf="$VIRTUAL_ENV/pip.conf"
+    elif [[ -d "$HOME/.config/pip" ]]; then
+        pip_conf="$HOME/.config/pip/pip.conf"
+    else
+        mkdir -p "$HOME/.config/pip" 2>/dev/null || true
+        pip_conf="$HOME/.config/pip/pip.conf"
+    fi
+    cat > "$pip_conf" << PIPEOF
+[global]
+index-url = $PIP_MIRROR
+trusted-host = ${PIP_MIRROR#https://}
+PIPEOF
+    if [[ "$LANG_CODE" == "zh" ]]; then
+        printf "  pip 镜像已配置: %s\n" "$PIP_MIRROR"
+    else
+        printf "  pip mirror configured: %s\n" "$PIP_MIRROR"
+    fi
+}
 
 # ---------- 多语言文本 ----------
 declare -A T
@@ -117,13 +182,15 @@ fi
 ans=$(prompt "${T[ask_deps]}")
 if [[ "$ans" == "1" ]]; then
     printf "%b" "${T[install_min]}\n"
-    $PY -m pip install --quiet --upgrade pip
-    $PY -m pip install --quiet pyyaml httpx
+    _pip_install --upgrade pip
+    _pip_install pyyaml httpx pydantic
 else
     printf "%b" "${T[install_full]}\n"
-    $PY -m pip install --quiet --upgrade pip
-    $PY -m pip install --quiet -r requirements.txt
+    _pip_install --upgrade pip
+    _pip_install -r requirements.txt
 fi
+# 持久化配置 pip 镜像，方便后续手工安装依赖
+_configure_pip_mirror
 printf "%b" "${T[install_done]}\n"
 
 # ---- [4/6] API Key ----
