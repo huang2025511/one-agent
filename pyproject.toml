@@ -30,6 +30,7 @@ full = [
 
 [project.scripts]
 one-agent = "one_agent:cli"
+one = "one_agent:cli"
 
 [tool.setuptools]
 py-modules = ["one_agent"]

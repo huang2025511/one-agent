@@ -87,56 +87,56 @@ if [[ "$LANG_CODE" == "zh" ]]; then
     T[welcome2]="  ║   One-Agent v2.0 安装向导        ║"
     T[welcome3]="  ╚══════════════════════════════════════╝\n"
     T[lang]="语言: 中文"
-    T[check_py]="[1/6] 检查 Python 环境..."
+    T[check_py]="[1/7] 检查 Python 环境..."
     T[py_fail]="未找到 Python 3.10+，请安装后重试。"
     T[py_ok]="Python 版本: "
-    T[ask_venv]="[2/6] 是否创建虚拟环境？[Y/n] "
+    T[ask_venv]="[2/7] 是否创建虚拟环境？[Y/n] "
     T[venv_create]="正在创建虚拟环境..."
     T[venv_activate]="虚拟环境已创建。后续使用请先执行: source venv/bin/activate"
     T[venv_skip]="跳过虚拟环境创建。"
-    T[ask_deps]="[3/6] 选择安装模式:\n  1) 最小安装 (仅 CLI + LLM)\n  2) 完整安装 (Web UI + 调度器 + 全部功能)\n请选择 [1/2, 默认2]: "
+    T[ask_deps]="[3/7] 选择安装模式:\n  1) 最小安装 (仅 CLI + LLM)\n  2) 完整安装 (Web UI + 调度器 + 全部功能)\n请选择 [1/2, 默认2]: "
     T[install_min]="正在安装最小依赖..."
     T[install_full]="正在安装完整依赖..."
     T[install_done]="依赖安装完成。"
-    T[ask_key]="[4/6] 配置 LLM API Key（至少配一个，也可跳过后手动配置）"
+    T[ask_key]="[5/7] 配置 LLM API Key（至少配一个，也可跳过后手动配置）"
     T[ask_provider]="选择提供商: 1)OpenRouter 2)OpenAI 3)Anthropic 4)DeepSeek 5)跳过 [1-5, 默认1]: "
     T[enter_key]="请输入 API Key: "
     T[key_saved]="API Key 已保存到 .env 文件。"
     T[key_skip]="跳过 API Key 配置。稍后可编辑 .env 或 config/default_config.yaml。"
-    T[ask_lang]="[5/6] 选择 Agent 界面语言:\n  1) 中文 (Asia/Shanghai)\n  2) English (UTC)\n请选择 [1/2, 默认1]: "
+    T[ask_lang]="[6/7] 选择 Agent 界面语言:\n  1) 中文 (Asia/Shanghai)\n  2) English (UTC)\n请选择 [1/2, 默认1]: "
     T[lang_cn]="界面语言设为中文，时区 Asia/Shanghai。"
     T[lang_en]="Interface language set to English, timezone UTC."
-    T[init_data]="[6/6] 初始化数据目录..."
+    T[init_data]="[7/7] 初始化数据目录..."
     T[data_done]="数据目录已就绪。"
-    T[done]="\n✅ 安装完成！\n\n启动方式:\n  source venv/bin/activate   # 如果使用了虚拟环境\n  python one_agent.py\n\n服务地址:\n  Web UI:    http://127.0.0.1:18791\n  REST API:  http://127.0.0.1:18792\n  监控面板:  http://127.0.0.1:18793\n\n详细教程: cat TUTORIAL.md\n"
+    T[done]="\n✅ 安装完成！\n\n启动方式:\n  one-agent                 # 直接输入即可启动\n  one                       # 简写别名\n\n如果使用虚拟环境，先执行:\n  source venv/bin/activate\n\n服务地址:\n  Web UI:    http://127.0.0.1:18791\n  REST API:  http://127.0.0.1:18792\n  监控面板:  http://127.0.0.1:18793\n\n详细教程: cat TUTORIAL.md\n"
     T[smoke]="运行冒烟测试验证安装: python tests/smoke.py\n"
 else
     T[welcome]="\n  ╔══════════════════════════════════════╗"
     T[welcome2]="  ║   One-Agent v2.0 Setup Wizard    ║"
     T[welcome3]="  ╚══════════════════════════════════════╝\n"
     T[lang]="Language: English"
-    T[check_py]="[1/6] Checking Python..."
+    T[check_py]="[1/7] Checking Python..."
     T[py_fail]="Python 3.10+ not found. Please install it and retry."
     T[py_ok]="Python version: "
-    T[ask_venv]="[2/6] Create a virtual environment? [Y/n] "
+    T[ask_venv]="[2/7] Create a virtual environment? [Y/n] "
     T[venv_create]="Creating virtual environment..."
     T[venv_activate]="Virtual environment created. Activate it with: source venv/bin/activate"
     T[venv_skip]="Skipping virtual environment."
-    T[ask_deps]="[3/6] Installation mode:\n  1) Minimal (CLI + LLM only)\n  2) Full (Web UI + scheduler + all features)\nChoose [1/2, default 2]: "
+    T[ask_deps]="[3/7] Installation mode:\n  1) Minimal (CLI + LLM only)\n  2) Full (Web UI + scheduler + all features)\nChoose [1/2, default 2]: "
     T[install_min]="Installing minimal dependencies..."
     T[install_full]="Installing full dependencies..."
     T[install_done]="Dependencies installed."
-    T[ask_key]="[4/6] Configure LLM API Key (at least one, or skip to configure later)"
+    T[ask_key]="[5/7] Configure LLM API Key (at least one, or skip to configure later)"
     T[ask_provider]="Choose provider: 1)OpenRouter 2)OpenAI 3)Anthropic 4)DeepSeek 5)Skip [1-5, default 1]: "
     T[enter_key]="Enter API Key: "
     T[key_saved]="API Key saved to .env file."
     T[key_skip]="Skipping API Key setup. You can edit .env or config/default_config.yaml later."
-    T[ask_lang]="[5/6] Choose agent interface language:\n  1) 中文 (Asia/Shanghai)\n  2) English (UTC)\nChoose [1/2, default 2]: "
+    T[ask_lang]="[6/7] Choose agent interface language:\n  1) 中文 (Asia/Shanghai)\n  2) English (UTC)\nChoose [1/2, default 2]: "
     T[lang_cn]="界面语言设为中文，时区 Asia/Shanghai。"
     T[lang_en]="Interface language set to English, timezone UTC."
-    T[init_data]="[6/6] Initializing data directories..."
+    T[init_data]="[7/7] Initializing data directories..."
     T[data_done]="Data directories ready."
-    T[done]="\n✅ Installation complete!\n\nTo start:\n  source venv/bin/activate   # if using virtual environment\n  python one_agent.py\n\nServices:\n  Web UI:    http://127.0.0.1:18791\n  REST API:  http://127.0.0.1:18792\n  Monitor:   http://127.0.0.1:18793\n\nFull tutorial: cat TUTORIAL.md\n"
+    T[done]="\n✅ Installation complete!\n\nTo start:\n  one-agent                 # run directly\n  one                       # short alias\n\nIf using virtual environment, activate first:\n  source venv/bin/activate\n\nServices:\n  Web UI:    http://127.0.0.1:18791\n  REST API:  http://127.0.0.1:18792\n  Monitor:   http://127.0.0.1:18793\n\nFull tutorial: cat TUTORIAL.md\n"
     T[smoke]="Run smoke test to verify: python tests/smoke.py\n"
 fi
 
@@ -178,7 +178,7 @@ else
     printf "%b" "${T[venv_skip]}\n"
 fi
 
-# ---- [3/6] 安装依赖 ----
+# ---- [3/7] 安装依赖 ----
 ans=$(prompt "${T[ask_deps]}")
 if [[ "$ans" == "1" ]]; then
     printf "%b" "${T[install_min]}\n"
@@ -193,7 +193,53 @@ fi
 _configure_pip_mirror
 printf "%b" "${T[install_done]}\n"
 
-# ---- [4/6] API Key ----
+# ---- [4/7] 注册 CLI 命令 (one-agent / one) ----
+if [[ "$LANG_CODE" == "zh" ]]; then
+    printf "\n[4/7] 注册 one-agent 命令...\n"
+else
+    printf "\n[4/7] Registering one-agent command...\n"
+fi
+# 方案 A：通过 pip install -e . 注册（推荐，使用 pyproject.toml 的 console_scripts）
+_pip_install --upgrade pip setuptools wheel 2>/dev/null || true
+if $PY -m pip install -e . 2>/dev/null; then
+    if [[ "$LANG_CODE" == "zh" ]]; then
+        printf "  ✓ one-agent 命令已注册，可直接在终端输入 one-agent 启动\n"
+    else
+        printf "  ✓ one-agent command registered. Run: one-agent\n"
+    fi
+else
+    # 方案 B：兜底 - 创建 wrapper 脚本到 /usr/local/bin
+    if [[ "$LANG_CODE" == "zh" ]]; then
+        printf "  ⚠ pip 注册失败，尝试创建系统级 wrapper 脚本...\n"
+    else
+        printf "  ⚠ pip registration failed, creating system wrapper...\n"
+    fi
+    SCRIPT_DIR="$(pwd)"
+    for cmd_name in one-agent one; do
+        if [[ -w /usr/local/bin ]] || [[ "$(id -u)" == "0" ]]; then
+            cat > "/usr/local/bin/${cmd_name}" << WRAPEOF
+#!/usr/bin/env bash
+cd "${SCRIPT_DIR}" && exec $PY one_agent.py "\$@"
+WRAPEOF
+            chmod +x "/usr/local/bin/${cmd_name}"
+            if [[ "$LANG_CODE" == "zh" ]]; then
+                printf "  ✓ 已创建: /usr/local/bin/%s\n" "$cmd_name"
+            else
+                printf "  ✓ Created: /usr/local/bin/%s\n" "$cmd_name"
+            fi
+        else
+            if [[ "$LANG_CODE" == "zh" ]]; then
+                printf "  ⚠ 无权限写入 /usr/local/bin，请用 sudo 重试安装或手动创建别名:\n"
+                printf "    alias one='cd %s && %s one_agent.py'\n" "$SCRIPT_DIR" "$PY"
+            else
+                printf "  ⚠ Cannot write to /usr/local/bin. Run with sudo or create alias manually:\n"
+                printf "    alias one='cd %s && %s one_agent.py'\n" "$SCRIPT_DIR" "$PY"
+            fi
+        fi
+    done
+fi
+
+# ---- [5/7] API Key ----
 printf "%b" "${T[ask_key]}\n"
 ans=$(prompt "${T[ask_provider]}")
 case "${ans:-1}" in
@@ -216,7 +262,7 @@ else
     printf "%b" "${T[key_skip]}\n"
 fi
 
-# ---- [5/6] 界面语言 ----
+# ---- [6/7] 界面语言 ----
 ans=$(prompt "${T[ask_lang]}")
 if [[ "$ans" == "1" ]]; then
     TZ="Asia/Shanghai"
@@ -231,7 +277,7 @@ if command -v sed &>/dev/null; then
     rm -f config/default_config.yaml.bak
 fi
 
-# ---- [6/6] 数据目录 ----
+# ---- [7/7] 数据目录 ----
 printf "%b" "${T[init_data]}\n"
 mkdir -p data/skills/builtin data/skills/user data/skills/community
 mkdir -p data/memory/skills data/workspace data/logs
