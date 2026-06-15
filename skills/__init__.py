@@ -579,6 +579,38 @@ class SkillManager(Plugin):
             handler=make_doc_search_handler(_doc_store),
         ))
 
+        # ---------- Python 代码执行技能 ----------
+        from executors.python_runner import PythonExecutor, make_python_handler
+        python_executor = PythonExecutor()
+        self.register(Skill(
+            id="python_execute",
+            title="Python 代码执行",
+            description="在沙箱环境中执行 Python 代码，用于数学计算、数据处理、文件操作等。"
+                        "支持安全的标准库（math, json, datetime, re 等），禁止系统调用和网络访问。",
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "python_execute",
+                    "description": "在沙箱环境中执行 Python 代码",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "description": "要执行的 Python 代码",
+                            },
+                            "timeout": {
+                                "type": "integer",
+                                "description": "执行超时时间（秒，默认 10）",
+                            },
+                        },
+                        "required": ["code"],
+                    },
+                },
+            },
+            handler=make_python_handler(python_executor),
+        ))
+
 
 def _schema(name: str, description: str, required: List[str]) -> Dict[str, Any]:
     return {

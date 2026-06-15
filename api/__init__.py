@@ -218,6 +218,85 @@ class RESTAPIGateway(Plugin):
                 "components": components,
             }
 
+        # ── Dashboard ──────────────────────────────────────────────────
+        @app.get("/dashboard")
+        async def dashboard():
+            """Serve the monitoring dashboard."""
+            from fastapi.responses import HTMLResponse
+            from api.dashboard import get_dashboard_html
+            return HTMLResponse(content=get_dashboard_html())
+
+        # ── Dashboard API endpoints ────────────────────────────────────
+        @app.get("/api/costs/daily")
+        async def costs_daily(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get today's cost and budget."""
+            auth(x_api_key)
+            _cost_tracker = getattr(_ctx, "cost_tracker", None) if _ctx else None
+            if _cost_tracker is None:
+                return {"cost": 0.0, "budget": 0.0, "remaining": 0.0}
+            today_cost = _cost_tracker.cost_today()
+            daily_budget = getattr(_cost_tracker, "_daily_budget", 1.0)
+            return {
+                "cost": today_cost,
+                "budget": daily_budget,
+                "remaining": max(0, daily_budget - today_cost),
+            }
+
+        @app.get("/api/costs/monthly")
+        async def costs_monthly(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get this month's cost."""
+            auth(x_api_key)
+            _cost_tracker = getattr(_ctx, "cost_tracker", None) if _ctx else None
+            if _cost_tracker is None:
+                return {"cost": 0.0}
+            return {"cost": _cost_tracker.cost_this_month()}
+
+        @app.get("/api/sessions/list")
+        async def sessions_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """List recent sessions."""
+            auth(x_api_key)
+            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            if _session_store is None:
+                return {"sessions": []}
+            sessions = _session_store.list_sessions(limit=20)
+            return {"sessions": sessions}
+
+        @app.get("/api/approvals/pending")
+        async def approvals_pending(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """List pending approval requests."""
+            auth(x_api_key)
+            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            if _approval_mgr is None:
+                return {"requests": []}
+            pending = _approval_mgr.list_pending()
+            return {"requests": pending}
+
+        @app.post("/api/sessions/{session_id}/fork")
+        async def fork_session(session_id: str, body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Fork a session at a specific message index."""
+            auth(x_api_key)
+            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            if _session_store is None:
+                raise HTTPException(503, _("session_store_not_available"))
+            fork_point = body.get("fork_point", 0)
+            new_id = body.get("new_session_id")
+            result = _session_store.fork_session(session_id, fork_point, new_id)
+            if result is None:
+                raise HTTPException(400, _("fork_failed"))
+            return {"new_session_id": result, "fork_point": fork_point}
+
+        @app.get("/api/sessions/{session_id}/tree")
+        async def session_tree(session_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Get the fork tree of a session."""
+            auth(x_api_key)
+            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            if _session_store is None:
+                raise HTTPException(503, _("session_store_not_available"))
+            tree = _session_store.get_session_tree(session_id)
+            if not tree:
+                raise HTTPException(404, _("session_not_found"))
+            return tree
+
         @app.get("/api/health/ready")
         async def readiness():
             """Kubernetes-style readiness probe — returns 503 if not ready."""
@@ -816,6 +895,65 @@ class RESTAPIGateway(Plugin):
             if not ok:
                 raise HTTPException(404, _("approval_request_not_found", request_id=request_id))
             return {"approved": False, "request_id": request_id}
+
+        # ── MCP (Model Context Protocol) 端点 ──────────────────────────
+        @app.get("/api/mcp/tools")
+        async def mcp_list_tools(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """列出所有可用的 MCP 工具"""
+            auth(x_api_key)
+            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            if _mcp_client is None:
+                raise HTTPException(503, _("mcp_client_not_available"))
+            tools = _mcp_client.list_tools()
+            return {"tools": tools}
+
+        @app.post("/api/mcp/call")
+        async def mcp_call_tool(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """调用 MCP 工具"""
+            auth(x_api_key)
+            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            if _mcp_client is None:
+                raise HTTPException(503, _("mcp_client_not_available"))
+            server_name = body.get("server")
+            tool_name = body.get("tool")
+            arguments = body.get("arguments", {})
+            if not server_name or not tool_name:
+                raise HTTPException(400, _("missing_required_fields", fields="server, tool"))
+            try:
+                result = await _mcp_client.call_tool(server_name, tool_name, arguments)
+                return {"result": result}
+            except ValueError as exc:
+                raise HTTPException(404, str(exc))
+            except Exception as exc:
+                logger.exception("MCP tool call failed")
+                raise HTTPException(500, _("mcp_tool_call_failed", error=str(exc)))
+
+        @app.post("/api/mcp/add-server")
+        async def mcp_add_server(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """添加并连接 MCP 服务器"""
+            auth(x_api_key)
+            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            if _mcp_client is None:
+                raise HTTPException(503, _("mcp_client_not_available"))
+            name = body.get("name")
+            url = body.get("url")
+            api_key = body.get("api_key")
+            if not name or not url:
+                raise HTTPException(400, _("missing_required_fields", fields="name, url"))
+            success = await _mcp_client.add_server(name, url, api_key)
+            if not success:
+                raise HTTPException(400, _("mcp_server_connection_failed"))
+            return {"success": True, "server": name}
+
+        @app.delete("/api/mcp/servers/{server_name}")
+        async def mcp_remove_server(server_name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """移除 MCP 服务器"""
+            auth(x_api_key)
+            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            if _mcp_client is None:
+                raise HTTPException(503, _("mcp_client_not_available"))
+            await _mcp_client.remove_server(server_name)
+            return {"success": True, "server": server_name}
 
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):

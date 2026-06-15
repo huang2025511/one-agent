@@ -255,7 +255,7 @@ class OneAgentApp:
         from memory import MemoryPlugin
         from skills import SkillManager, Skill
         from memory.knowledge_graph import make_graph_search_handler
-        from executors import ShellExecutor, DockerExecutor, BrowserExecutor
+        from executors import ShellExecutor, DockerExecutor, BrowserExecutor, PythonExecutor
         from scheduler import SchedulerPlugin
         from multimodal import MultimodalPlugin
         from api import RESTAPIGateway
@@ -299,6 +299,7 @@ class OneAgentApp:
         self.exec_shell = ShellExecutor()
         self.exec_docker = DockerExecutor()
         self.exec_browser = BrowserExecutor()
+        self.exec_python = PythonExecutor()
         self.coordinator = Coordinator()
         self.scheduler = SchedulerPlugin()
         self.multimodal = MultimodalPlugin()

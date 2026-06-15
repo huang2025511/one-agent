@@ -1,13 +1,15 @@
-"""Code execution backends — shell, docker, browser.
+"""Code execution backends — shell, docker, browser, python.
 
 Security-first: the shell executor uses regex patterns instead of simple
 command lists.  Docker runs with full security hardening (no network,
 non-root user, dropped capabilities).  Browser uses httpx headless fetcher.
+Python executor provides sandboxed code execution.
 
 Enhanced with:
   - Regex command allow-list for shell
   - Docker security hardening (cap-drop, read-only, user 1000:1000)
   - Structured audit log entries
+  - Sandboxed Python REPL executor
 """
 
 from __future__ import annotations
@@ -22,8 +24,11 @@ from typing import Dict, Optional
 import httpx
 
 from core.plugin import Plugin
+from executors.python_runner import PythonExecutor
 
 logger = logging.getLogger(__name__)
+
+__all__ = ["ShellExecutor", "DockerExecutor", "BrowserExecutor", "PythonExecutor"]
 
 
 # Regex patterns for allowed shell commands (much safer than word lists)

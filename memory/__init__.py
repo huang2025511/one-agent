@@ -23,6 +23,7 @@ from core.plugin import Plugin
 
 from .knowledge_graph import KnowledgeGraph  # noqa: F401
 from .session_store import SessionStore  # noqa: F401
+from .embeddings import EmbeddingStore  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,27 @@ class LongTermMemory:
     def vacuum(self) -> None:
         self._conn.execute("VACUUM")
 
+    def get_by_id(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """Get a memory entry by its rowid."""
+        c = self._conn.cursor()
+        try:
+            c.execute(
+                "SELECT rowid, content, source, tags, timestamp FROM memory WHERE rowid = ?",
+                (memory_id,),
+            )
+            row = c.fetchone()
+            if row:
+                return {
+                    "id": str(row[0]),
+                    "content": row[1],
+                    "source": row[2],
+                    "tags": row[3],
+                    "timestamp": row[4],
+                }
+        except sqlite3.Error as exc:
+            logger.error("get_by_id(%s) failed: %s", memory_id, exc)
+        return None
+
     def close(self) -> None:
         """Close the SQLite connection (called from MemoryPlugin.stop)."""
         try:
@@ -279,9 +301,11 @@ class MemoryPlugin(Plugin):
         self._long: Optional[LongTermMemory] = None
         self._procedural: Optional[ProceduralMemory] = None
         self._kg: Optional[KnowledgeGraph] = None
+        self._embeddings: Optional[EmbeddingStore] = None
         self._max_results = 5
         self._auto_create_skills = True
         self._min_usage = 3
+        self._hybrid_search = True  # Enable hybrid search (FTS + embedding)
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -295,6 +319,19 @@ class MemoryPlugin(Plugin):
         )
         self._procedural = ProceduralMemory(os.path.join(data_dir, "memory/skills"))
         self._kg = KnowledgeGraph(os.path.join(data_dir, "memory/kg.db"))
+        
+        # Initialize embedding store for semantic search
+        self._hybrid_search = mem_cfg.get("hybrid_search", True)
+        if self._hybrid_search:
+            try:
+                self._embeddings = EmbeddingStore(
+                    db_path=os.path.join(data_dir, "memory/embeddings.db")
+                )
+                logger.info("Embedding store initialized for hybrid search")
+            except Exception as exc:
+                logger.warning("Failed to initialize embedding store: %s", exc)
+                self._hybrid_search = False
+        
         self._max_results = mem_cfg.get("max_results", 5)
         self._auto_create_skills = cfg.get("procedural", {}).get("auto_create_skills", True)
         self._min_usage = cfg.get("procedural", {}).get("min_usage_before_skill", 3)
@@ -302,13 +339,57 @@ class MemoryPlugin(Plugin):
         self.bus.subscribe("user_message", self._on_user_message)
         self.bus.subscribe("turn_completed", self._on_turn_completed)
         self.bus.subscribe("cron", self._on_cron)
-        logger.info("memory plugin ready: long_term=%s", self._long.stats())
+        logger.info("memory plugin ready: long_term=%s, hybrid_search=%s", 
+                    self._long.stats(), self._hybrid_search)
 
     async def _on_user_message(self, event: Event) -> None:
         turn: TurnContext | None = event.get("turn")
         if turn is None or self._long is None:
             return
-        hits = self._long.search(turn.input_text, limit=self._max_results)
+        
+        # FTS5 keyword search
+        fts_hits = self._long.search(turn.input_text, limit=self._max_results)
+        
+        # Hybrid search: combine FTS + embedding semantic search
+        if self._hybrid_search and self._embeddings:
+            try:
+                # Get embedding for query
+                query_vec = self._embeddings.embed(turn.input_text)
+                if query_vec is not None:
+                    # Semantic search
+                    semantic_results = self._embeddings.search(query_vec, top_k=self._max_results)
+                    
+                    # Merge results: FTS hits + semantic hits
+                    # Use memory_id to avoid duplicates
+                    seen_ids = set()
+                    merged_hits = []
+                    
+                    # Add FTS hits first (keyword match has higher priority)
+                    for hit in fts_hits:
+                        memory_id = hit.get("id")
+                        if memory_id and memory_id not in seen_ids:
+                            seen_ids.add(memory_id)
+                            merged_hits.append(hit)
+                    
+                    # Add semantic results
+                    for memory_id, score in semantic_results:
+                        if memory_id not in seen_ids:
+                            seen_ids.add(memory_id)
+                            # Fetch full memory content
+                            hit = self._long.get_by_id(memory_id)
+                            if hit:
+                                hit["semantic_score"] = score
+                                merged_hits.append(hit)
+                    
+                    hits = merged_hits[:self._max_results]
+                else:
+                    hits = fts_hits
+            except Exception as exc:
+                logger.warning("Hybrid search failed, falling back to FTS: %s", exc)
+                hits = fts_hits
+        else:
+            hits = fts_hits
+        
         if hits:
             snippets = "\n".join(f"- {h['content'][:160]}" for h in hits)
             turn.meta["memory_snippets"] = snippets

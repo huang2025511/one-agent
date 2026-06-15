@@ -34,7 +34,9 @@ class SessionStore:
                 updated_at REAL,
                 message_count INTEGER DEFAULT 0,
                 total_tokens INTEGER DEFAULT 0,
-                status TEXT DEFAULT 'active'
+                status TEXT DEFAULT 'active',
+                parent_id TEXT,
+                fork_point INTEGER
             );
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,6 +49,15 @@ class SessionStore:
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
         """)
+        # Add fork columns to existing tables
+        try:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN parent_id TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN fork_point INTEGER")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self._conn.commit()
 
     # -------------------------------------------------------- public API
@@ -193,3 +204,114 @@ class SessionStore:
             self._conn.close()
         except Exception:
             pass
+
+    def fork_session(self, session_id: str, fork_point: int, new_session_id: Optional[str] = None) -> Optional[str]:
+        """从指定消息位置分叉会话，创建新的对话分支。
+
+        Args:
+            session_id: 原始会话 ID
+            fork_point: 分叉点（消息索引，从 0 开始）
+            new_session_id: 新会话 ID（可选，不传则自动生成）
+
+        Returns:
+            新会话 ID，失败返回 None
+
+        示例:
+            # 从第 5 条消息处分叉
+            new_id = store.fork_session("abc123", 5)
+            # 新会话包含原会话的前 5 条消息
+        """
+        import uuid
+
+        try:
+            # 获取原始会话
+            original = self.get_session(session_id)
+            if not original:
+                logger.error(f"fork_session: session {session_id} not found")
+                return None
+
+            messages = original.get("messages", [])
+            if fork_point < 0 or fork_point > len(messages):
+                logger.error(f"fork_session: invalid fork_point {fork_point} (max {len(messages)})")
+                return None
+
+            # 生成新会话 ID
+            if not new_session_id:
+                new_session_id = f"fork_{session_id}_{uuid.uuid4().hex[:8]}"
+
+            # 创建新会话
+            now = time.time()
+            title = f"[分支] {original.get('title', '')}"
+            self._conn.execute(
+                "INSERT INTO sessions(id, title, created_at, updated_at, message_count, total_tokens, parent_id, fork_point) "
+                "VALUES (?, ?, ?, ?, 0, 0, ?, ?)",
+                (new_session_id, title, now, now, session_id, fork_point),
+            )
+
+            # 复制分叉点之前的消息
+            for msg in messages[:fork_point]:
+                self._conn.execute(
+                    "INSERT INTO messages(id, session_id, role, content, meta, created_at) "
+                    "VALUES (NULL, ?, ?, ?, ?, ?)",
+                    (new_session_id, msg["role"], msg["content"], msg.get("meta", "{}"), msg["created_at"]),
+                )
+
+            # 更新消息计数和 token 统计
+            self._conn.execute(
+                "UPDATE sessions SET message_count = ?, total_tokens = ? WHERE id = ?",
+                (fork_point, sum(m.get("tokens", 0) for m in messages[:fork_point]), new_session_id),
+            )
+
+            self._conn.commit()
+            logger.info(f"fork_session: created {new_session_id} from {session_id} at point {fork_point}")
+            return new_session_id
+
+        except sqlite3.Error as exc:
+            logger.error(f"fork_session({session_id}) failed: {exc}")
+            self._conn.rollback()
+            return None
+
+    def get_session_tree(self, session_id: str) -> Dict[str, Any]:
+        """获取会话的分支树结构。
+
+        Args:
+            session_id: 会话 ID
+
+        Returns:
+            包含 parent_id, children, fork_point 的树结构
+        """
+        try:
+            # 获取当前会话
+            cur = self._conn.execute(
+                "SELECT id, title, parent_id, fork_point FROM sessions WHERE id = ?",
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+
+            tree = {
+                "id": row["id"],
+                "title": row["title"],
+                "parent_id": row["parent_id"],
+                "fork_point": row["fork_point"],
+                "children": [],
+            }
+
+            # 查找子会话
+            cur = self._conn.execute(
+                "SELECT id, title, fork_point FROM sessions WHERE parent_id = ?",
+                (session_id,),
+            )
+            for child_row in cur.fetchall():
+                tree["children"].append({
+                    "id": child_row["id"],
+                    "title": child_row["title"],
+                    "fork_point": child_row["fork_point"],
+                })
+
+            return tree
+
+        except sqlite3.Error as exc:
+            logger.error(f"get_session_tree({session_id}) failed: {exc}")
+            return {}
