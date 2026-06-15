@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import struct
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -151,7 +152,7 @@ class EmbeddingStore:
             self._conn.execute(
                 """INSERT OR REPLACE INTO embeddings (memory_id, vector, created_at)
                    VALUES (?, ?, ?)""",
-                (memory_id, vector_blob, sqlite3.Time()),
+                (memory_id, vector_blob, time.time()),
             )
             self._conn.commit()
         except Exception as e:
