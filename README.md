@@ -257,7 +257,7 @@ one_agent/
 ├── one_agent.py              入口 & OneAgentApp 装配
 ├── pyproject.toml            项目元信息
 ├── requirements.txt          依赖清单
-├── install.sh                安装脚本
+├── install                    安装脚本
 ├── config/
 │   ├── default_config.yaml   默认配置
 │   └── test_config.yaml      测试配置

@@ -2,13 +2,14 @@
 # ============================================================
 # One-Agent 安装脚本
 # 支持语言：中文(zh) / English(en)  |  默认：中文
-# 用法：bash install.sh          # 中文
-#       bash install.sh en       # 英文
-#       LANG=en bash install.sh  # 英文（环境变量方式）
+# 用法：bash install          # 中文
+#       bash install en       # 英文
+#       LANG=en bash install  # 英文（环境变量方式）
+#       ./install             # 或直接运行
 #
 # 国内网络优化：
 #   - 自动检测是否在中国大陆，优先使用清华/阿里云 PyPI 镜像
-#   - 也可手动指定: PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple bash install.sh
+#   - 也可手动指定: PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple bash install
 # ============================================================
 
 set -e
