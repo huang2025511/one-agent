@@ -1,3 +1,25 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "one-agent"
+version = "0.1.0"
+description = "One-Agent: Universal AI agent with multi-gateway, multi-model support"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx",
+    "pyyaml",
+    "pydantic>=2",
+]
+
+[project.scripts]
+one-agent = "one_agent:cli"
+
+[tool.setuptools]
+py-modules = ["one_agent"]
+packages = ["core", "gateways", "executors", "models", "memory", "skills", "router", "api", "monitor", "scheduler", "multimodal", "marketplace", "alerting", "config_backup", "i18n", "tests"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"

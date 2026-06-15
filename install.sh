@@ -171,5 +171,25 @@ mkdir -p data/memory/skills data/workspace data/logs
 mkdir -p data/marketplace data/scheduler
 printf "%b" "${T[data_done]}\n"
 
+# ---- [7/7] 安全密码（可选）----
+printf "\n  是否设置系统命令执行密码？\n"
+printf "  设置后，one-agent 执行 rm、sudo 等危险命令时需要输入密码确认。\n"
+printf "  留空跳过：不使用密码保护（仅安全命令可执行）。\n"
+SYS_PWD=$(prompt "  系统执行密码 [留空跳过]: ")
+if [[ -n "$SYS_PWD" ]]; then
+    # Generate SHA-256 hash
+    if command -v python3 &>/dev/null; then
+        PWD_HASH=$(python3 -c "import hashlib; print(hashlib.sha256('${SYS_PWD}'.encode()).hexdigest())")
+        # Update config
+        sed -i.bak "s|system_executor_password: ''|system_executor_password: '${PWD_HASH}'|" config/default_config.yaml 2>/dev/null || true
+        rm -f config/default_config.yaml.bak
+        printf "  ✓ 密码已设置（SHA-256 哈希存储）\n"
+    else
+        printf "  ⚠ Python 不可用，无法哈希密码。请稍后手动设置。\n"
+    fi
+else
+    printf "  已跳过。安全命令（ls/cat/echo 等）无需密码即可执行。\n"
+fi
+
 # ---------- 完成 ----------
 printf "%b" "${T[done]}${T[smoke]}"

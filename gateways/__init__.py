@@ -24,6 +24,7 @@ from gateways.messaging import (  # noqa: F401  # re-exported for plugin discove
     DiscordGateway,
     SlackGateway,
 )
+from gateways.wechat_personal import WeChatPersonalGateway  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

@@ -26,10 +26,11 @@ import httpx
 from core.plugin import Plugin
 from core.exceptions import SecurityError, InputValidationError
 from executors.python_runner import PythonExecutor
+from executors.system import SystemExecutor, classify_command  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ShellExecutor", "DockerExecutor", "BrowserExecutor", "PythonExecutor"]
+__all__ = ["ShellExecutor", "DockerExecutor", "BrowserExecutor", "PythonExecutor", "SystemExecutor", "classify_command"]
 
 
 # Shell metacharacters that enable command injection — always reject

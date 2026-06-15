@@ -744,11 +744,25 @@ async def _interactive(app: OneAgentApp) -> None:
 
 
 async def main() -> None:
+    # ── auto-detect missing API key and run setup wizard ──
+    # This runs BEFORE the agent starts, so the user sees a clean
+    # guided setup instead of confusing error messages.
+    try:
+        from core.setup_wizard import setup_if_needed
+        _setup_ran = setup_if_needed()
+    except Exception as exc:  # noqa: BLE001
+        _setup_ran = False
+        print(f"[setup wizard unavailable: {exc}]")
+
     cfg_path = os.environ.get("ONE_AGENT_CONFIG", str(ROOT / "config" / "default_config.yaml"))
     if not Path(cfg_path).exists():
         sys.exit(f"config not found: {cfg_path}")
     app = OneAgentApp(cfg_path)
     await app.start()
+
+    # If the setup wizard ran, show a brief notice that keys were saved
+    if _setup_ran:
+        print("[已保存配置到 .env 文件，下次启动无需重新设置]")
 
     # register graceful shutdown on SIGINT/SIGTERM
     # Use ``get_running_loop()`` — we're inside ``asyncio.run()`` so a
@@ -779,3 +793,12 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+def cli():
+    """Console-script entry point for ``one-agent`` command."""
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
