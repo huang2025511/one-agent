@@ -77,8 +77,8 @@ def test_eventbus_dlq():
 
     async def run():
         await bus.start()
-        # Publish an event with no handler
-        bus.publish({"type": "orphan_event", "payload": {"x": 1}, "source": "test"})
+        # Publish an event with no handler (use allowed event type)
+        bus.publish({"type": "turn_start", "payload": {"x": 1}, "source": "test"})
         await asyncio.sleep(0.2)
         m = bus.metrics()
         assert m["published"] == 1, f"expected 1 published, got {m['published']}"
