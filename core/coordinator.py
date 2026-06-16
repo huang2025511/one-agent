@@ -172,22 +172,43 @@ class Coordinator(Plugin):
     # ------------------------------------------------------------ slash commands
     # Mapping from slash command names (both EN and CN) to skill IDs
     _SLASH_COMMANDS: Dict[str, str] = {
-        # help
-        "help": "help", "帮助": "help", "帮助信息": "help", "怎么用": "help",
-        # settings
+        # ---------- 系统信息与帮助 ----------
+        "help": "help", "帮助": "help", "帮助信息": "help", "怎么用": "help", "menu": "help", "菜单": "help",
+        "status": "status", "状态": "status", "info": "status", "信息": "status", "系统状态": "status",
+        "version": "version", "版本": "version", "ver": "version", "about": "version", "关于": "version",
+        "skills": "list_skills", "skill": "list_skills", "技能": "list_skills", "技能列表": "list_skills",
+        "tools": "list_skills", "工具": "list_skills", "工具列表": "list_skills",
+        "history": "history", "历史": "history", "历史记录": "history", "对话历史": "history",
+        "clear": "clear", "清屏": "clear", "清空": "clear", "清除": "clear", "cls": "clear",
+        # ---------- 配置 ----------
         "settings": "settings", "设置": "settings", "配置": "settings", "设定": "settings",
-        # update
-        "update": "updater", "更新": "updater", "升级": "updater",
-        # wechat
+        "config": "settings", "configure": "settings", "配置项": "settings",
+        # ---------- 更新与维护 ----------
+        "update": "updater", "更新": "updater", "升级": "updater", "upgrade": "updater",
+        "restart": "restart", "重启": "restart", "reboot": "restart",
+        # ---------- 网关管理 ----------
         "wechat": "wechat_login", "微信": "wechat_login", "微信登录": "wechat_login",
-        # quit
-        "quit": "quit", "退出": "quit", "关机": "quit", "再见": "quit",
-        # calculator
-        "calc": "calc", "计算": "calc", "计算器": "calc", "算": "calc",
-        # note
+        "gateways": "list_gateways", "网关": "list_gateways", "网关列表": "list_gateways",
+        # ---------- 退出 ----------
+        "quit": "quit", "退出": "quit", "关机": "quit", "再见": "quit", "exit": "quit", "bye": "quit",
+        # ---------- 计算与时间 ----------
+        "calc": "calc", "计算": "calc", "计算器": "calc", "算": "calc", "math": "calc",
+        "time": "now", "时间": "now", "当前时间": "now", "现在几点了": "now", "date": "now", "日期": "now",
+        # ---------- 笔记 ----------
         "note": "save_note", "笔记": "save_note", "记录": "save_note", "记事": "save_note",
-        # time
-        "time": "now", "时间": "now", "当前时间": "now", "现在几点了": "now",
+        # ---------- 搜索与网络 ----------
+        "search": "web_search", "搜索": "web_search", "网络搜索": "web_search", "google": "web_search",
+        "百度": "web_search", "baidu": "web_search",
+        # ---------- 多媒体 ----------
+        "transcribe": "transcribe", "转文字": "transcribe", "语音转文字": "transcribe", "stt": "transcribe",
+        "image": "describe_image", "图片": "describe_image", "图片描述": "describe_image",
+        "看图": "describe_image", "vision": "describe_image",
+        # ---------- 文档 ----------
+        "doc": "document_search", "docs": "document_search", "文档": "document_search",
+        "文档搜索": "document_search", "document": "document_search",
+        # ---------- 代码执行 ----------
+        "py": "python_execute", "python": "python_execute", "代码": "python_execute",
+        "执行": "python_execute", "执行python": "python_execute", "run": "python_execute",
     }
 
     async def _handle_slash_command(self, turn: TurnContext) -> bool:

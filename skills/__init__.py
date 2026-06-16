@@ -318,11 +318,23 @@ class SkillManager(Plugin):
             """显示帮助信息，列出所有可用命令。"""
             commands = [
                 ("📋 /help /帮助", "显示此帮助信息"),
+                ("📊 /status /状态", "显示系统状态（模型、网关等）"),
+                ("ℹ️ /version /版本", "显示版本信息"),
+                ("🧰 /skills /技能", "列出所有可用技能"),
+                ("🌐 /gateways /网关", "显示所有网关状态"),
+                ("📜 /history /历史", "显示最近的对话历史"),
+                ("🧹 /clear /清屏", "清空当前对话上下文"),
                 ("⚙️ /settings /设置", "查看和修改设置"),
                 ("🔄 /update /更新", "从 GitHub 更新到最新版本"),
+                ("♻️ /restart /重启", "重启 One-Agent"),
                 ("💬 /wechat /微信", "启动微信网关并显示登录二维码"),
+                ("🔍 /search /搜索", "搜索互联网（输入 /search 关键词）"),
+                ("🎤 /transcribe /转文字", "语音转文字（输入 /transcribe 路径）"),
+                ("🖼️ /image /图片", "图片描述（输入 /image 路径）"),
+                ("📄 /doc /文档", "搜索已上传的文档"),
+                ("🐍 /py /python", "执行 Python 代码（输入 /py 代码）"),
                 ("🔢 /calc /计算", "执行数学计算，如 /calc 2+2"),
-                ("📝 /note /笔记", "保存笔记到文件，如 /note 今天天气真好"),
+                ("📝 /note /笔记", "保存笔记到文件"),
                 ("⏰ /time /时间", "显示当前时间"),
                 ("🚪 /quit /退出", "退出程序"),
             ]
@@ -336,6 +348,155 @@ class SkillManager(Plugin):
             description="显示帮助信息，列出所有可用命令。使用方式: /help",
             schema=_schema("help", "display help information", []),
             handler=help_handler,
+        ))
+
+        async def status_handler(args: Dict[str, Any]) -> str:
+            """显示系统状态。"""
+            import os
+            import platform
+            lines = ["📊 系统状态：", ""]
+            lines.append(f"  🐍 Python: {platform.python_version()}")
+            lines.append(f"  💻 系统: {platform.system()} {platform.release()}")
+            lines.append(f"  📁 工作目录: {os.getcwd()}")
+            try:
+                cfg = self._ctx_ref.config if self._ctx_ref else {}
+                if cfg:
+                    llm = cfg.get("llm", {})
+                    lines.append(f"  🧠 主模型: {llm.get('primary_provider', '?')}/{llm.get('primary_model', '?')}")
+                    lines.append(f"  🪶 轻量模型: {llm.get('lightweight_model', '?')}")
+            except Exception:
+                pass
+            lines.append(f"  🧰 已加载技能: {len(self._skills)}")
+            return "\n".join(lines)
+        self.register(Skill(
+            id="status", title="系统状态",
+            description="显示系统状态信息（模型、网关、Python 版本等）。使用方式: /status",
+            schema=_schema("status", "show system status", []),
+            handler=status_handler,
+        ))
+
+        async def version_handler(args: Dict[str, Any]) -> str:
+            """显示版本信息。"""
+            import platform
+            try:
+                from one_agent import __version__ as VERSION
+            except (ImportError, AttributeError):
+                VERSION = "0.1.0"
+            return (
+                f"🤖 One-Agent 版本信息：\n"
+                f"  版本: {VERSION}\n"
+                f"  Python: {platform.python_version()}\n"
+                f"  平台: {platform.platform()}"
+            )
+        self.register(Skill(
+            id="version", title="版本信息",
+            description="显示 One-Agent 版本信息。使用方式: /version",
+            schema=_schema("version", "show version info", []),
+            handler=version_handler,
+        ))
+
+        async def list_skills_handler(args: Dict[str, Any]) -> str:
+            """列出所有已注册的技能。"""
+            lines = [f"🧰 已注册技能 (共 {len(self._skills)} 个)：", ""]
+            for i, (sid, skill) in enumerate(sorted(self._skills.items()), 1):
+                title = skill.title if hasattr(skill, 'title') else sid
+                lines.append(f"  {i:3d}. {sid:20s} - {title}")
+            return "\n".join(lines)
+        self.register(Skill(
+            id="list_skills", title="技能列表",
+            description="列出所有可用的技能。使用方式: /skills 或 /技能",
+            schema=_schema("list_skills", "list all skills", []),
+            handler=list_skills_handler,
+        ))
+
+        async def list_gateways_handler(args: Dict[str, Any]) -> str:
+            """列出所有网关状态。"""
+            try:
+                cfg = self._ctx_ref.config if self._ctx_ref else {}
+                gateways = cfg.get("gateways", {}) or {}
+                if not gateways:
+                    return "ℹ️ 当前没有配置任何网关。\n使用 /settings 配置网关。"
+                lines = ["🌐 网关状态：", ""]
+                for name, gcfg in gateways.items():
+                    enabled = gcfg.get("enabled", False) if isinstance(gcfg, dict) else False
+                    icon = "✅" if enabled else "⏸️"
+                    status = "已启用" if enabled else "未启用"
+                    lines.append(f"  {icon} {name:15s} - {status}")
+                return "\n".join(lines)
+            except Exception as exc:
+                return f"❌ 获取网关状态失败: {exc}"
+        self.register(Skill(
+            id="list_gateways", title="网关列表",
+            description="列出所有网关及其状态。使用方式: /gateways 或 /网关",
+            schema=_schema("list_gateways", "list gateways", []),
+            handler=list_gateways_handler,
+        ))
+
+        async def history_handler(args: Dict[str, Any]) -> str:
+            """显示最近的对话历史。"""
+            try:
+                sid = args.get("session_id", "default")
+                if not self._ctx_ref:
+                    return "❌ 无法访问会话存储"
+                from memory.session_store import SessionStore
+                store = SessionStore(self._ctx_ref.config.get("agent", {}).get("data_dir", "./data") + "/memory/sessions.db")
+                session = store.get_session(sid)
+                if not session:
+                    return "📜 当前会话暂无历史记录"
+                messages = session.get("messages", []) if isinstance(session, dict) else []
+                if not messages:
+                    return "📜 当前会话暂无历史记录"
+                lines = [f"📜 最近 {len(messages)} 条对话 (session: {sid})：", ""]
+                for msg in messages[-10:]:
+                    role = msg.get("role", "?")
+                    content = msg.get("content", "")[:80]
+                    icon = "👤" if role == "user" else "🤖"
+                    lines.append(f"  {icon} [{role}] {content}")
+                return "\n".join(lines)
+            except Exception as exc:
+                return f"❌ 获取历史失败: {exc}"
+        self.register(Skill(
+            id="history", title="对话历史",
+            description="显示最近的对话历史。使用方式: /history",
+            schema=_schema("history", "show conversation history", []),
+            handler=history_handler,
+        ))
+
+        async def clear_handler(args: Dict[str, Any]) -> str:
+            """清空当前会话。"""
+            try:
+                sid = args.get("session_id", "default")
+                if not self._ctx_ref:
+                    return "❌ 无法访问会话存储"
+                from memory.session_store import SessionStore
+                store = SessionStore(self._ctx_ref.config.get("agent", {}).get("data_dir", "./data") + "/memory/sessions.db")
+                store.delete_session(sid)
+                return "✅ 已清空当前对话历史"
+            except Exception as exc:
+                return f"❌ 清空失败: {exc}"
+        self.register(Skill(
+            id="clear", title="清屏",
+            description="清空当前对话历史。使用方式: /clear",
+            schema=_schema("clear", "clear conversation", []),
+            handler=clear_handler,
+        ))
+
+        async def restart_handler(args: Dict[str, Any]) -> str:
+            """重启 One-Agent。"""
+            import os
+            import sys
+            results = ["♻️ 正在重启 One-Agent..."]
+            try:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception as exc:
+                results.append(f"❌ 重启失败: {exc}")
+                results.append("请手动退出后重新启动")
+            return "\n".join(results)
+        self.register(Skill(
+            id="restart", title="重启",
+            description="重启 One-Agent 程序。使用方式: /restart",
+            schema=_schema("restart", "restart One-Agent", []),
+            handler=restart_handler,
         ))
 
         async def now_handler(args: Dict[str, Any]) -> str:
