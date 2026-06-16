@@ -169,11 +169,97 @@ class Coordinator(Plugin):
                     "compare", "analyze", "research", "evaluate", "both", "each"]
         return len(text) > 50 and any(k in text for k in keywords)
 
+    # ------------------------------------------------------------ slash commands
+    # Mapping from slash command names (both EN and CN) to skill IDs
+    _SLASH_COMMANDS: Dict[str, str] = {
+        # help
+        "help": "help", "帮助": "help", "帮助信息": "help", "怎么用": "help",
+        # settings
+        "settings": "settings", "设置": "settings", "配置": "settings", "设定": "settings",
+        # update
+        "update": "updater", "更新": "updater", "升级": "updater",
+        # wechat
+        "wechat": "wechat_login", "微信": "wechat_login", "微信登录": "wechat_login",
+        # quit
+        "quit": "quit", "退出": "quit", "关机": "quit", "再见": "quit",
+        # calculator
+        "calc": "calc", "计算": "calc", "计算器": "calc", "算": "calc",
+        # note
+        "note": "save_note", "笔记": "save_note", "记录": "save_note", "记事": "save_note",
+        # time
+        "time": "now", "时间": "now", "当前时间": "now", "现在几点了": "now",
+    }
+
+    async def _handle_slash_command(self, turn: TurnContext) -> bool:
+        """Handle slash commands like /help, /settings.
+        
+        Returns True if the command was handled (no further processing needed),
+        False otherwise.
+        """
+        text = turn.input_text.strip()
+        if not text.startswith("/"):
+            return False
+        
+        # Parse command: /command or /command arg1 arg2 ...
+        parts = text[1:].split(maxsplit=1)
+        cmd = parts[0].lower()
+        args_text = parts[1] if len(parts) > 1 else ""
+        
+        # Look up command in mapping (try exact match first, then partial)
+        skill_id = None
+        
+        # Try exact match
+        if cmd in self._SLASH_COMMANDS:
+            skill_id = self._SLASH_COMMANDS[cmd]
+        else:
+            # Try partial match (e.g., "/help me" → "/help")
+            for key in self._SLASH_COMMANDS:
+                if cmd.startswith(key) or key.startswith(cmd):
+                    skill_id = self._SLASH_COMMANDS[key]
+                    break
+        
+        if skill_id is None:
+            turn.result = f"未知命令: /{cmd}。支持的命令: {', '.join(sorted(set(self._SLASH_COMMANDS.keys())))}"
+            self.publish("turn_completed", turn=turn)
+            return True
+        
+        # Dispatch to skill
+        if self._skills is None:
+            turn.result = "[技能系统未初始化]"
+            self.publish("turn_completed", turn=turn)
+            return True
+        
+        skill = self._skills.get(skill_id)
+        if skill is None:
+            turn.result = f"[技能不存在: {skill_id}]"
+            self.publish("turn_completed", turn=turn)
+            return True
+        
+        # Build args - for most skills, put remaining text as 'input' arg
+        args: Dict[str, Any] = {}
+        if args_text:
+            args["input"] = args_text
+        
+        try:
+            result = await self._skills.dispatch(skill_id, args)
+            turn.result = str(result)
+        except Exception as exc:
+            logger.exception("slash command dispatch failed: %s", exc)
+            turn.result = f"[执行错误: {exc}]"
+        
+        self.publish("turn_completed", turn=turn)
+        return True
+
     # ------------------------------------------------------------ handlers
     async def _on_routed(self, event: Event) -> None:
         turn: TurnContext | None = event.get("turn")
         if turn is None or turn.result is not None or turn.error is not None:
             return
+        
+        # Handle slash commands first
+        if turn.input_text and turn.input_text.strip().startswith("/"):
+            if await self._handle_slash_command(turn):
+                return
         
         # Auto-detect language from user input
         if turn.input_text:

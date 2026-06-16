@@ -314,11 +314,35 @@ class SkillManager(Plugin):
             handler=echo_handler,
         ))
 
+        async def help_handler(args: Dict[str, Any]) -> str:
+            """显示帮助信息，列出所有可用命令。"""
+            commands = [
+                ("📋 /help /帮助", "显示此帮助信息"),
+                ("⚙️ /settings /设置", "查看和修改设置"),
+                ("🔄 /update /更新", "从 GitHub 更新到最新版本"),
+                ("💬 /wechat /微信", "启动微信网关并显示登录二维码"),
+                ("🔢 /calc /计算", "执行数学计算，如 /calc 2+2"),
+                ("📝 /note /笔记", "保存笔记到文件，如 /note 今天天气真好"),
+                ("⏰ /time /时间", "显示当前时间"),
+                ("🚪 /quit /退出", "退出程序"),
+            ]
+            lines = ["可用命令列表：", ""]
+            lines.extend([f"  {cmd}  -  {desc}" for cmd, desc in commands])
+            lines.append("")
+            lines.append("💡 也可以直接输入自然语言，无需斜杠，AI 会自动选择合适的工具处理。")
+            return "\n".join(lines)
+        self.register(Skill(
+            id="help", title="帮助",
+            description="显示帮助信息，列出所有可用命令。使用方式: /help",
+            schema=_schema("help", "display help information", []),
+            handler=help_handler,
+        ))
+
         async def now_handler(args: Dict[str, Any]) -> str:
             return datetime.datetime.now().isoformat()
         self.register(Skill(
             id="now", title="Current time",
-            description="Return the current local timestamp in ISO format.",
+            description="显示当前时间。使用方式: /time 或 /时间",
             schema=_schema("now", "return current timestamp", []),
             handler=now_handler,
         ))
@@ -353,7 +377,7 @@ class SkillManager(Plugin):
                 return f"[math error: {exc}]"
         self.register(Skill(
             id="calc", title="Calculator",
-            description="Evaluate a simple arithmetic expression (numbers +-*/).",
+            description="执行数学计算。使用方式: /calc 2+2*3",
             schema=_schema("calc", "evaluate arithmetic expression", ["input"]),
             handler=calc_handler,
         ))
@@ -381,7 +405,7 @@ class SkillManager(Plugin):
             return "note saved"
         self.register(Skill(
             id="save_note", title="Save note",
-            description="Append a note to a persistent log file.",
+            description="保存笔记到文件。使用方式: /note 今天天气真好",
             schema=_schema("save_note", "append persistent note", ["input"]),
             handler=save_note,
         ))
@@ -591,8 +615,7 @@ class SkillManager(Plugin):
 
         self.register(Skill(
             id="settings", title="Settings Manager",
-            description="读取或修改 Agent 配置（模型、温度、网关开关等）。"
-                        "示例：'查看当前模型'、'把温度改为0.7'、'开启Docker'、'列出所有设置'",
+            description="读取或修改 Agent 配置（模型、温度、网关开关等）。使用方式: /settings 或 /设置",
             schema={
                 "type": "function",
                 "function": {
