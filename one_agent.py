@@ -794,7 +794,9 @@ async def main() -> None:
         nonlocal _shutdown_triggered, _shutdown_task
         if not _shutdown_triggered:
             _shutdown_triggered = True
-            print("\n[shutting down...]")
+            print("\n\n========================================")
+            print("  👋 再见！One-Agent 已关闭")
+            print("========================================\n")
             _shutdown_task = asyncio.create_task(app.stop())
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -805,6 +807,11 @@ async def main() -> None:
 
     try:
         await _interactive(app)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Clean exit on Ctrl+C or signal
+        print("\n\n========================================")
+        print("  👋 再见！One-Agent 已关闭")
+        print("========================================\n")
     finally:
         await app.stop()
 

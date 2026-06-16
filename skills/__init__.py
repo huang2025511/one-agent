@@ -431,6 +431,27 @@ from .wechat_login import make_wechat_login_handler
             handler=wechat_login_handler,
         ))
 
+        # ---------- 退出技能 ----------
+        async def quit_handler(args: Dict[str, Any]) -> str:
+            """退出 One-Agent"""
+            import sys
+            results = []
+            results.append("正在退出...")
+            results.append("再见！下次见 👋")
+            # 使用 os._exit 而不是 sys.exit，这样更干净
+            import os
+            os._exit(0)
+            return "\n".join(results)
+        self.register(Skill(
+            id="quit", title="退出",
+            description="退出 One-Agent 程序。触发词：退出、quit、exit、关机",
+            schema={
+                "type": "object",
+                "properties": {}
+            },
+            handler=quit_handler,
+        ))
+
         # ---------- 设置管理技能 ----------
         async def settings_handler(args: Dict[str, Any]) -> str:
             """通过自然语言读取或修改配置。
