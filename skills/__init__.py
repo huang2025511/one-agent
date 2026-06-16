@@ -388,20 +388,14 @@ class SkillManager(Plugin):
 
         # ---------- 更新技能 ----------
         async def updater_handler(args: Dict[str, Any]) -> str:
-            """更新 One-Agent 到最新版本。
-
-            支持：
-            - "更新" / "升级" / "update" - 自动从 GitHub 拉取最新代码
-            - 如果没有 git，会尝试使用 curl 方式下载
-            """
+            """更新 One-Agent 到最新版本。使用方式: /update"""
             # 延迟导入避免循环依赖
             from .updater import make_updater_handler
-from .wechat_login import make_wechat_login_handler
             updater = make_updater_handler()
             return await updater(args)
         self.register(Skill(
-            id="updater", title="更新 One-Agent",
-            description="从 GitHub 更新 One-Agent 到最新版本，支持 git 和 curl 两种方式。触发词：更新、升级、update",
+            id="updater", title="更新",
+            description="从 GitHub 更新 One-Agent 到最新版本。使用方式: /update",
             schema={
                 "type": "object",
                 "properties": {
@@ -423,7 +417,7 @@ from .wechat_login import make_wechat_login_handler
             return await wechat_handler(args)
         self.register(Skill(
             id="wechat_login", title="微信登录",
-            description="启动微信网关并显示登录二维码。触发词：微信登录、登录微信",
+            description="启动微信网关并显示登录二维码。使用方式: /wechat",
             schema={
                 "type": "object",
                 "properties": {}
@@ -444,7 +438,7 @@ from .wechat_login import make_wechat_login_handler
             return "\n".join(results)
         self.register(Skill(
             id="quit", title="退出",
-            description="退出 One-Agent 程序。触发词：退出、quit、exit、关机",
+            description="退出 One-Agent 程序。使用方式: /quit",
             schema={
                 "type": "object",
                 "properties": {}
