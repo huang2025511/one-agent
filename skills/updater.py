@@ -1,6 +1,6 @@
 """Updater skill - Auto-update One-Agent from GitHub.
 
-Usage: 输入 "更新" 或 "升级" 即可自动更新到最新版本
+Usage: /update 或 /更新
 """
 
 from __future__ import annotations
@@ -15,259 +15,343 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-# 获取项目根目录
-ROOT = Path(__file__).parent.parent.parent
+
+def _find_project_root() -> Path:
+    """从当前文件向上查找项目根目录（含有 .git 或 one_agent.py 的目录）。"""
+    path = Path(__file__).resolve().parent
+    for _ in range(5):
+        if (path / ".git").exists() or (path / "one_agent.py").exists():
+            return path
+        path = path.parent
+    # 回退：skills 目录的父目录的父目录（skills/updater.py -> skills/ -> project/）
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = _find_project_root()
+
+
+def _run_git(args: list, timeout: int = 10) -> subprocess.CompletedProcess:
+    """在项目根目录执行 git 命令。"""
+    return subprocess.run(
+        ["git"] + args,
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+        timeout=timeout,
+    )
+
+
+def _detect_branch() -> str:
+    """自动检测当前分支。失败则返回 'main'。"""
+    try:
+        result = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "main"
+
+
+def _detect_remote() -> str:
+    """检测默认远程仓库名。"""
+    try:
+        result = _run_git(["remote"])
+        if result.returncode == 0:
+            remotes = result.stdout.strip().split("\n")
+            if "origin" in remotes:
+                return "origin"
+            if remotes and remotes[0]:
+                return remotes[0]
+    except Exception:
+        pass
+    return "origin"
 
 
 def make_updater_handler():
     """Create the updater skill handler."""
-    
+
     async def handler(args: Dict[str, Any]) -> str:
         """Handle update request."""
-        branch = args.get("branch", "main")
-        auto_restart = args.get("auto_restart", True)
-        
         results = []
         results.append("🚀 开始更新 One-Agent...")
         results.append("")
-        
+
         # 1. 检查 git 是否可用
         try:
             result = subprocess.run(
                 ["git", "--version"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
             )
             if result.returncode != 0:
                 raise FileNotFoundError("git not found")
             results.append(f"✓ Git 版本: {result.stdout.strip()}")
-        except FileNotFoundError:
+        except (FileNotFoundError, subprocess.TimeoutExpired):
             results.append("⚠️ Git 未安装，尝试使用 curl 下载...")
-            return await _update_with_curl(branch, results)
-        
-        # 2. 检查远程仓库
-        try:
-            result = subprocess.run(
-                ["git", "remote", "-v"],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-                timeout=5
-            )
-            if result.returncode != 0:
-                results.append("❌ 无法获取远程仓库信息")
-                return "\n".join(results)
-            
-            # 解析远程仓库 URL
-            remote_url = ""
-            for line in result.stdout.strip().split("\n"):
-                if "origin" in line and "fetch" in line:
-                    remote_url = line.split()[1] if len(line.split()) > 1 else ""
-                    break
-            
-            if not remote_url:
-                results.append("❌ 未找到 origin 远程仓库")
-                return "\n".join(results)
-            
-            results.append(f"✓ 远程仓库: {remote_url}")
-        except Exception as e:
-            results.append(f"❌ 检查远程仓库失败: {e}")
+            return await _update_with_curl(args.get("branch", "main"), results)
+
+        results.append(f"📍 项目目录: {ROOT}")
+
+        # 2. 检查是否为 git 仓库
+        result = _run_git(["rev-parse", "--is-inside-work-tree"])
+        if result.returncode != 0 or result.stdout.strip() != "true":
+            results.append("")
+            results.append("❌ 当前目录不是 Git 仓库")
+            results.append("")
+            results.append("💡 请先在项目目录执行:")
+            results.append(f"   cd {ROOT}")
+            results.append("   git init")
+            results.append("   git remote add origin <你的仓库地址>")
+            results.append("   git fetch origin")
+            results.append("   git checkout main")
+            results.append("")
+            results.append("或者使用 curl 方式更新...")
+            return await _update_with_curl(args.get("branch", "main"), results)
+
+        # 3. 检查远程仓库
+        remote = _detect_remote()
+        result = _run_git(["remote", "-v"])
+        if result.returncode != 0:
+            results.append("❌ 无法获取远程仓库信息")
+            results.append("")
+            results.append("💡 请先在项目目录执行:")
+            results.append(f"   cd {ROOT}")
+            results.append("   git remote add origin <你的仓库地址>")
+            results.append("   git fetch origin")
             return "\n".join(results)
-        
-        # 3. 获取远程最新版本
+
+        remote_url = ""
+        for line in result.stdout.strip().split("\n"):
+            if remote in line and "fetch" in line:
+                parts = line.split()
+                if len(parts) > 1:
+                    remote_url = parts[1]
+                break
+
+        if not remote_url:
+            results.append(f"❌ 未找到 {remote} 远程仓库")
+            results.append("")
+            results.append("💡 请添加远程仓库:")
+            results.append(f"   cd {ROOT}")
+            results.append("   git remote add origin <你的仓库地址>")
+            return "\n".join(results)
+
+        results.append(f"🌐 远程仓库: {remote_url}")
+
+        # 4. 自动检测分支
+        branch = args.get("branch") or _detect_branch()
+        results.append(f"🔖 当前分支: {branch}")
+
+        # 5. 获取远程最新版本
         results.append("")
         results.append("📡 正在获取远程最新版本...")
         try:
-            # Fetch latest
-            result = subprocess.run(
-                ["git", "fetch", "origin", branch],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-                timeout=30
-            )
+            result = _run_git(["fetch", remote, branch], timeout=60)
             if result.returncode != 0:
-                results.append(f"⚠️ Fetch 失败: {result.stderr.strip()}")
-            
-            # 获取最新 commit
-            result = subprocess.run(
-                ["git", "log", "-1", "--format=%H %s", f"origin/{branch}"],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-                timeout=10
-            )
+                err = result.stderr.strip() or "fetch failed"
+                results.append(f"⚠️ Fetch 失败: {err}")
+                results.append("")
+                results.append("💡 可能的原因:")
+                results.append("   1. 网络不通 - 检查网络连接")
+                results.append("   2. 分支不存在 - 确认远程分支名")
+                results.append("   3. 需要认证 - 私有仓库请配置 SSH 或 token")
+                results.append("")
+                results.append("尝试使用 curl 方式更新...")
+                return await _update_with_curl(branch, results)
+
+            result = _run_git(["log", "-1", "--format=%H %s", f"{remote}/{branch}"])
             if result.returncode == 0 and result.stdout.strip():
-                latest_commit = result.stdout.strip().split(" ", 1)
-                if len(latest_commit) == 2:
-                    commit_hash, commit_msg = latest_commit
-                    results.append(f"📋 最新版本: {commit_hash[:8]}")
+                parts = result.stdout.strip().split(" ", 1)
+                if len(parts) == 2:
+                    commit_hash, commit_msg = parts
+                    results.append(f"📋 远程最新: {commit_hash[:8]}")
                     results.append(f"   {commit_msg}")
             else:
-                results.append("⚠️ 无法获取最新版本信息")
+                results.append("⚠️ 无法获取远程版本信息")
+        except subprocess.TimeoutExpired:
+            results.append("⚠️ 网络超时，尝试 curl 方式...")
+            return await _update_with_curl(branch, results)
         except Exception as e:
             results.append(f"⚠️ 获取版本失败: {e}")
-        
-        # 4. 获取当前版本
+
+        # 6. 获取当前版本
         results.append("")
         results.append("📌 当前版本:")
-        try:
-            result = subprocess.run(
-                ["git", "log", "-1", "--format=%H %s"],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-                timeout=10
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                current = result.stdout.strip().split(" ", 1)
-                if len(current) == 2:
-                    current_hash, current_msg = current
-                    results.append(f"   {current_hash[:8]} - {current_msg}")
-        except Exception:
-            pass
-        
-        # 5. 拉取更新
+        result = _run_git(["log", "-1", "--format=%H %s"])
+        if result.returncode == 0 and result.stdout.strip():
+            parts = result.stdout.strip().split(" ", 1)
+            if len(parts) == 2:
+                ch, cm = parts
+                results.append(f"   {ch[:8]} - {cm}")
+
+        # 7. 拉取更新
         results.append("")
         results.append("📥 正在拉取更新...")
         try:
-            # 先 stash 本地更改（如果有）
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-                timeout=10
-            )
+            result = _run_git(["status", "--porcelain"])
             has_changes = result.stdout.strip()
-            
+
             if has_changes:
                 results.append("⚠️ 检测到本地修改，自动 stash...")
-                subprocess.run(
-                    ["git", "stash"],
-                    capture_output=True,
-                    cwd=ROOT,
-                    timeout=10
-                )
-            
-            # Pull
-            result = subprocess.run(
-                ["git", "pull", "origin", branch],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-                timeout=60
-            )
-            
+                _run_git(["stash"])
+
+            result = _run_git(["pull", remote, branch], timeout=120)
+
             if result.returncode == 0:
                 results.append("✓ 代码更新成功!")
-                
-                # 检查更新的文件
-                result = subprocess.run(
-                    ["git", "log", "-1", "--format=%H", "HEAD"],
-                    capture_output=True,
-                    text=True,
-                    cwd=ROOT,
-                    timeout=10
+                result = _run_git(["log", "-1", "--format=%H"])
+                if result.returncode == 0 and result.stdout.strip():
+                    results.append(f"   新版本: {result.stdout.strip()[:8]}")
+
+                # 检查是否有依赖变化
+                result = _run_git(
+                    ["diff", "--name-only", "ORIG_HEAD", "HEAD", "--",
+                     "requirements.txt", "pyproject.toml"]
                 )
-                if result.returncode == 0:
-                    new_hash = result.stdout.strip()[:8]
-                    results.append(f"   新版本: {new_hash}")
+                deps_changed = result.stdout.strip()
+                if deps_changed:
+                    results.append("")
+                    results.append("📦 检测到依赖文件变化，正在更新...")
+                    pip_cmd = sys.executable
+                    try:
+                        r = subprocess.run(
+                            [pip_cmd, "-m", "pip", "install", "-r",
+                             str(ROOT / "requirements.txt")],
+                            capture_output=True,
+                            text=True,
+                            timeout=180,
+                            cwd=str(ROOT),
+                        )
+                        if r.returncode == 0:
+                            results.append("✓ 依赖更新成功!")
+                        else:
+                            results.append(f"⚠️ 依赖更新部分失败: {r.stderr.strip()[:200]}")
+                    except Exception as e:
+                        results.append(f"⚠️ 依赖更新失败: {e}")
             else:
-                results.append(f"❌ 更新失败: {result.stderr.strip()}")
+                err = result.stderr.strip() or "pull failed"
+                results.append(f"❌ 更新失败: {err}")
+                results.append("")
+                results.append("💡 如果本地有冲突，可手动执行:")
+                results.append(f"   cd {ROOT}")
+                results.append(f"   git reset --hard {remote}/{branch}")
                 return "\n".join(results)
-                
+
+        except subprocess.TimeoutExpired:
+            results.append("⚠️ pull 超时，可能是网络问题")
+            return "\n".join(results)
         except Exception as e:
             results.append(f"❌ 拉取更新失败: {e}")
             return "\n".join(results)
-        
-        # 6. 检查是否需要更新依赖
-        results.append("")
-        results.append("📦 检查依赖更新...")
-        try:
-            # 检查 requirements.txt 是否有变化
-            result = subprocess.run(
-                ["git", "diff", "--name-only", "HEAD~1", "requirements.txt", "pyproject.toml"],
-                capture_output=True,
-                text=True,
-                cwd=ROOT,
-                timeout=10
-            )
-            deps_changed = result.stdout.strip()
-            
-            if deps_changed:
-                results.append("   检测到依赖文件有变化")
-                results.append("   运行 pip install -r requirements.txt ...")
-                
-                # 确定 pip 命令
-                pip_cmd = sys.executable
-                result = subprocess.run(
-                    [pip_cmd, "-m", "pip", "install", "-r", "requirements.txt", "--quiet"],
-                    capture_output=True,
-                    timeout=120
-                )
-                if result.returncode == 0:
-                    results.append("✓ 依赖更新成功!")
-                else:
-                    results.append(f"⚠️ 依赖更新失败: {result.stderr.decode()[:200] if result.stderr else 'unknown'}")
-            else:
-                results.append("   依赖无变化，跳过")
-        except Exception as e:
-            results.append(f"⚠️ 依赖检查失败: {e}")
-        
-        # 7. 完成
+
+        # 8. 完成
         results.append("")
         results.append("=" * 50)
         results.append("✅ 更新完成!")
         results.append("")
-        results.append("💡 如需重启以应用更新，请输入: 重启")
+        results.append("💡 如需重启以应用更新，请输入: /restart 或 /重启")
         results.append("=" * 50)
-        
+
         return "\n".join(results)
-    
+
     return handler
 
 
 async def _update_with_curl(branch: str, results: list) -> str:
     """Fallback update using curl when git is not available."""
     results.append("")
-    results.append("📥 使用 curl 方式更新...")
-    
+    results.append("📥 使用 curl 方式更新（仅更新核心文件）...")
+    results.append(f"📍 项目目录: {ROOT}")
+
     try:
-        # 获取 repo 信息
-        raw_url = f"https://raw.githubusercontent.com/huang2025511/one-agent/{branch}"
-        
-        # 下载主要文件
+        # 从当前 git remote 或使用默认地址
+        remote_url = ""
+        try:
+            result = _run_git(["remote", "-v"])
+            if result.returncode == 0:
+                for line in result.stdout.strip().split("\n"):
+                    if "origin" in line and "fetch" in line:
+                        parts = line.split()
+                        if len(parts) > 1:
+                            remote_url = parts[1]
+                        break
+        except Exception:
+            pass
+
+        # 从 remote URL 提取 user/repo
+        gh_prefix = "https://github.com/"
+        gh_suffix = ".git"
+        repo_path = ""
+
+        if remote_url:
+            if remote_url.startswith(gh_prefix):
+                repo_path = remote_url[len(gh_prefix):]
+                if repo_path.endswith(gh_suffix):
+                    repo_path = repo_path[:-len(gh_suffix)]
+            elif remote_url.startswith("git@github.com:"):
+                repo_path = remote_url[len("git@github.com:"):]
+                if repo_path.endswith(gh_suffix):
+                    repo_path = repo_path[:-len(gh_suffix)]
+
+        if not repo_path:
+            results.append("⚠️ 无法从远程 URL 解析 GitHub 地址")
+            results.append("💡 请确保项目目录中已正确配置 git remote")
+            results.append("   或手动执行: git pull <remote> <branch>")
+            return "\n".join(results)
+
+        raw_url = f"https://raw.githubusercontent.com/{repo_path}/{branch}"
+        results.append(f"🌐 下载来源: {raw_url}")
+        results.append("")
+
         files_to_update = [
             ("one_agent.py", "主程序"),
             ("install", "安装脚本"),
+            ("requirements.txt", "依赖列表"),
+            ("skills/updater.py", "更新技能"),
+            ("skills/wechat_login.py", "微信技能"),
+            ("skills/__init__.py", "技能注册"),
             ("scripts/fetch_models.py", "模型获取脚本"),
+            ("core/coordinator.py", "协调器"),
         ]
-        
+
+        ok_count = 0
+        fail_count = 0
         for file_path, desc in files_to_update:
             results.append(f"   下载 {desc}...")
             url = f"{raw_url}/{file_path}"
             local_path = ROOT / file_path
-            
-            result = subprocess.run(
-                ["curl", "-s", "-L", "-o", str(local_path), url],
-                capture_output=True,
-                timeout=30
-            )
-            
-            if result.returncode == 0 and local_path.exists():
-                results.append(f"   ✓ {desc} 更新成功")
-            else:
-                results.append(f"   ⚠️ {desc} 下载失败")
-        
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                r = subprocess.run(
+                    ["curl", "-s", "-L", "-f", "-o", str(local_path), url],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if r.returncode == 0 and local_path.exists() and local_path.stat().st_size > 0:
+                    results.append(f"   ✓ {desc} 更新成功")
+                    ok_count += 1
+                else:
+                    results.append(f"   ⚠️ {desc} 下载失败")
+                    fail_count += 1
+            except Exception as e:
+                results.append(f"   ⚠️ {desc} 下载失败: {e}")
+                fail_count += 1
+
         results.append("")
-        results.append("✅ 使用 curl 方式更新完成!")
-        results.append("💡 如需完整更新，请安装 git: apt install git")
-        
+        if ok_count > 0:
+            results.append(f"✅ curl 方式更新完成 (成功 {ok_count} 个, 失败 {fail_count} 个)")
+            results.append("💡 完整更新请使用 Git 方式")
+            results.append("💡 如需重启以应用更新，请输入: /restart 或 /重启")
+        else:
+            results.append("❌ curl 方式更新全部失败")
+            results.append("💡 请检查网络或手动下载:")
+            results.append(f"   {raw_url}")
+
     except Exception as e:
         results.append(f"❌ curl 更新失败: {e}")
-    
+
     return "\n".join(results)
 
 
@@ -275,19 +359,14 @@ async def _update_with_curl(branch: str, results: list) -> str:
 UPDATER_SKILL = {
     "id": "updater",
     "title": "更新 One-Agent",
-    "description": "更新 One-Agent 到最新版本，支持 Git 和 curl 两种方式",
+    "description": "/update 或 /更新：从 GitHub 更新到最新版本，支持 Git 和 curl 两种方式",
     "schema": {
         "type": "object",
         "properties": {
             "branch": {
                 "type": "string",
-                "description": "分支名称，默认 main",
-                "default": "main"
-            },
-            "auto_restart": {
-                "type": "boolean",
-                "description": "更新后是否自动重启",
-                "default": True
+                "description": "分支名称（可选，默认自动检测）",
+                "default": ""
             }
         }
     },

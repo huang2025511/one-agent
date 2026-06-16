@@ -345,7 +345,7 @@ class SkillManager(Plugin):
             return "\n".join(lines)
         self.register(Skill(
             id="help", title="帮助",
-            description="显示帮助信息，列出所有可用命令。使用方式: /help",
+            description="/help 或 /帮助：显示帮助信息，列出所有可用命令",
             schema=_schema("help", "display help information", []),
             handler=help_handler,
         ))
@@ -370,7 +370,7 @@ class SkillManager(Plugin):
             return "\n".join(lines)
         self.register(Skill(
             id="status", title="系统状态",
-            description="显示系统状态信息（模型、网关、Python 版本等）。使用方式: /status",
+            description="/status 或 /状态：显示系统状态信息（模型、网关、Python 版本等）",
             schema=_schema("status", "show system status", []),
             handler=status_handler,
         ))
@@ -390,7 +390,7 @@ class SkillManager(Plugin):
             )
         self.register(Skill(
             id="version", title="版本信息",
-            description="显示 One-Agent 版本信息。使用方式: /version",
+            description="/version 或 /版本：显示 One-Agent 版本信息",
             schema=_schema("version", "show version info", []),
             handler=version_handler,
         ))
@@ -404,7 +404,7 @@ class SkillManager(Plugin):
             return "\n".join(lines)
         self.register(Skill(
             id="list_skills", title="技能列表",
-            description="列出所有可用的技能。使用方式: /skills 或 /技能",
+            description="/skills 或 /技能：列出所有可用的技能",
             schema=_schema("list_skills", "list all skills", []),
             handler=list_skills_handler,
         ))
@@ -427,7 +427,7 @@ class SkillManager(Plugin):
                 return f"❌ 获取网关状态失败: {exc}"
         self.register(Skill(
             id="list_gateways", title="网关列表",
-            description="列出所有网关及其状态。使用方式: /gateways 或 /网关",
+            description="/gateways 或 /网关：列出所有网关及其状态",
             schema=_schema("list_gateways", "list gateways", []),
             handler=list_gateways_handler,
         ))
@@ -457,7 +457,7 @@ class SkillManager(Plugin):
                 return f"❌ 获取历史失败: {exc}"
         self.register(Skill(
             id="history", title="对话历史",
-            description="显示最近的对话历史。使用方式: /history",
+            description="/history 或 /历史：显示最近的对话历史",
             schema=_schema("history", "show conversation history", []),
             handler=history_handler,
         ))
@@ -476,7 +476,7 @@ class SkillManager(Plugin):
                 return f"❌ 清空失败: {exc}"
         self.register(Skill(
             id="clear", title="清屏",
-            description="清空当前对话历史。使用方式: /clear",
+            description="/clear 或 /清屏：清空当前对话历史",
             schema=_schema("clear", "clear conversation", []),
             handler=clear_handler,
         ))
@@ -494,7 +494,7 @@ class SkillManager(Plugin):
             return "\n".join(results)
         self.register(Skill(
             id="restart", title="重启",
-            description="重启 One-Agent 程序。使用方式: /restart",
+            description="/restart 或 /重启：重启 One-Agent 程序",
             schema=_schema("restart", "restart One-Agent", []),
             handler=restart_handler,
         ))
@@ -538,7 +538,7 @@ class SkillManager(Plugin):
                 return f"[math error: {exc}]"
         self.register(Skill(
             id="calc", title="Calculator",
-            description="执行数学计算。使用方式: /calc 2+2*3",
+            description="/calc 或 /计算：执行数学计算，如 /calc 2+2*3",
             schema=_schema("calc", "evaluate arithmetic expression", ["input"]),
             handler=calc_handler,
         ))
@@ -573,14 +573,13 @@ class SkillManager(Plugin):
 
         # ---------- 更新技能 ----------
         async def updater_handler(args: Dict[str, Any]) -> str:
-            """更新 One-Agent 到最新版本。使用方式: /update"""
-            # 延迟导入避免循环依赖
+            """更新 One-Agent 到最新版本。使用方式: /update 或 /更新"""
             from .updater import make_updater_handler
             updater = make_updater_handler()
             return await updater(args)
         self.register(Skill(
             id="updater", title="更新",
-            description="从 GitHub 更新 One-Agent 到最新版本。使用方式: /update",
+            description="/update 或 /更新：从 GitHub 更新 One-Agent 到最新版本，支持 Git 和 curl 两种更新方式",
             schema={
                 "type": "object",
                 "properties": {
@@ -602,7 +601,7 @@ class SkillManager(Plugin):
             return await wechat_handler(args)
         self.register(Skill(
             id="wechat_login", title="微信登录",
-            description="启动微信网关并显示登录二维码。使用方式: /wechat",
+            description="/wechat 或 /微信：启动微信网关并显示登录二维码（按需启动）",
             schema={
                 "type": "object",
                 "properties": {}
@@ -623,7 +622,7 @@ class SkillManager(Plugin):
             return "\n".join(results)
         self.register(Skill(
             id="quit", title="退出",
-            description="退出 One-Agent 程序。使用方式: /quit",
+            description="/quit 或 /退出：退出 One-Agent 程序",
             schema={
                 "type": "object",
                 "properties": {}
@@ -776,7 +775,7 @@ class SkillManager(Plugin):
 
         self.register(Skill(
             id="settings", title="Settings Manager",
-            description="读取或修改 Agent 配置（模型、温度、网关开关等）。使用方式: /settings 或 /设置",
+            description="/settings 或 /设置：读取或修改 Agent 配置（模型、温度、网关开关等）",
             schema={
                 "type": "function",
                 "function": {
