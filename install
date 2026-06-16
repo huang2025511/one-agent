@@ -186,28 +186,76 @@ ok "数据目录已就绪"
 # ----- 交互模式：额外配置 -----
 if $INTERACTIVE; then
     echo -e "\n配置 LLM API Key（可选，回车跳过）"
-    echo "  1) OpenAI  2) DeepSeek  3) 商汤(SenseNova)  4) 阿里云(DashScope)  5) 跳过"
-    echo -n "选择 [5]: "; read -r ans
-    case "${ans:-5}" in
-        1) _PROVIDER="OPENAI_API_KEY" ; _PROVIDER_KEY="openai" ;;
-        2) _PROVIDER="DEEPSEEK_API_KEY" ; _PROVIDER_KEY="deepseek" ;;
-        3) _PROVIDER="SENSENOVA_API_KEY" ; _PROVIDER_KEY="sensenova" ;;
-        4) _PROVIDER="DASHSCOPE_API_KEY" ; _PROVIDER_KEY="dashscope" ;;
-        *) _PROVIDER="" ; _PROVIDER_KEY="" ;;
+    echo "  1) OpenAI"
+    echo "  2) DeepSeek (深度求索)"
+    echo "  3) SenseNova (商汤)"
+    echo "  4) DashScope (阿里云)"
+    echo "  5) Anthropic (Claude)"
+    echo "  6) Google Gemini"
+    echo "  7) Ollama (本地模型)"
+    echo "  8) Groq"
+    echo "  9) Together AI"
+    echo " 10) Fireworks AI"
+    echo " 11) Cohere"
+    echo " 12) Mistral AI"
+    echo " 13) 自定义 OpenAI 兼容 API"
+    echo " 14) 自定义 API 地址"
+    echo " 15) 跳过"
+    echo -n "选择 [15]: "; read -r ans
+    
+    case "${ans:-15}" in
+        1)  _PROVIDER="OPENAI_API_KEY" ; _PROVIDER_KEY="openai" ;;
+        2)  _PROVIDER="DEEPSEEK_API_KEY" ; _PROVIDER_KEY="deepseek" ;;
+        3)  _PROVIDER="SENSENOVA_API_KEY" ; _PROVIDER_KEY="sensenova" ;;
+        4)  _PROVIDER="DASHSCOPE_API_KEY" ; _PROVIDER_KEY="dashscope" ;;
+        5)  _PROVIDER="ANTHROPIC_API_KEY" ; _PROVIDER_KEY="anthropic" ;;
+        6)  _PROVIDER="GEMINI_API_KEY" ; _PROVIDER_KEY="gemini" ;;
+        7)  _PROVIDER="OLLAMA_HOST" ; _PROVIDER_KEY="ollama" ;;
+        8)  _PROVIDER="GROQ_API_KEY" ; _PROVIDER_KEY="groq" ;;
+        9)  _PROVIDER="TOGETHER_API_KEY" ; _PROVIDER_KEY="together" ;;
+        10) _PROVIDER="FIREWORKS_API_KEY" ; _PROVIDER_KEY="fireworks" ;;
+        11) _PROVIDER="COHERE_API_KEY" ; _PROVIDER_KEY="cohere" ;;
+        12) _PROVIDER="MISTRAL_API_KEY" ; _PROVIDER_KEY="mistral" ;;
+        13) _PROVIDER_KEY="custom-openai" ;;
+        14) _PROVIDER_KEY="custom-url" ;;
+        *)  _PROVIDER="" ; _PROVIDER_KEY="" ;;
     esac
-    if [[ -n "$_PROVIDER" ]]; then
-        echo -n "API Key: "; read -r _KEY
-        if [[ -z "$_KEY" ]]; then
-            warn "未输入 Key，跳过模型配置"
+    
+    if [[ -n "$_PROVIDER_KEY" && "$_PROVIDER_KEY" != "custom-url" ]]; then
+        # 输入 API Key 或 URL
+        if [[ "$_PROVIDER_KEY" == "ollama" ]]; then
+            echo -n "Ollama 地址 [http://localhost:11434]: "; read -r _KEY
+            [[ -z "$_KEY" ]] && _KEY="http://localhost:11434"
+            _API_URL="$_KEY"
+        elif [[ "$_PROVIDER_KEY" == "custom-openai" ]]; then
+            echo -n "API Base URL (如 https://api.openai.com/v1): "; read -r _API_URL
+            echo -n "API Key: "; read -r _KEY
+            _PROVIDER="CUSTOM_API_KEY"
         else
-            echo "${_PROVIDER}=${_KEY}" >> .env && ok "Key 已保存"
+            echo -n "API Key: "; read -r _KEY
+        fi
+        
+        if [[ -z "$_KEY" && -z "$_API_URL" ]]; then
+            warn "未输入任何信息，跳过模型配置"
+        else
+            # 保存配置
+            if [[ -n "$_PROVIDER" && -n "$_KEY" ]]; then
+                echo "${_PROVIDER}=${_KEY}" >> .env && ok "Key 已保存"
+            fi
             
-            # 实时获取模型列表
-            echo -e "\n正在从 ${_PROVIDER_KEY} 获取可用模型..."
-            _MODELS_RAW=$(python3 scripts/fetch_models.py --provider "$_PROVIDER_KEY" --key "$_KEY" 2>/dev/null || echo "")
+            # 获取模型列表
+            echo -e "\n正在获取可用模型..."
             
-            if [[ -n "$_MODELS_RAW" && ! "$_MODELS_RAW" =~ "Error" ]]; then
-                # 转换为数组
+            if [[ "$_PROVIDER_KEY" == "ollama" ]]; then
+                _MODELS_RAW=$(python3 scripts/fetch_models.py --provider ollama --url "$_API_URL" 2>/dev/null || echo "")
+            elif [[ "$_PROVIDER_KEY" == "custom-openai" ]]; then
+                _MODELS_RAW=$(python3 scripts/fetch_models.py --provider openai --key "$_KEY" --url "$_API_URL" 2>/dev/null || echo "")
+            else
+                _MODELS_RAW=$(python3 scripts/fetch_models.py --provider "$_PROVIDER_KEY" --key "$_KEY" 2>/dev/null || echo "")
+            fi
+            
+            # 选择模型
+            if [[ -n "$_MODELS_RAW" && ! "$_MODELS_RAW" =~ "Error" && -n "$_MODELS_RAW" ]]; then
                 IFS=$'\n' read -r -d '' -a _MODELS <<< "$_MODELS_RAW"
                 _MODEL_COUNT=${#_MODELS[@]}
                 
@@ -228,41 +276,43 @@ if $INTERACTIVE; then
                     else
                         echo -n "输入模型名: "; read -r _MODEL
                     fi
-                else
-                    echo "  无法获取模型列表，请手动输入模型名:"
-                    echo -n "模型名: "; read -r _MODEL
-                fi
-            else
-                # 抓取失败，使用预置列表
-                warn "无法获取模型列表，使用预置列表"
-                case "$_PROVIDER_KEY" in
-                    openai)   _MODELS=("gpt-4o" "gpt-4o-mini" "gpt-3.5-turbo") ;;
-                    deepseek) _MODELS=("deepseek-chat" "deepseek-reasoner") ;;
-                    sensenova) _MODELS=("deepseek-v4-flash" "sensenova-default" "deepseek-v4") ;;
-                    dashscope) _MODELS=("qwen-plus" "qwen-max" "qwen-turbo") ;;
-                esac
-                echo -e "\n可用模型:"
-                for i in "${!_MODELS[@]}"; do
-                    _default=""
-                    [[ $i -eq 0 ]] && _default=" (默认)"
-                    echo "  $((i+1))) ${_MODELS[$i]}${_default}"
-                done
-                echo "  $(( ${#_MODELS[@]} + 1 ))) 自定义输入"
-                echo -n "选择模型 [默认 1]: "; read -r _M
-                if [[ -z "$_M" || "$_M" == "1" ]]; then
-                    _MODEL="${_MODELS[0]}"
-                elif [[ "$_M" -le "${#_MODELS[@]}" ]] 2>/dev/null; then
-                    _MODEL="${_MODELS[$((_M-1))]}"
-                else
-                    echo -n "输入模型名: "; read -r _MODEL
                 fi
             fi
             
-            if [[ -n "$_MODEL" && -f config/default_config.yaml ]]; then
-                sed -i "s|primary_provider: .*|primary_provider: ${_PROVIDER_KEY}|" config/default_config.yaml
-                sed -i "s|primary_model: .*|primary_model: ${_PROVIDER_KEY}/${_MODEL}|" config/default_config.yaml
-                ok "模型: ${_PROVIDER_KEY}/${_MODEL}"
+            # 如果还没选择模型，手动输入
+            if [[ -z "$_MODEL" ]]; then
+                echo "无法获取模型列表，请手动输入:"
+                echo -n "模型名: "; read -r _MODEL
             fi
+            
+            # 保存模型配置
+            if [[ -n "$_MODEL" && -f config/default_config.yaml ]]; then
+                # 确定 provider 名称
+                _PROV_NAME="$_PROVIDER_KEY"
+                [[ "$_PROVIDER_KEY" == "custom-openai" ]] && _PROV_NAME="custom"
+                
+                sed -i "s|primary_provider: .*|primary_provider: ${_PROV_NAME}|" config/default_config.yaml
+                sed -i "s|primary_model: .*|primary_model: ${_PROV_NAME}/${_MODEL}|" config/default_config.yaml
+                ok "模型: ${_PROV_NAME}/${_MODEL}"
+            fi
+            
+            # 保存自定义 API URL
+            if [[ -n "$_API_URL" ]]; then
+                echo "CUSTOM_API_URL=${_API_URL}" >> .env
+                echo "CUSTOM_PROVIDER_NAME=${_PROVIDER_KEY}" >> .env
+                ok "API 地址已保存: $_API_URL"
+            fi
+        fi
+    elif [[ "$_PROVIDER_KEY" == "custom-url" ]]; then
+        echo -n "API Base URL: "; read -r _API_URL
+        echo -n "API Key (可选): "; read -r _KEY
+        echo -n "模型名: "; read -r _MODEL
+        
+        if [[ -n "$_API_URL" ]]; then
+            echo "CUSTOM_API_URL=${_API_URL}" >> .env
+            echo "CUSTOM_API_KEY=${_KEY}" >> .env
+            [[ -n "$_MODEL" ]] && echo "CUSTOM_MODEL=${_MODEL}" >> .env
+            ok "自定义 API 已保存"
         fi
     fi
 
