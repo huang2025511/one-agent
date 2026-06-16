@@ -228,6 +228,58 @@ if $INTERACTIVE; then
         sed -i "s|system_executor_password: ''|system_executor_password: '${_HASH}'|" config/default_config.yaml 2>/dev/null || true
         ok "密码已设置"
     fi
+
+    # 网关配置
+    echo -e "\n配置网关（按空格选择，回车确认）"
+    echo "  可用网关:"
+    echo "    1) Web UI        - 网页界面"
+    echo "    2) Telegram      - 电报"
+    echo "    3) WeCom         - 企业微信"
+    echo "    4) DingTalk      - 钉钉"
+    echo "    5) Feishu        - 飞书"
+    echo "    6) Discord       - Discord"
+    echo "    7) Slack         - Slack"
+    echo "    8) WeChat        - 个人微信 (需要 itchat-uos)"
+    echo -n "选择网关 [默认 1]: "; read -r _GW
+    if [[ -z "$_GW" ]]; then
+        _GW="1"
+    fi
+
+    # 根据选择启用网关
+    if echo "$_GW" | grep -q "1"; then
+        sed -i "/^  web:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
+        ok "已启用: Web UI"
+    fi
+    if echo "$_GW" | grep -q "2"; then
+        sed -i "/^  telegram:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
+        echo -n "Telegram Bot Token（可选）: "; read -r _TG_TOKEN
+        [[ -n "$_TG_TOKEN" ]] && echo "TELEGRAM_BOT_TOKEN=${_TG_TOKEN}" >> .env
+        ok "已启用: Telegram"
+    fi
+    if echo "$_GW" | grep -q "3"; then
+        sed -i "/^  wecom:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
+        ok "已启用: 企业微信"
+    fi
+    if echo "$_GW" | grep -q "4"; then
+        sed -i "/^  dingtalk:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
+        ok "已启用: 钉钉"
+    fi
+    if echo "$_GW" | grep -q "5"; then
+        sed -i "/^  feishu:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
+        ok "已启用: 飞书"
+    fi
+    if echo "$_GW" | grep -q "6"; then
+        sed -i "/^  discord:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
+        ok "已启用: Discord"
+    fi
+    if echo "$_GW" | grep -q "7"; then
+        sed -i "/^  slack:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
+        ok "已启用: Slack"
+    fi
+    if echo "$_GW" | grep -q "8"; then
+        sed -i "/^  wechat_personal:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
+        _pip itchat-uos 2>/dev/null && ok "已启用: 个人微信 (已安装 itchat-uos)" || warn "需要安装 itchat-uos: pip install itchat-uos"
+    fi
 fi
 
 # ----- 完成 -----

@@ -60,10 +60,49 @@ skills:
   search_paths:
   - ./skills
 gateways:
+  cli:
+    enabled: true
+  web:
+    enabled: true
+    host: 0.0.0.0
+    port: 18791
+    cors_origins:
+    - '*'
+  telegram:
+    enabled: false
+    bot_token: ${TELEGRAM_BOT_TOKEN}
+    allowed_users: []
+  wecom:
+    enabled: false
+    corp_id: ''
+    corp_secret: ''
+    agent_id: ''
+    allowed_users: []
+  dingtalk:
+    enabled: false
+    app_key: ''
+    app_secret: ''
+    token: ''
+    aes_key: ''
+    allowed_users: []
+  feishu:
+    enabled: false
+    app_id: ''
+    app_secret: ''
+    allowed_users: []
+  discord:
+    enabled: false
+    bot_token: ''
+    allowed_users: []
+  slack:
+    enabled: false
+    bot_token: ''
+    signing_secret: ''
+    allowed_users: []
   wechat_personal:
     enabled: false
     allowed_users: []
-    reply_prefix: ''
+    reply_prefix: '[Bot] '
     hot_reload: false
 execution: {}
 scheduler: {}
