@@ -99,8 +99,8 @@ class WeChatPersonalGateway(Plugin):
             return
 
         self.bus.subscribe("turn_completed", self._on_done)
-        self._task = asyncio.create_task(self._run())
-        logger.info("wechat_personal enabled (personal WeChat account mode)")
+        # 不再自动启动，改为按需启动
+        logger.info("wechat_personal enabled (按需启动模式，输入 '微信登录' 开始)")
 
     async def stop(self) -> None:
         if self._task:
@@ -117,6 +117,18 @@ class WeChatPersonalGateway(Plugin):
         await super().stop()
 
     # ------------------------------------------------------------ helpers
+    async def login(self) -> bool:
+        """手动登录微信（按需启动）"""
+        if self._logged_in:
+            return True
+        
+        if self._task is None:
+            logger.info("wechat_personal: 启动微信网关...")
+            self._task = asyncio.create_task(self._run())
+            return True
+        
+        return False
+
     async def _on_done(self, event) -> None:
         turn = event.get("turn")
         if turn is None:

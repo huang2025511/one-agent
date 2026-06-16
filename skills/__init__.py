@@ -26,6 +26,7 @@ from core.exceptions import SkillExecutionError, InputValidationError
 
 from .document_search import DocumentStore
 from .updater import make_updater_handler
+from .wechat_login import make_wechat_login_handler
 from multimodal import make_transcribe_handler, make_image_handler
 from skills.document_search import make_doc_search_handler
 from memory.knowledge_graph import make_graph_search_handler
@@ -395,6 +396,7 @@ class SkillManager(Plugin):
             """
             # 延迟导入避免循环依赖
             from .updater import make_updater_handler
+from .wechat_login import make_wechat_login_handler
             updater = make_updater_handler()
             return await updater(args)
         self.register(Skill(
@@ -411,6 +413,22 @@ class SkillManager(Plugin):
                 }
             },
             handler=updater_handler,
+        ))
+
+        # ---------- 微信登录技能 ----------
+        async def wechat_login_handler(args: Dict[str, Any]) -> str:
+            """启动微信网关并显示登录二维码（按需启动）"""
+            from skills.wechat_login import make_wechat_login_handler
+            wechat_handler = make_wechat_login_handler()
+            return await wechat_handler(args)
+        self.register(Skill(
+            id="wechat_login", title="微信登录",
+            description="启动微信网关并显示登录二维码。触发词：微信登录、登录微信",
+            schema={
+                "type": "object",
+                "properties": {}
+            },
+            handler=wechat_login_handler,
         ))
 
         # ---------- 设置管理技能 ----------
