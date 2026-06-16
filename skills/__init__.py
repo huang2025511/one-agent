@@ -25,6 +25,7 @@ from core.plugin import Plugin
 from core.exceptions import SkillExecutionError, InputValidationError
 
 from .document_search import DocumentStore
+from .updater import make_updater_handler
 from multimodal import make_transcribe_handler, make_image_handler
 from skills.document_search import make_doc_search_handler
 from memory.knowledge_graph import make_graph_search_handler
@@ -382,6 +383,34 @@ class SkillManager(Plugin):
             description="Append a note to a persistent log file.",
             schema=_schema("save_note", "append persistent note", ["input"]),
             handler=save_note,
+        ))
+
+        # ---------- 更新技能 ----------
+        async def updater_handler(args: Dict[str, Any]) -> str:
+            """更新 One-Agent 到最新版本。
+
+            支持：
+            - "更新" / "升级" / "update" - 自动从 GitHub 拉取最新代码
+            - 如果没有 git，会尝试使用 curl 方式下载
+            """
+            # 延迟导入避免循环依赖
+            from .updater import make_updater_handler
+            updater = make_updater_handler()
+            return await updater(args)
+        self.register(Skill(
+            id="updater", title="更新 One-Agent",
+            description="从 GitHub 更新 One-Agent 到最新版本，支持 git 和 curl 两种方式。触发词：更新、升级、update",
+            schema={
+                "type": "object",
+                "properties": {
+                    "branch": {
+                        "type": "string",
+                        "description": "分支名称，默认 main",
+                        "default": "main"
+                    }
+                }
+            },
+            handler=updater_handler,
         ))
 
         # ---------- 设置管理技能 ----------
