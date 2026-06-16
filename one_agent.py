@@ -746,6 +746,22 @@ async def _interactive(app: OneAgentApp) -> None:
 
 
 async def main() -> None:
+    # ── Load .env file if it exists ──
+    # This makes environment variables from .env available to the config
+    env_file = ROOT / ".env"
+    if env_file.exists():
+        try:
+            import dotenv
+            dotenv.load_dotenv(env_file)
+        except ImportError:
+            # Fallback: manually parse .env if python-dotenv is not installed
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        key, val = line.split("=", 1)
+                        os.environ.setdefault(key.strip(), val.strip())
+
     # ── auto-detect missing API key and run setup wizard ──
     # This runs BEFORE the agent starts, so the user sees a clean
     # guided setup instead of confusing error messages.
