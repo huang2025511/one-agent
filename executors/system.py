@@ -296,9 +296,9 @@ class SystemExecutor(Plugin):
         if not self._pwd_manager.is_configured():
             logger.warning(
                 "system_executor: no password configured. "
-                "SAFE commands (level 0) will run without password, "
-                "but level 1-3 commands will be blocked. "
-                "Set security.system_executor_password in config."
+                "SAFE commands (level 0) will run without password. "
+                "Level 1-3 commands require a password. "
+                "使用 /unlock <password> 来解锁，或在 config 中设置 security.system_executor_password"
             )
 
         # Register skill
@@ -357,10 +357,16 @@ class SystemExecutor(Plugin):
     async def _check_permission(
         self, command: str, risk_level: int, reason: str, provided_password: str = "",
     ) -> Tuple[bool, bool]:
-        """Return (allowed, needs_password)."""
+        """Return (allowed, needs_password).
+
+        简化后的策略：
+        - Level 0 (SAFE): 免密码，始终允许
+        - Level 1+ (LOW/MEDIUM/DANGEROUS): 需要密码，验证通过后缓存 60 分钟
+          （只要对话框不关闭，60 分钟内不需要再次输入）
+        """
         mgr = self._pwd_manager
 
-        # SAFE level: always allowed
+        # SAFE level: always allowed without password
         if risk_level == 0:
             return (True, False)
 
@@ -368,11 +374,7 @@ class SystemExecutor(Plugin):
         if mgr is None:
             return (False, True)
 
-        # Password not configured → block non-safe
-        if not mgr.is_configured():
-            return (False, True)
-
-        # Already cached for this level → allow
+        # Already cached → allow (会话内 60 分钟有效)
         if mgr.is_cached(risk_level):
             return (True, False)
 
@@ -383,33 +385,14 @@ class SystemExecutor(Plugin):
         # If password was provided in the request body
         if provided_password:
             if mgr.verify(provided_password):
-                mgr.record_success(risk_level)
+                # 记录成功，缓存 60 分钟 —— 所有 level 都走同一套缓存逻辑
+                mgr.record_success(3)  # 最高级授权：level 3
                 return (True, False)
             else:
                 mgr.record_failure()
                 return (False, True)
 
-        # Level 1: require password once (cache for session)
-        # Levels 2-3: require password per call (no auto-cache for these)
-        if risk_level >= 2:
-            # Publish approval event — wait for user to provide password
-            if self.bus is not None:
-                req_id = f"syscmd-{int(time.time()*1000)}"
-                self.bus.publish({
-                    "type": "approval_needed",
-                    "source": "system_executor",
-                    "request": {
-                        "id": req_id,
-                        "operation": f"执行系统命令 (风险: {self.RISK_LABELS[risk_level]})",
-                        "details": f"命令: {command[:200]}\n原因: {reason}",
-                        "risk_level": self.RISK_LABELS[risk_level],
-                    },
-                })
-                # Wait up to 120s for user to approve
-                # The caller should re-invoke with password after approval
-            return (False, True)
-
-        # Level 1: also needs password, but single approval suffices
+        # Need password — caller should prompt user
         return (False, True)
 
     # ------------------------------------------------------------ execution

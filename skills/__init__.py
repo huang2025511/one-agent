@@ -333,6 +333,9 @@ class SkillManager(Plugin):
                 ("🖼️ /image /图片", "图片描述（输入 /image 路径）"),
                 ("📄 /doc /文档", "搜索已上传的文档"),
                 ("🐍 /py /python", "执行 Python 代码（输入 /py 代码）"),
+                ("💻 /shell /sh /命令", "执行系统命令（/shell ls -la [--password xxx]）"),
+                ("🔓 /unlock /解锁", "解锁会话（/unlock 密码，60分钟有效）"),
+                ("🔒 /lock /锁定", "撤销密码授权"),
                 ("🔢 /calc /计算", "执行数学计算，如 /calc 2+2"),
                 ("📝 /note /笔记", "保存笔记到文件"),
                 ("⏰ /time /时间", "显示当前时间"),
@@ -569,6 +572,137 @@ class SkillManager(Plugin):
             description="保存笔记到文件。使用方式: /note 今天天气真好",
             schema=_schema("save_note", "append persistent note", ["input"]),
             handler=save_note,
+        ))
+
+        # ---------- 系统执行器（SystemExecutor）单例 ----------
+        # 在会话生命周期内共享一个实例，以便密码缓存生效
+        _system_executor = None
+        async def _get_system_executor():
+            nonlocal _system_executor
+            if _system_executor is None:
+                from executors.system import SystemExecutor
+                _system_executor = SystemExecutor()
+                # 使用 SkillManager 的 ctx 来初始化
+                ctx = getattr(self, "_ctx_ref", None)
+                if ctx is not None:
+                    await _system_executor.setup(ctx)
+                else:
+                    # Fallback: 手动初始化
+                    _system_executor._enabled = True
+                    from executors.system import PasswordManager
+                    _system_executor._pwd_manager = PasswordManager("", 60, 3, 5)
+                    _system_executor._timeout_seconds = 30
+                    _system_executor._workdir = "."
+                    _system_executor._max_output_bytes = 65536
+            return _system_executor
+
+        # ---------- 系统命令执行技能 ----------
+        async def system_run_handler(args: Dict[str, Any]) -> str:
+            """执行系统命令（带密码保护）。使用方式: /shell ls -la [--password xxx]"""
+            executor = await _get_system_executor()
+            command = str(args.get("command", "")).strip()
+            password = str(args.get("password", "")) if args.get("password") else ""
+
+            if not command:
+                return "用法: /shell <命令> [--password <密码>]\n示例:\n  /shell ls -la\n  /shell ls -la --password mypass123"
+
+            try:
+                result = await executor.dispatch("system.run", {
+                    "command": command,
+                    "password": password,
+                })
+            except Exception as exc:
+                return f"执行错误: {exc}"
+
+            if not isinstance(result, dict):
+                return str(result)
+
+            ok = result.get("ok", False)
+            needs_pwd = result.get("requires_password", False)
+            err = result.get("error", "")
+            level = result.get("risk_level", 0)
+            label = result.get("risk_label", "UNKNOWN")
+
+            if ok:
+                stdout = result.get("stdout", "")
+                stderr = result.get("stderr", "")
+                parts = []
+                if level > 0:
+                    parts.append(f"✅ 已执行 (风险级别: {label})")
+                else:
+                    parts.append("✅ 已执行 (安全操作)")
+                if stdout:
+                    parts.append(stdout.strip())
+                if stderr:
+                    parts.append(f"警告/错误: {stderr.strip()}")
+                return "\n".join(parts)
+
+            if needs_pwd:
+                return "🔒 需要密码才能执行此命令。\n请使用: /shell " + command + " --password <你的密码>\n或先解锁: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中的 security.system_executor_password\n  设为空表示允许所有 Level 0 安全命令，其他命令一律拒绝。"
+
+            return f"❌ 执行失败: {err}"
+
+        self.register(Skill(
+            id="system_run", title="系统命令",
+            description="/shell 或 /sh：执行系统命令。危险操作需要密码。\n安全命令(ls/cat/echo/date 等)免密码，其他命令需密码验证(60分钟缓存)。",
+            schema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的系统命令"},
+                    "password": {"type": "string", "description": "密码(可选，用于解锁会话)"},
+                },
+            },
+            handler=system_run_handler,
+        ))
+
+        # ---------- 解锁会话技能 ----------
+        async def system_unlock_handler(args: Dict[str, Any]) -> str:
+            """输入密码解锁会话。使用方式: /unlock 密码"""
+            executor = await _get_system_executor()
+            password = str(args.get("password", ""))
+
+            if not password:
+                return "用法: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中 security.system_executor_password = \"hash值\"\n  hash值生成: python -c \"import hashlib; print(hashlib.sha256(b'你的密码').hexdigest())\""
+
+            try:
+                ok = await executor.verify_password(password)
+                if ok:
+                    return "✅ 解锁成功！60 分钟内执行危险命令不需要再次输入密码。"
+                else:
+                    return "❌ 密码错误，请重试。(连续3次错误会锁定5分钟)"
+            except Exception as exc:
+                return f"解锁错误: {exc}"
+
+        self.register(Skill(
+            id="system_unlock", title="解锁系统",
+            description="/unlock 或 /解锁：输入密码解锁会话(60分钟有效)",
+            schema={
+                "type": "object",
+                "properties": {
+                    "password": {"type": "string", "description": "密码"},
+                },
+            },
+            handler=system_unlock_handler,
+        ))
+
+        # ---------- 锁定会话技能 ----------
+        async def system_lock_handler(args: Dict[str, Any]) -> str:
+            """撤销密码缓存，立即锁定。使用方式: /lock"""
+            executor = await _get_system_executor()
+            try:
+                executor.invalidate_password()
+                return "🔒 已锁定。再次执行危险命令需要重新输入密码。"
+            except Exception as exc:
+                return f"锁定错误: {exc}"
+
+        self.register(Skill(
+            id="system_lock", title="锁定系统",
+            description="/lock 或 /锁定：撤销密码授权，再次执行危险命令需要重新输入密码",
+            schema={
+                "type": "object",
+                "properties": {},
+            },
+            handler=system_lock_handler,
         ))
 
         # ---------- 更新技能 ----------

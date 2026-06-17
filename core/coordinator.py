@@ -209,6 +209,11 @@ class Coordinator(Plugin):
         # ---------- 代码执行 ----------
         "py": "python_execute", "python": "python_execute", "代码": "python_execute",
         "执行": "python_execute", "执行python": "python_execute", "run": "python_execute",
+        # ---------- 系统操作（Shell/Docker） ----------
+        "shell": "system_run", "sh": "system_run", "命令": "system_run", "系统命令": "system_run",
+        "exec": "system_run", "execute": "system_run", "运行": "system_run",
+        "unlock": "system_unlock", "解锁": "system_unlock", "授权": "system_unlock",
+        "lock": "system_lock", "锁定": "system_lock", "撤销授权": "system_lock",
     }
 
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
@@ -259,7 +264,29 @@ class Coordinator(Plugin):
         # Build args - for most skills, put remaining text as 'input' arg
         args: Dict[str, Any] = {}
         if args_text:
-            args["input"] = args_text
+            if skill_id == "system_run":
+                # system_run: args_text is the command to run (password can be embedded with --password)
+                # Support: /shell ls -la  or  /shell ls -la --password mypass
+                if "--password" in args_text:
+                    cmd_part, pwd_part = args_text.split("--password", 1)
+                    args["command"] = cmd_part.strip()
+                    args["password"] = pwd_part.strip()
+                else:
+                    args["command"] = args_text
+            elif skill_id == "system_unlock":
+                # /unlock <password>
+                args["password"] = args_text
+            else:
+                args["input"] = args_text
+        elif skill_id == "system_run":
+            # /shell without command — show usage
+            turn.result = "用法: /shell <命令> [--password <密码>]\n示例:\n  /shell ls -la\n  /shell ls -la --password mypass123\n  /unlock mypass123 (先解锁，60分钟内有效)"
+            self.publish("turn_completed", turn=turn)
+            return True
+        elif skill_id == "system_unlock":
+            turn.result = "用法: /unlock <密码>\n解锁后 60 分钟内执行危险命令不需要再次输入密码。"
+            self.publish("turn_completed", turn=turn)
+            return True
         
         try:
             result = await self._skills.dispatch(skill_id, args)
