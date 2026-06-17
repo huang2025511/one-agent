@@ -3,8 +3,9 @@
 Tracks per-call cost via SQLite, enforces daily/monthly budgets, and
 provides query APIs for dashboards and alerting.
 
-Thread-safe: uses ``check_same_thread=False`` so the tracker can be
-shared across async tasks without extra locking.
+Thread-safe: uses a ``threading.Lock`` to serialize writes, plus
+``check_same_thread=False`` so the connection can be shared across
+async tasks.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import threading
 import time
 from typing import Any, Dict, List
 
@@ -39,11 +41,11 @@ class CostTracker:
         monthly_budget: float = 20.0,
     ) -> None:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        import sqlite3
 
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._lock = threading.Lock()
         self._daily_budget = daily_budget
         self._monthly_budget = monthly_budget
         self._migrate()
@@ -98,15 +100,16 @@ class CostTracker:
         cost = round(cost, 8)
 
         try:
-            self._conn.execute(
-                """INSERT INTO cost_log
-                   (provider, model, tokens_prompt, tokens_completion,
-                    cost_usd, session_id, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (provider, model, tokens_prompt, tokens_completion,
-                 cost, session_id, time.time()),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    """INSERT INTO cost_log
+                       (provider, model, tokens_prompt, tokens_completion,
+                        cost_usd, session_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (provider, model, tokens_prompt, tokens_completion,
+                     cost, session_id, time.time()),
+                )
+                self._conn.commit()
         except sqlite3.Error as exc:
             logger.error("cost_tracker: failed to persist cost entry: %s", exc)
             raise  # propagate so caller can fall back to estimated cost
