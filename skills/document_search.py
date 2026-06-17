@@ -55,7 +55,7 @@ class DocumentStore:
             self._conn.execute("DELETE FROM doc_chunks WHERE doc_id = ?", (doc_id,))
 
         cur = self._conn.execute(
-            "INSERT INTO documents (name, type, size_bytes, created_at) VALUES (?, 'txt', ?, unixepoch())",
+            "INSERT INTO documents (name, type, size_bytes, created_at) VALUES (?, 'txt', ?, CAST(strftime('%s','now') AS REAL))",
             (name, len(content.encode()))
         )
         doc_id = cur.lastrowid
@@ -295,7 +295,7 @@ def make_doc_search_handler(store):
             except ValueError as exc:
                 logger.warning("document_search ingest rejected: %s", exc)
                 return f"拒绝摄入文档：{exc}"
-            loop = _asyncio.get_event_loop()
+            loop = _asyncio.get_running_loop()
             count = await loop.run_in_executor(None, store.ingest_file, str(safe_path))
             return f"已摄入文档，切分为 {count} 个 chunks"
         else:

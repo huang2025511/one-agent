@@ -547,12 +547,18 @@ class SkillManager(Plugin):
         ))
 
         async def save_note(args: Dict[str, Any]) -> str:
-            # 跨平台文件锁：fcntl 在 Windows 不可用，降级为无锁
+            # 跨平台文件锁：fcntl (Unix) 或 msvcrt (Windows)
             try:
                 import fcntl
                 _has_fcntl = True
+                _has_msvcrt = False
             except ImportError:
                 _has_fcntl = False
+                try:
+                    import msvcrt
+                    _has_msvcrt = True
+                except ImportError:
+                    _has_msvcrt = False
             text = str(args.get("input", ""))
             target = Path(self._builtin_dir or "./data/skills/builtin") / "user_notes.log"
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -564,6 +570,15 @@ class SkillManager(Plugin):
                         f.write(f"[{ts}] {text}\n")
                     finally:
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                elif _has_msvcrt:
+                    try:
+                        msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                        f.write(f"[{ts}] {text}\n")
+                    finally:
+                        try:
+                            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                        except OSError:
+                            pass
                 else:
                     f.write(f"[{ts}] {text}\n")
             return "note saved"
@@ -757,7 +772,7 @@ class SkillManager(Plugin):
             import sys
             results = ["正在退出...", "再见！下次见 👋"]
             # Defer the exit slightly so the reply can be surfaced first.
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             loop.call_later(0.1, sys.exit, 0)
             return "\n".join(results)
         self.register(Skill(

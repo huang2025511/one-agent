@@ -505,7 +505,7 @@ class OneAgentApp:
             if turn.result is not None or turn.error is not None:
                 break
             await asyncio.sleep(0.1)
-        return turn.result or "[timeout]"
+        return turn.result if turn.result is not None else "[timeout]"
 
     async def chat_with_thinking(self, text: str, source: str = "api", session_id: str = "default") -> dict:
         """Like chat(), but returns {"reply": ..., "thinking": ...} with thinking process.
@@ -525,7 +525,7 @@ class OneAgentApp:
             if turn.result is not None or turn.error is not None:
                 break
             await asyncio.sleep(0.1)
-        reply = turn.result or "[timeout]"
+        reply = turn.result if turn.result is not None else "[timeout]"
         thinking_text = turn.meta.get("thinking", "")
         return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
 
@@ -766,7 +766,11 @@ async def main() -> None:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         key, val = line.split("=", 1)
-                        os.environ.setdefault(key.strip(), val.strip())
+                        val = val.strip()
+                        # Strip surrounding quotes (single or double)
+                        if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                            val = val[1:-1]
+                        os.environ.setdefault(key.strip(), val)
 
     # ── auto-detect missing API key and run setup wizard ──
     # This runs BEFORE the agent starts, so the user sees a clean

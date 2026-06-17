@@ -129,7 +129,7 @@ class CLIGateway(Plugin):
         turn = event.get("turn")
         if turn is None or turn.session_id != self._session_id:
             return
-        self._last_reply = turn.result or f"[error: {turn.error}]"
+        self._last_reply = turn.result if turn.result is not None else f"[error: {turn.error}]"
         if self._reply_available is not None:
             self._reply_available.set()
 

@@ -152,8 +152,8 @@ class ShellExecutor(Plugin):
         try:
             with open(self._audit_log_path, "a") as f:
                 f.write(json.dumps(entry) + "\n")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("failed to write audit log: %s", exc)
 
     async def run(
         self,

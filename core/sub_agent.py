@@ -22,7 +22,7 @@ class SubAgent:
         self._skills = skills_manager
         self.name = name or f"sub-{id(self):x}"[:12]
 
-    async def run(self, task: str, model: str = None, max_iterations: int = 2) -> Dict[str, Any]:
+    async def run(self, task: str, model: Optional[str] = None, max_iterations: int = 2) -> Dict[str, Any]:
         """Execute a single subtask. Returns {result, tokens_used, duration_ms}."""
         start = time.time()
         messages = [
@@ -64,7 +64,7 @@ class DelegationManager:
         self._skills = skills_manager
         self._max_parallel = 3
 
-    async def decompose(self, task: str, model: str = None) -> List[str]:
+    async def decompose(self, task: str, model: Optional[str] = None) -> List[str]:
         """Use LLM to decompose a complex task into subtasks."""
         prompt = [
             {"role": "system", "content": (
@@ -88,7 +88,7 @@ class DelegationManager:
             logger.warning("DelegationManager decompose failed: %s", exc)
             return [task]
 
-    async def execute(self, task: str, model: str = None) -> Dict[str, Any]:
+    async def execute(self, task: str, model: Optional[str] = None) -> Dict[str, Any]:
         """Decompose and execute subtasks in parallel."""
         start = time.time()
 

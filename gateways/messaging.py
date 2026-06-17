@@ -79,7 +79,7 @@ class BaseMessagingGateway(Plugin):
             return
         sid = turn.session_id
         if sid in self._sessions:
-            self._replies[sid] = turn.result or f"[error: {turn.error}]"
+            self._replies[sid] = turn.result if turn.result is not None else f"[error: {turn.error}]"
             self._sessions[sid].set()
 
 

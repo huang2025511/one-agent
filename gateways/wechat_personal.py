@@ -74,10 +74,12 @@ class WeChatPersonalGateway(Plugin):
         self._pending: Dict[str, asyncio.Event] = {}
         self._logged_in: bool = False
         self._own_user_name: str = ""
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ------------------------------------------------------------ lifecycle
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
+        self._loop = asyncio.get_running_loop()
         cfg = (ctx.config.get("gateways") or {}).get("wechat_personal") or {}
         self._enabled = bool(cfg.get("enabled", False))
         if not self._enabled:
@@ -135,7 +137,7 @@ class WeChatPersonalGateway(Plugin):
             return
         sid = turn.session_id
         if sid in self._pending:
-            self._replies[sid] = turn.result or f"[error: {turn.error}]"
+            self._replies[sid] = turn.result if turn.result is not None else f"[error: {turn.error}]"
             self._pending[sid].set()
 
     async def _send_text(self, to_user_name: str, text: str) -> bool:
@@ -169,9 +171,9 @@ class WeChatPersonalGateway(Plugin):
             message asynchronously.
             """
             try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
                 loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = self._loop or asyncio.get_event_loop()
             asyncio.run_coroutine_threadsafe(
                 self._handle_message(msg), loop
             )

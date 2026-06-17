@@ -180,7 +180,8 @@ async def _probe_one(
             headers=headers,
             timeout=timeout,
         )
-    except Exception:
+    except Exception as exc:
+        logger.debug("provider probe failed for %s: %s", base_url, exc)
         return False
     return 200 <= resp.status_code < 300
 

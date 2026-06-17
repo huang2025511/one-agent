@@ -8,6 +8,7 @@ import os
 import time
 import logging
 import sqlite3
+import threading
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ class SelfImprover:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Serialize writes (see audit_log.py for rationale).
+        self._write_lock = threading.Lock()
         self._failures: List[FailureCase] = []
         self._improvements: List[Dict[str, Any]] = []
         self._migrate()
@@ -75,12 +78,13 @@ class SelfImprover:
             self._failures = self._failures[-100:]
 
         # Persist
-        self._conn.execute(
-            "INSERT INTO failures (user_input, error_type, error_detail, turn_meta, created_at) VALUES (?, ?, ?, ?, ?)",
-            (user_input[:500], error_type, error_detail[:500],
-             json.dumps(turn_meta or {}, ensure_ascii=False), time.time())
-        )
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO failures (user_input, error_type, error_detail, turn_meta, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user_input[:500], error_type, error_detail[:500],
+                 json.dumps(turn_meta or {}, ensure_ascii=False), time.time())
+            )
+            self._conn.commit()
 
     def analyze_patterns(self) -> List[Dict[str, Any]]:
         """Analyze recent failures to find patterns."""
@@ -90,7 +94,7 @@ class SelfImprover:
         cur = self._conn.execute("""
             SELECT error_type, COUNT(*) as cnt
             FROM failures
-            WHERE created_at > unixepoch() - 86400
+            WHERE created_at > CAST(strftime('%s','now') AS REAL) - 86400
             GROUP BY error_type
             ORDER BY cnt DESC
         """)
@@ -105,7 +109,7 @@ class SelfImprover:
 
         # Pattern 2: Empty results
         cur = self._conn.execute(
-            "SELECT COUNT(*) as cnt FROM failures WHERE error_type = 'empty_result' AND created_at > unixepoch() - 86400"
+            "SELECT COUNT(*) as cnt FROM failures WHERE error_type = 'empty_result' AND created_at > CAST(strftime('%s','now') AS REAL) - 86400"
         )
         row = cur.fetchone()
         if row and row["cnt"] >= 3:
@@ -130,11 +134,12 @@ class SelfImprover:
 
     def apply_improvement(self, pattern: str, suggestion: str) -> None:
         """Record an applied improvement."""
-        self._conn.execute(
-            "INSERT INTO improvements (pattern, suggestion, applied, created_at) VALUES (?, ?, 1, ?)",
-            (pattern, suggestion, time.time())
-        )
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO improvements (pattern, suggestion, applied, created_at) VALUES (?, ?, 1, ?)",
+                (pattern, suggestion, time.time())
+            )
+            self._conn.commit()
         self._improvements.append({
             "pattern": pattern,
             "suggestion": suggestion,
@@ -153,7 +158,7 @@ class SelfImprover:
         """Get improvement statistics."""
         total_failures = self._conn.execute("SELECT COUNT(*) FROM failures").fetchone()[0]
         recent_failures = self._conn.execute(
-            "SELECT COUNT(*) FROM failures WHERE created_at > unixepoch() - 86400"
+            "SELECT COUNT(*) FROM failures WHERE created_at > CAST(strftime('%s','now') AS REAL) - 86400"
         ).fetchone()[0]
         total_improvements = self._conn.execute("SELECT COUNT(*) FROM improvements").fetchone()[0]
 

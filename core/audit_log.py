@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,6 +44,12 @@ class AuditLog:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        # Serialize writes: check_same_thread=False allows cross-thread access
+        # but SQLite connections are not safe for concurrent writes from
+        # multiple threads — a threading.Lock prevents ProgrammingError and
+        # data corruption when the event bus, background tasks, and request
+        # handlers all log concurrently.
+        self._write_lock = threading.Lock()
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -86,16 +93,17 @@ class AuditLog:
         """
         try:
             details_json = json.dumps(details) if details else None
-            self._conn.execute(
-                """INSERT INTO audit_log 
-                   (timestamp, actor, action, resource, details, ip_address, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (time.time(), actor, action, resource, details_json, ip_address, status),
-            )
-            self._conn.commit()
-            
-            # Auto-rotate if too many entries
-            self._check_rotation()
+            with self._write_lock:
+                self._conn.execute(
+                    """INSERT INTO audit_log
+                       (timestamp, actor, action, resource, details, ip_address, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (time.time(), actor, action, resource, details_json, ip_address, status),
+                )
+                self._conn.commit()
+
+                # Auto-rotate if too many entries
+                self._check_rotation()
         except sqlite3.Error as exc:
             logger.error("Failed to write audit log: %s", exc)
 
@@ -107,10 +115,10 @@ class AuditLog:
                 # Keep only the most recent 80% of entries
                 keep_count = int(AUDIT_MAX_ENTRIES * 0.8)
                 self._conn.execute(
-                    """DELETE FROM audit_log 
+                    """DELETE FROM audit_log
                        WHERE id NOT IN (
-                           SELECT id FROM audit_log 
-                           ORDER BY timestamp DESC 
+                           SELECT id FROM audit_log
+                           ORDER BY timestamp DESC
                            LIMIT ?
                        )""",
                     (keep_count,),

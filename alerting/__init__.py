@@ -76,6 +76,10 @@ class AlertManager:
         ``metric``/``window_minutes`` (shorthand from default_config.yaml)
         field names for alert rules, defaulting operator to ``">"``.
         """
+        # Close any existing client before creating a new one (supports re-config).
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
         self._client = httpx.AsyncClient(timeout=10)
 
         # Load alert rules from config

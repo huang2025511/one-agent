@@ -30,6 +30,9 @@ MAX_TOOL_ITERATIONS = 5
 DEFAULT_MAX_TOKENS = 2048
 MAX_SKILL_FAILURES = 3
 TURN_COMPLETION_TIMEOUT = 120.0
+# Complexity tier thresholds (determine execution strategy)
+EXPERT_COMPLEXITY_THRESHOLD = 0.8   # >= → multi-agent pattern
+COMPLEX_COMPLEXITY_THRESHOLD = 0.5  # >= → think + reflect
 
 
 class Coordinator(Plugin):
@@ -68,12 +71,11 @@ class Coordinator(Plugin):
         If a skill has failed too many times consecutively, return a hint
         to the model to stop retrying and use its own knowledge instead.
         """
-        _MAX = 3
-        if failed_skills.get(name, 0) >= _MAX:
+        if failed_skills.get(name, 0) >= MAX_SKILL_FAILURES:
             return ToolResult(
                 tool_name=name,
                 status="unavailable",
-                error=f"已连续失败 {_MAX} 次，请停止调用此工具，直接用你的知识给出答案。",
+                error=f"已连续失败 {MAX_SKILL_FAILURES} 次，请停止调用此工具，直接用你的知识给出答案。",
             )
         start = time.time()
         try:
@@ -97,11 +99,11 @@ class Coordinator(Plugin):
         # Track failures — if result contains error keywords, count it
         if "error" in result_str.lower() or "不可用" in result_str or "unavailable" in result_str.lower():
             failed_skills[name] = failed_skills.get(name, 0) + 1
-            logger.info("skill %s failed (%d/%d)", name, failed_skills[name], _MAX)
+            logger.info("skill %s failed (%d/%d)", name, failed_skills[name], MAX_SKILL_FAILURES)
             # If just hit the limit, enrich the result with a stop hint
-            if failed_skills[name] >= _MAX:
+            if failed_skills[name] >= MAX_SKILL_FAILURES:
                 result_str = (
-                    f"[{name} 连续失败 {_MAX} 次，已标记为不可用。"
+                    f"[{name} 连续失败 {MAX_SKILL_FAILURES} 次，已标记为不可用。"
                     "请立即停止调用此工具，用你已有的知识完成回答。]\n"
                 ) + result_str
         else:
@@ -160,7 +162,8 @@ class Coordinator(Plugin):
                 tools=None,
             )
             return resp.get("text", "").strip()
-        except Exception:
+        except Exception as exc:
+            logger.debug("context compression LLM call failed: %s", exc)
             return ""
 
     @staticmethod
@@ -470,33 +473,51 @@ class Coordinator(Plugin):
 
         External messages arrive in a loose format; we normalize them into
         a TurnContext so they flow through the same pipeline.
+
+        Note: this handler must return quickly so the event bus can process
+        the ``user_message`` we publish here. The wait for ``turn_completed``
+        is delegated to a background task.
         """
         text = event.get("text") or ""
         session_id = event.get("session_id") or event.get("chat_id") or "ext"
-        
+
         # Auto-detect language on first user message
         from i18n import auto_detect_and_switch
         auto_detect_and_switch(text)
-        
+
         turn = TurnContext(input_text=text, source=event.get("source", "ext"), session_id=str(session_id))
         # publish user_message so the router classifies this — routing
         # publishes turn_routed which eventually reaches _on_routed above.
         self.publish("user_message", turn=turn, session_id=turn.session_id)
-        
-        # Event-driven wait: subscribe to turn_completed for this specific turn
-        # instead of polling with asyncio.sleep
+
+        # Wait for completion in a background task so we don't block the bus.
+        # Blocking here would deadlock the bus: it can't process user_message
+        # (and thus never reach turn_completed) while awaiting this handler.
+        asyncio.create_task(self._await_turn_completion(turn, session_id))
+
+    async def _await_turn_completion(self, turn: TurnContext, session_id: str) -> None:
+        """Wait for a turn to complete, with timeout.
+
+        On timeout, mark the turn as errored so that if it hasn't started
+        yet (still queued behind other events), ``_on_routed`` will skip it.
+        If it's already running, the result will be computed but ignored by
+        the gateway (which has already unsubscribed).
+        """
         completion_event = asyncio.Event()
-        
+
         def _on_turn_completed(evt: Event) -> None:
             completed_turn = evt.get("turn")
             if completed_turn is turn:
                 completion_event.set()
-        
+
         self.bus.subscribe("turn_completed", _on_turn_completed)
         try:
             await asyncio.wait_for(completion_event.wait(), timeout=TURN_COMPLETION_TIMEOUT)
         except asyncio.TimeoutError:
             logger.warning("Turn completion timeout for session %s", session_id)
+            # Mark the turn so _on_routed skips it if it hasn't started yet.
+            if turn.result is None and turn.error is None:
+                turn.record_failure("turn completion timeout")
         finally:
             self.bus.unsubscribe("turn_completed", _on_turn_completed)
 
@@ -533,12 +554,12 @@ class Coordinator(Plugin):
         logger.debug("turn complexity: %.2f", complexity)
 
         # Expert level: multi-agent pattern
-        if complexity >= 0.8:
+        if complexity >= EXPERT_COMPLEXITY_THRESHOLD:
             if await self._multi_agent_phase(messages, turn):
                 return  # multi-agent handled it, skip normal flow
         
         # Complex level: think + reflect
-        elif complexity >= 0.5:
+        elif complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
             await self._think_phase(messages, turn)
             await self._reflect_phase(messages, turn)
         
@@ -1184,14 +1205,24 @@ class Coordinator(Plugin):
         )
 
     def _extract_entities(self, turn: TurnContext) -> None:
-        """Auto-extract entities from turn for knowledge graph."""
+        """Auto-extract entities from turn for knowledge graph.
+
+        Only extract from successful turns with a non-empty result —
+        extracting from error turns or empty results would pollute the
+        KG with user questions or placeholder text like "(no reply produced)".
+        """
         assert turn is not None, "turn cannot be None"
-        
+
         if not (self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg):
             return
 
-        final_text = turn.result or ""
-        full_text = f"{turn.input_text}\n{final_text}"
+        # Skip error turns and turns with no meaningful result
+        if turn.error is not None:
+            return
+        if not turn.result or not turn.result.strip():
+            return
+
+        full_text = f"{turn.input_text}\n{turn.result}"
 
         try:
             count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)

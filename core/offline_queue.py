@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -37,6 +38,8 @@ class OfflineQueue:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        # Serialize writes (see audit_log.py for rationale).
+        self._write_lock = threading.Lock()
         self._init_schema()
         self._retry_task: Optional[asyncio.Task] = None
 
@@ -72,22 +75,23 @@ class OfflineQueue:
             Queue entry ID
         """
         try:
-            # Check queue size limit
-            count = self._conn.execute(
-                "SELECT COUNT(*) FROM offline_queue WHERE status = 'pending'"
-            ).fetchone()[0]
-            if count >= MAX_QUEUE_SIZE:
-                logger.warning("Offline queue full (%d/%d), dropping oldest", count, MAX_QUEUE_SIZE)
-                self._conn.execute(
-                    "DELETE FROM offline_queue WHERE id IN (SELECT id FROM offline_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1)"
+            with self._write_lock:
+                # Check queue size limit
+                count = self._conn.execute(
+                    "SELECT COUNT(*) FROM offline_queue WHERE status = 'pending'"
+                ).fetchone()[0]
+                if count >= MAX_QUEUE_SIZE:
+                    logger.warning("Offline queue full (%d/%d), dropping oldest", count, MAX_QUEUE_SIZE)
+                    self._conn.execute(
+                        "DELETE FROM offline_queue WHERE id IN (SELECT id FROM offline_queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1)"
+                    )
+
+                cursor = self._conn.execute(
+                    """INSERT INTO offline_queue (created_at, request_type, request_data)
+                       VALUES (?, ?, ?)""",
+                    (time.time(), request_type, json.dumps(request_data)),
                 )
-            
-            cursor = self._conn.execute(
-                """INSERT INTO offline_queue (created_at, request_type, request_data)
-                   VALUES (?, ?, ?)""",
-                (time.time(), request_type, json.dumps(request_data)),
-            )
-            self._conn.commit()
+                self._conn.commit()
             logger.info("Enqueued offline request: type=%s id=%d", request_type, cursor.lastrowid)
             return cursor.lastrowid
         except sqlite3.Error as exc:
@@ -130,23 +134,25 @@ class OfflineQueue:
     def mark_success(self, queue_id: int) -> None:
         """Mark a queue entry as successfully processed."""
         try:
-            self._conn.execute(
-                "UPDATE offline_queue SET status = 'completed' WHERE id = ?",
-                (queue_id,),
-            )
-            self._conn.commit()
+            with self._write_lock:
+                self._conn.execute(
+                    "UPDATE offline_queue SET status = 'completed' WHERE id = ?",
+                    (queue_id,),
+                )
+                self._conn.commit()
         except sqlite3.Error as exc:
             logger.error("Failed to mark queue entry success: %s", exc)
 
     def mark_failure(self, queue_id: int, error: str) -> None:
         """Mark a queue entry as failed and increment retry count."""
         try:
-            self._conn.execute(
-                """UPDATE offline_queue 
-                   SET retry_count = retry_count + 1, last_error = ?
-                   WHERE id = ?""",
-                (error, queue_id),
-            )
+            with self._write_lock:
+                self._conn.execute(
+                    """UPDATE offline_queue
+                       SET retry_count = retry_count + 1, last_error = ?
+                       WHERE id = ?""",
+                    (error, queue_id),
+                )
             self._conn.commit()
         except sqlite3.Error as exc:
             logger.error("Failed to mark queue entry failure: %s", exc)
