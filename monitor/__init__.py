@@ -161,7 +161,7 @@ class MonitoringPlugin(Plugin):
                 "latency_histogram": dict(
                     zip(
                         [f"le_{b}" for b in self._latency_buckets],
-                        self._latency_counts,
+                        self._latency_counts, strict=False,
                     )
                 ),
                 "request_stats": {
@@ -224,7 +224,7 @@ class MonitoringPlugin(Plugin):
                 "latency_histogram": dict(
                     zip(
                         [f"le_{b}" for b in self._latency_buckets],
-                        self._latency_counts,
+                        self._latency_counts, strict=False,
                     )
                 ),
                 "request_stats": {

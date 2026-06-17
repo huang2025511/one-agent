@@ -1,6 +1,6 @@
 """Messaging gateways — Telegram, WeCom, DingTalk, Feishu, Discord, Slack.
 
-Each gateway is a plugin that publishes user_message events and sends back 
+Each gateway is a plugin that publishes user_message events and sends back
 replies via the respective messaging platform's API.
 
 All integrations use httpx / stdlib — no heavy SDK dependencies.
@@ -355,8 +355,8 @@ class WeComGateway(BaseMessagingGateway):
     async def _start_callback_server(self) -> None:
         """启动回调 HTTP 服务器接收企业微信消息推送。"""
         try:
-            from fastapi import FastAPI, Request, Response
             import uvicorn
+            from fastapi import FastAPI, Request, Response
         except ImportError:
             logger.warning("fastapi not installed — wecom callback disabled")
             return
@@ -470,7 +470,6 @@ class WeComGateway(BaseMessagingGateway):
 
     def _decrypt_message(self, echostr: str, signature: str, timestamp: str, nonce: str) -> str:
         """解密企业微信消息（需 encoding_aes_key）。"""
-        import hashlib
         import base64
         aes_key = base64.b64decode(self._encoding_aes_key + "=")
         # Sort and hash for signature verification
@@ -560,9 +559,8 @@ class DingTalkGateway(BaseMessagingGateway):
         """通过群机器人 Webhook 推送消息。"""
         if not self._client or not self._webhook_url:
             return {"ok": False, "error": "webhook not configured"}
-        import hashlib
-        import hmac
         import base64
+        import hmac
         import urllib.parse
         headers = {"Content-Type": "application/json"}
         url = self._webhook_url
@@ -859,9 +857,9 @@ class FeishuGateway(BaseMessagingGateway):
         payload: Dict[str, Any] = {"msg_type": "text", "content": {"text": text[:4000]}}
         # 签名
         if self._secret:
+            import base64
             import hashlib
             import hmac
-            import base64
             timestamp = str(int(time.time()))
             string_to_sign = f"{timestamp}\n{self._secret}"
             sig = base64.b64encode(
@@ -929,8 +927,8 @@ class FeishuGateway(BaseMessagingGateway):
 
     async def _start_callback_server(self) -> None:
         try:
-            from fastapi import FastAPI, Request
             import uvicorn
+            from fastapi import FastAPI, Request
         except ImportError:
             logger.warning("fastapi not installed — feishu callback disabled")
             return
@@ -949,9 +947,14 @@ class FeishuGateway(BaseMessagingGateway):
             # Decrypt payload if encrypt_key is configured (Feishu AES-256-CBC)
             if gateway._encrypt_key and isinstance(body, dict) and body.get("encrypt"):
                 try:
-                    import hashlib as _hashlib
                     import base64 as _base64
-                    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # type: ignore
+                    import hashlib as _hashlib
+
+                    from cryptography.hazmat.primitives.ciphers import (  # type: ignore
+                        Cipher,
+                        algorithms,
+                        modes,
+                    )
                     key = _hashlib.sha256(gateway._encrypt_key.encode()).digest()
                     encrypted_b64 = body["encrypt"]
                     encrypted = _base64.b64decode(encrypted_b64)

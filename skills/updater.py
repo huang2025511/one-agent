@@ -5,9 +5,7 @@ Usage: /update 或 /更新
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 import subprocess
 import sys
 from pathlib import Path

@@ -20,7 +20,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-
 logger = logging.getLogger(__name__)
 
 # Event bus configuration constants
@@ -131,16 +130,15 @@ class EventBus:
     # Format: "<source>.<action>" or simple action names
     _ALLOWED_EVENT_TYPES = {
         # Core events
-        "turn_start", "turn_complete", "turn_completed", "turn_failed", "turn_routed",
+        "turn_start", "turn_completed", "turn_failed", "turn_routed",
         "skill_executed", "skill_failed",
         "memory_added", "memory_searched",
         "config_changed",
         "session_created", "session_updated",
-        "approval_requested", "approval_resolved", "approval_needed",
+        "approval_resolved", "approval_needed",
         "alert_triggered",
         "mcp_tool_called",
         "python_executed",
-        "cron_triggered",
         "cron",
         "shutdown",
         "startup",
@@ -153,7 +151,7 @@ class EventBus:
     @classmethod
     def _is_allowed_event_type(cls, event_type: str) -> bool:
         """Check if event type is allowed.
-        
+
         Accepts:
         - Exact match in _ALLOWED_EVENT_TYPES
         - Namespaced format: "<source>.<action>" where both parts are alphanumeric/underscore
@@ -207,7 +205,7 @@ class EventBus:
         assert isinstance(event_type, str), "event_type must be a string"
         assert handler is not None, "handler cannot be None"
         assert callable(handler), "handler must be callable"
-        
+
         self._subscribers.setdefault(event_type, []).append(handler)
         logger.info("subscribed %s to %s", handler, event_type)
 
@@ -232,11 +230,23 @@ class EventBus:
         logger.debug("unsubscribed %s from %s", handler, event_type)
 
     def publish(self, event) -> None:
-        """Accept either an Event object OR a dict with 'type'/'payload' keys."""
+        """Accept either an Event object OR a dict.
+
+        Dict form supports two layouts (backward compatible):
+        - Nested:  {"type": ..., "payload": {...}, "source": ...}
+        - Flat:    {"type": ..., "text": ..., "chat_id": ...}
+          Flat fields (excluding reserved keys) are merged into payload.
+        """
         if isinstance(event, dict):
+            # Reserved keys are consumed as Event metadata; everything else
+            # is treated as business data and merged into payload.
+            reserved = {"type", "payload", "source", "context_id", "priority"}
+            extra_payload = {k: v for k, v in event.items() if k not in reserved}
+            payload = dict(event.get("payload", {}))
+            payload.update(extra_payload)
             evt = Event(
                 type=event.get("type", "unknown"),
-                payload=event.get("payload", {}),
+                payload=payload,
                 source=event.get("source", "bus"),
                 context_id=event.get("context_id"),
                 priority=event.get("priority"),

@@ -16,7 +16,6 @@ import hashlib
 import os
 import sys
 from pathlib import Path
-from io import StringIO
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -48,10 +47,10 @@ def test_has_api_key_false_when_none():
 def test_setup_wizard_smoke():
     """Import smoke test — ensures no syntax errors."""
     from core.setup_wizard import (
-        setup_if_needed,
-        run_cli_setup,
-        register_setup_endpoints,
         _has_any_api_key,
+        register_setup_endpoints,
+        run_cli_setup,
+        setup_if_needed,
     )
     assert callable(setup_if_needed)
     assert callable(run_cli_setup)
@@ -247,7 +246,7 @@ def test_password_cache():
 def test_password_lockout():
     """Three failed attempts trigger lockout."""
     from executors.system import PasswordManager
-    hash_val = hashlib.sha256("secret".encode()).hexdigest()
+    hash_val = hashlib.sha256(b"secret").hexdigest()
     mgr = PasswordManager(hash_val, max_attempts=3, lockout_minutes=1)
     assert mgr.can_attempt() is True
     mgr.verify("wrong1")
@@ -264,7 +263,7 @@ def test_password_lockout():
 def test_password_invalidate_cache():
     """Cache can be invalidated."""
     from executors.system import PasswordManager
-    hash_val = hashlib.sha256("secret".encode()).hexdigest()
+    hash_val = hashlib.sha256(b"secret").hexdigest()
     mgr = PasswordManager(hash_val)
     mgr.record_success(3)
     assert mgr.is_cached(3) is True
@@ -275,7 +274,7 @@ def test_password_invalidate_cache():
 def test_password_success_resets_failures():
     """A successful verification resets the failure counter."""
     from executors.system import PasswordManager
-    hash_val = hashlib.sha256("secret".encode()).hexdigest()
+    hash_val = hashlib.sha256(b"secret").hexdigest()
     mgr = PasswordManager(hash_val)
     mgr.record_failure()
     mgr.record_failure()

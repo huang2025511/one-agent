@@ -126,9 +126,12 @@ class ModelCatalog:
         self.ttl = ttl
         self._models: Dict[str, ModelInfo] = {}
         self._fetched_at: float = 0.0
+        self._own_client = client is None
         self._client = client or httpx.AsyncClient(timeout=30)
 
     async def aclose(self) -> None:
+        if not self._own_client:
+            return
         try:
             if self._client is not None:
                 await self._client.aclose()
@@ -148,11 +151,11 @@ class ModelCatalog:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        
+
         # Add explicit timeout and retry logic
         max_retries = 3
         retry_delay = 1.0
-        
+
         for attempt in range(max_retries):
             try:
                 resp = await asyncio.wait_for(
@@ -161,7 +164,7 @@ class ModelCatalog:
                 )
                 break
             except asyncio.TimeoutError:
-                logger.warning("catalog refresh GET %s timeout (attempt %d/%d)", 
+                logger.warning("catalog refresh GET %s timeout (attempt %d/%d)",
                              url, attempt + 1, max_retries)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
@@ -170,7 +173,7 @@ class ModelCatalog:
                     logger.error("catalog refresh failed after %d attempts", max_retries)
                     return 0
             except httpx.HTTPError as exc:
-                logger.warning("catalog refresh GET %s failed: %s (attempt %d/%d)", 
+                logger.warning("catalog refresh GET %s failed: %s (attempt %d/%d)",
                              url, exc, attempt + 1, max_retries)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
@@ -178,7 +181,7 @@ class ModelCatalog:
                 else:
                     logger.error("catalog refresh failed after %d attempts", max_retries)
                     return 0
-        
+
         if resp.status_code >= 400:
             logger.warning("catalog refresh %s → HTTP %d", url, resp.status_code)
             return 0
@@ -453,7 +456,8 @@ class ModelCatalog:
         sweep per model) and avoids stale data when the catalog was
         loaded before a new feature flag was added.
         """
-        from .capabilities import detect_capabilities, recommend as _recommend
+        from .capabilities import detect_capabilities
+        from .capabilities import recommend as _recommend
         # Refresh capabilities — cheap and idempotent
         for m in self._models.values():
             try:
@@ -507,7 +511,7 @@ def auto_classify_tier(model: ModelInfo) -> str:
          → ``simple``
     """
     name = (model.id or "") + " " + (model.name or "")
-    name_lc = name.lower()
+    _name_lc = name.lower()
     feats = {f.lower() for f in (model.features or [])}
     has_vision = "vision" in feats or any("image" in m for m in model.input_modalities)
     has_tools = "tools" in feats

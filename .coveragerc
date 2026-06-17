@@ -1,0 +1,20 @@
+[run]
+source = .
+omit =
+    */tests/*
+    */.pytest_cache/*
+    */data/*
+    setup_wizard.py
+    scripts/*
+    __main__.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+show_missing = True
+precision = 2

@@ -21,23 +21,28 @@ sys.path.insert(0, str(ROOT))
 
 def test_imports():
     """Verify all modules import without errors. (pyflakes: noqa for test harness)"""
+    from api import RESTAPIGateway  # noqa: F401
+    from core.coordinator import Coordinator  # noqa: F401
     from core.events import EventBus, EventStatus  # noqa: F401
     from core.plugin import Plugin, PluginManager  # noqa: F401
-    from core.coordinator import Coordinator  # noqa: F401
-    from models import LLMProvider, LLMCache  # noqa: F401
-    from router import SmartRouter  # noqa: F401
-    from memory import MemoryPlugin, LongTermMemory, ProceduralMemory  # noqa: F401
-    from skills import SkillManager  # noqa: F401
-    from executors import ShellExecutor, DockerExecutor, BrowserExecutor  # noqa: F401
+    from executors import BrowserExecutor, DockerExecutor, ShellExecutor  # noqa: F401
     from gateways import (  # noqa: F401
-        CLIGateway, WebGateway, WeComGateway, DingTalkGateway,
-        FeishuGateway, DiscordGateway, SlackGateway,
+        CLIGateway,
+        DingTalkGateway,
+        DiscordGateway,
+        FeishuGateway,
+        SlackGateway,
+        WebGateway,
+        WeComGateway,
     )
-    from scheduler import SchedulerPlugin  # noqa: F401
-    from multimodal import MultimodalPlugin  # noqa: F401
-    from api import RESTAPIGateway  # noqa: F401
-    from monitor import MonitoringPlugin  # noqa: F401
     from marketplace import MarketplacePlugin  # noqa: F401
+    from memory import LongTermMemory, MemoryPlugin, ProceduralMemory  # noqa: F401
+    from models import LLMCache, LLMProvider  # noqa: F401
+    from monitor import MonitoringPlugin  # noqa: F401
+    from multimodal import MultimodalPlugin  # noqa: F401
+    from router import SmartRouter  # noqa: F401
+    from scheduler import SchedulerPlugin  # noqa: F401
+    from skills import SkillManager  # noqa: F401
     print("  all imports OK")
     return True
 
@@ -96,8 +101,9 @@ def test_eventbus_dlq():
 
 def test_shell_executor_patterns():
     """Test regex allow-list patterns."""
-    from executors import ALLOWED_PATTERNS as PATTERNS
     import re
+
+    from executors import ALLOWED_PATTERNS as PATTERNS
 
     allowed = [
         "python test.py",
@@ -128,7 +134,9 @@ def test_shell_executor_patterns():
 
 def test_memory_pagination():
     """Test paginated long-term memory."""
-    import tempfile, os
+    import os
+    import tempfile
+
     from memory import LongTermMemory
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -149,8 +157,9 @@ def test_memory_pagination():
 
 def test_plugin_discovery():
     """Test auto-discovery of plugins from package directories."""
-    from core.plugin import PluginManager
     import logging
+
+    from core.plugin import PluginManager
     logging.getLogger().setLevel(logging.CRITICAL)
 
     pm = PluginManager.discover(["executors"], exclude=["__init__"])
@@ -171,11 +180,11 @@ def test_coordinator():
         return True
 
     from core.context import AgentContext, TurnContext
-    from core.events import EventBus
     from core.coordinator import Coordinator
+    from core.events import EventBus
+    from memory import MemoryPlugin
     from models import LLMProvider
     from router import SmartRouter
-    from memory import MemoryPlugin
     from skills import SkillManager
 
     class StubLLM(LLMProvider):

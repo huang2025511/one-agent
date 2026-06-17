@@ -27,6 +27,7 @@ import hmac
 import json
 import logging
 import os
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -35,13 +36,13 @@ from typing import Any, Dict, List, Optional
 # Import FastAPI types at module level for type annotation resolution
 # (needed because of `from __future__ import annotations`)
 try:
-    from fastapi import Body, Request
+    from fastapi import Body, Request  # noqa: F401
 except ImportError:
     # Will be handled in start() method
     pass
 
-from core.plugin import Plugin
 from core.exceptions import InputValidationError
+from core.plugin import Plugin
 from i18n import _
 
 logger = logging.getLogger(__name__)
@@ -170,11 +171,11 @@ class RESTAPIGateway(Plugin):
         # Trusted proxies for X-Forwarded-For header validation
         # Only trust these IPs when extracting real client IP from X-Forwarded-For
         self._trusted_proxies = set(cfg.get("trusted_proxies", []))
-        
+
         # Initialize audit log
         from core.audit_log import AuditLog
         self._audit_log = AuditLog()
-        
+
         logger.info("REST API configured on %s:%s auth=%s rate_limit=%d/min max_chat=%dB cors=%s trusted_proxies=%s",
                     self._host, self._port, _mask_api_key(self._api_key),
                     self._rate_limit, self._max_chat_bytes, self._cors_origins, self._trusted_proxies)
@@ -206,7 +207,14 @@ class RESTAPIGateway(Plugin):
         if not self._enabled:
             return
         try:
-            from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, Body
+            from fastapi import (  # noqa: F401
+                Body,
+                FastAPI,
+                Header,
+                HTTPException,
+                Request,
+                UploadFile,
+            )
             from fastapi.middleware.cors import CORSMiddleware
             from fastapi.responses import JSONResponse
         except ImportError:
@@ -238,7 +246,7 @@ class RESTAPIGateway(Plugin):
                 client_info = request.scope["client"]
                 if client_info and len(client_info) > 0:
                     client_ip = client_info[0]
-            
+
             if not client_ip:
                 # All unknown clients share a single bucket — using a unique
                 # ID per request (e.g. md5(time.time())) would give every
@@ -246,7 +254,7 @@ class RESTAPIGateway(Plugin):
                 # and leaking memory into _rate_buckets indefinitely.
                 client_ip = "unknown"
                 logger.warning("Rate limit: unable to determine client IP, using shared 'unknown' bucket")
-            
+
             if client_ip in self._trusted_proxies:
                 # Request from trusted proxy - use X-Forwarded-For
                 forwarded_for = request.headers.get("X-Forwarded-For")
@@ -259,13 +267,13 @@ class RESTAPIGateway(Plugin):
             else:
                 # Direct connection or untrusted proxy - use client IP directly
                 ip = client_ip
-            
+
             now = time.time()
             bucket = self._rate_buckets.setdefault(ip, [])
             # evict entries older than 60s
             bucket[:] = [t for t in bucket if now - t < 60]
             if len(bucket) >= self._rate_limit:
-                return JSONResponse({"error": _("rate_limit_exceeded")}, status_code=429)
+                return JSONResponse({"error": {"code": 429, "message": _("rate_limit_exceeded"), "type": "rate_limit"}}, status_code=429)
             bucket.append(now)
             return await call_next(request)
 
@@ -279,7 +287,7 @@ class RESTAPIGateway(Plugin):
                 try:
                     if cl is not None and int(cl) > self._max_chat_bytes:
                         return JSONResponse(
-                            {"error": _("request_body_too_large", size=cl, max=self._max_chat_bytes)},
+                            {"error": {"code": 413, "message": _("request_body_too_large", size=cl, max=self._max_chat_bytes), "type": "request_too_large"}},
                             status_code=413,
                         )
                 except ValueError:
@@ -307,7 +315,7 @@ class RESTAPIGateway(Plugin):
             return {
                 "status": "healthy",
                 "timestamp": time.time(),
-                "version": "2.1"
+                "version": "2.0.0"
             }
 
         @app.get("/ready")
@@ -325,7 +333,7 @@ class RESTAPIGateway(Plugin):
                 except Exception as e:
                     logger.error("Database check failed with unexpected error: %s", e)
                 return False
-            
+
             checks = {
                 "database": _check_database(),
                 "llm_configured": bool(_ctx.config.get("llm", {}).get("api_keys", {}).get("sensenova")) if _ctx else False,
@@ -346,13 +354,13 @@ class RESTAPIGateway(Plugin):
                     "status": "not_ready",
                     "uptime": 0,
                     "timestamp": time.time(),
-                    "version": "2.1",
+                    "version": "2.0.0",
                     "components": {}
                 }
-            
+
             uptime = int(time.time() - _ctx.started_at)
             components = {}
-            
+
             # Database connectivity check
             try:
                 _session_store = getattr(_ctx, "session_store", None)
@@ -363,7 +371,7 @@ class RESTAPIGateway(Plugin):
                     components["database"] = {"status": "unavailable"}
             except Exception as e:
                 components["database"] = {"status": "error", "message": str(e)}
-            
+
             # LLM provider connectivity and stats
             if _llm is not None:
                 try:
@@ -422,7 +430,7 @@ class RESTAPIGateway(Plugin):
                     components["skills"] = {"status": "error", "message": str(e)}
             else:
                 components["skills"] = {"status": "unavailable"}
-            
+
             # MCP client status
             if _app_instance and hasattr(_app_instance, 'mcp_client'):
                 try:
@@ -448,7 +456,7 @@ class RESTAPIGateway(Plugin):
                 "status": overall,
                 "uptime": uptime,
                 "timestamp": time.time(),
-                "version": "2.1",
+                "version": "2.0.0",
                 "components": components,
             }
 
@@ -458,6 +466,7 @@ class RESTAPIGateway(Plugin):
             """Serve the monitoring dashboard."""
             auth(x_api_key)
             from fastapi.responses import HTMLResponse
+
             from api.dashboard import get_dashboard_html
             return HTMLResponse(content=get_dashboard_html())
 
@@ -465,7 +474,7 @@ class RESTAPIGateway(Plugin):
         @app.post("/api/config/reload")
         async def reload_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Hot reload configuration without restarting the service.
-            
+
             Reloads the config file and updates runtime settings for:
             - LLM provider settings
             - Rate limits
@@ -473,15 +482,16 @@ class RESTAPIGateway(Plugin):
             - Trusted proxies
             """
             auth(x_api_key)
-            
+
             if _ctx is None:
                 raise HTTPException(503, "Context not initialized")
-            
+
             try:
                 # Reload configuration from file
-                from one_agent import load_config
                 import os
-                
+
+                from one_agent import load_config
+
                 config_path = os.environ.get(
                     "ONE_AGENT_CONFIG",
                     str(Path(__file__).resolve().parent.parent / "config" / "default_config.yaml"),
@@ -493,13 +503,13 @@ class RESTAPIGateway(Plugin):
                 # BaseModel has no .get(), so assigning the model object directly
                 # would crash every downstream ctx.config.get(...) call.
                 _ctx.config = new_config.model_dump() if hasattr(new_config, "model_dump") else new_config
-                
+
                 # Update API-specific settings
                 if hasattr(self, '_setup_from_config'):
                     self._setup_from_config(new_config)
-                
+
                 logger.info("Configuration reloaded successfully")
-                
+
                 return {
                     "status": "ok",
                     "message": "Configuration reloaded",
@@ -513,24 +523,24 @@ class RESTAPIGateway(Plugin):
         async def get_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get current runtime configuration (sanitized)."""
             auth(x_api_key)
-            
+
             if _ctx is None:
                 raise HTTPException(503, "Context not initialized")
-            
+
             # Deep-copy the config so sanitization doesn't mutate the
             # live runtime config. A shallow copy shares nested dict
             # references, so modifying config["llm"]["api_keys"] would
             # overwrite the real API keys with "***" permanently.
             import copy
             config = copy.deepcopy(_ctx.config) if _ctx.config else {}
-            
+
             # Mask sensitive fields
             if "llm" in config and "api_keys" in config["llm"]:
                 config["llm"]["api_keys"] = {
-                    k: "***" if v else None 
+                    k: "***" if v else None
                     for k, v in config["llm"]["api_keys"].items()
                 }
-            
+
             return {
                 "config": config,
                 "timestamp": time.time()
@@ -591,7 +601,7 @@ class RESTAPIGateway(Plugin):
             """System statistics for dashboard."""
             _session_store = getattr(_ctx, "session_store", None) if _ctx else None
             _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
-            
+
             # Get session statistics
             sessions_data = {}
             if _session_store:
@@ -603,9 +613,10 @@ class RESTAPIGateway(Plugin):
                         "active": active_count,
                         "total": len(all_sessions)
                     }
-                except Exception:
+                except Exception as exc:
+                    logger.warning("stats query failed: %s", exc)
                     sessions_data = {"active": 0, "total": 0}
-            
+
             # Get knowledge graph entity count
             kg_data = {}
             if _memory_plugin and hasattr(_memory_plugin, "_kg"):
@@ -613,9 +624,10 @@ class RESTAPIGateway(Plugin):
                     kg = _memory_plugin._kg
                     entity_count = len(kg.entities) if hasattr(kg, "entities") else 0
                     kg_data = {"entities": entity_count}
-                except Exception:
+                except Exception as exc:
+                    logger.warning("stats query failed: %s", exc)
                     kg_data = {"entities": 0}
-            
+
             return {
                 "uptime_seconds": _ctx.uptime() if _ctx else 0,
                 "bus_metrics": _bus.metrics() if _bus else {},
@@ -641,77 +653,77 @@ class RESTAPIGateway(Plugin):
         @app.get("/metrics")
         async def prometheus_metrics():
             """Prometheus-compatible metrics endpoint.
-            
+
             Returns metrics in Prometheus text format for scraping.
             """
             lines = []
-            
+
             # System metrics
             if _ctx:
                 uptime = time.time() - _ctx.started_at
-                lines.append(f"# HELP one_agent_uptime_seconds Time since agent started")
-                lines.append(f"# TYPE one_agent_uptime_seconds gauge")
+                lines.append("# HELP one_agent_uptime_seconds Time since agent started")
+                lines.append("# TYPE one_agent_uptime_seconds gauge")
                 lines.append(f"one_agent_uptime_seconds {uptime:.2f}")
-            
+
             # LLM metrics
             if _llm:
                 stats = _llm.stats()
-                lines.append(f"# HELP one_agent_llm_calls_total Total LLM API calls")
-                lines.append(f"# TYPE one_agent_llm_calls_total counter")
+                lines.append("# HELP one_agent_llm_calls_total Total LLM API calls")
+                lines.append("# TYPE one_agent_llm_calls_total counter")
                 lines.append(f"one_agent_llm_calls_total {stats.get('calls', 0)}")
-                
-                lines.append(f"# HELP one_agent_llm_tokens_total Total tokens used")
-                lines.append(f"# TYPE one_agent_llm_tokens_total counter")
+
+                lines.append("# HELP one_agent_llm_tokens_total Total tokens used")
+                lines.append("# TYPE one_agent_llm_tokens_total counter")
                 lines.append(f"one_agent_llm_tokens_total {stats.get('tokens_used', 0)}")
-                
-                lines.append(f"# HELP one_agent_llm_errors_total Total LLM errors")
-                lines.append(f"# TYPE one_agent_llm_errors_total counter")
+
+                lines.append("# HELP one_agent_llm_errors_total Total LLM errors")
+                lines.append("# TYPE one_agent_llm_errors_total counter")
                 lines.append(f"one_agent_llm_errors_total {stats.get('failed', 0)}")
-                
+
                 cache_stats = stats.get('cache', {})
-                lines.append(f"# HELP one_agent_cache_hits_total Cache hits")
-                lines.append(f"# TYPE one_agent_cache_hits_total counter")
+                lines.append("# HELP one_agent_cache_hits_total Cache hits")
+                lines.append("# TYPE one_agent_cache_hits_total counter")
                 lines.append(f"one_agent_cache_hits_total {cache_stats.get('hits', 0)}")
-                
-                lines.append(f"# HELP one_agent_cache_misses_total Cache misses")
-                lines.append(f"# TYPE one_agent_cache_misses_total counter")
+
+                lines.append("# HELP one_agent_cache_misses_total Cache misses")
+                lines.append("# TYPE one_agent_cache_misses_total counter")
                 lines.append(f"one_agent_cache_misses_total {cache_stats.get('misses', 0)}")
-            
+
             # Event bus metrics
             if _bus:
                 bus_m = _bus.metrics()
-                lines.append(f"# HELP one_agent_events_published_total Total events published")
-                lines.append(f"# TYPE one_agent_events_published_total counter")
+                lines.append("# HELP one_agent_events_published_total Total events published")
+                lines.append("# TYPE one_agent_events_published_total counter")
                 lines.append(f"one_agent_events_published_total {bus_m.get('published', 0)}")
-                
-                lines.append(f"# HELP one_agent_events_processed_total Total events processed")
-                lines.append(f"# TYPE one_agent_events_processed_total counter")
+
+                lines.append("# HELP one_agent_events_processed_total Total events processed")
+                lines.append("# TYPE one_agent_events_processed_total counter")
                 lines.append(f"one_agent_events_processed_total {bus_m.get('processed', 0)}")
-                
-                lines.append(f"# HELP one_agent_events_errors_total Total event errors")
-                lines.append(f"# TYPE one_agent_events_errors_total counter")
+
+                lines.append("# HELP one_agent_events_errors_total Total event errors")
+                lines.append("# TYPE one_agent_events_errors_total counter")
                 lines.append(f"one_agent_events_errors_total {bus_m.get('errors', 0)}")
-            
+
             # Memory metrics
             if _memory:
                 mem_stats = _memory.stats()
-                lines.append(f"# HELP one_agent_memory_rows Long-term memory rows")
-                lines.append(f"# TYPE one_agent_memory_rows gauge")
+                lines.append("# HELP one_agent_memory_rows Long-term memory rows")
+                lines.append("# TYPE one_agent_memory_rows gauge")
                 lines.append(f"one_agent_memory_rows {mem_stats.get('rows', 0)}")
-            
+
             # Skills metrics
             if _skills:
-                lines.append(f"# HELP one_agent_skills_loaded Number of skills loaded")
-                lines.append(f"# TYPE one_agent_skills_loaded gauge")
+                lines.append("# HELP one_agent_skills_loaded Number of skills loaded")
+                lines.append("# TYPE one_agent_skills_loaded gauge")
                 lines.append(f"one_agent_skills_loaded {len(_skills.all_skill_ids())}")
-            
+
             # Audit log metrics
             if self._audit_log:
                 audit_stats = self._audit_log.stats()
-                lines.append(f"# HELP one_agent_audit_entries_total Total audit log entries")
-                lines.append(f"# TYPE one_agent_audit_entries_total counter")
+                lines.append("# HELP one_agent_audit_entries_total Total audit log entries")
+                lines.append("# TYPE one_agent_audit_entries_total counter")
                 lines.append(f"one_agent_audit_entries_total {audit_stats.get('total_entries', 0)}")
-            
+
             return "\n".join(lines) + "\n"
 
 
@@ -735,7 +747,7 @@ class RESTAPIGateway(Plugin):
             """Get audit log statistics."""
             auth(x_api_key)
             if not self._audit_log:
-                return {"error": "Audit log not initialized"}
+                return {"error": {"code": 503, "message": "Audit log not initialized", "type": "service_unavailable"}}
             return self._audit_log.stats()
 
         @app.post("/api/chat")
@@ -743,7 +755,7 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
-            
+
             # Validate text input
             try:
                 _validate_chat_text(text)
@@ -759,7 +771,7 @@ class RESTAPIGateway(Plugin):
                         status="failure"
                     )
                 raise HTTPException(400, str(exc))
-            
+
             # Log successful API call
             if self._audit_log:
                 self._audit_log.log(
@@ -770,12 +782,12 @@ class RESTAPIGateway(Plugin):
                     ip_address=request.client.host if request.client else None,
                     status="success"
                 )
-            
+
             # Auto-detect language from user input — use thread-local to
             # avoid multi-tenant language contention (global _current_lang
             # is shared across all concurrent requests).
             if text:
-                from i18n import detect_language, set_thread_language, clear_thread_language
+                from i18n import detect_language, set_thread_language
                 detected_lang = detect_language(text)
                 set_thread_language(detected_lang)
                 # Sanitize language value to prevent log injection
@@ -797,17 +809,17 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
-            
+
             # Security restrictions: limit parameters to prevent abuse
             model = body.get("model")
             temperature = body.get("temperature")
             if temperature is not None:
                 temperature = max(0.0, min(2.0, float(temperature)))
-            
+
             max_tokens = body.get("max_tokens")
             if max_tokens is not None:
                 max_tokens = max(50, min(8192, int(max_tokens)))
-            
+
             # Ignore tools parameter for security - stream endpoint should be simple
             tools = None
 
@@ -834,7 +846,7 @@ class RESTAPIGateway(Plugin):
                 if body.get("system"):
                     msgs.insert(0, {"role": "system", "content": body["system"]})
                 yield f"data: {json.dumps({'status': 'thinking', 'session_id': session_id})}\n\n"
-                
+
                 # Check client connection periodically during streaming
                 chunks_sent = 0
                 async for chunk in _llm.chat_completion_stream(
@@ -850,7 +862,7 @@ class RESTAPIGateway(Plugin):
                             break
                     yield f"data: {json.dumps(chunk)}\n\n"
                     chunks_sent += 1
-                    
+
                 yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
 
             return StreamingResponse(
@@ -922,21 +934,20 @@ class RESTAPIGateway(Plugin):
             mp = getattr(_ctx, "marketplace", None) if _ctx else None
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
-            
+
             # Security: validate path is within allowed directories
-            import os
             from pathlib import Path
-            
+
             # Get allowed base directories
             workspace_root = Path.cwd().resolve()
             skills_dir = workspace_root / "skills"
-            
+
             # Resolve the provided path
             try:
                 resolved_path = Path(dirpath).resolve()
             except Exception:
                 raise HTTPException(400, "Invalid path")
-            
+
             # Check if path is within allowed directories
             allowed = False
             for allowed_dir in [skills_dir, workspace_root / "data" / "skills"]:
@@ -946,17 +957,17 @@ class RESTAPIGateway(Plugin):
                     break
                 except ValueError:
                     continue
-            
+
             if not allowed:
                 raise HTTPException(
-                    403, 
+                    403,
                     f"Path must be within skills directory. Allowed: {skills_dir}"
                 )
-            
+
             # Additional check: ensure path exists and is a directory
             if not resolved_path.exists() or not resolved_path.is_dir():
                 raise HTTPException(400, "Path does not exist or is not a directory")
-            
+
             pkg = mp.publish(str(resolved_path))
             if pkg is None:
                 raise HTTPException(400, _("invalid_skill_package", path=dirpath))
@@ -969,7 +980,7 @@ class RESTAPIGateway(Plugin):
             mp = getattr(_ctx, "marketplace", None) if _ctx else None
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
-            
+
             # Security: restrict target_dir to prevent path traversal
             if not target_dir:
                 target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
@@ -985,7 +996,7 @@ class RESTAPIGateway(Plugin):
                     target_real.relative_to(allowed_base)
                 except ValueError:
                     raise HTTPException(403, "target_dir must be within skills directory")
-            
+
             ok = mp.install(name, target_dir)
             if not ok:
                 raise HTTPException(404, _("skill_not_found", name=name))
@@ -1001,7 +1012,7 @@ class RESTAPIGateway(Plugin):
             mp = getattr(_ctx, "marketplace", None) if _ctx else None
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
-            
+
             # Security: restrict target_dir to prevent path traversal
             if not target_dir:
                 target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
@@ -1015,7 +1026,7 @@ class RESTAPIGateway(Plugin):
                     target_real.relative_to(allowed_base)
                 except ValueError:
                     raise HTTPException(403, "target_dir must be within skills directory")
-            
+
             ok = mp.uninstall(name, target_dir)
             if not ok:
                 raise HTTPException(404, _("skill_not_found", name=name))
@@ -1162,7 +1173,12 @@ class RESTAPIGateway(Plugin):
         async def settings_get(key: Optional[str] = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """读取配置项。不传 key 则返回所有可配置项列表。"""
             auth(x_api_key)
-            from skills import _SETTING_ALIASES, _get_nested, _SENSITIVE_KEYS, _is_sensitive_write_allowed
+            from skills import (
+                _SENSITIVE_KEYS,
+                _SETTING_ALIASES,
+                _get_nested,
+                _is_sensitive_write_allowed,
+            )
             sensitive_allowed = _is_sensitive_write_allowed(_ctx.config) if _ctx else False
             if key is None:
                 items = []
@@ -1182,13 +1198,20 @@ class RESTAPIGateway(Plugin):
                         if not sensitive_allowed:
                             val = val[:4] + "****"
                     return {"alias": alias, "path": path, "value": val}
-            return {"error": _("unknown_key", key=key)}
+            return {"error": {"code": 404, "message": _("unknown_key", key=key), "type": "not_found"}}
 
         @app.post("/api/settings")
         async def settings_set(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """修改配置项。body: {"key": "模型", "value": "gpt-4o"}"""
             auth(x_api_key)
-            from skills import _SETTING_ALIASES, _set_nested, _parse_value, _SENSITIVE_KEYS, _is_sensitive_write_allowed, _save_config
+            from skills import (
+                _SENSITIVE_KEYS,
+                _SETTING_ALIASES,
+                _is_sensitive_write_allowed,
+                _parse_value,
+                _save_config,
+                _set_nested,
+            )
             key = body.get("key", "")
             value = body.get("value")
             if not key or value is None:
@@ -1203,8 +1226,9 @@ class RESTAPIGateway(Plugin):
                         raise HTTPException(400, _("cannot_parse_value", type=vtype.__name__))
                     if _ctx:
                         # Create backup before changing config
-                        from config_backup import ConfigBackupManager
                         import os
+
+                        from config_backup import ConfigBackupManager
                         cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
                         backup_mgr = ConfigBackupManager(cfg_path)
                         backup_mgr.create_backup(reason="pre-change")
@@ -1219,6 +1243,7 @@ class RESTAPIGateway(Plugin):
             """List all config backups."""
             auth(x_api_key)
             import os
+
             from config_backup import ConfigBackupManager
             cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
             backup_mgr = ConfigBackupManager(cfg_path)
@@ -1229,6 +1254,7 @@ class RESTAPIGateway(Plugin):
             """Create a config backup."""
             auth(x_api_key)
             import os
+
             from config_backup import ConfigBackupManager
             cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
             backup_mgr = ConfigBackupManager(cfg_path)
@@ -1243,6 +1269,7 @@ class RESTAPIGateway(Plugin):
             """Restore config from a backup."""
             auth(x_api_key)
             import os
+
             from config_backup import ConfigBackupManager
             cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
             backup_mgr = ConfigBackupManager(cfg_path)
@@ -1260,6 +1287,7 @@ class RESTAPIGateway(Plugin):
             if not filename or '/' in filename or '\\' in filename or '..' in filename:
                 raise HTTPException(400, "invalid_filename")
             import os
+
             from config_backup import ConfigBackupManager
             cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
             backup_mgr = ConfigBackupManager(cfg_path)
@@ -1275,7 +1303,6 @@ class RESTAPIGateway(Plugin):
             # Validate filename to prevent path traversal
             if not filename or '/' in filename or '\\' in filename or '..' in filename:
                 raise HTTPException(400, "invalid_filename")
-            import os
             from config_backup import ConfigBackupManager
             cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
             backup_mgr = ConfigBackupManager(cfg_path)
@@ -1290,10 +1317,10 @@ class RESTAPIGateway(Plugin):
                                   x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             from skills import _doc_store
-            
+
             if file is not None:
-                import tempfile
                 import shutil
+                import tempfile
                 with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
                     shutil.copyfileobj(file.file, tmp)
                     tmp_path = tmp.name
@@ -1302,12 +1329,11 @@ class RESTAPIGateway(Plugin):
                 finally:
                     os.unlink(tmp_path)
                 return {"ingested": True, "name": file.filename, "chunks": count}
-            
+
             if path:
                 # Security: restrict path to data/documents directory only
                 # Use Path.relative_to() for strict containment (startswith can be bypassed
                 # e.g. "/data/skills_evil" starts with "/data/skills")
-                import os.path
                 allowed_base = Path(os.path.realpath(os.path.join(
                     _ctx.config.get("agent", {}).get("data_dir", "./data"), "documents")))
                 path_real = Path(os.path.realpath(path))
@@ -1322,7 +1348,7 @@ class RESTAPIGateway(Plugin):
 
                 count = _doc_store.ingest_file(str(path_real))
                 return {"ingested": True, "name": path_real.name, "chunks": count}
-            
+
             raise HTTPException(400, _("need_file_or_path"))
 
         @app.get("/api/documents")
@@ -1498,33 +1524,38 @@ class RESTAPIGateway(Plugin):
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):
             from starlette.exceptions import HTTPException as StarletteHTTPException
-            from core.exceptions import OneAgentError, InputValidationError, SecurityError
-            
+
+            from core.exceptions import InputValidationError, OneAgentError, SecurityError
+
             if isinstance(exc, StarletteHTTPException):
+                status_code = getattr(exc, "status_code", 500)
                 return JSONResponse(
-                    {"detail": exc.detail},
-                    status_code=getattr(exc, "status_code", 500),
+                    {"error": {"code": status_code, "message": exc.detail}},
+                    status_code=status_code,
                 )
             # Handle custom One-Agent exceptions
             if isinstance(exc, InputValidationError):
                 return JSONResponse(
-                    {"error": f"validation_error: {str(exc)}"},
+                    {"error": {"code": 400, "message": str(exc), "type": "InputValidationError"}},
                     status_code=400,
                 )
             if isinstance(exc, SecurityError):
                 return JSONResponse(
-                    {"error": f"security_error: {str(exc)}"},
+                    {"error": {"code": 403, "message": str(exc), "type": "SecurityError"}},
                     status_code=403,
                 )
             if isinstance(exc, OneAgentError):
                 logger.exception("one-agent error: %s", exc)
                 return JSONResponse(
-                    {"error": f"agent_error: {str(exc)}"},
+                    {"error": {"code": 500, "message": str(exc), "type": "OneAgentError"}},
                     status_code=500,
                 )
             # Generic exception handler
             logger.exception("api error: %s", exc)
-            return JSONResponse({"error": _("internal_error")}, status_code=500)
+            return JSONResponse(
+                {"error": {"code": 500, "message": _("internal_error"), "type": "internal_error"}},
+                status_code=500,
+            )
 
         self._app = app
         try:

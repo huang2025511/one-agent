@@ -64,10 +64,10 @@ class LLMCache:
     def set(self, messages, model, tools, value: Dict[str, Any], temperature=None) -> None:
         key = self._make_key(messages, model, tools, temperature)
         entry = _CacheEntry(value, self._ttl)
-        
+
         # Estimate memory usage of this entry (rough approximation)
         entry_size = len(json.dumps(value).encode('utf-8'))
-        
+
         if key in self._store:
             # Update existing entry
             old_entry = self._store[key]
@@ -76,13 +76,13 @@ class LLMCache:
             self._store.move_to_end(key)
         else:
             # New entry - check if we need to evict
-            while self._store and (len(self._store) >= self._max_size or 
+            while self._store and (len(self._store) >= self._max_size or
                                    self._current_memory_bytes + entry_size > self._max_memory_bytes):
                 # Evict oldest entry
                 evicted_key, evicted_entry = self._store.popitem(last=False)
                 evicted_size = len(json.dumps(evicted_entry.value).encode('utf-8'))
                 self._current_memory_bytes -= evicted_size
-        
+
         self._store[key] = entry
         self._current_memory_bytes += entry_size
 

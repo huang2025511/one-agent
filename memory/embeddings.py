@@ -13,10 +13,9 @@ Architecture:
 from __future__ import annotations
 
 import logging
-import sqlite3
 import struct
 import time
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 from .base_store import BaseSQLiteStore
 
@@ -30,7 +29,7 @@ MODEL_LOAD_TIMEOUT = 30.0
 
 def _dot_product(a: List[float], b: List[float]) -> float:
     """Calculate dot product of two vectors."""
-    return sum(x * y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b, strict=False))
 
 
 def _norm(v: List[float]) -> float:
@@ -95,9 +94,10 @@ class EmbeddingStore(BaseSQLiteStore):
     def _load_model(self):
         """Load the embedding model lazily with timeout."""
         try:
-            from sentence_transformers import SentenceTransformer
             import concurrent.futures
-            
+
+            from sentence_transformers import SentenceTransformer
+
             # Load model with timeout to prevent blocking
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(SentenceTransformer, MODEL_NAME)
@@ -132,7 +132,7 @@ class EmbeddingStore(BaseSQLiteStore):
         """
         assert text, "text cannot be empty"
         assert isinstance(text, str), "text must be a string"
-        
+
         if self._model is None:
             return None
         try:
@@ -154,7 +154,7 @@ class EmbeddingStore(BaseSQLiteStore):
         assert texts is not None, "texts cannot be None"
         assert isinstance(texts, list), "texts must be a list"
         assert all(isinstance(t, str) for t in texts), "all texts must be strings"
-        
+
         if self._model is None:
             return [None] * len(texts)
         try:
@@ -176,7 +176,7 @@ class EmbeddingStore(BaseSQLiteStore):
         assert vector is not None, "vector cannot be None"
         assert isinstance(vector, list), "vector must be a list"
         assert len(vector) == EMBEDDING_DIM, f"vector must have {EMBEDDING_DIM} dimensions"
-        
+
         with self._write_lock:
             try:
                 vector_blob = _vector_to_blob(vector)
@@ -251,7 +251,7 @@ class EmbeddingStore(BaseSQLiteStore):
         """
         assert memory_id, "memory_id cannot be empty"
         assert isinstance(memory_id, str), "memory_id must be a string"
-        
+
         with self._write_lock:
             try:
                 self._conn.execute(

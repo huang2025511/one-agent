@@ -14,7 +14,6 @@ import os
 import sqlite3
 import threading
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -27,14 +26,14 @@ AUDIT_MAX_ENTRIES = 100000  # Auto-rotate when exceeded
 
 class AuditLog:
     """Persistent audit log for tracking system operations.
-    
+
     Records:
     - API endpoint calls (who/when/what)
     - Skill executions
     - Configuration changes
     - Authentication events
     - Sensitive operations (marketplace publish, etc.)
-    
+
     Provides query API for dashboards and compliance.
     """
 
@@ -82,7 +81,7 @@ class AuditLog:
         status: str = "success",
     ) -> None:
         """Record an audit event.
-        
+
         Args:
             action: What happened (e.g., "api_call", "skill_execute", "config_change")
             actor: Who did it (e.g., user ID, API key hash, "system")
@@ -137,20 +136,20 @@ class AuditLog:
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         """Query audit log with filters.
-        
+
         Args:
             action: Filter by action type
             actor: Filter by actor
             start_time: Filter events after this timestamp
             end_time: Filter events before this timestamp
             limit: Maximum number of results
-            
+
         Returns:
             List of audit log entries
         """
         query_parts = ["SELECT * FROM audit_log WHERE 1=1"]
         params = []
-        
+
         if action:
             query_parts.append("AND action = ?")
             params.append(action)
@@ -163,12 +162,12 @@ class AuditLog:
         if end_time:
             query_parts.append("AND timestamp <= ?")
             params.append(end_time)
-        
+
         query_parts.append("ORDER BY timestamp DESC LIMIT ?")
         params.append(limit)
-        
+
         sql = " ".join(query_parts)
-        
+
         try:
             cursor = self._conn.execute(sql, params)
             rows = cursor.fetchall()
@@ -193,7 +192,7 @@ class AuditLog:
         """Get audit log statistics."""
         try:
             total = self._conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
-            
+
             # Count by action type
             action_counts = {}
             cursor = self._conn.execute(
@@ -201,7 +200,7 @@ class AuditLog:
             )
             for row in cursor.fetchall():
                 action_counts[row["action"]] = row["count"]
-            
+
             # Count by status
             status_counts = {}
             cursor = self._conn.execute(
@@ -209,11 +208,11 @@ class AuditLog:
             )
             for row in cursor.fetchall():
                 status_counts[row["status"]] = row["count"]
-            
+
             # Oldest and newest entry
             oldest = self._conn.execute("SELECT MIN(timestamp) FROM audit_log").fetchone()[0]
             newest = self._conn.execute("SELECT MAX(timestamp) FROM audit_log").fetchone()[0]
-            
+
             return {
                 "total_entries": total,
                 "action_counts": action_counts,
@@ -237,8 +236,7 @@ class AuditLog:
 
     def __del__(self):
         """Ensure connection is closed on garbage collection."""
-        if hasattr(self, "_conn") and self._conn:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
+        try:
+            self.close()
+        except Exception:
+            pass

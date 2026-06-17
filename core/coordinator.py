@@ -307,8 +307,8 @@ class Coordinator(Plugin):
             skill = self._skills.get("system_lock")
             if skill:
                 await self._skills.dispatch("system_lock", {})
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("system_lock handler failed: %s", exc)
 
     # ------------------------------------------------------------ slash commands
     # Mapping from slash command names (both EN and CN) to skill IDs
@@ -455,15 +455,15 @@ class Coordinator(Plugin):
         turn: TurnContext | None = event.get("turn")
         if turn is None or turn.result is not None or turn.error is not None:
             return
-        
+
         # Handle slash commands first
         if turn.input_text and turn.input_text.strip().startswith("/"):
             if await self._handle_slash_command(turn):
                 return
-        
+
         # Auto-detect language from user input
         if turn.input_text:
-            from i18n import detect_language, set_language, get_language
+            from i18n import detect_language, get_language, set_language
             detected_lang = detect_language(turn.input_text)
             current_lang = get_language()
             if detected_lang != current_lang:
@@ -471,7 +471,7 @@ class Coordinator(Plugin):
                 logger.info("Auto-detected language: %s from user input", detected_lang)
                 # Persist language preference to config
                 self._persist_language(detected_lang)
-        
+
         # avoid double-processing — if something already published a reply,
         # skip this turn entirely
         try:
@@ -540,12 +540,12 @@ class Coordinator(Plugin):
     # --------------------------------------------------------- main loop
     async def _run_turn(self, turn: TurnContext) -> None:
         """Execute a single turn with tiered execution strategy based on complexity.
-        
+
         Tiered execution strategy (independent from model selection):
         - trivial/simple (< 0.5): direct execution, no thinking/reflection
         - complex (0.5–0.8): think + reflect before executing
         - expert (≥ 0.8): multi-agent pattern (planner + executor)
-        
+
         This is orthogonal to model tier selection — both work together:
         e.g., an expert task gets both the strongest model AND multi-agent execution.
         """
@@ -553,7 +553,7 @@ class Coordinator(Plugin):
             raise RuntimeError("turn cannot be None")
         if turn.input_text is None:
             raise RuntimeError("turn.input_text cannot be None")
-        
+
         if self._llm is None:
             turn.record_failure("LLM provider not bound")
             self.publish("turn_completed", turn=turn)
@@ -573,12 +573,12 @@ class Coordinator(Plugin):
         if complexity >= EXPERT_COMPLEXITY_THRESHOLD:
             if await self._multi_agent_phase(messages, turn):
                 return  # multi-agent handled it, skip normal flow
-        
+
         # Complex level: think + reflect
         elif complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
             await self._think_phase(messages, turn)
             await self._reflect_phase(messages, turn)
-        
+
         # Simple/trivial: skip thinking entirely for speed
         else:
             # Still do context compression for long conversations
@@ -941,7 +941,7 @@ class Coordinator(Plugin):
             raise RuntimeError("turn cannot be None")
 
         from i18n import get_language
-        lang = (get_language() or "zh").lower()
+        _lang = (get_language() or "zh").lower()
 
         try:
             from core.sub_agent import DelegationManager
@@ -981,7 +981,7 @@ class Coordinator(Plugin):
             raise RuntimeError("messages cannot be None")
         if turn is None:
             raise RuntimeError("turn cannot be None")
-        
+
         if not (self.ctx and self.ctx.config):
             return
 
@@ -1012,7 +1012,7 @@ class Coordinator(Plugin):
             raise RuntimeError("turn cannot be None")
         if messages is None:
             raise RuntimeError("messages cannot be None")
-        
+
         if not (turn.meta.get("enable_delegation") or self._detect_complex_task(turn.input_text)):
             return False
 
@@ -1057,7 +1057,7 @@ class Coordinator(Plugin):
             raise RuntimeError("turn cannot be None")
         if tools is None:
             raise RuntimeError("tools cannot be None")
-        
+
         final_text = ""
         total_tokens = 0
         _failed_skills: Dict[str, int] = {}
@@ -1129,7 +1129,7 @@ class Coordinator(Plugin):
             raise RuntimeError("failed_skills cannot be None")
         if iteration < 0:
             raise RuntimeError("iteration must be non-negative")
-        
+
         provider = turn.model.split("/")[0] if turn.model and "/" in turn.model else "openai"
 
         if provider == "anthropic":
@@ -1182,7 +1182,7 @@ class Coordinator(Plugin):
         """Handle when tool loop reaches max iterations."""
         assert messages is not None, "messages cannot be None"
         assert turn is not None, "turn cannot be None"
-        
+
         messages.append({
             "role": "user",
             "content": (
@@ -1206,7 +1206,7 @@ class Coordinator(Plugin):
     def _record_self_improvement(self, turn: TurnContext) -> None:
         """Record failure for self-improvement analysis."""
         assert turn is not None, "turn cannot be None"
-        
+
         if not (self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver):
             return
 

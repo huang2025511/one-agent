@@ -3,12 +3,11 @@
 
 import argparse
 import json
-import os
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import Dict, List
 
 # Custom providers storage
 CUSTOM_PROVIDERS_FILE = Path.home() / ".one-agent" / "custom_providers.json"
@@ -29,7 +28,7 @@ def save_custom_provider(name: str, base_url: str, api_key: str = None) -> None:
     """Save a custom provider to file."""
     CUSTOM_PROVIDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
     providers = load_custom_providers()
-    
+
     # Generate a unique key
     key = name.lower().replace(" ", "-").replace("/", "-")
     providers[key] = {
@@ -37,7 +36,7 @@ def save_custom_provider(name: str, base_url: str, api_key: str = None) -> None:
         "base_url": base_url,
         "api_key": api_key,
     }
-    
+
     with open(CUSTOM_PROVIDERS_FILE, "w") as f:
         json.dump(providers, f, indent=2)
 
@@ -48,7 +47,7 @@ def fetch_openai_models(api_key: str = None, base_url: str = None) -> List[str]:
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    
+
     try:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -207,7 +206,7 @@ PROVIDERS: Dict[str, dict] = {
         "needs_key": True,
         "needs_url": False,
     },
-    
+
     # ===== 国内服务商 =====
     "deepseek": {
         "name": "DeepSeek",
@@ -305,7 +304,7 @@ PROVIDERS: Dict[str, dict] = {
         "needs_key": True,
         "needs_url": False,
     },
-    
+
     # ===== 高性价比 / 开源 =====
     "groq": {
         "name": "Groq",
@@ -364,7 +363,7 @@ PROVIDERS: Dict[str, dict] = {
         "needs_url": True,
         "default_url": "http://localhost:11434",
     },
-    
+
     # ===== 企业级 =====
     "azure": {
         "name": "Azure OpenAI",
@@ -390,7 +389,7 @@ PROVIDERS: Dict[str, dict] = {
         "needs_key": True,
         "needs_url": True,
     },
-    
+
     # ===== 自定义（运行时添加）=====
     "custom-openai": {
         "name": "自定义 OpenAI 兼容",
@@ -407,14 +406,14 @@ def list_providers(include_custom: bool = True):
     """List all available providers."""
     print("可用服务商列表:")
     print()
-    
+
     # International
     print("【国际主流】")
     for key in ["openai", "anthropic", "google", "mistral", "cohere", "meta"]:
         if key in PROVIDERS:
             cfg = PROVIDERS[key]
             print(f"  {cfg['name']} - {cfg['desc']}")
-    
+
     # China
     print()
     print("【国内服务商】")
@@ -422,7 +421,7 @@ def list_providers(include_custom: bool = True):
         if key in PROVIDERS:
             cfg = PROVIDERS[key]
             print(f"  {cfg['name']} - {cfg['desc']}")
-    
+
     # Open source / Budget
     print()
     print("【高性价比 / 开源】")
@@ -430,7 +429,7 @@ def list_providers(include_custom: bool = True):
         if key in PROVIDERS:
             cfg = PROVIDERS[key]
             print(f"  {cfg['name']} - {cfg['desc']}")
-    
+
     # Enterprise
     print()
     print("【企业级】")
@@ -438,20 +437,20 @@ def list_providers(include_custom: bool = True):
         if key in PROVIDERS:
             cfg = PROVIDERS[key]
             print(f"  {cfg['name']} - {cfg['desc']}")
-    
+
     # Custom
     if include_custom:
         custom = load_custom_providers()
         if custom:
             print()
             print("【已保存的自定义服务商】")
-            for key, cfg in custom.items():
+            for _key, cfg in custom.items():
                 print(f"  {cfg['name']} - {cfg['base_url']}")
 
 
 def fetch_models(provider: str, api_key: str = None, base_url: str = None) -> tuple[List[str], str]:
     """Fetch models based on provider.
-    
+
     Returns:
         (models_list, provider_name)
     """
@@ -461,19 +460,19 @@ def fetch_models(provider: str, api_key: str = None, base_url: str = None) -> tu
         cfg = custom[provider]
         models = fetch_openai_models(cfg.get("api_key"), cfg["base_url"])
         return models, cfg["name"]
-    
+
     # Known provider
     cfg = PROVIDERS.get(provider.lower())
     if not cfg:
         return [], provider
-    
+
     try:
         models = cfg["fetch"](api_key, base_url)
         if models and not models[0].startswith("Error"):
             return models, cfg["name"]
     except Exception:
         pass
-    
+
     # Fallback to default models
     return cfg.get("default_models", []), cfg["name"]
 
@@ -493,26 +492,26 @@ def main():
     parser.add_argument("--list", action="store_true", help="列出所有服务商")
     parser.add_argument("--add", metavar="NAME", help="添加自定义服务商")
     args = parser.parse_args()
-    
+
     if args.list:
         list_providers()
         return
-    
+
     if args.add:
         if not args.url:
             print("错误: --add 需要 --url 参数", file=sys.stderr)
             sys.exit(1)
-        key = add_custom_provider(args.add, args.url, args.key)
+        add_custom_provider(args.add, args.url, args.key)
         print(f"已添加自定义服务商: {args.add}")
-        print(f"下次选择时输入编号 0 使用此服务商")
+        print("下次选择时输入编号 0 使用此服务商")
         return
-    
+
     if not args.provider:
         print("错误: 需要 --provider 参数，或使用 --list 查看所有服务商", file=sys.stderr)
         sys.exit(1)
-    
+
     models, name = fetch_models(args.provider, args.key, args.url)
-    
+
     if models:
         print("\n".join(models))
     else:

@@ -71,7 +71,7 @@ class SessionStore(BaseSQLiteStore):
         """Create a new session record (idempotent — upsert)."""
         assert session_id, "session_id cannot be empty"
         assert isinstance(session_id, str), "session_id must be a string"
-        
+
         now = time.time()
         with self._write_lock:
             try:
@@ -97,7 +97,7 @@ class SessionStore(BaseSQLiteStore):
 
         If the session does not exist yet, it is created automatically.
         The title is auto-generated from the first user message (first 80 chars).
-        
+
         Args:
             session_id: Session identifier
             role: Message role (user/assistant/system)
@@ -111,7 +111,7 @@ class SessionStore(BaseSQLiteStore):
         assert role in ("user", "assistant", "system"), "role must be user/assistant/system"
         assert isinstance(content, str), "content must be a string"
         assert tokens >= 0, "tokens must be non-negative"
-        
+
         now = time.time()
         meta_json = json.dumps(meta or {})
 
@@ -124,7 +124,7 @@ class SessionStore(BaseSQLiteStore):
                     )
                     if cur.fetchone():
                         return  # Message already exists, skip insertion
-                
+
                 with self._conn:  # automatic transaction
                     # Ensure session exists (auto-create)
                     self._conn.execute(
@@ -178,7 +178,7 @@ class SessionStore(BaseSQLiteStore):
         """Retrieve a session with all its messages."""
         assert session_id, "session_id cannot be empty"
         assert isinstance(session_id, str), "session_id must be a string"
-        
+
         try:
             cur = self._conn.execute(
                 "SELECT * FROM sessions WHERE id = ?", (session_id,)
@@ -210,7 +210,7 @@ class SessionStore(BaseSQLiteStore):
         """List recent sessions ordered by last update time."""
         assert limit > 0, "limit must be positive"
         assert offset >= 0, "offset must be non-negative"
-        
+
         try:
             cur = self._conn.execute(
                 "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
@@ -225,7 +225,7 @@ class SessionStore(BaseSQLiteStore):
         """Delete a session and all its messages. Returns True if deleted."""
         assert session_id, "session_id cannot be empty"
         assert isinstance(session_id, str), "session_id must be a string"
-        
+
         with self._write_lock:
             try:
                 cur = self._conn.execute(
@@ -268,7 +268,7 @@ class SessionStore(BaseSQLiteStore):
         assert session_id, "session_id cannot be empty"
         assert isinstance(session_id, str), "session_id must be a string"
         assert fork_point >= 0, "fork_point must be non-negative"
-        
+
         import uuid
 
         with self._write_lock:
@@ -336,7 +336,7 @@ class SessionStore(BaseSQLiteStore):
         """
         assert session_id, "session_id cannot be empty"
         assert isinstance(session_id, str), "session_id must be a string"
-        
+
         try:
             # 获取当前会话
             cur = self._conn.execute(

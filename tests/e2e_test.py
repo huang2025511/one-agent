@@ -1,6 +1,4 @@
 """End-to-end integration test — starts One-Agent and verifies all services."""
-import asyncio
-import json
 import os
 import sys
 
@@ -9,7 +7,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from one_agent import OneAgentApp
 
 
 @pytest.mark.asyncio

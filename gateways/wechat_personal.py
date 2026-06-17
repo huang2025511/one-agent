@@ -41,9 +41,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from core.plugin import Plugin
 
@@ -123,12 +122,12 @@ class WeChatPersonalGateway(Plugin):
         """手动登录微信（按需启动）"""
         if self._logged_in:
             return True
-        
+
         if self._task is None:
             logger.info("wechat_personal: 启动微信网关...")
             self._task = asyncio.create_task(self._run())
             return True
-        
+
         return False
 
     async def _on_done(self, event) -> None:
@@ -204,7 +203,6 @@ class WeChatPersonalGateway(Plugin):
     async def _handle_message(self, msg: Any) -> None:
         """Process a single text message from WeChat."""
         from_user = getattr(msg, "FromUserName", "")
-        to_user = getattr(msg, "ToUserName", "")
         text_raw = getattr(msg, "Text", "") or getattr(msg, "Content", "") or ""
         text = str(text_raw).strip()
 

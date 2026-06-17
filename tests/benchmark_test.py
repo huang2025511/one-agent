@@ -1,6 +1,5 @@
 """Performance benchmark tests — verify system can handle concurrent load."""
 import asyncio
-import json
 import os
 import sys
 import time
@@ -10,7 +9,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from one_agent import OneAgentApp
 
 
 @pytest.mark.asyncio

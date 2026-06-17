@@ -1,16 +1,22 @@
+# One-Agent default configuration
+# All keys use snake_case. Environment variables can be referenced via ${VAR_NAME}.
+# Sensitive values (API keys) support Fernet encryption with prefix "enc:" when
+# ONE_AGENT_ENCRYPTION_KEY env var is set.
+
 agent:
-  name: One-Agent-Test
-  description: Test configuration for One-Agent
+  name: One-Agent
+  description: Token-efficient self-evolving microkernel AI agent
   version: 2.0.0
-  data_dir: ./data
-  log_level: WARNING
-  timezone: Asia/Shanghai
-  language: en
+  data_dir: ./data  # Base directory for logs, memory, marketplace, scheduler data
+  log_level: INFO  # DEBUG | INFO | WARNING | ERROR
+  timezone: UTC  # IANA timezone (e.g. Asia/Shanghai, America/Los_Angeles)
+  language: en  # en | zh — default UI/system-prompt language
+
 llm:
-  primary_provider: sensenova
-  primary_model: sensenova/deepseek-v4-flash
-  lightweight_model: sensenova/sensenova-6.7-flash-lite
-  local_endpoint: http://localhost:11434
+  primary_provider: sensenova  # Provider key in api_keys below
+  primary_model: sensenova/deepseek-v4-flash  # provider/model format
+  lightweight_model: sensenova/sensenova-6.7-flash-lite  # Used for trivial tasks
+  local_endpoint: http://localhost:11434  # Ollama / local LLM server
   local_model: qwen2.5:7b
   api_keys:
     openrouter: null
@@ -18,78 +24,88 @@ llm:
     anthropic: null
     deepseek: null
     dashscope: null
-    sensenova: ${SENSENOVA_API_KEY}
-  default_temperature: 0.3
+    sensenova: ${SENSENOVA_API_KEY}  # Expanded from environment variable
+  default_temperature: 0.3  # 0.0 = deterministic, 2.0 = max randomness
   default_max_tokens: 2048
-  timeout: 30
-  retries: 1
+  timeout: 30  # Seconds per LLM request
+  retries: 1  # Retry attempts on retryable errors (429/503)
   cost_tracking:
-    daily_budget: 1.0
-    monthly_budget: 20.0
+    daily_budget: 1.0  # USD — requests rejected when daily spend exceeds this
+    monthly_budget: 20.0  # USD — monthly cap
     db_path: data/memory/costs.db
+
 router:
   enabled: true
-  task_complexity_thresholds:
+  task_complexity_thresholds:  # 0.0-1.0 complexity → tier mapping
     trivial: 0.2
     simple: 0.5
     complex: 0.8
     expert: 1.0
   context_compression:
-    enabled: false
+    enabled: false  # Compress long contexts before sending to LLM
   skill_lazy_loading:
-    enabled: false
+    enabled: false  # Load skills on-demand per turn
   self_evolution:
-    enabled: false
+    enabled: false  # Auto-adjust thresholds based on usage patterns
+
 memory:
   short_term:
-    max_turns: 20
-    max_tokens: 8000
+    max_turns: 20  # Max conversation turns kept in context
+    max_tokens: 8000  # Token budget for short-term memory
   long_term:
     enabled: true
-    storage: sqlite-fts5
-    max_results: 5
-    decay_enabled: true
+    storage: sqlite-fts5  # SQLite with FTS5 full-text search
+    max_results: 5  # Max memories retrieved per query
+    decay_enabled: true  # Weight decay for old memories
   procedural:
     enabled: true
-    auto_create_skills: true
-    min_usage_before_skill: 3
-    skill_storage: markdown
+    auto_create_skills: true  # Auto-create skills from repeated patterns
+    min_usage_before_skill: 3  # Min pattern occurrences before skill creation
+    skill_storage: markdown  # markdown | json
+
 skills:
   enabled: true
-  auto_discover: true
+  auto_discover: true  # Auto-discover skills in search_paths
   search_paths:
   - ./skills
+
 gateways:
   wechat_personal:
-    enabled: false
-    allowed_users: []
-    reply_prefix: ''
-    hot_reload: false
-execution: {}
-scheduler: {}
+    enabled: false  # Personal WeChat (itchat-uos) — requires QR scan
+    allowed_users: []  # Empty = allow all contacts
+    reply_prefix: ''  # Prepended to every reply
+    hot_reload: false  # itchat hot reload (debugging only)
+  # Other gateways (telegram/wecom/dingtalk/feishu/discord/slack/web) are
+  # configured via environment variables; see TUTORIAL.md for details.
+
+execution: {}  # Shell/Docker/Browser/Python executor settings (uses defaults)
+scheduler: {}  # APScheduler jobs (uses defaults)
+
 security:
-  system_executor_password: ''
-  password_cache_minutes: 15
-  max_password_attempts: 3
-  lockout_minutes: 5
-  require_password_for_dangerous: true
-  command_timeout_seconds: 30
-  max_output_bytes: 65536
+  system_executor_password: ''  # Empty = OS mode disabled; set to enable /unlock
+  password_cache_minutes: 15  # How long unlock stays valid
+  max_password_attempts: 3  # Before lockout
+  lockout_minutes: 5  # Lockout duration after max attempts
+  require_password_for_dangerous: true  # DANGEROUS-level commands need approval
+  command_timeout_seconds: 30  # Shell command timeout
+  max_output_bytes: 65536  # Truncate command output beyond this
+
 rest:
   enabled: true
-  host: 127.0.0.1
+  host: 127.0.0.1  # Bind address (use 0.0.0.0 for external access)
   port: 18792
-  api_key: ''
-  rate_limit_per_minute: 60
-  max_chat_bytes: 65536
+  api_key: ''  # Empty = no auth; set or use ONE_AGENT_API_KEY env var
+  rate_limit_per_minute: 60  # Per-client-IP request limit
+  max_chat_bytes: 65536  # Max request body size for /api/chat
   # Restrict CORS to localhost origins — '*' allows any website (including
   # malicious pages in the user's browser) to call the API via DNS rebinding.
   cors_origins:
   - 'http://localhost'
   - 'http://127.0.0.1'
-monitoring: {}
-multimodal: {}
+
+monitoring: {}  # Monitoring plugin settings (uses defaults)
+multimodal: {}  # Multimodal plugin settings (uses defaults)
 marketplace:
   enabled: true
-  registry_url: ''
-llm_cache: {}
+  registry_url: ''  # Empty = use built-in registry
+llm_cache: {}  # LLM response cache settings (uses defaults)

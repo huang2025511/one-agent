@@ -36,7 +36,7 @@ import sys
 import time
 from typing import Any, Dict, Optional
 
-from core.plugin import Plugin
+from executors.base import BaseExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ except Exception as _e:
 '''
 
 
-class PythonExecutor(Plugin):
+class PythonExecutor(BaseExecutor):
     """Sandboxed Python code executor using subprocess isolation."""
 
     name = "executor_python"

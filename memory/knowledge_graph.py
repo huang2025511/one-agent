@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
+import logging
 import re
 import sqlite3
 import time
-import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from .base_store import BaseSQLiteStore
 
@@ -56,25 +54,25 @@ class KnowledgeGraph(BaseSQLiteStore):
         # Validate entity name
         if not name or not isinstance(name, str):
             raise ValueError("Entity name must be a non-empty string")
-        
+
         name = name.strip()
         if not name:
             raise ValueError("Entity name cannot be empty after trimming")
-        
+
         if len(name) > 200:
             raise ValueError("Entity name too long (max 200 chars)")
-        
+
         # Validate characters - allow word chars, whitespace, hyphens, dots
         if not re.match(r'^[\w\s\-\.]+$', name):
             raise ValueError("Entity name contains invalid characters")
-        
+
         # Block HTML tags and script injection
         if re.search(r'<[^>]*>', name):
             raise ValueError("Entity name contains HTML tags")
-        
+
         # Normalize whitespace
         name = re.sub(r'\s+', ' ', name)
-        
+
         now = time.time()
         with self._write_lock:
             cur = self._conn.execute("SELECT id FROM entities WHERE name = ?", (name,))
@@ -101,11 +99,11 @@ class KnowledgeGraph(BaseSQLiteStore):
         predicate = predicate.strip()
         if len(predicate) > 200:
             raise ValueError("Predicate too long (max 200 chars)")
-        
+
         # Validate weight
         if not isinstance(weight, (int, float)) or weight < 0:
             raise ValueError("Weight must be a non-negative number")
-        
+
         subj_id = self.add_entity(subject, source=source)
         obj_id = self.add_entity(obj, source=source)
 
@@ -172,10 +170,10 @@ class KnowledgeGraph(BaseSQLiteStore):
         assert query, "query cannot be empty"
         assert isinstance(query, str), "query must be a string"
         assert limit > 0, "limit must be positive"
-        
+
         # Escape LIKE wildcards to prevent unexpected matches
         escaped_query = query.replace('%', '\\%').replace('_', '\\_')
-        
+
         cur = self._conn.execute(
             "SELECT * FROM entities WHERE name LIKE ? ESCAPE '\\' LIMIT ?",
             (f"%{escaped_query}%", limit)
@@ -187,7 +185,7 @@ class KnowledgeGraph(BaseSQLiteStore):
         assert name, "name cannot be empty"
         assert isinstance(name, str), "name must be a string"
         assert depth > 0, "depth must be positive"
-        
+
         entity = self.query_entity(name)
         if not entity:
             return []
@@ -221,7 +219,7 @@ class KnowledgeGraph(BaseSQLiteStore):
         """Simple rule-based entity extraction from text."""
         assert text, "text cannot be empty"
         assert isinstance(text, str), "text must be a string"
-        
+
         count = 0
 
         # Extract proper nouns (capitalized words, Chinese names)

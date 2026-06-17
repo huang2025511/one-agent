@@ -27,7 +27,7 @@ RETRY_INTERVAL_SECONDS = 60
 
 class OfflineQueue:
     """Persistent queue for offline operation retry.
-    
+
     When LLM calls fail due to network issues, requests are queued here.
     A background task periodically retries queued requests.
     """
@@ -66,11 +66,11 @@ class OfflineQueue:
         request_data: Dict[str, Any],
     ) -> int:
         """Add a request to the offline queue.
-        
+
         Args:
             request_type: Type of request (e.g., "llm_call", "skill_execute")
             request_data: Request payload (JSON-serializable)
-            
+
         Returns:
             Queue entry ID
         """
@@ -100,18 +100,18 @@ class OfflineQueue:
 
     def dequeue(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get pending requests from the queue.
-        
+
         Args:
             limit: Maximum number of requests to return
-            
+
         Returns:
             List of queue entries
         """
         try:
             cursor = self._conn.execute(
-                """SELECT * FROM offline_queue 
-                   WHERE status = 'pending' 
-                   ORDER BY created_at ASC 
+                """SELECT * FROM offline_queue
+                   WHERE status = 'pending'
+                   ORDER BY created_at ASC
                    LIMIT ?""",
                 (limit,),
             )
@@ -163,19 +163,19 @@ class OfflineQueue:
             pending = self._conn.execute(
                 "SELECT COUNT(*) FROM offline_queue WHERE status = 'pending'"
             ).fetchone()[0]
-            
+
             completed = self._conn.execute(
                 "SELECT COUNT(*) FROM offline_queue WHERE status = 'completed'"
             ).fetchone()[0]
-            
+
             failed = self._conn.execute(
                 "SELECT COUNT(*) FROM offline_queue WHERE retry_count >= 3"
             ).fetchone()[0]
-            
+
             oldest = self._conn.execute(
                 "SELECT MIN(created_at) FROM offline_queue WHERE status = 'pending'"
             ).fetchone()[0]
-            
+
             return {
                 "pending": pending,
                 "completed": completed,
@@ -189,15 +189,15 @@ class OfflineQueue:
 
     async def start_retry_loop(self, callback) -> None:
         """Start background task to retry queued requests.
-        
+
         Args:
-            callback: Async function to process each request. 
+            callback: Async function to process each request.
                      Signature: async def callback(request_type, request_data) -> bool
         """
         if self._retry_task and not self._retry_task.done():
             logger.warning("Offline retry loop already running")
             return
-        
+
         async def _retry_loop():
             while True:
                 try:
@@ -217,14 +217,14 @@ class OfflineQueue:
                         except Exception as exc:
                             self.mark_failure(entry["id"], str(exc))
                             logger.error("Offline request %d error: %s", entry["id"], exc)
-                    
+
                     await asyncio.sleep(RETRY_INTERVAL_SECONDS)
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
                     logger.error("Offline retry loop error: %s", exc)
                     await asyncio.sleep(RETRY_INTERVAL_SECONDS)
-        
+
         self._retry_task = asyncio.create_task(_retry_loop())
         logger.info("Offline retry loop started")
 
@@ -249,8 +249,7 @@ class OfflineQueue:
 
     def __del__(self):
         """Ensure connection is closed on garbage collection."""
-        if hasattr(self, "_conn") and self._conn:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
+        try:
+            self.close()
+        except Exception:
+            pass

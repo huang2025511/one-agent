@@ -38,7 +38,8 @@ class RecommendationMixin:
         Returns a dict with the new tier map + a per-tier diff vs the old
         one so the CLI can show "I added X to expert, removed Y from complex".
         """
-        from .catalog import ModelCatalog, rebuild_tiers as _rebuild, diff_tiers as _diff
+        from .catalog import diff_tiers as _diff
+        from .catalog import rebuild_tiers as _rebuild
         prov = provider or self._infer_primary_provider()
         cat = self.get_catalog(prov)
         if cat is None:
@@ -110,9 +111,9 @@ class RecommendationMixin:
         Categories with no qualifying model get ``None`` so the caller
         can show "no vision model on this provider" without crashing.
         """
-        from .catalog import ModelCatalog
         from .capabilities import (
-            RECOMMEND_CATEGORIES, describe_capabilities,
+            RECOMMEND_CATEGORIES,
+            describe_capabilities,
         )
         prov = provider or self._infer_primary_provider()
         cat = self.get_catalog(prov)

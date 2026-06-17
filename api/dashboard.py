@@ -16,9 +16,7 @@ Architecture:
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -260,13 +258,13 @@ DASHBOARD_HTML = """
         async function updateCosts() {
             const data = await fetchJSON(`${API_BASE}/costs/daily`);
             if (!data) return;
-            
+
             document.getElementById('daily-cost').textContent = `$${data.cost.toFixed(4)}`;
             document.getElementById('budget-remaining').textContent = `$${data.remaining.toFixed(4)}`;
-            
+
             const progress = (data.cost / data.budget) * 100;
             document.getElementById('budget-progress').style.width = `${Math.min(progress, 100)}%`;
-            
+
             const monthly = await fetchJSON(`${API_BASE}/costs/monthly`);
             if (monthly) {
                 document.getElementById('monthly-cost').textContent = `$${monthly.cost.toFixed(4)}`;
@@ -276,7 +274,7 @@ DASHBOARD_HTML = """
         async function updateStats() {
             const data = await fetchJSON(`${API_BASE}/stats`);
             if (!data) return;
-            
+
             document.getElementById('active-sessions').textContent = data.sessions?.active || 0;
             document.getElementById('total-messages').textContent = data.messages?.total || 0;
             document.getElementById('kg-entities').textContent = data.knowledge_graph?.entities || 0;
@@ -286,17 +284,17 @@ DASHBOARD_HTML = """
         async function updateSessions() {
             const data = await fetchJSON(`${API_BASE}/sessions/list`);
             const container = document.getElementById('session-list');
-            
+
             if (!data || !data.sessions || data.sessions.length === 0) {
                 container.innerHTML = '<div class="loading">暂无会话</div>';
                 return;
             }
-            
+
             container.innerHTML = data.sessions.map(s => `
                 <div class="session-item" onclick="viewSession('${escJs(s.id)}')">
                     <div class="session-title">${esc(s.title || '未命名会话')}</div>
                     <div class="session-meta">
-                        ${esc(s.message_count)} 条消息 · 
+                        ${esc(s.message_count)} 条消息 ·
                         最后更新: ${new Date(s.updated_at * 1000).toLocaleString('zh-CN')}
                     </div>
                     <div class="session-actions">
@@ -309,12 +307,12 @@ DASHBOARD_HTML = """
         async function updateApprovals() {
             const data = await fetchJSON(`${API_BASE}/approvals/pending`);
             const container = document.getElementById('approval-queue');
-            
+
             if (!data || !data.pending || data.pending.length === 0) {
                 container.innerHTML = '<div class="loading">暂无待审批项</div>';
                 return;
             }
-            
+
             container.innerHTML = data.pending.map(r => `
                 <div class="approval-item">
                     <div><strong>${esc(r.action)}</strong></div>
@@ -347,13 +345,13 @@ DASHBOARD_HTML = """
             event.stopPropagation();
             const forkPoint = prompt('请输入分支点（消息索引，从0开始）:', '0');
             if (forkPoint === null) return;
-            
+
             const response = await fetch(`${API_BASE}/sessions/${sessionId}/fork`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ fork_point: parseInt(forkPoint) })
             });
-            
+
             if (response.ok) {
                 const data = await response.json();
                 alert(`分支成功！新会话ID: ${data.new_session_id}`);
@@ -381,10 +379,10 @@ DASHBOARD_HTML = """
 
         // Initial load
         refreshAll();
-        
+
         // Auto-refresh every 5 seconds
         refreshInterval = setInterval(refreshAll, 5000);
-        
+
         // Cleanup on page unload
         window.addEventListener('beforeunload', () => {
             if (refreshInterval) clearInterval(refreshInterval);

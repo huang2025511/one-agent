@@ -23,9 +23,9 @@ from core.context import TurnContext
 from core.events import Event
 from core.plugin import Plugin
 
+from .embeddings import EmbeddingStore  # noqa: F401
 from .knowledge_graph import KnowledgeGraph  # noqa: F401
 from .session_store import SessionStore  # noqa: F401
-from .embeddings import EmbeddingStore  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ __all__ = [
 
 def _escape_fts5_query(query: str) -> str:
     """Escape FTS5 special characters to prevent injection attacks.
-    
+
     FTS5 special characters: * ? " ( ) : ^ + - AND OR NOT NEAR
     We strip all non-alphanumeric characters (except CJK and spaces)
     to prevent any FTS5 operator injection.
@@ -49,14 +49,14 @@ def _escape_fts5_query(query: str) -> str:
     # Strip all characters except letters, digits, CJK, and whitespace
     # This is the safest approach — no FTS5 operators can survive
     result = re.sub(r'[^\w\s\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]', ' ', query)
-    
+
     # Collapse multiple spaces
     result = re.sub(r'\s+', ' ', result).strip()
-    
+
     # Limit query length to prevent DoS
     if len(result) > 500:
         result = result[:500]
-    
+
     return result
 
 
@@ -179,7 +179,7 @@ class LongTermMemory:
         """
         # Escape FTS5 special characters to prevent injection attacks
         query = _escape_fts5_query(query)
-        
+
         c = self._conn.cursor()
         try:
             # FTS5 rank(): bm25 returns negative values; more negative = more relevant.
@@ -412,7 +412,7 @@ class MemoryPlugin(Plugin):
         )
         self._procedural = ProceduralMemory(os.path.join(data_dir, "memory/skills"))
         self._kg = KnowledgeGraph(os.path.join(data_dir, "memory/kg.db"))
-        
+
         # Initialize embedding store for semantic search
         self._hybrid_search = mem_cfg.get("hybrid_search", True)
         if self._hybrid_search:
@@ -424,7 +424,7 @@ class MemoryPlugin(Plugin):
             except (OSError, RuntimeError, ValueError) as exc:
                 logger.error("failed to initialize embedding store: %s", exc, exc_info=True)
                 self._hybrid_search = False
-        
+
         self._max_results = mem_cfg.get("max_results", 5)
         self._auto_create_skills = cfg.get("procedural", {}).get("auto_create_skills", True)
         self._min_usage = cfg.get("procedural", {}).get("min_usage_before_skill", 3)
@@ -432,7 +432,7 @@ class MemoryPlugin(Plugin):
         self.bus.subscribe("user_message", self._on_user_message)
         self.bus.subscribe("turn_completed", self._on_turn_completed)
         self.bus.subscribe("cron", self._on_cron)
-        logger.info("memory plugin ready: long_term=%s, hybrid_search=%s", 
+        logger.info("memory plugin ready: long_term=%s, hybrid_search=%s",
                     self._long.stats(), self._hybrid_search)
 
     async def _on_user_message(self, event: Event) -> None:

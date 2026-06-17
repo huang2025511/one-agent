@@ -2,10 +2,9 @@
 
 import asyncio
 import os
+import shutil
 import sys
 import tempfile
-import shutil
-import time
 import traceback
 
 # Ensure workspace is on the path
@@ -35,7 +34,12 @@ def report(name: str, passed: bool, detail: str = ""):
 # ============================================================
 def test_embedding_store():
     print("\n===== 1. EmbeddingStore =====")
-    from memory.embeddings import EmbeddingStore, _cosine_similarity, _vector_to_blob, _blob_to_vector
+    from memory.embeddings import (
+        EmbeddingStore,
+        _blob_to_vector,
+        _cosine_similarity,
+        _vector_to_blob,
+    )
 
     tmpdir = tempfile.mkdtemp()
     db_path = os.path.join(tmpdir, "test_emb.db")
@@ -97,11 +101,11 @@ def test_embedding_store():
         blob = _vector_to_blob([1.0, 2.0, 3.0])
         recovered = _blob_to_vector(blob)
         report("EmbeddingStore: vector blob round-trip",
-               all(abs(a - b) < 1e-6 for a, b in zip([1.0, 2.0, 3.0], recovered)),
+               all(abs(a - b) < 1e-6 for a, b in zip([1.0, 2.0, 3.0], recovered, strict=False)),
                f"recovered={recovered}")
 
         store.close()
-    except Exception as e:
+    except Exception:
         report("EmbeddingStore: exception", False, traceback.format_exc())
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -224,7 +228,7 @@ def test_session_store():
                deleted_sess is None, f"got {deleted_sess}")
 
         store.close()
-    except Exception as e:
+    except Exception:
         report("SessionStore: exception", False, traceback.format_exc())
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -300,7 +304,7 @@ print("second line")
                result.get("duration_ms", 0) >= 0,
                f"duration_ms={result.get('duration_ms')}")
 
-    except Exception as e:
+    except Exception:
         report("PythonExecutor: exception", False, traceback.format_exc())
 
 
@@ -411,7 +415,7 @@ def test_schema_gen():
                "Search query" in props.get("query", {}).get("description", ""),
                f"desc={props.get('query', {}).get('description')}")
 
-    except Exception as e:
+    except Exception:
         report("schema_gen: exception", False, traceback.format_exc())
 
 
@@ -456,7 +460,7 @@ async def test_mcp_client():
         await client.close_all()
         report("MCPClient: close_all on empty client works", True)
 
-    except Exception as e:
+    except Exception:
         report("MCPClient: exception", False, traceback.format_exc())
 
 
@@ -496,7 +500,7 @@ def test_dashboard():
         for func_name in required_functions:
             report(f"dashboard: contains JS function '{func_name}'",
                    f"function {func_name}" in html or f"async function {func_name}" in html,
-                   f"function not found in HTML")
+                   "function not found in HTML")
 
         # HTML structure
         report("dashboard: contains <script> tag",
@@ -508,7 +512,7 @@ def test_dashboard():
         report("dashboard: contains <style> tag",
                "<style>" in html, "")
 
-    except Exception as e:
+    except Exception:
         report("dashboard: exception", False, traceback.format_exc())
 
 
@@ -577,7 +581,7 @@ def test_long_term_memory():
                page.get("total") == 3, f"total={page.get('total')}")
 
         ltm.close()
-    except Exception as e:
+    except Exception:
         report("LongTermMemory: exception", False, traceback.format_exc())
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -673,7 +677,7 @@ def test_cost_tracker():
         report("CostTracker: zero tokens = zero cost",
                cost_zero == 0.0, f"cost={cost_zero}")
 
-    except Exception as e:
+    except Exception:
         report("CostTracker: exception", False, traceback.format_exc())
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -697,8 +701,8 @@ def test_knowledge_graph():
         report("KnowledgeGraph: add_entity returns id",
                id1 is not None and id1 > 0, f"id={id1}")
 
-        id2 = kg.add_entity("JavaScript", etype="language", source="test")
-        id3 = kg.add_entity("React", etype="framework", source="test")
+        kg.add_entity("JavaScript", etype="language", source="test")
+        kg.add_entity("React", etype="framework", source="test")
 
         # Add duplicate entity — should return same id
         id1_dup = kg.add_entity("Python", etype="language", source="test")
@@ -765,7 +769,7 @@ def test_knowledge_graph():
                stats["relations"] > 0, f"stats={stats}")
 
         kg.close()
-    except Exception as e:
+    except Exception:
         report("KnowledgeGraph: exception", False, traceback.format_exc())
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

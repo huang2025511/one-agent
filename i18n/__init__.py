@@ -59,17 +59,17 @@ _translations: Dict[str, Dict[str, str]] = {
         "need_file_or_path": "need file or path",
         "session_store_not_available": "session store not available",
         "improvement_not_available": "self-improvement not available",
-        
+
         # Model errors
         "no_api_key": "[no API key configured for provider '{provider}']",
         "service_unavailable": "[service temporarily unavailable — please retry later]",
-        
+
         # CLI messages
         "welcome": "╔══════════════════════════════════════════════╗\n║  One-Agent v2 — Natural language interface, type 'help'   ║\n╚══════════════════════════════════════════════╝",
         "timeout": "[timeout — try again]",
         "shutting_down": "[shutting down...]",
         "cli_help_content": "You can use natural language or precise commands:\n  exit/quit/bye       → Exit program\n  help/?              → Show help\n  status              → System status\n  clear               → Clear screen\n  Any other text      → Chat with AI",
-        
+
         # Common
         "ok": "ok",
         "error": "error",
@@ -104,17 +104,17 @@ _translations: Dict[str, Dict[str, str]] = {
         "need_file_or_path": "需要提供文件或路径",
         "session_store_not_available": "会话存储不可用",
         "improvement_not_available": "自我改进服务不可用",
-        
+
         # Model errors
         "no_api_key": "[未配置提供商 '{provider}' 的 API 密钥]",
         "service_unavailable": "[服务暂时不可用 — 请稍后重试]",
-        
+
         # CLI messages
         "welcome": "╔══════════════════════════════════════════════╗\n║  One-Agent v2 — 自然语言即可操作，输入 '帮助'   ║\n╚══════════════════════════════════════════════╝",
         "timeout": "[超时 — 请重试]",
         "shutting_down": "[正在关闭...]",
         "cli_help_content": "你可以用自然语言操作，也可以用精准命令：\n  退出/再见/bye     → 退出程序\n  帮助/怎么用/help  → 显示帮助\n  状态/运行情况     → 系统状态\n  清屏/clear        → 清除屏幕\n  其他任何文字      → 与 AI 对话",
-        
+
         # Common
         "ok": "正常",
         "error": "错误",
@@ -126,7 +126,7 @@ _translations: Dict[str, Dict[str, str]] = {
 
 def set_language(lang: str) -> None:
     """Set the current language.
-    
+
     Args:
         lang: Language code ('en' or 'zh')
     """
@@ -173,20 +173,20 @@ def clear_thread_language() -> None:
 
 def detect_language(text: str) -> str:
     """Detect language from input text.
-    
+
     Uses character-based heuristics to determine the language:
     - If text contains CJK characters, it's likely Chinese
     - Otherwise, default to English
-    
+
     Args:
         text: Input text to analyze
-        
+
     Returns:
         Detected language code ('en' or 'zh')
     """
     if not text:
         return "en"
-    
+
     # Count CJK (Chinese/Japanese/Korean) characters
     # Unicode ranges for CJK:
     # - CJK Unified Ideographs: U+4E00 to U+9FFF
@@ -194,50 +194,53 @@ def detect_language(text: str) -> str:
     # - CJK Compatibility Ideographs: U+F900 to U+FAFF
     cjk_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]')
     cjk_chars = len(cjk_pattern.findall(text))
-    
+
     # If more than 10% of characters are CJK, assume Chinese
     total_chars = len(text.strip())
     if total_chars > 0 and (cjk_chars / total_chars) > 0.1:
         return "zh"
-    
+
     return "en"
 
 
 def auto_detect_and_switch(text: str) -> str:
     """Auto-detect language from text and switch if needed.
-    
+
     This function is called on every user message to automatically
-    set the system language to match the user's current language.
-    
+    set the language to match the user's current language.
+
+    Uses thread-local storage to avoid multi-tenant language contention:
+    each thread/request gets its own language without affecting others.
+    The global _current_lang is only set by explicit set_language() calls.
+
     Args:
         text: User input text
-        
+
     Returns:
         The detected language code
     """
-    global _current_lang
-    
     detected_lang = detect_language(text)
-    
-    # Switch language if different from current
-    with _lock:
-        if detected_lang != _current_lang and detected_lang in _translations:
-            logger.info("auto-detected language: %s (switching from %s)", detected_lang, _current_lang)
-            _current_lang = detected_lang
-    
+
+    # Set thread-local language (takes precedence over global in get_language())
+    # This isolates per-request language in multi-user scenarios (Telegram/WeChat)
+    if detected_lang in _translations:
+        set_thread_language(detected_lang)
+    else:
+        set_thread_language("en")
+
     return detected_lang
 
 
 def _(key: str, **kwargs) -> str:
     """Translate a message key to the current language.
-    
+
     Args:
         key: Message key
         **kwargs: Format arguments
-        
+
     Returns:
         Translated message
-        
+
     Example:
         >>> _("rate_limit_exceeded")
         'rate limit exceeded'
@@ -249,20 +252,20 @@ def _(key: str, **kwargs) -> str:
         lang = get_language()
         lang_dict = _translations.get(lang, _translations["en"])
     message = lang_dict.get(key, _translations["en"].get(key, key))
-    
+
     # Format with kwargs if provided
     if kwargs:
         try:
             message = message.format(**kwargs)
         except (KeyError, ValueError) as exc:
             logger.warning("failed to format message '%s': %s", key, exc)
-    
+
     return message
 
 
 def add_translation(lang: str, key: str, message: str) -> None:
     """Add a custom translation.
-    
+
     Args:
         lang: Language code
         key: Message key
@@ -276,7 +279,7 @@ def add_translation(lang: str, key: str, message: str) -> None:
 
 def load_translations_from_dict(translations: Dict[str, Dict[str, str]]) -> None:
     """Load translations from a dictionary.
-    
+
     Args:
         translations: Dict of {lang: {key: message}}
     """

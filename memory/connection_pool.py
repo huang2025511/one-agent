@@ -11,7 +11,7 @@ class SQLiteConnectionPool:
 
     def __init__(self, db_path: str, pool_size: int = 5):
         """Initialize connection pool.
-        
+
         Args:
             db_path: Path to SQLite database file
             pool_size: Number of connections to maintain in pool
@@ -33,10 +33,10 @@ class SQLiteConnectionPool:
     @contextmanager
     def get_connection(self):
         """Get a connection from the pool.
-        
+
         Yields:
             sqlite3.Connection from the pool
-            
+
         Raises:
             RuntimeError: If no connections available
         """
@@ -44,12 +44,16 @@ class SQLiteConnectionPool:
             if not self._connections:
                 raise RuntimeError("No connections available in pool")
             conn = self._connections.pop()
-        
+
         try:
             yield conn
         finally:
             with self._lock:
                 self._connections.append(conn)
+
+    def close(self) -> None:
+        """Close all connections in the pool (alias for close_all)."""
+        self.close_all()
 
     def close_all(self):
         """Close all connections in the pool."""
@@ -64,6 +68,6 @@ class SQLiteConnectionPool:
     def __del__(self):
         """Ensure connections are closed on garbage collection."""
         try:
-            self.close_all()
+            self.close()
         except Exception:
             pass

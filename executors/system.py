@@ -46,14 +46,10 @@ import os
 import re
 import shlex
 import signal
-import subprocess
 import time
-from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
-
-from core.plugin import Plugin
+from executors.base import BaseExecutor, ExecutorResult, _to_executor_result
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +172,7 @@ def classify_command(command: str) -> Tuple[int, str]:
             return (1, f"file/system operation: {cmd}")
 
     # Check SAFE
-    for cmd, pattern in _SAFE_PATTERNS:
+    for _cmd, pattern in _SAFE_PATTERNS:
         if re.match(pattern, stripped, re.IGNORECASE):
             return (0, "safe operation")
 
@@ -255,7 +251,7 @@ class PasswordManager:
 # ============================================================
 #  System Executor Plugin
 # ============================================================
-class SystemExecutor(Plugin):
+class SystemExecutor(BaseExecutor):
     """Run OS commands with risk-based password confirmation.
 
     Implements the ``system.run`` skill:
@@ -363,6 +359,15 @@ class SystemExecutor(Plugin):
         # ---- execute ----
         return await self._execute(command, workdir, risk_level)
 
+    async def execute(self, command: str, **kwargs) -> ExecutorResult:
+        """Unified entry point — delegates to dispatch('system.run', ...)."""
+        result = await self.dispatch("system.run", {
+            "command": command,
+            "password": kwargs.get("password", ""),
+            "working_dir": kwargs.get("working_dir", ""),
+        })
+        return _to_executor_result(result)
+
     # ------------------------------------------------------------ permission check
     async def _check_permission(
         self, command: str, risk_level: int, reason: str, provided_password: str = "",
@@ -420,7 +425,6 @@ class SystemExecutor(Plugin):
         are already classified as DANGEROUS by ``classify_command`` and
         should never reach this point without explicit confirmation.
         """
-        import shlex
         try:
             # Parse command into argv — avoids shell interpretation.
             # shlex.split handles quoting correctly.
@@ -509,5 +513,4 @@ __all__ = [
     "SystemExecutor",
     "PasswordManager",
     "classify_command",
-    "RISK_LABELS",
 ]

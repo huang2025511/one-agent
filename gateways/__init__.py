@@ -15,14 +15,13 @@ from pathlib import Path
 from typing import Optional
 
 from core.plugin import Plugin
-
 from gateways.messaging import (  # noqa: F401  # re-exported for plugin discovery
+    DingTalkGateway,
+    DiscordGateway,
+    FeishuGateway,
+    SlackGateway,
     TelegramGateway,
     WeComGateway,
-    DingTalkGateway,
-    FeishuGateway,
-    DiscordGateway,
-    SlackGateway,
 )
 from gateways.wechat_personal import WeChatPersonalGateway  # noqa: F401
 
@@ -80,11 +79,11 @@ class CLIGateway(Plugin):
         """Run the interactive REPL.  ``send_to_agent(text)`` should be an
         async function that triggers the agent pipeline."""
         from i18n import _, auto_detect_and_switch
-        
+
         # Auto-detect language on first interaction
         print("One-Agent — 自然语言即可操作，输入 '帮助' 查看功能。")
         first_message = True
-        
+
         while True:
             try:
                 line = input(self._prompt)
@@ -97,12 +96,12 @@ class CLIGateway(Plugin):
             line = line.strip()
             if not line:
                 continue
-            
+
             # Auto-detect language on first user message
             if first_message:
                 auto_detect_and_switch(line)
                 first_message = False
-            
+
             intent = _match_cli_intent(line)
             if intent == "exit":
                 return
@@ -306,8 +305,9 @@ class WebGateway(Plugin):
             if _llm is None:
                 return {"error": "LLM provider not available"}
 
-            from fastapi.responses import StreamingResponse
             import json as _json
+
+            from fastapi.responses import StreamingResponse
 
             async def event_generator():
                 msgs = [{"role": "user", "content": text}]

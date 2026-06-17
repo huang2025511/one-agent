@@ -87,7 +87,7 @@ MAX_CALL_STATS_SIZE = 1000
 CALL_STATS_TRIM_SIZE = 500
 
 
-from models.tiers import MODEL_TIERS  # re-export for backward compatibility
+from models.tiers import MODEL_TIERS  # noqa: E402  # re-export for backward compatibility
 
 __all__ = [
     "LLMProvider",
@@ -141,14 +141,14 @@ _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
 class CircuitBreaker:
     """断路器模式：防止对故障服务的重复调用。
-    
+
     状态转换：
     - CLOSED（正常）：连续失败达到阈值时转为 OPEN
     - OPEN（熔断）：快速失败，不尝试调用。超时后转为 HALF_OPEN
     - HALF_OPEN（半开）：尝试一次调用，成功则转为 CLOSED，失败则回到 OPEN
     """
-    
-    def __init__(self, failure_threshold: int = CIRCUIT_BREAKER_FAILURE_THRESHOLD, 
+
+    def __init__(self, failure_threshold: int = CIRCUIT_BREAKER_FAILURE_THRESHOLD,
                  recovery_timeout: float = CIRCUIT_BREAKER_RECOVERY_TIMEOUT):
         assert failure_threshold > 0, "failure_threshold must be positive"
         assert recovery_timeout >= 0, "recovery_timeout must be non-negative"
@@ -157,7 +157,7 @@ class CircuitBreaker:
         self.failure_count = 0
         self.last_failure_time = 0.0
         self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
-    
+
     def can_execute(self) -> bool:
         """检查是否允许执行调用。"""
         if self.state == "CLOSED":
@@ -170,17 +170,17 @@ class CircuitBreaker:
             return False
         else:  # HALF_OPEN
             return True
-    
+
     def record_success(self):
         """记录成功调用。"""
         self.failure_count = 0
         self.state = "CLOSED"
-    
+
     def record_failure(self):
         """记录失败调用。"""
         self.failure_count += 1
         self.last_failure_time = time.time()
-        
+
         if self.state == "HALF_OPEN":
             # 半开状态失败，回到 OPEN
             self.state = "OPEN"
@@ -259,12 +259,12 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._default_max_tokens = llm_cfg.get("default_max_tokens", 2048)
         self._timeout = llm_cfg.get("timeout", 60)
         self._retry_count = llm_cfg.get("retries", 3)
-        
+
         # Fallback chain configuration
         self._fallback_chain = llm_cfg.get("fallback_chain", []) or []
         if self._fallback_chain:
             logger.info("LLM fallback chain configured: %s", self._fallback_chain)
-        
+
         # Cache config: read from dedicated llm_cache section first, fall back to llm inline
         cache_cfg = ctx.config.get("llm_cache") or {}
         self._cache_enabled = cache_cfg.get("enabled", llm_cfg.get("cache_enabled", True))
@@ -349,7 +349,7 @@ class LLMProvider(RecommendationMixin, Plugin):
         provider = self._infer_primary_provider()
         base = self._provider_base_urls.get(provider)
         api_key = self._api_keys.get(provider)
-        if base and api_key and not "${" in (api_key or ""):
+        if base and api_key and "${" not in (api_key or ""):
             try:
                 async with httpx.AsyncClient(timeout=5.0) as probe:
                     r = await probe.get(
@@ -402,8 +402,9 @@ class LLMProvider(RecommendationMixin, Plugin):
             # Use the resolver if available, otherwise just leave it —
             # get_catalog() / rebuild_tiers() will return no_api_key in that case
             try:
-                from .resolver import resolve
                 import asyncio as _asyncio
+
+                from .resolver import resolve
                 try:
                     loop = _asyncio.get_event_loop()
                     if loop.is_running():
@@ -591,7 +592,8 @@ class LLMProvider(RecommendationMixin, Plugin):
         logger.info("probing alternative endpoints for provider=%s (attempt %d/2)", provider, count + 1)
 
         try:
-            from .resolver import _candidate_hosts as _hosts, _PROBE_PATH_PATTERNS as _patterns
+            from .resolver import _PROBE_PATH_PATTERNS as _patterns
+            from .resolver import _candidate_hosts as _hosts
         except ImportError:
             return None
 
@@ -786,7 +788,7 @@ class LLMProvider(RecommendationMixin, Plugin):
         _skip_fallback: bool = False,
     ) -> Dict[str, Any]:
         """Call the LLM, with optional caching and automatic retries.
-        
+
         Args:
             _skip_fallback: Internal flag to prevent recursive fallback attempts.
         """
@@ -794,7 +796,7 @@ class LLMProvider(RecommendationMixin, Plugin):
         assert len(messages) > 0, "messages cannot be empty"
         assert temperature is None or (0.0 <= temperature <= 2.0), "temperature must be between 0 and 2"
         assert max_tokens is None or max_tokens > 0, "max_tokens must be positive"
-        
+
         model = model or self._default_model
         temperature = self._default_temperature if temperature is None else temperature
         max_tokens = self._default_max_tokens if max_tokens is None else max_tokens
@@ -868,7 +870,7 @@ class LLMProvider(RecommendationMixin, Plugin):
         if provider not in self._circuit_breakers:
             self._circuit_breakers[provider] = CircuitBreaker()
         circuit_breaker = self._circuit_breakers[provider]
-        
+
         if not circuit_breaker.can_execute():
             logger.warning(
                 "Circuit breaker OPEN for provider %s, skipping call",
@@ -877,7 +879,6 @@ class LLMProvider(RecommendationMixin, Plugin):
             # Don't return immediately — break to the fallback chain below
             # so an alternative provider can handle the request. Returning
             # here would skip the fallback logic, defeating its purpose.
-            last_err = RuntimeError(f"circuit breaker open for {provider}")
             # Skip directly to fallback chain
             if not _skip_fallback and self._fallback_chain:
                 for fb in self._fallback_chain:
@@ -902,7 +903,6 @@ class LLMProvider(RecommendationMixin, Plugin):
                 "circuit_breaker_open": True,
             }
 
-        last_err: Optional[Exception] = None
         for attempt in range(1, self._retry_count + 1):
             try:
                 result = await self._do_call(
@@ -910,10 +910,10 @@ class LLMProvider(RecommendationMixin, Plugin):
                     messages=messages, temperature=temperature,
                     max_tokens=max_tokens, tools=tools, provider=provider,
                 )
-                
+
                 # Record success in circuit breaker
                 circuit_breaker.record_success()
-                
+
                 # Record cost
                 cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
                 self._cost_total += cost
@@ -940,8 +940,6 @@ class LLMProvider(RecommendationMixin, Plugin):
 
                 return result
             except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError, asyncio.TimeoutError, ConnectionError) as exc:
-                last_err = exc
-
                 # Classify: non-retryable errors (4xx auth/bad-request) exit
                 # immediately to avoid wasting time on invalid requests.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -998,7 +996,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                                     retry_body = resp_obj.text[:300]
                             except AttributeError as exc:
                                 logger.error("failed to extract retry response body: %s", exc, exc_info=True)
-                            logger.warning("retry without tools also failed: status=%s body=%s", 
+                            logger.warning("retry without tools also failed: status=%s body=%s",
                                           retry_status, retry_body)
                             # Last resort: retry with minimal prompt (no system message)
                             if retry_status == 400:
@@ -1114,13 +1112,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                     logger.error("llm call gave up after %d attempts: %s", self._retry_count, exc)
 
         from i18n import _
-        
+
         # --- Fallback chain: try alternative providers if primary fails ---
         if not _skip_fallback and self._fallback_chain:
             for fallback_model in self._fallback_chain:
                 if fallback_model == model:
                     continue  # Skip if it's the same model
-                
+
                 logger.info("Trying fallback provider: %s", fallback_model)
                 try:
                     result = await self.chat_completion(
@@ -1139,7 +1137,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                 except Exception as exc:
                     logger.warning("Fallback %s failed: %s", fallback_model, exc)
                     continue
-        
+
         return {
             "text": _("service_unavailable"),
             "tool_calls": [],

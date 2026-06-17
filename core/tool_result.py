@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Union
 from dataclasses import dataclass
+from typing import Any, Dict, Optional, Union
 
 _VALID_STATUSES = frozenset({"success", "error", "timeout", "unavailable", "skipped"})
 

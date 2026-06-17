@@ -12,7 +12,6 @@ The SkillManager exposes them uniformly as tools consumable by the LLM.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import re
@@ -21,15 +20,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.events import Event
+from core.exceptions import InputValidationError, SkillExecutionError  # noqa: F401
 from core.plugin import Plugin
-from core.exceptions import SkillExecutionError, InputValidationError
+from memory.knowledge_graph import make_graph_search_handler  # noqa: F401
+from multimodal import make_image_handler, make_transcribe_handler
+from skills.document_search import make_doc_search_handler
 
 from .document_search import DocumentStore
 from .updater import make_updater_handler
-from .wechat_login import make_wechat_login_handler
-from multimodal import make_transcribe_handler, make_image_handler
-from skills.document_search import make_doc_search_handler
-from memory.knowledge_graph import make_graph_search_handler
+from .wechat_login import make_wechat_login_handler  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +91,13 @@ class Skill:
         """Validate skill arguments against schema."""
         if not isinstance(args, dict):
             raise InputValidationError("Arguments must be a dictionary")
-        
+
         # Check required parameters
         required = self.schema.get("function", {}).get("parameters", {}).get("required", [])
         for param in required:
             if param not in args or args[param] is None:
                 raise InputValidationError(f"Missing required parameter: {param}")
-        
+
         # Validate parameters against schema properties
         properties = self.schema.get("function", {}).get("parameters", {}).get("properties", {})
         for key, value in args.items():
@@ -106,7 +105,7 @@ class Skill:
                 continue
             prop = properties[key]
             expected_type = prop.get("type")
-            
+
             if expected_type == "string":
                 if not isinstance(value, str):
                     raise InputValidationError(f"Parameter '{key}' must be a string")
@@ -384,7 +383,7 @@ class SkillManager(Plugin):
             try:
                 from one_agent import __version__ as VERSION
             except (ImportError, AttributeError):
-                VERSION = "0.1.0"
+                VERSION = "2.0.0"
             return (
                 f"🤖 One-Agent 版本信息：\n"
                 f"  版本: {VERSION}\n"
@@ -728,7 +727,6 @@ class SkillManager(Plugin):
         # ---------- 更新技能 ----------
         async def updater_handler(args: Dict[str, Any]) -> str:
             """更新 One-Agent 到最新版本。使用方式: /update 或 /更新"""
-            from .updater import make_updater_handler
             updater = make_updater_handler()
             return await updater(args)
         self.register(Skill(
@@ -750,7 +748,7 @@ class SkillManager(Plugin):
         # ---------- 微信登录技能 ----------
         async def wechat_login_handler(args: Dict[str, Any]) -> str:
             """启动微信网关并显示登录二维码（按需启动）"""
-            from skills.wechat_login import make_wechat_login_handler
+            from skills.wechat_login import make_wechat_login_handler  # noqa: F811
             # Pass the SkillManager's ctx_ref so the handler can locate the
             # wechat gateway plugin without importing non-existent names.
             wechat_handler = make_wechat_login_handler(getattr(self, "_ctx_ref", None))
@@ -813,17 +811,18 @@ class SkillManager(Plugin):
         # ---------- 网页搜索技能 ----------
         async def web_search_handler(args: Dict[str, Any]) -> str:
             """搜索互联网获取最新信息。多源自动切换：DuckDuckGo → Bing → 自给。
-            
+
             不依赖任何 API key，纯 HTML 解析。任一源成功即返回结果。
             """
             query = str(args.get("input", "")).strip()
             if not query:
                 return "[web_search error: empty query]"
-            
+
             import re as _re
-            import httpx as _httpx
             from urllib.parse import quote as _url_quote
-            
+
+            import httpx as _httpx
+
             headers = {
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -832,7 +831,7 @@ class SkillManager(Plugin):
             }
             results: list[str] = []
             sources_tried: list[str] = []
-            
+
             async def _try_ddg() -> bool:
                 """DuckDuckGo Lite — clean HTML, no JS."""
                 nonlocal results
@@ -903,7 +902,7 @@ class SkillManager(Plugin):
                 sources_tried.append(name)
                 if await fn():
                     break
-            
+
             if results:
                 summary = "\n\n".join(results[:5])
                 return f"搜索结果（{query}，来源: {' → '.join(sources_tried)}）：\n\n{summary}"
@@ -1079,7 +1078,7 @@ class SkillManager(Plugin):
             # 如果未提供，创建新实例（向后兼容或测试环境）
             from executors.python_runner import PythonExecutor
             python_executor = PythonExecutor()
-        
+
         self.register(Skill(
             id="python_execute",
             title="Python 代码执行",
@@ -1237,7 +1236,7 @@ def _set_nested(d: dict, path: str, value) -> None:
 def _parse_bool_value(text: str) -> Optional[bool]:
     """从自然语言中解析布尔值。"""
     t = text.lower().strip()
-    if t in {"true", "yes", "1", "on", "开", "开启", "启用", "打开", "打开", "是", "enable", "enabled"}:
+    if t in {"true", "yes", "1", "on", "开", "开启", "启用", "打开", "是", "enable", "enabled"}:
         return True
     if t in {"false", "no", "0", "off", "关", "关闭", "禁用", "停用", "否", "disable", "disabled"}:
         return False
@@ -1247,16 +1246,16 @@ def _parse_bool_value(text: str) -> Optional[bool]:
 def _parse_value(text: str, value_type: type):
     """根据目标类型解析用户输入的值。"""
     text = text.strip().strip("\"'").strip()
-    if value_type == bool:
+    if value_type is bool:
         v = _parse_bool_value(text)
         if v is not None:
             return v
         return None
-    if value_type == int:
+    if value_type is int:
         import re as _re
         m = _re.search(r"-?\d+", text)
         return int(m.group()) if m else None
-    if value_type == float:
+    if value_type is float:
         import re as _re
         m = _re.search(r"-?\d+\.?\d*", text)
         return float(m.group()) if m else None
@@ -1329,7 +1328,8 @@ def _process_settings_command(input_text: str, config: dict) -> str:
                 break
 
     if matched_path is None:
-        return f"未识别的设置项。可设置的选项：{', '.join(a for a in _SETTING_ALIASES if any('\u4e00' <= c <= '\u9fff' for c in a))}"
+        chinese_aliases = [a for a in _SETTING_ALIASES if any('\u4e00' <= c <= '\u9fff' for c in a)]
+        return f"未识别的设置项。可设置的选项：{', '.join(chinese_aliases)}"
 
     # 敏感项写入检查
     if is_write and any(sk in matched_path for sk in _SENSITIVE_KEYS):
@@ -1391,11 +1391,12 @@ def _process_settings_command(input_text: str, config: dict) -> str:
 
 def _save_config(config: dict) -> None:
     """将配置写回 YAML 文件（原子写入，带文件锁）。"""
-    import yaml
     import tempfile
+
+    import yaml
     config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
     lock_path = config_path + ".lock"
-    
+
     # Cross-platform file locking
     lock_fd = None
     use_fcntl = False
@@ -1408,7 +1409,7 @@ def _save_config(config: dict) -> None:
             import msvcrt
         except ImportError:
             logger.warning("File locking not available on this platform")
-    
+
     try:
         # Acquire file lock to prevent race conditions
         lock_fd = open(lock_path, "w")
@@ -1422,7 +1423,7 @@ def _save_config(config: dict) -> None:
                     msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
                 except (ImportError, OSError):
                     pass  # Skip locking if not available
-            
+
             # Write to temp file first, then atomically rename
             dir_name = os.path.dirname(config_path) or "."
             with tempfile.NamedTemporaryFile(
@@ -1454,7 +1455,7 @@ def _save_config(config: dict) -> None:
                 os.unlink(lock_path)
             except OSError as exc:
                 logger.error("failed to unlink lock file %s: %s", lock_path, exc, exc_info=True)
-    except (OSError, IOError) as exc:
+    except OSError as exc:
         logger.error("保存配置失败: %s", exc, exc_info=True)
         # Clean up temp file on error
         try:

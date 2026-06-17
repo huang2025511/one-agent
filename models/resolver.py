@@ -28,7 +28,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
@@ -241,7 +241,7 @@ async def resolve(
             *[_probe_one(cli, url, api_key, timeout) for url in candidates],
             return_exceptions=False,
         )
-        for url, ok in zip(candidates, results):
+        for url, ok in zip(candidates, results, strict=False):
             if ok:
                 logger.info("resolver: probed %s → %s", name, url)
                 result = ResolvedProvider(provider=name, base_url=url, found=True, via="probe")

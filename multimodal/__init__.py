@@ -25,7 +25,7 @@ import mimetypes
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import httpx
 
@@ -193,8 +193,11 @@ class MultimodalPlugin(Plugin):
             try:
                 p = Path(image_data).resolve()
                 # Only allow files in current directory or subdirectories
+                # Use relative_to() for strict containment (startswith can be bypassed)
                 cwd = Path.cwd().resolve()
-                if not str(p).startswith(str(cwd)):
+                try:
+                    p.relative_to(cwd)
+                except ValueError:
                     return {"error": "access denied: path outside working directory", "analysis": ""}
                 # Validate file extension
                 allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -289,7 +292,6 @@ class MultimodalPlugin(Plugin):
         Tries the local ``whisper`` CLI first (openai-whisper), then falls
         back to the OpenAI-compatible whisper-1 model via the LLM provider.
         """
-        import os
         import subprocess
 
         if not os.path.exists(audio_path):
@@ -363,7 +365,6 @@ class MultimodalPlugin(Plugin):
         :meth:`LLMProvider.chat_completion`.
         """
         import base64 as _b64
-        import mimetypes as _mt
         from pathlib import Path
 
         path = Path(image_path).resolve()
@@ -424,10 +425,9 @@ def make_transcribe_handler():
         path = args.get("path", args.get("input", ""))
         if not path:
             return "请提供音频文件路径（path 或 input 参数）"
-        import subprocess
         import os
         from pathlib import Path
-        
+
         # Security: validate path to prevent directory traversal
         try:
             p = Path(path).resolve()
@@ -442,7 +442,7 @@ def make_transcribe_handler():
             path = str(p)
         except (OSError, ValueError) as exc:
             return f"invalid path: {exc}"
-        
+
         try:
             result = subprocess.run(
                 ["whisper", path, "--language", "zh", "--model", "tiny",
@@ -473,10 +473,9 @@ def make_image_handler():
         question = args.get("question", "请描述这张图片")
         if not path:
             return "请提供图片路径（path 或 input 参数）"
-        import os
         import base64
         from pathlib import Path
-        
+
         # Security: validate path to prevent directory traversal
         try:
             p = Path(path).resolve()

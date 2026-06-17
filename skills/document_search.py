@@ -7,10 +7,10 @@ No vector database required.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sqlite3
-import logging
 import threading
 from pathlib import Path
 from typing import Any, Dict, List
@@ -131,7 +131,7 @@ class DocumentStore:
             if not content.strip():
                 try:
                     content = path.read_text(encoding='utf-8', errors='ignore')
-                except (OSError, UnicodeDecodeError) as exc:
+                except (OSError, UnicodeDecodeError):
                     logger.warning("Failed to parse PDF: %s", name)
                     content = f"[无法解析 PDF: {name}]"
         else:

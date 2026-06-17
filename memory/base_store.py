@@ -10,7 +10,7 @@ used by :class:`SessionStore`, :class:`EmbeddingStore`, and
     multiple threads/coroutines, but simultaneous writes may cause
     "database is locked" errors. The retry logic in :meth:`_execute_with_retry`
     handles transient lock conflicts with exponential backoff.
-    
+
     For multi-process deployments, consider using a connection pool with
     a write queue to serialize writes.
 """
@@ -22,7 +22,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -72,17 +72,17 @@ class BaseSQLiteStore:
         operation: str = "execute",
     ) -> Optional[sqlite3.Row]:
         """Execute SQL with retry logic for "database is locked" errors.
-        
+
         Uses exponential backoff: 10ms, 20ms, 40ms (capped at 100ms).
-        
+
         Args:
             sql: SQL statement to execute
             params: Query parameters
             operation: "execute" for single row, "executemany" for bulk
-            
+
         Returns:
             Last row for queries, None for DML statements
-            
+
         Raises:
             sqlite3.OperationalError: If all retries exhausted
         """
@@ -114,7 +114,7 @@ class BaseSQLiteStore:
                     continue
                 # Non-lock error or final attempt
                 raise
-        
+
         # All retries exhausted
         if last_error:
             raise last_error

@@ -9,10 +9,10 @@ shared across async tasks without extra locking.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import time
-import logging
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -164,8 +164,9 @@ class CostTracker:
         }
 
     def check_budget(self) -> Dict[str, Any]:
-        daily = self.daily_cost()
-        monthly = self.monthly_cost()
+        with self._lock:
+            daily = self.daily_cost()
+            monthly = self.monthly_cost()
         return {
             "daily": daily,
             "monthly": monthly,

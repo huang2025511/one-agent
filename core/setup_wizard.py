@@ -15,12 +15,10 @@ Architecture:
 
 from __future__ import annotations
 
-import asyncio
 import os
-import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 # ---- Known API key env vars across all providers ----
 _KNOWN_KEY_ENV_VARS: List[str] = [
@@ -179,7 +177,7 @@ def run_cli_setup() -> bool:
         default_mark = " (默认)" if i == 1 else ""
         print(f"    {i}. {model}{default_mark}")
     print(f"    {len(models) + 1}. 自定义输入 (Custom)")
-    model_choice = _prompt(f"  请选择模型 [默认 1]: ", "1")
+    model_choice = _prompt("  请选择模型 [默认 1]: ", "1")
     try:
         idx = int(model_choice) - 1
         if 0 <= idx < len(models):

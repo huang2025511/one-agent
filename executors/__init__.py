@@ -10,12 +10,14 @@ Enhanced with:
   - Docker security hardening (cap-drop, read-only, user 1000:1000)
   - Structured audit log entries
   - Sandboxed Python REPL executor
+  - BaseExecutor abstract base class + ExecutorResult unified return type
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shlex
 import time
 from pathlib import Path
@@ -23,14 +25,24 @@ from typing import Dict, Optional
 
 import httpx
 
-from core.plugin import Plugin
-from core.exceptions import SecurityError, InputValidationError
+from core.exceptions import InputValidationError, SecurityError
+from core.plugin import Plugin  # noqa: F401
+from executors.base import BaseExecutor, ExecutorResult, _to_executor_result
 from executors.python_runner import PythonExecutor
 from executors.system import SystemExecutor, classify_command  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ShellExecutor", "DockerExecutor", "BrowserExecutor", "PythonExecutor", "SystemExecutor", "classify_command"]
+__all__ = [
+    "BaseExecutor",
+    "ExecutorResult",
+    "ShellExecutor",
+    "DockerExecutor",
+    "BrowserExecutor",
+    "PythonExecutor",
+    "SystemExecutor",
+    "classify_command",
+]
 
 
 # Shell metacharacters that enable command injection — always reject
@@ -83,7 +95,7 @@ ALLOWED_PATTERNS = {
 }
 
 
-class ShellExecutor(Plugin):
+class ShellExecutor(BaseExecutor):
     """Runs shell commands locally with regex allow-list security."""
 
     name = "executor_shell"
@@ -133,7 +145,7 @@ class ShellExecutor(Plugin):
         # Fixed: [0-9a-zA-Z\s_./:@#='\"\-]+ - backslash at end, no need to escape dash
         if not re.fullmatch(r"[0-9a-zA-Z\s_./:@#='\"\-]+", command.strip()):
             return False
-        for name, pattern in self._patterns.items():
+        for _name, pattern in self._patterns.items():
             if re.fullmatch(pattern, command.strip()):
                 return True
         return False
@@ -186,7 +198,7 @@ class ShellExecutor(Plugin):
             # Determine risk level based on command content
             if any(d in command for d in ["sudo", "rm -rf", "mkfs", "dd if="]):
                 risk = "critical"
-            elif any(d in command for d in ["rm", "delete", "drop", ">", "sudo", "chmod", "chown"]):
+            elif any(d in command for d in ["rm", "delete", "drop", "sudo", "chmod", "chown"]):
                 risk = "high"
             else:
                 risk = "medium"
@@ -251,10 +263,14 @@ class ShellExecutor(Plugin):
 
         if audit:
             self._audit(command, result)
-        return result
+        return _to_executor_result(result)
+
+    async def execute(self, command: str, timeout: Optional[int] = None, **kwargs) -> ExecutorResult:
+        """Unified entry point — delegates to run()."""
+        return await self.run(command, timeout=timeout, audit=kwargs.get("audit", True))
 
 
-class DockerExecutor(Plugin):
+class DockerExecutor(BaseExecutor):
     """Runs commands in a hardened Docker container.
 
     Security hardening:
@@ -303,30 +319,31 @@ class DockerExecutor(Plugin):
             return False
         import re
         # Basic safety: only allow printable ASCII with common shell-safe chars
-        if not re.fullmatch(r"[0-9a-zA-Z\s_./:@#\-='\"\\-]+", command.strip()):
+        # Note: backslash excluded to prevent path traversal / escape sequences (Bug #14)
+        if not re.fullmatch(r"[0-9a-zA-Z\s_./:@#='\"\-]+", command.strip()):
             return False
-        for name, pattern in self._patterns.items():
+        for _name, pattern in self._patterns.items():
             if re.fullmatch(pattern, command.strip()):
                 return True
         return False
 
-    async def run(self, command: str) -> Dict:
+    async def run(self, command: str, timeout: Optional[int] = None) -> ExecutorResult:
         if not self._enabled:
-            return {
+            return _to_executor_result({
                 "stdout": "", "stderr": "docker executor disabled",
                 "returncode": -1, "blocked": False,
-            }
+            })
         if not self.can_run(command):
-            return {
+            return _to_executor_result({
                 "stdout": "", "stderr": f"[security] command blocked: {command[:100]}",
                 "returncode": -1, "blocked": True,
-            }
+            })
         # Human-in-the-loop approval check for dangerous commands
         approval_manager = getattr(self.ctx, 'approval_manager', None) if self.ctx else None
         if approval_manager is not None:
             if any(d in command for d in ["sudo", "rm -rf", "mkfs", "dd if="]):
                 risk = "critical"
-            elif any(d in command for d in ["rm", "delete", "drop", ">", "sudo", "chmod", "chown"]):
+            elif any(d in command for d in ["rm", "delete", "drop", "sudo", "chmod", "chown"]):
                 risk = "high"
             else:
                 risk = "medium"
@@ -338,12 +355,12 @@ class DockerExecutor(Plugin):
             self.publish("approval_needed", request=req.to_dict())
             approved = await req.wait(timeout=120.0)
             if not approved:
-                return {
+                return _to_executor_result({
                     "stdout": "",
                     "stderr": "[execution denied by user]",
                     "returncode": -1,
                     "blocked": True,
-                }
+                })
         # Use exec-form (argv) instead of shell-form to avoid container-internal
         # shell interpretation.  The container is already heavily sandboxed
         # (--network=none, --read-only, --cap-drop=all, non-root), but
@@ -351,10 +368,10 @@ class DockerExecutor(Plugin):
         try:
             cmd_parts = shlex.split(command, posix=True)
         except ValueError:
-            return {
+            return _to_executor_result({
                 "stdout": "", "stderr": "[parse error: cannot split command]",
                 "returncode": -3, "blocked": True,
-            }
+            })
         args = [
             "docker", "run", "--rm",
             f"--memory={self._mem_limit_mb}m",
@@ -373,24 +390,30 @@ class DockerExecutor(Plugin):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
-            return {
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout or self._timeout,
+            )
+            return _to_executor_result({
                 "stdout": (stdout.decode() or "")[:8000],
                 "stderr": (stderr.decode() or "")[:4000],
                 "returncode": proc.returncode,
                 "blocked": False,
-            }
+            })
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.wait()  # 等待进程终止，避免僵尸进程
-            return {"stdout": "", "stderr": "docker timeout", "returncode": -2}
+            await proc.wait()  # Wait for process termination to avoid zombies
+            return _to_executor_result({"stdout": "", "stderr": "docker timeout", "returncode": -2})
         except FileNotFoundError:
-            return {"stdout": "", "stderr": "docker binary not found", "returncode": -3}
+            return _to_executor_result({"stdout": "", "stderr": "docker binary not found", "returncode": -3})
         except Exception as exc:  # noqa: BLE001
-            return {"stdout": "", "stderr": str(exc), "returncode": -4}
+            return _to_executor_result({"stdout": "", "stderr": str(exc), "returncode": -4})
+
+    async def execute(self, command: str, timeout: Optional[int] = None, **kwargs) -> ExecutorResult:
+        """Unified entry point — delegates to run()."""
+        return await self.run(command, timeout=timeout)
 
 
-class BrowserExecutor(Plugin):
+class BrowserExecutor(BaseExecutor):
     """Minimal browser automation: GET a page and return text / HTML."""
 
     name = "executor_browser"
@@ -419,17 +442,35 @@ class BrowserExecutor(Plugin):
             await self._client.aclose()
         await super().stop()
 
-    async def fetch(self, url: str, max_chars: int = 8000) -> Dict:
+    async def fetch(self, url: str, max_chars: int = 8000) -> ExecutorResult:
         if not self._enabled or self._client is None:
-            return {"status": 0, "text": "", "error": "browser executor disabled"}
+            return _to_executor_result({
+                "stdout": "", "stderr": "browser executor disabled",
+                "exit_code": -1, "blocked": False, "error": "disabled",
+                "metadata": {"url": url, "http_status": 0},
+            })
         try:
             resp = await self._client.get(url)
             text = (resp.text or "")[:max_chars]
-            return {
-                "status": resp.status_code,
-                "text": text,
-                "content_type": resp.headers.get("content-type", ""),
+            return _to_executor_result({
+                "stdout": text,
+                "stderr": "",
+                "exit_code": 0 if resp.status_code < 400 else 1,
+                "blocked": False,
                 "error": None,
-            }
+                "metadata": {
+                    "url": url,
+                    "http_status": resp.status_code,
+                    "content_type": resp.headers.get("content-type", ""),
+                },
+            })
         except Exception as exc:  # noqa: BLE001
-            return {"status": 0, "text": "", "error": str(exc)}
+            return _to_executor_result({
+                "stdout": "", "stderr": str(exc),
+                "exit_code": -3, "blocked": False, "error": str(exc),
+                "metadata": {"url": url, "http_status": 0},
+            })
+
+    async def execute(self, url: str, **kwargs) -> ExecutorResult:
+        """Unified entry point — delegates to fetch()."""
+        return await self.fetch(url, max_chars=kwargs.get("max_chars", 8000))

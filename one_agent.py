@@ -18,19 +18,22 @@ import os
 import signal
 import sys
 from pathlib import Path
-
-logger = logging.getLogger(__name__)
 from typing import Any, Dict, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+# Local path setup — must precede local application imports
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+
+__version__ = "2.0.0"
 
 from core.context import AgentContext  # noqa: E402
 from core.plugin import PluginManager  # noqa: E402
 from memory.session_store import SessionStore  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -178,7 +181,7 @@ def load_config(path: str) -> FullConfig:
     Returns a FullConfig Pydantic object (validated).  Call .model_dump() to get a
     plain dict for contexts that don't need Pydantic validation.
     """
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
 
     expanded = _expand_env(raw)
@@ -247,26 +250,25 @@ class OneAgentApp:
     """Top-level assembly: builds plugin manager, coordinates plugins."""
 
     def __init__(self, config_path: str) -> None:
-        from core.events import EventBus
-        from core.coordinator import Coordinator
-        from models import LLMProvider
-        from router import SmartRouter
-        from memory import MemoryPlugin
-        from skills import SkillManager, Skill
-        from memory.knowledge_graph import make_graph_search_handler
-        from executors import ShellExecutor, DockerExecutor, BrowserExecutor, PythonExecutor
-        from scheduler import SchedulerPlugin
-        from multimodal import MultimodalPlugin
         from api import RESTAPIGateway
-        from monitor import MonitoringPlugin
-        from marketplace import MarketplacePlugin, Marketplace
+        from core.coordinator import Coordinator
+        from core.events import EventBus
+        from executors import BrowserExecutor, DockerExecutor, PythonExecutor, ShellExecutor
 
         # Import gateways with graceful degradation — if a gateway's dependencies
         # are missing (e.g., cryptography for WeCom), log warning and skip it
         # rather than crashing the entire startup.
         from gateways import CLIGateway
+        from marketplace import MarketplacePlugin
+        from memory import MemoryPlugin
+        from models import LLMProvider
+        from monitor import MonitoringPlugin
+        from multimodal import MultimodalPlugin
+        from router import SmartRouter
+        from scheduler import SchedulerPlugin
+        from skills import SkillManager
         self.cli = CLIGateway()
-        
+
         gateways_to_load = [
             ("telegram", "TelegramGateway"),
             ("wecom", "WeComGateway"),
@@ -276,7 +278,7 @@ class OneAgentApp:
             ("slack", "SlackGateway"),
             ("web", "WebGateway"),
         ]
-        
+
         for attr_name, class_name in gateways_to_load:
             try:
                 module = __import__("gateways", fromlist=[class_name])
@@ -326,6 +328,7 @@ class OneAgentApp:
             self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
             self.discord, self.slack, self.web,
             self.multimodal, self.rest_api, self.monitor, self.marketplace,
+            self._alert_manager,
         ):
             if p is not None:
                 self._pm.register(p)
@@ -336,7 +339,7 @@ class OneAgentApp:
         # Initialize i18n based on config
         from i18n import set_language
         set_language(self.config.agent.language)
-        
+
         self.ctx = AgentContext(
             config=self.config.model_dump(),
             bus=self.bus,
@@ -405,8 +408,8 @@ class OneAgentApp:
         await self._pm.setup_all(self.ctx)
         # Register knowledge graph search skill (KG is created by MemoryPlugin during setup)
         if self.memory._kg is not None:
-            from skills import Skill as _Skill
             from memory.knowledge_graph import make_graph_search_handler
+            from skills import Skill as _Skill
             self.skills.register(_Skill(
                 id="graph_search",
                 title="知识图谱搜索",
@@ -461,13 +464,12 @@ class OneAgentApp:
         # wire marketplace to skills plugin
         self.marketplace._skills_plugin = self.skills  # type: ignore[attr-defined]
 
-        # Setup and start alert manager
-        await self._alert_manager.setup(self.config.model_dump())
         # Wire the monitoring plugin's metrics collector into the alert
         # manager so _check_loop actually evaluates rules against live metrics.
+        # AlertManager.setup is invoked by PluginManager.setup_all above
+        # (depends_on=["monitoring"]); start/stop are handled by start_all/stop_all.
         if self.monitor is not None:
             self._alert_manager.set_metrics_getter(self.monitor.collect_metrics)
-        await self._alert_manager.start()
 
         await self._pm.start_all()
 
@@ -509,7 +511,7 @@ class OneAgentApp:
 
     async def chat_with_thinking(self, text: str, source: str = "api", session_id: str = "default") -> dict:
         """Like chat(), but returns {"reply": ..., "thinking": ...} with thinking process.
-        
+
         Uses its own TurnContext to avoid cross-request race conditions.
         """
         from core.context import TurnContext
@@ -530,7 +532,6 @@ class OneAgentApp:
         return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
 
     async def stop(self) -> None:
-        await self._alert_manager.stop()
         await self._pm.stop_all()
         await self.bus.stop()
 
@@ -761,7 +762,7 @@ async def main() -> None:
             dotenv.load_dotenv(env_file)
         except ImportError:
             # Fallback: manually parse .env if python-dotenv is not installed
-            with open(env_file, "r", encoding="utf-8") as f:
+            with open(env_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:

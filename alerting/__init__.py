@@ -19,6 +19,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from core.plugin import Plugin
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,10 +50,14 @@ class AlertEvent:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-class AlertManager:
+class AlertManager(Plugin):
     """Manages alert rules and dispatches alerts to configured channels."""
 
+    name = "alerting"
+    depends_on = ["monitoring"]
+
     def __init__(self) -> None:
+        super().__init__()
         self._rules: Dict[str, AlertRule] = {}
         self._channels: List[Callable[[AlertEvent], Any]] = []
         self._client: Optional[httpx.AsyncClient] = None
@@ -69,13 +75,16 @@ class AlertManager:
         self._metrics_getter = getter
         logger.info("alert manager metrics getter registered")
 
-    async def setup(self, config: Dict[str, Any]) -> None:
-        """Initialize alert manager from config.
+    async def setup(self, ctx) -> None:
+        """Initialize alert manager from the agent context.
 
-        Accepts both ``metric_path``/``operator`` (explicit) and
+        Reads alerting configuration from ``ctx.config``. Accepts both
+        ``metric_path``/``operator`` (explicit) and
         ``metric``/``window_minutes`` (shorthand from default_config.yaml)
         field names for alert rules, defaulting operator to ``">"``.
         """
+        await super().setup(ctx)
+        config = ctx.config
         # Close any existing client before creating a new one (supports re-config).
         if self._client is not None:
             await self._client.aclose()

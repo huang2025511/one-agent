@@ -174,6 +174,7 @@ def test_router_self_evolution():
 def test_longterm_memory():
     """Test LongTermMemory: insert→search→forget→vacuum."""
     import tempfile
+
     from memory import LongTermMemory
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -234,7 +235,7 @@ def test_shell_executor_patterns():
     for cmd, name in allowed_tests:
         import re
         ok = False
-        for pattern_name, pattern in ALLOWED_PATTERNS.items():
+        for _pattern_name, pattern in ALLOWED_PATTERNS.items():
             if re.match(pattern, cmd):
                 ok = True
                 break
@@ -542,7 +543,9 @@ def test_catalog_normalize_basic():
     """ModelCatalog should normalise various API response shapes."""
     import asyncio
     import json
+
     import httpx
+
     from models.catalog import ModelCatalog
 
     fake = {
@@ -623,6 +626,7 @@ def test_catalog_describe_includes_tier():
 def test_llm_provider_rebuild_tiers_no_key():
     """rebuild_tiers with no API key must return ok=False (not crash)."""
     import asyncio
+
     from models import LLMProvider
 
     p = LLMProvider()
@@ -640,9 +644,11 @@ def test_llm_provider_rebuild_tiers_with_mock():
     """rebuild_tiers should fetch the live model list and rebuild tiers."""
     import asyncio
     import json
+
     import httpx
-    from models import LLMProvider
+
     import models as _models_pkg
+    from models import LLMProvider
 
     p = LLMProvider()
     p._api_keys = {"sensenova": "sk-test"}
@@ -791,9 +797,10 @@ def test_setup_runs_auto_classify_in_event_loop():
     timestamps cache got populated for the configured provider.
     """
     import asyncio
-    from models import LLMProvider
+
     from core.context import AgentContext
     from core.events import EventBus
+    from models import LLMProvider
 
     p = LLMProvider()
     # Use auto_classify_on_setup=False to avoid hitting the real network;
@@ -823,10 +830,12 @@ def test_rebuild_tiers_no_user_action_does_what_user_would():
     """
     import asyncio
     import json
+
     import httpx
+
+    import models as _models_pkg
     from models import LLMProvider
     from models.catalog import ModelCatalog
-    import models as _models_pkg
 
     p = LLMProvider()
     p._api_keys = {"sensenova": "sk-test"}
@@ -860,7 +869,7 @@ def test_rebuild_tiers_no_user_action_does_what_user_would():
     ModelCatalog.__init__ = patched_init
 
     # Capture the pre-reclassify tier state
-    pre_expert = set(_models_pkg.MODEL_TIERS.get("expert", []))
+    _pre_expert = set(_models_pkg.MODEL_TIERS.get("expert", []))
 
     try:
         # The user just called set_api_key — no explicit "rebuild_tiers"
@@ -920,7 +929,7 @@ def test_resolver_registry_includes_china_providers() -> None:
 
 
 def test_resolver_lookup_sync() -> None:
-    from models.resolver import lookup, clear_cache
+    from models.resolver import clear_cache, lookup
     clear_cache()
     _check("lookup openai", lookup("openai") == "https://api.openai.com/v1")
     _check("lookup OpenAI (case-insensitive)", lookup("OpenAI") == "https://api.openai.com/v1")
@@ -947,7 +956,8 @@ def test_resolver_async_probe_finds_working_url() -> None:
     Uses a provider NOT in the registry so the probe path is exercised.
     """
     import httpx
-    from models.resolver import resolve, clear_cache
+
+    from models.resolver import clear_cache, resolve
     clear_cache()
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"id": "fake"}]})
@@ -966,7 +976,8 @@ def test_resolver_async_probe_finds_working_url() -> None:
 def test_resolver_async_probe_handles_all_failures() -> None:
     """If every URL returns 404, probe returns found=False."""
     import httpx
-    from models.resolver import resolve, clear_cache
+
+    from models.resolver import clear_cache, resolve
     clear_cache()
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={"error": "nope"})
@@ -987,7 +998,7 @@ def test_resolver_empty_provider_returns_not_found() -> None:
 
 
 def test_resolver_cache_repeats_return_same() -> None:
-    from models.resolver import resolve, clear_cache
+    from models.resolver import clear_cache, resolve
     clear_cache()
     r1 = asyncio.run(resolve("openai", probe=False))
     r2 = asyncio.run(resolve("openai", probe=False))
@@ -1000,16 +1011,16 @@ def test_resolver_cache_repeats_return_same() -> None:
 # 12. Capability detection — recognise what each model can do
 # ══════════════════════════════════════════════════════════════════════════
 def test_capability_text_default() -> None:
+    from models.capabilities import CAP_TEXT, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_TEXT
     m = ModelInfo(id="custom-model-7b-chat")
     caps = detect_capabilities(m)
     _check("default chat model has text", CAP_TEXT in caps)
 
 
 def test_capability_vision_from_name() -> None:
+    from models.capabilities import CAP_VISION, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_VISION
     for mid in ("gpt-4o", "claude-3-5-sonnet", "gemini-2.0-flash",
                 "qwen2-vl-7b", "internvl2", "kimi-vl"):
         m = ModelInfo(id=mid)
@@ -1018,8 +1029,8 @@ def test_capability_vision_from_name() -> None:
 
 
 def test_capability_image_generation_dalle() -> None:
+    from models.capabilities import CAP_IMAGE_GEN, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_IMAGE_GEN
     for mid in ("dall-e-3", "sdxl-1.0", "flux-dev", "imagen-3.0",
                 "cogview-3", "wanx-v1", "kolors"):
         m = ModelInfo(id=mid)
@@ -1028,8 +1039,8 @@ def test_capability_image_generation_dalle() -> None:
 
 
 def test_capability_video_sora() -> None:
+    from models.capabilities import CAP_VIDEO, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_VIDEO
     for mid in ("sora", "veo-2", "kling-v1", "runway-gen3",
                 "cogvideox", "hunyuan-video", "minimax-video-01"):
         m = ModelInfo(id=mid)
@@ -1038,8 +1049,8 @@ def test_capability_video_sora() -> None:
 
 
 def test_capability_audio_in_whisper() -> None:
+    from models.capabilities import CAP_AUDIO_IN, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_AUDIO_IN
     for mid in ("whisper-1", "paraformer-large", "sensevoice"):
         m = ModelInfo(id=mid)
         caps = detect_capabilities(m)
@@ -1047,8 +1058,8 @@ def test_capability_audio_in_whisper() -> None:
 
 
 def test_capability_audio_out_tts() -> None:
+    from models.capabilities import CAP_AUDIO_OUT, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_AUDIO_OUT
     for mid in ("tts-1", "tts-1-hd", "elevenlabs-multilingual-v2",
                 "azure-tts-neural", "cosyvoice-300m"):
         m = ModelInfo(id=mid)
@@ -1058,8 +1069,8 @@ def test_capability_audio_out_tts() -> None:
 
 def test_capability_embeddings_excludes_text() -> None:
     """An embedding-only model should NOT have the 'text' tag."""
+    from models.capabilities import CAP_EMBEDDINGS, CAP_TEXT, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_EMBEDDINGS, CAP_TEXT
     for mid in ("text-embedding-3-small", "bge-large-en",
                 "e5-large-v2", "nomic-embed-text-v1.5"):
         m = ModelInfo(id=mid)
@@ -1069,8 +1080,8 @@ def test_capability_embeddings_excludes_text() -> None:
 
 
 def test_capability_reasoning_o1() -> None:
+    from models.capabilities import CAP_REASONING, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_REASONING
     for mid in ("o1-preview", "o1-mini", "o3-mini", "deepseek-r1",
                 "qwq-32b-preview", "kimi-thinking"):
         m = ModelInfo(id=mid)
@@ -1079,8 +1090,8 @@ def test_capability_reasoning_o1() -> None:
 
 
 def test_capability_code_codellama() -> None:
+    from models.capabilities import CAP_CODE, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_CODE
     for mid in ("codellama-34b", "deepseek-coder-33b",
                 "qwen2.5-coder-32b", "starcoder2-15b"):
         m = ModelInfo(id=mid)
@@ -1090,16 +1101,16 @@ def test_capability_code_codellama() -> None:
 
 def test_capability_tools_from_metadata() -> None:
     """Tools capability should come from features if present."""
+    from models.capabilities import CAP_TOOLS, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_TOOLS
     m = ModelInfo(id="my-model", features=["function_calling"])
     caps = detect_capabilities(m)
     _check("metadata-driven tools", CAP_TOOLS in caps)
 
 
 def test_capability_long_context_200k() -> None:
+    from models.capabilities import CAP_LONG_CONTEXT, detect_capabilities
     from models.catalog import ModelInfo
-    from models.capabilities import detect_capabilities, CAP_LONG_CONTEXT
     m = ModelInfo(id="some-model", context_length=200_000)
     caps = detect_capabilities(m)
     _check("200k context → long_context", CAP_LONG_CONTEXT in caps)
@@ -1116,8 +1127,8 @@ def test_capability_describe_chinese_labels() -> None:
 # 13. Recommendation engine — best model per category
 # ══════════════════════════════════════════════════════════════════════════
 def test_recommend_picks_paid_over_free() -> None:
-    from models.catalog import ModelInfo
     from models.capabilities import recommend
+    from models.catalog import ModelInfo
     paid = ModelInfo(id="big-paid", is_free=False, context_length=128_000,
                      features=["tools"], tier="complex")
     paid.capabilities = frozenset({"text", "tools"})
@@ -1130,8 +1141,8 @@ def test_recommend_picks_paid_over_free() -> None:
 
 
 def test_recommend_picks_free_for_best_free() -> None:
-    from models.catalog import ModelInfo
     from models.capabilities import recommend
+    from models.catalog import ModelInfo
     a = ModelInfo(id="free-a", is_free=True, context_length=4_000)
     a.capabilities = frozenset({"text"})
     b = ModelInfo(id="free-b", is_free=True, context_length=16_000)
@@ -1141,8 +1152,8 @@ def test_recommend_picks_free_for_best_free() -> None:
 
 
 def test_recommend_picks_vision_model() -> None:
-    from models.catalog import ModelInfo
     from models.capabilities import recommend
+    from models.catalog import ModelInfo
     plain = ModelInfo(id="plain", is_free=False, context_length=8_000)
     plain.capabilities = frozenset({"text"})
     vision = ModelInfo(id="vision", is_free=False, context_length=128_000,
@@ -1154,8 +1165,8 @@ def test_recommend_picks_vision_model() -> None:
 
 
 def test_recommend_picks_code_model() -> None:
-    from models.catalog import ModelInfo
     from models.capabilities import recommend
+    from models.catalog import ModelInfo
     code = ModelInfo(id="coder-34b", is_free=False, context_length=32_000)
     code.capabilities = frozenset({"text", "code"})
     chat = ModelInfo(id="chat-7b", is_free=False, context_length=8_000)
@@ -1165,8 +1176,8 @@ def test_recommend_picks_code_model() -> None:
 
 
 def test_recommend_picks_image_gen_model() -> None:
-    from models.catalog import ModelInfo
     from models.capabilities import recommend
+    from models.catalog import ModelInfo
     dalle = ModelInfo(id="dall-e-3", is_free=False)
     dalle.capabilities = frozenset({"image_generation"})
     flux = ModelInfo(id="flux-dev", is_free=False)
@@ -1177,8 +1188,8 @@ def test_recommend_picks_image_gen_model() -> None:
 
 
 def test_recommend_picks_video_model() -> None:
-    from models.catalog import ModelInfo
     from models.capabilities import recommend
+    from models.catalog import ModelInfo
     sora = ModelInfo(id="sora")
     sora.capabilities = frozenset({"video"})
     r = recommend([sora])
@@ -1187,7 +1198,7 @@ def test_recommend_picks_video_model() -> None:
 
 
 def test_recommend_empty_models_returns_all_none() -> None:
-    from models.capabilities import recommend, RECOMMEND_CATEGORIES
+    from models.capabilities import RECOMMEND_CATEGORIES, recommend
     r = recommend([])
     _check("empty input → all None", all(v is None for v in r.values()))
     _check("empty input has all categories",
@@ -1237,7 +1248,9 @@ def test_provider_get_provider_url_unknown_returns_none() -> None:
 def test_provider_recommend_for_with_mock() -> None:
     """recommend_for() returns structured recommendations via mock transport."""
     import json
+
     import httpx
+
     import models as _models_pkg
     from models.catalog import ModelCatalog
     p = _models_pkg.LLMProvider()
@@ -1375,7 +1388,7 @@ def test_multimodal_unknown_provider_raises() -> None:
     p = MultimodalPlugin()
     # No setup() — _api_keys is empty, but _base_urls is also empty.
     try:
-        result = p._resolve("nonexistent-xyz-abc/fake-model")
+        p._resolve("nonexistent-xyz-abc/fake-model")
         _check("should have raised ValueError", False)
     except ValueError as exc:
         _check("error mentions unsupported",
@@ -1408,9 +1421,10 @@ def test_models_strip_provider_prefix_in_payload() -> None:
     from the model id so sensenova/zhipu/moonshot don't get a request
     with model='sensenova/deepseek-v4-flash'."""
     import json
+
     import httpx
+
     import models as _models_pkg
-    from models.catalog import ModelCatalog
     p = _models_pkg.LLMProvider()
     p._api_keys = {"testprov": "sk-test"}
     p._provider_base_urls["testprov"] = "https://testprov.example/v1"
@@ -1460,6 +1474,7 @@ def test_api_rate_buckets_in_init() -> None:
 def test_memory_search_no_relevance_threshold() -> None:
     """search() should NOT accept relevance_threshold (dead param)."""
     import inspect
+
     from memory import LongTermMemory
     sig = inspect.signature(LongTermMemory.search)
     _check("search() no longer has relevance_threshold",
@@ -1487,8 +1502,9 @@ def test_eventbus_metrics_includes_by_type() -> None:
 
 def test_llm_uses_httpx_limits() -> None:
     """LLMProvider's httpx client should be created with connection limits."""
-    import models as _models_pkg
     import httpx
+
+    import models as _models_pkg
     p = _models_pkg.LLMProvider()
     # Construct a fake ctx so setup() runs minimally
     from core.context import AgentContext
@@ -1631,8 +1647,8 @@ def test_dispatch_smart_recovery():
 
 def test_think_phase_injects_into_turn():
     """Think phase should store LLM output in turn.meta['thinking']."""
-    from core.coordinator import Coordinator
     from core.context import TurnContext
+    from core.coordinator import Coordinator
 
     class MockLLM:
         def __init__(self):
@@ -1681,7 +1697,9 @@ def test_think_phase_injects_into_turn():
 def test_llm_degradation_tools_fallback():
     """400 with tools → retry without tools (200) → success."""
     import json as _json
+
     import httpx
+
     from models import LLMProvider
 
     call_count = [0]
@@ -1723,7 +1741,9 @@ def test_llm_degradation_tools_fallback():
 def test_llm_degradation_minimal_prompt():
     """400 with tools → 400 without tools → last resort minimal prompt → success."""
     import json as _json
+
     import httpx
+
     from models import LLMProvider
 
     call_count = [0]
@@ -1792,8 +1812,9 @@ def test_web_search_skill_exists():
 
 def test_web_search_skill_returns_fallback():
     """Call web_search handler with no network → returns fallback suggesting own knowledge."""
-    from skills import SkillManager
     import httpx
+
+    from skills import SkillManager
 
     sm = SkillManager()
     sm._seed_builtins()
@@ -1941,8 +1962,8 @@ def test_approval_manager_approve():
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_self_improver_record():
+
     from core.self_improve import SelfImprover
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_improver_{os.getpid()}.db")
     si = SelfImprover(db_path)
     si.record_failure("test input", "tool_error", "something broke")
@@ -1956,8 +1977,8 @@ def test_self_improver_record():
 
 
 def test_self_improver_patterns():
+
     from core.self_improve import SelfImprover
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_improver_pat_{os.getpid()}.db")
     si = SelfImprover(db_path)
     for i in range(3):
@@ -1974,8 +1995,8 @@ def test_self_improver_patterns():
 
 
 def test_self_improver_apply():
+
     from core.self_improve import SelfImprover
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_improver_apply_{os.getpid()}.db")
     si = SelfImprover(db_path)
     si.apply_improvement("timeout", "增加超时重试机制")
@@ -2055,8 +2076,8 @@ def test_kg_stats():
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_session_create_and_get():
+
     from memory.session_store import SessionStore
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_sessions_{os.getpid()}.db")
     store = SessionStore(db_path)
     store.create_session("s1", "Test Session")
@@ -2073,8 +2094,8 @@ def test_session_create_and_get():
 
 
 def test_session_list():
+
     from memory.session_store import SessionStore
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_sessions_list_{os.getpid()}.db")
     store = SessionStore(db_path)
     for i in range(3):
@@ -2089,8 +2110,8 @@ def test_session_list():
 
 
 def test_session_delete():
+
     from memory.session_store import SessionStore
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_sessions_del_{os.getpid()}.db")
     store = SessionStore(db_path)
     store.create_session("s1", "To Delete")
@@ -2160,8 +2181,8 @@ def test_cost_by_provider():
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_doc_ingest_text():
+
     from skills.document_search import DocumentStore
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_docs_{os.getpid()}.db")
     ds = DocumentStore(db_path)
     chunks = ds.ingest_text("test.txt", "Hello world from the test suite")
@@ -2176,8 +2197,8 @@ def test_doc_ingest_text():
 
 
 def test_doc_list():
+
     from skills.document_search import DocumentStore
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_docs_list_{os.getpid()}.db")
     ds = DocumentStore(db_path)
     ds.ingest_text("doc1.txt", "Content one")
@@ -2192,8 +2213,8 @@ def test_doc_list():
 
 
 def test_doc_delete():
+
     from skills.document_search import DocumentStore
-    import tempfile
     db_path = os.path.join(os.environ.get('TEMP', '/tmp'), f"test_docs_del_{os.getpid()}.db")
     ds = DocumentStore(db_path)
     ds.ingest_text("to_delete.txt", "Some content")

@@ -246,7 +246,7 @@ class SmartRouter(Plugin):
                 failures[tier] += 1
 
         # Adjust thresholds for each non-expert tier
-        for i, tier in enumerate(tier_order[:-1]):  # skip expert (no upper tier)
+        for _i, tier in enumerate(tier_order[:-1]):  # skip expert (no upper tier)
             if total[tier] == 0:
                 continue
             failure_rate = failures[tier] / total[tier]
@@ -406,7 +406,7 @@ class SmartRouter(Plugin):
             # Keep last 6 turns, but try to preserve important context
             # by summarizing older turns if available
             recent_history = history[-6:]
-            
+
             # If we have a summary capability, use it
             if compression_cfg.get("summarize_old_turns", False) and len(history) > 6:
                 old_turns = history[:-6]
@@ -416,7 +416,7 @@ class SmartRouter(Plugin):
                 for h in old_turns:
                     if h.get("reply"):
                         summary_parts.append(f"Earlier reply: {str(h['reply'])[:80]}...")
-                
+
                 # Always preserve the system prompt — it contains core rules
                 messages = [{"role": "system", "content": system}]
                 if summary_parts:
@@ -427,11 +427,11 @@ class SmartRouter(Plugin):
                     messages.append(summary_msg)
             else:
                 messages = [{"role": "system", "content": system}]
-            
+
             history = recent_history
         else:
             messages = [{"role": "system", "content": system}]
-        
+
         for h in history:
             messages.append({"role": "user", "content": h["input"]})
             if h["reply"] is not None:
