@@ -44,6 +44,7 @@ class Coordinator(Plugin):
         self._skills: Optional[SkillManager] = None
         self._max_tool_iterations = MAX_TOOL_ITERATIONS
         self._max_tokens = DEFAULT_MAX_TOKENS
+        self._os_mode_enabled: bool = False  # OS 操作权限模式（会话级）
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -169,6 +170,130 @@ class Coordinator(Plugin):
                     "compare", "analyze", "research", "evaluate", "both", "each"]
         return len(text) > 50 and any(k in text for k in keywords)
 
+    # ------------------------------------------------------------ OS 模式处理
+    async def _handle_os_mode(
+        self, turn: TurnContext, cmd: str, args_text: str,
+    ) -> None:
+        """Handle /os-on, /os-off, /os-mode commands.
+
+        OS 模式 = 用户授权 One-Agent 可以直接调用 system_run 工具
+        （安装软件、执行脚本、apt-get / pip 等），无需每次加 /shell 前缀。
+        危险命令（DANGEROUS 级别）仍然需要额外确认。
+
+        /os-on <password>  — 开启 OS 模式（同时验证密码、缓存授权）
+        /os-off            — 关闭 OS 模式
+        /os-mode           — 查看当前 OS 模式状态
+        """
+        from i18n import get_language
+        lang = (get_language() or "zh").lower()
+
+        # /os-mode — 查询状态
+        if cmd == "_os_mode":
+            if self._os_mode_enabled:
+                status = "已开启" if lang.startswith("zh") else "ENABLED"
+                msg = (
+                    f"OS 模式: {status}\n"
+                    "当前可以自动执行系统命令（pip / npm / apt-get / curl 等）。\n"
+                    "使用 /os-off 可关闭。"
+                )
+            else:
+                status = "已关闭" if lang.startswith("zh") else "DISABLED"
+                msg = (
+                    f"OS 模式: {status}\n"
+                    "One-Agent 不能直接执行系统命令，只能通过 /shell 前缀调用。\n"
+                    "使用 /os-on <密码> 可开启。"
+                )
+            turn.result = msg
+            return
+
+        # /os-off — 关闭 OS 模式
+        if cmd in ("_os_off", "disable-os", "关闭os", "关闭系统权限"):
+            self._os_mode_enabled = False
+            turn.meta["os_mode"] = False
+            # 使 SystemExecutor 的密码缓存失效
+            await self._invalidate_os_cache()
+            msg = "OS 模式已关闭。One-Agent 不能再直接操作系统命令。" if lang.startswith("zh") else "OS mode DISABLED. One-Agent can no longer directly execute system commands."
+            turn.result = msg
+            return
+
+        # /os-on — 开启 OS 模式（需要密码验证）
+        password = args_text.strip()
+
+        # 如果密码未提供，要求用户输入
+        if not password:
+            turn.result = (
+                "OS 模式开启需要密码验证。\n"
+                "用法: /os-on <你的密码>\n\n"
+                "示例: /os-on mypassword123\n\n"
+                "开启后，One-Agent 可以直接执行系统命令（如 pip install、apt-get、curl 等），\n"
+                "无需加 /shell 前缀。危险命令仍需额外确认。"
+                if lang.startswith("zh")
+                else "Usage: /os-on <your_password>\n\n"
+                "After enabling, One-Agent can directly execute system commands "
+                "(pip install, apt-get, curl, etc.) without the /shell prefix."
+            )
+            return
+
+        # 验证密码并开启 OS 模式
+        success = await self._enable_os_mode(turn, password)
+        if success:
+            self._os_mode_enabled = True
+            turn.meta["os_mode"] = True
+            msg = (
+                "✅ OS 模式已开启！\n\n"
+                "One-Agent 现在可以直接帮你操作系统：\n"
+                "  - pip install / npm install / apt-get install\n"
+                "  - curl / wget 下载文件\n"
+                "  - 创建目录、移动文件\n"
+                "  - 运行自定义脚本\n\n"
+                "【重要】危险命令（如 rm -rf、sudo、格式化）仍需你额外确认。\n"
+                "使用 /os-off 可关闭此权限。"
+                if lang.startswith("zh")
+                else "✅ OS mode ENABLED!\n\n"
+                "One-Agent can now directly help with system operations:\n"
+                "  - pip install / npm install / apt-get install\n"
+                "  - curl / wget downloads\n"
+                "  - create dirs, move files\n"
+                "  - run custom scripts\n\n"
+                "DANGEROUS commands (rm -rf, sudo, mkfs...) still require your explicit confirmation.\n"
+                "Use /os-off to disable."
+            )
+        else:
+            msg = (
+                "❌ OS 模式开启失败：密码错误。\n"
+                "请检查密码后重试。连续 3 次错误会锁定 5 分钟。"
+                if lang.startswith("zh")
+                else "❌ OS mode failed: incorrect password.\n"
+                "Please check and retry. 3 wrong attempts = 5-minute lockout."
+            )
+        turn.result = msg
+
+    async def _enable_os_mode(self, turn: TurnContext, password: str) -> bool:
+        """Verify password and enable OS mode for this session."""
+        if self._skills is None:
+            return False
+        try:
+            # 通过 system_unlock 技能验证密码（会缓存授权）
+            result = await self._skills.dispatch("system_unlock", {"password": password})
+            ok = "成功" in str(result) or "success" in str(result).lower() or "✅" in str(result)
+            if ok:
+                logger.info("OS mode enabled for session %s", turn.session_id)
+            return ok
+        except Exception as exc:
+            logger.warning("OS mode enable failed: %s", exc)
+            return False
+
+    async def _invalidate_os_cache(self) -> None:
+        """Invalidate the SystemExecutor password cache."""
+        if self._skills is None:
+            return
+        try:
+            skill = self._skills.get("system_lock")
+            if skill:
+                await self._skills.dispatch("system_lock", {})
+        except Exception:
+            pass
+
     # ------------------------------------------------------------ slash commands
     # Mapping from slash command names (both EN and CN) to skill IDs
     _SLASH_COMMANDS: Dict[str, str] = {
@@ -214,26 +339,31 @@ class Coordinator(Plugin):
         "exec": "system_run", "execute": "system_run", "运行": "system_run",
         "unlock": "system_unlock", "解锁": "system_unlock", "授权": "system_unlock",
         "lock": "system_lock", "锁定": "system_lock", "撤销授权": "system_lock",
+        # ---------- OS 模式（操作系统操作权限） ----------
+        "os-on": "_os_on", "os_on": "_os_on", "os-off": "_os_off", "os_off": "_os_off",
+        "os-mode": "_os_mode", "osmode": "_os_mode", "os": "_os_mode",
+        "enable-os": "_os_on", "disable-os": "_os_off",
+        "开启os": "_os_on", "关闭os": "_os_off", "开启系统权限": "_os_on", "关闭系统权限": "_os_off",
     }
 
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
         """Handle slash commands like /help, /settings.
-        
+
         Returns True if the command was handled (no further processing needed),
         False otherwise.
         """
         text = turn.input_text.strip()
         if not text.startswith("/"):
             return False
-        
+
         # Parse command: /command or /command arg1 arg2 ...
         parts = text[1:].split(maxsplit=1)
         cmd = parts[0].lower()
         args_text = parts[1] if len(parts) > 1 else ""
-        
+
         # Look up command in mapping (try exact match first, then partial)
         skill_id = None
-        
+
         # Try exact match
         if cmd in self._SLASH_COMMANDS:
             skill_id = self._SLASH_COMMANDS[cmd]
@@ -243,24 +373,30 @@ class Coordinator(Plugin):
                 if cmd.startswith(key) or key.startswith(cmd):
                     skill_id = self._SLASH_COMMANDS[key]
                     break
-        
+
         if skill_id is None:
             turn.result = f"未知命令: /{cmd}。支持的命令: {', '.join(sorted(set(self._SLASH_COMMANDS.keys())))}"
             self.publish("turn_completed", turn=turn)
             return True
-        
+
+        # ---- OS mode commands (handled directly, not via skill dispatch) ----
+        if skill_id in ("_os_on", "_os_off", "_os_mode"):
+            await self._handle_os_mode(turn, skill_id, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+
         # Dispatch to skill
         if self._skills is None:
             turn.result = "[技能系统未初始化]"
             self.publish("turn_completed", turn=turn)
             return True
-        
+
         skill = self._skills.get(skill_id)
         if skill is None:
             turn.result = f"[技能不存在: {skill_id}]"
             self.publish("turn_completed", turn=turn)
             return True
-        
+
         # Build args - for most skills, put remaining text as 'input' arg
         args: Dict[str, Any] = {}
         if args_text:
@@ -287,14 +423,14 @@ class Coordinator(Plugin):
             turn.result = "用法: /unlock <密码>\n解锁后 60 分钟内执行危险命令不需要再次输入密码。"
             self.publish("turn_completed", turn=turn)
             return True
-        
+
         try:
             result = await self._skills.dispatch(skill_id, args)
             turn.result = str(result)
         except Exception as exc:
             logger.exception("slash command dispatch failed: %s", exc)
             turn.result = f"[执行错误: {exc}]"
-        
+
         self.publish("turn_completed", turn=turn)
         return True
 
@@ -521,16 +657,25 @@ class Coordinator(Plugin):
         return header + "\n".join(hits[:5])
 
     def _prepare_tools(self, turn: TurnContext) -> List[Dict[str, Any]]:
-        """Pick relevant skills and prepare tool schemas."""
+        """Pick relevant skills and prepare tool schemas.
+
+        When OS mode is enabled (via /os-on), system_run is automatically added
+        to the tool list so the LLM can directly call it for system operations.
+        """
         if turn is None:
             raise RuntimeError("turn cannot be None")
-        
+
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
             chosen = self._skills.pick_relevant(turn.input_text, limit=4)
             web_search = self._skills.get("web_search")
             if web_search and web_search not in chosen:
                 chosen.insert(0, web_search)
+            # OS mode: auto-add system_run so the LLM can call it directly
+            if self._os_mode_enabled:
+                system_run = self._skills.get("system_run")
+                if system_run and system_run not in chosen:
+                    chosen.append(system_run)
             turn.skills = [s.id for s in chosen]
             tools = [s.schema for s in chosen]
         else:
