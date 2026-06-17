@@ -72,11 +72,13 @@ class TurnContext:
 
     def record_success(self, answer: str, tokens_used: int) -> None:
         self.result = answer
+        self.error = None  # Clear any stale error from a concurrent timeout
         self.tokens_used = tokens_used
         self.duration_seconds = time.monotonic() - self.created_at
 
     def record_failure(self, error: str) -> None:
         self.error = error
+        self.result = None  # Clear any stale result from a concurrent success
         self.duration_seconds = time.monotonic() - self.created_at
 
 

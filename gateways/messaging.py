@@ -245,6 +245,13 @@ class WeComGateway(BaseMessagingGateway):
             if not self._corp_id or not self._secret:
                 logger.warning("wecom app mode requires corp_id and secret")
                 return
+            # Fail-closed: the callback signature verification in verify_url()
+            # and receive_message() skips validation when _token is empty.
+            # We MUST refuse to start the callback server without a token,
+            # otherwise an attacker can inject forged messages freely.
+            if not self._token:
+                logger.warning("wecom app mode requires callback_token for signature verification")
+                return
             self.bus.subscribe("turn_completed", self._on_done)
             self._task = asyncio.create_task(self._start_callback_server())
             logger.info("wecom app mode enabled, callback on %s:%d",
@@ -644,6 +651,7 @@ class DingTalkGateway(BaseMessagingGateway):
         """
         # 尝试加载 WebSocket 客户端库（优先 websockets，其次 aiohttp）
         ws_connect = None
+        _aiohttp_session = None  # track for cleanup
         try:
             import websockets  # type: ignore
             async def _ws_connect(uri):
@@ -653,7 +661,13 @@ class DingTalkGateway(BaseMessagingGateway):
             try:
                 import aiohttp  # type: ignore
                 async def _ws_connect(uri):
-                    return await aiohttp.ClientSession().ws_connect(uri)
+                    nonlocal _aiohttp_session
+                    # Reuse a single ClientSession across reconnects to
+                    # avoid leaking sessions (each ClientSession holds a
+                    # connection pool and file descriptors).
+                    if _aiohttp_session is None or _aiohttp_session.closed:
+                        _aiohttp_session = aiohttp.ClientSession()
+                    return await _aiohttp_session.ws_connect(uri)
                 ws_connect = _ws_connect
             except ImportError:
                 logger.warning(
@@ -814,6 +828,12 @@ class FeishuGateway(BaseMessagingGateway):
         elif self._mode == "app":
             if not self._app_id or not self._app_secret:
                 logger.warning("feishu app mode requires app_id and app_secret")
+                return
+            # Fail-closed: the callback verification_token check in the event
+            # handler skips validation when _verification_token is empty. We
+            # MUST refuse to start without it, otherwise forged events pass.
+            if not self._verification_token:
+                logger.warning("feishu app mode requires verification_token for event verification")
                 return
             self.bus.subscribe("turn_completed", self._on_done)
             self._task = asyncio.create_task(self._start_callback_server())
@@ -1180,8 +1200,16 @@ class SlackGateway(BaseMessagingGateway):
             resp = await self._client.get(f"{self._base}/auth.test")
             data = resp.json()
             self._bot_user_id = data.get("user_id", "")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("slack: failed to get bot user_id (%s) — self-reply filtering disabled, this is dangerous", exc)
+        if not self._bot_user_id:
+            # Without a valid bot_user_id, we cannot filter out our own
+            # messages, leading to an infinite self-reply loop. Refuse to
+            # start the poll loop in this case.
+            logger.error("slack: bot user_id is empty, refusing to start poll loop to prevent self-reply loop")
+            await self._client.aclose()
+            self._client = None
+            return
         self.bus.subscribe("turn_completed", self._on_done)
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("slack gateway enabled")

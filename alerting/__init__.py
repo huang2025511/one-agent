@@ -271,7 +271,10 @@ class AlertManager:
         metrics = metrics_getter()
         now = time.time()
 
-        for rule in self._rules.values():
+        # Snapshot the rules list to avoid "dictionary changed size during
+        # iteration" if add_rule/remove_rule is called from an API endpoint
+        # during the await below.
+        for rule in list(self._rules.values()):
             if not rule.enabled:
                 continue
 

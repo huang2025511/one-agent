@@ -308,6 +308,10 @@ class ProceduralMemory:
         # mutations.  Keeps the lookup→update→write hot path cheap.
         self._dirty_count = 0
         self._dirty_threshold = 20
+        # Thread-safe access: save() is called via asyncio.to_thread while
+        # lookup() runs on the event loop thread. Without a lock, concurrent
+        # dict mutation during iteration raises RuntimeError.
+        self._lock = threading.Lock()
 
     def _load_index(self) -> Dict[str, Any]:
         if self._index_path.exists():
@@ -322,43 +326,48 @@ class ProceduralMemory:
         safe = re.sub(r"[^A-Za-z0-9_-]", "_", name).strip("_") or "skill"
         path = self._dir / f"{safe}.md"
         path.write_text(body, encoding="utf-8")
-        self._index["skills"][safe] = {
-            "triggers": triggers,
-            "path": str(path),
-            "created_at": time.time(),
-            "uses": 0,
-        }
-        # Mark dirty — persist happens on the next threshold flush or
-        # explicit flush() call.  Saves the JSON write on every save().
-        self._dirty_count += 1
-        if self._dirty_count >= self._dirty_threshold:
-            self._persist_index()
-        else:
-            logger.info("saved skill %s (%d triggers, %d dirty)",
-                        safe, len(triggers), self._dirty_count)
+        with self._lock:
+            self._index["skills"][safe] = {
+                "triggers": triggers,
+                "path": str(path),
+                "created_at": time.time(),
+                "uses": 0,
+            }
+            # Mark dirty — persist happens on the next threshold flush or
+            # explicit flush() call.  Saves the JSON write on every save().
+            self._dirty_count += 1
+            if self._dirty_count >= self._dirty_threshold:
+                self._persist_index()
+            else:
+                logger.info("saved skill %s (%d triggers, %d dirty)",
+                            safe, len(triggers), self._dirty_count)
 
     def lookup(self, text: str) -> Optional[Dict[str, Any]]:
-        best: Optional[Dict[str, Any]] = None
-        best_id: Optional[str] = None
-        best_hits = 0
-        for skill_id, meta in self._index["skills"].items():
-            hits = sum(1 for t in meta["triggers"] if t and t.lower() in text.lower())
-            if hits > best_hits:
-                best_hits = hits
-                best = meta
-                best_id = skill_id
-        if best is None or best_id is None or best_hits == 0:
-            return None
+        with self._lock:
+            best: Optional[Dict[str, Any]] = None
+            best_id: Optional[str] = None
+            best_hits = 0
+            for skill_id, meta in self._index["skills"].items():
+                hits = sum(1 for t in meta["triggers"] if t and t.lower() in text.lower())
+                if hits > best_hits:
+                    best_hits = hits
+                    best = meta
+                    best_id = skill_id
+            if best is None or best_id is None or best_hits == 0:
+                return None
+            # Copy meta to avoid mutation outside the lock
+            best = dict(best)
+            best["uses"] += 1
+            # Increment dirty count; only persist on the next flush.
+            self._dirty_count += 1
+            need_flush = self._dirty_count >= self._dirty_threshold
+        if need_flush:
+            self._persist_index()
         try:
             body = Path(best["path"]).read_text(encoding="utf-8")
         except (FileNotFoundError, OSError) as exc:
             logger.warning("procedural memory: skill file missing: %s", exc)
             return None
-        best["uses"] += 1
-        # Increment dirty count; only persist on the next flush.
-        self._dirty_count += 1
-        if self._dirty_count >= self._dirty_threshold:
-            self._persist_index()
         return {"id": best_id, "body": body, "meta": best}
 
     def list(self) -> List[str]:
@@ -536,7 +545,7 @@ class MemoryPlugin(Plugin):
         """Handle scheduled maintenance tasks."""
         job_name = event.get("name") or ""
         if job_name == "memory_housekeeping" and self._long is not None:
-            self._long.vacuum()
+            await asyncio.to_thread(self._long.vacuum)
             logger.info("memory housekeeping: vacuum completed, stats=%s", self._long.stats())
 
     def _looks_teachable(self, turn: TurnContext) -> bool:

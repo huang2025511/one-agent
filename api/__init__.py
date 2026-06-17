@@ -179,6 +179,23 @@ class RESTAPIGateway(Plugin):
                     self._host, self._port, _mask_api_key(self._api_key),
                     self._rate_limit, self._max_chat_bytes, self._cors_origins, self._trusted_proxies)
 
+    def _setup_from_config(self, config) -> None:
+        """Re-apply REST API settings from a reloaded config.
+
+        Called by the /api/config/reload endpoint to update rate limits,
+        CORS origins, trusted proxies, etc. without restarting the server.
+        """
+        cfg = (config.model_dump() if hasattr(config, "model_dump") else config).get("rest") or {}
+        self._host = cfg.get("host", self._host)
+        self._port = int(cfg.get("port", self._port))
+        self._api_key = cfg.get("api_key", self._api_key)
+        self._rate_limit = int(cfg.get("rate_limit_per_minute", self._rate_limit))
+        self._max_chat_bytes = int(cfg.get("max_chat_bytes", self._max_chat_bytes))
+        self._cors_origins = cfg.get("cors_origins") or self._cors_origins
+        self._trusted_proxies = set(cfg.get("trusted_proxies", []))
+        logger.info("REST API reconfigured: rate_limit=%d/min cors=%s trusted_proxies=%s",
+                    self._rate_limit, self._cors_origins, self._trusted_proxies)
+
     def bind_callback(self, cb) -> None:
         self._agent_callback = cb
         # Store the app instance for thinking access
@@ -223,10 +240,12 @@ class RESTAPIGateway(Plugin):
                     client_ip = client_info[0]
             
             if not client_ip:
-                # Generate unique identifier for unknown clients to avoid shared bucket
-                import hashlib
-                client_ip = f"unknown_{hashlib.md5(str(time.time()).encode()).hexdigest()[:8]}"
-                logger.warning("Rate limit: unable to determine client IP, using temporary ID")
+                # All unknown clients share a single bucket — using a unique
+                # ID per request (e.g. md5(time.time())) would give every
+                # request its own empty bucket, making the rate limit a no-op
+                # and leaking memory into _rate_buckets indefinitely.
+                client_ip = "unknown"
+                logger.warning("Rate limit: unable to determine client IP, using shared 'unknown' bucket")
             
             if client_ip in self._trusted_proxies:
                 # Request from trusted proxy - use X-Forwarded-For
@@ -463,11 +482,17 @@ class RESTAPIGateway(Plugin):
                 from one_agent import load_config
                 import os
                 
-                config_path = os.environ.get("ONE_AGENT_CONFIG", "config.yaml")
+                config_path = os.environ.get(
+                    "ONE_AGENT_CONFIG",
+                    str(Path(__file__).resolve().parent.parent / "config" / "default_config.yaml"),
+                )
                 new_config = load_config(config_path)
-                
-                # Update context config
-                _ctx.config = new_config
+
+                # Update context config — must be a dict to match startup type
+                # (one_agent.py sets _ctx.config = config.model_dump()). Pydantic
+                # BaseModel has no .get(), so assigning the model object directly
+                # would crash every downstream ctx.config.get(...) call.
+                _ctx.config = new_config.model_dump() if hasattr(new_config, "model_dump") else new_config
                 
                 # Update API-specific settings
                 if hasattr(self, '_setup_from_config'):
@@ -746,27 +771,17 @@ class RESTAPIGateway(Plugin):
                     status="success"
                 )
             
-            # Auto-detect language from user input
+            # Auto-detect language from user input — use thread-local to
+            # avoid multi-tenant language contention (global _current_lang
+            # is shared across all concurrent requests).
             if text:
-                from i18n import detect_language, set_language, get_language
+                from i18n import detect_language, set_thread_language, clear_thread_language
                 detected_lang = detect_language(text)
-                current_lang = get_language()
-                if detected_lang != current_lang:
-                    set_language(detected_lang)
-                    # Sanitize language value to prevent log injection
-                    safe_lang = str(detected_lang).replace('\n', '\\n').replace('\r', '\\r')
-                    logger.info("Auto-detected language: %s from API request", safe_lang)
-                    # Persist language preference to config
-                    if _ctx:
-                        try:
-                            config = _ctx.config
-                            if config.get("agent", {}).get("language") != detected_lang:
-                                config.setdefault("agent", {})["language"] = detected_lang
-                                from skills import _save_config
-                                _save_config(config)
-                        except Exception as exc:
-                            logger.warning("failed to persist language: %s", exc)
-            
+                set_thread_language(detected_lang)
+                # Sanitize language value to prevent log injection
+                safe_lang = str(detected_lang).replace('\n', '\\n').replace('\r', '\\r')
+                logger.info("Auto-detected language: %s from API request", safe_lang)
+
             if _agent is None:
                 raise HTTPException(503, _("agent_not_ready"))
             # Use chat_with_thinking to get thinking process alongside reply
@@ -802,13 +817,11 @@ class RESTAPIGateway(Plugin):
             except InputValidationError as exc:
                 raise HTTPException(400, str(exc))
 
-            # Auto-detect language from user input
+            # Auto-detect language from user input (thread-local for isolation)
             if text:
-                from i18n import detect_language, set_language, get_language
+                from i18n import detect_language, set_thread_language
                 detected_lang = detect_language(text)
-                current_lang = get_language()
-                if detected_lang != current_lang:
-                    set_language(detected_lang)
+                set_thread_language(detected_lang)
 
             if _llm is None:
                 raise HTTPException(503, _("llm_not_available"))
@@ -961,10 +974,16 @@ class RESTAPIGateway(Plugin):
             if not target_dir:
                 target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
             else:
-                # Validate path is within allowed directory
-                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
-                target_real = os.path.realpath(target_dir)
-                if not target_real.startswith(allowed_base):
+                # Validate path is within allowed directory (strict containment
+                # via Path.relative_to — startswith can be bypassed by sibling
+                # dirs like /data/skills_evil).
+                from pathlib import Path
+                allowed_base = Path(os.path.realpath(os.path.join(
+                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "skills")))
+                target_real = Path(os.path.realpath(target_dir))
+                try:
+                    target_real.relative_to(allowed_base)
+                except ValueError:
                     raise HTTPException(403, "target_dir must be within skills directory")
             
             ok = mp.install(name, target_dir)

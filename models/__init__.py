@@ -874,6 +874,24 @@ class LLMProvider(RecommendationMixin, Plugin):
                 "Circuit breaker OPEN for provider %s, skipping call",
                 provider
             )
+            # Don't return immediately — break to the fallback chain below
+            # so an alternative provider can handle the request. Returning
+            # here would skip the fallback logic, defeating its purpose.
+            last_err = RuntimeError(f"circuit breaker open for {provider}")
+            # Skip directly to fallback chain
+            if not _skip_fallback and self._fallback_chain:
+                for fb in self._fallback_chain:
+                    fb_model = fb.get("model")
+                    if not fb_model or fb_model == model:
+                        continue
+                    logger.info("circuit open, trying fallback model %s", fb_model)
+                    fb_result = await self.chat_completion(
+                        messages, model=fb_model, temperature=temperature,
+                        max_tokens=max_tokens, tools=tools,
+                        use_cache=use_cache, _skip_fallback=True,
+                    )
+                    if not fb_result.get("failed"):
+                        return fb_result
             return {
                 "text": f"服务暂时不可用（{provider}），请稍后重试",
                 "tool_calls": [],
@@ -923,10 +941,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                 return result
             except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError, asyncio.TimeoutError, ConnectionError) as exc:
                 last_err = exc
-                
-                # Record failure in circuit breaker
-                circuit_breaker.record_failure()
-                
+
                 # Classify: non-retryable errors (4xx auth/bad-request) exit
                 # immediately to avoid wasting time on invalid requests.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -935,6 +950,15 @@ class LLMProvider(RecommendationMixin, Plugin):
                     or status in _RETRYABLE_STATUS
                     or isinstance(exc, (asyncio.TimeoutError, ConnectionError))
                 )
+
+                # Only record circuit-breaker failures for retryable errors
+                # (server-side / network issues). Non-retryable 4xx errors
+                # (400 bad request, 401 unauthorized) are client-side problems
+                # and should NOT trip the breaker — otherwise repeated bad
+                # requests would block the provider for all callers.
+                if retryable:
+                    circuit_breaker.record_failure()
+
                 if not retryable:
                     # --- Auto-heal: tools not supported (400) ---
                     # Some providers/models don't support function calling.
@@ -1233,12 +1257,31 @@ class LLMProvider(RecommendationMixin, Plugin):
                             if text_delta:
                                 yield {"delta": text_delta, "done": False}
                         elif event_type == "message_delta":
+                            # message_delta carries usage — this is the true
+                            # completion signal. Return immediately to avoid
+                            # yielding multiple done events (message_stop +
+                            # final yield would produce up to 3 done chunks).
                             usage = (data.get("usage") or {})
                             tokens_used = usage.get("output_tokens", 0)
+                            circuit_breaker.record_success()
+                            self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
+                            # Record cost (mirror non-streaming path)
+                            cost = MODEL_COST.get(model, 0.001) * (tokens_used / 1000)
+                            self._cost_total += cost
+                            if self._cost_tracker:
+                                try:
+                                    provider_name, bare = self._parse_model(model)
+                                    self._cost_tracker.record(
+                                        provider=provider_name, model=bare,
+                                        tokens_prompt=usage.get("input_tokens", 0),
+                                        tokens_completion=tokens_used,
+                                    )
+                                except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+                                    logger.error("stream cost_tracker record failed: %s", exc)
                             yield {"delta": "", "done": True, "tokens_used": tokens_used}
-                        elif event_type == "message_stop":
-                            yield {"delta": "", "done": True, "tokens_used": 0}
-                    # Ensure we always yield a final done event
+                            return
+                    # Stream ended without a message_delta event — yield a
+                    # final done with zero tokens as fallback.
                     circuit_breaker.record_success()
                     self._call_stats.append({"model": model, "tokens_used": 0, "t": time.time()})
                     yield {"delta": "", "done": True, "tokens_used": 0}
@@ -1303,9 +1346,22 @@ class LLMProvider(RecommendationMixin, Plugin):
                             tokens_used = usage.get("total_tokens", 0)
                             circuit_breaker.record_success()
                             self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
+                            # Record cost (mirror non-streaming path)
+                            cost = MODEL_COST.get(model, 0.001) * (tokens_used / 1000)
+                            self._cost_total += cost
+                            if self._cost_tracker:
+                                try:
+                                    provider_name, bare = self._parse_model(model)
+                                    self._cost_tracker.record(
+                                        provider=provider_name, model=bare,
+                                        tokens_prompt=usage.get("prompt_tokens", 0),
+                                        tokens_completion=usage.get("completion_tokens", 0),
+                                    )
+                                except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+                                    logger.error("stream cost_tracker record failed: %s", exc)
                             yield {"delta": "", "done": True, "tokens_used": tokens_used}
                             return
-                    # Ensure we always yield a final done event
+                    # Stream ended without a usage chunk — yield final done.
                     circuit_breaker.record_success()
                     self._call_stats.append({"model": model, "tokens_used": 0, "t": time.time()})
                     yield {"delta": "", "done": True, "tokens_used": 0}

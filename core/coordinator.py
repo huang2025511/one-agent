@@ -48,6 +48,9 @@ class Coordinator(Plugin):
         self._max_tool_iterations = MAX_TOOL_ITERATIONS
         self._max_tokens = DEFAULT_MAX_TOKENS
         self._os_mode_enabled: bool = False  # OS 操作权限模式（会话级）
+        # Track background turn-completion tasks so they aren't GC'd
+        # mid-execution (Python's asyncio only holds a weak ref to tasks).
+        self._pending_turn_tasks: set = set()
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -81,9 +84,16 @@ class Coordinator(Plugin):
         try:
             if self._skills is not None:
                 result = await self._skills.dispatch(name, args)
-                result_str = str(result)
+                # dispatch may return a ToolResult or a plain string
+                if isinstance(result, ToolResult):
+                    result_str = str(result.data) if result.data is not None else str(result)
+                    is_error = result.status in ("error", "unavailable")
+                else:
+                    result_str = str(result)
+                    is_error = False
             else:
                 result_str = "[no skill manager bound]"
+                is_error = False
         except Exception as exc:  # noqa: BLE001
             logger.exception("skill dispatch failed: %s(%s)", name, args)
             duration_ms = (time.time() - start) * 1000
@@ -96,8 +106,11 @@ class Coordinator(Plugin):
 
         duration_ms = (time.time() - start) * 1000
 
-        # Track failures — if result contains error keywords, count it
-        if "error" in result_str.lower() or "不可用" in result_str or "unavailable" in result_str.lower():
+        # Track failures based on ToolResult.status, NOT result text keywords.
+        # Keyword matching ("error" in result_str) produces false positives:
+        # a web_search for "HTTP error codes" or python_execute printing
+        # "error handling demo" would be falsely counted as failures.
+        if is_error:
             failed_skills[name] = failed_skills.get(name, 0) + 1
             logger.info("skill %s failed (%d/%d)", name, failed_skills[name], MAX_SKILL_FAILURES)
             # If just hit the limit, enrich the result with a stop hint
@@ -493,7 +506,10 @@ class Coordinator(Plugin):
         # Wait for completion in a background task so we don't block the bus.
         # Blocking here would deadlock the bus: it can't process user_message
         # (and thus never reach turn_completed) while awaiting this handler.
-        asyncio.create_task(self._await_turn_completion(turn, session_id))
+        # Save a reference to prevent the task from being GC'd mid-execution.
+        task = asyncio.create_task(self._await_turn_completion(turn, session_id))
+        self._pending_turn_tasks.add(task)
+        task.add_done_callback(self._pending_turn_tasks.discard)
 
     async def _await_turn_completion(self, turn: TurnContext, session_id: str) -> None:
         """Wait for a turn to complete, with timeout.

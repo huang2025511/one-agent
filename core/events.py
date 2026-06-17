@@ -310,7 +310,15 @@ class EventBus:
                     break
             pending.sort(key=lambda e: -int(e.priority))
             for i, e in enumerate(pending):
-                await self._dispatch(e)
+                try:
+                    await self._dispatch(e)
+                except asyncio.CancelledError:
+                    raise  # Bus shutdown — propagate cancellation
+                except Exception as exc:
+                    # A single dispatch failure must not kill the entire
+                    # event bus (which would leave all future events
+                    # unprocessed). Log and continue to the next event.
+                    logger.error("dispatch failed for %s: %s", e.type, exc, exc_info=True)
                 # periodically yield to prevent starving other coroutines
                 if (i + 1) % 50 == 0:
                     await asyncio.sleep(0)

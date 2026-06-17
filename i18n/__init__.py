@@ -151,6 +151,26 @@ def get_language() -> str:
         return _current_lang
 
 
+def set_thread_language(lang: str) -> None:
+    """Set language for the current thread only.
+
+    Used by REST API handlers to isolate per-request language without
+    affecting other concurrent requests (the global _current_lang is
+    shared across all threads and would cause multi-tenant language
+    contention).
+    """
+    if lang in _translations:
+        _thread_local.lang = lang
+    else:
+        _thread_local.lang = "en"
+
+
+def clear_thread_language() -> None:
+    """Clear the per-thread language override."""
+    if hasattr(_thread_local, 'lang'):
+        del _thread_local.lang
+
+
 def detect_language(text: str) -> str:
     """Detect language from input text.
     

@@ -153,7 +153,7 @@ class OfflineQueue:
                        WHERE id = ?""",
                     (error, queue_id),
                 )
-            self._conn.commit()
+                self._conn.commit()
         except sqlite3.Error as exc:
             logger.error("Failed to mark queue entry failure: %s", exc)
 

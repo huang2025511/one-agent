@@ -594,21 +594,26 @@ class SkillManager(Plugin):
         _system_executor = None
         async def _get_system_executor():
             nonlocal _system_executor
-            if _system_executor is None:
-                from executors.system import SystemExecutor
-                _system_executor = SystemExecutor()
-                # 使用 SkillManager 的 ctx 来初始化
-                ctx = getattr(self, "_ctx_ref", None)
-                if ctx is not None:
-                    await _system_executor.setup(ctx)
-                else:
-                    # Fallback: 手动初始化
-                    _system_executor._enabled = True
-                    from executors.system import PasswordManager
-                    _system_executor._pwd_manager = PasswordManager("", 60, 3, 5)
-                    _system_executor._timeout_seconds = 30
-                    _system_executor._workdir = "."
-                    _system_executor._max_output_bytes = 65536
+            if _system_executor is not None:
+                return _system_executor
+            # Build and fully initialize BEFORE assigning to the shared
+            # variable. If we assign first and await setup() second, a
+            # concurrent coroutine sees the non-None value and returns
+            # a half-initialized executor (missing _pwd_manager etc.).
+            from executors.system import SystemExecutor
+            executor = SystemExecutor()
+            ctx = getattr(self, "_ctx_ref", None)
+            if ctx is not None:
+                await executor.setup(ctx)
+            else:
+                # Fallback: 手动初始化
+                executor._enabled = True
+                from executors.system import PasswordManager
+                executor._pwd_manager = PasswordManager("", 60, 3, 5)
+                executor._timeout_seconds = 30
+                executor._workdir = "."
+                executor._max_output_bytes = 65536
+            _system_executor = executor
             return _system_executor
 
         # ---------- 系统命令执行技能 ----------
@@ -1193,7 +1198,9 @@ _SETTING_ALIASES: Dict[str, tuple] = {
 }
 
 # 敏感配置（默认不允许通过对话修改，受 security.allow_sensitive_chat_settings 控制）
-_SENSITIVE_KEYS = {"rest.api_key", "llm.api_keys"}
+# security.allow_sensitive_chat_settings itself is sensitive — otherwise an
+# attacker could enable it via chat and then modify all other sensitive keys.
+_SENSITIVE_KEYS = {"rest.api_key", "llm.api_keys", "security.allow_sensitive_chat_settings"}
 
 
 def _is_sensitive_write_allowed(config: dict) -> bool:

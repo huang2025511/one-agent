@@ -109,8 +109,22 @@ builtins.__import__ = _safe_import
 # --- Read user code from stdin ---
 _code = sys.stdin.buffer.read().decode("utf-8", "replace")
 
+# --- Build restricted builtins ---
+# Remove dangerous builtins that allow file I/O or code execution.
+# The subprocess isolation (separate process + rlimits + env cleanup +
+# import whitelist) is the primary defense against sandbox escapes;
+# removing these builtins adds defense-in-depth against file exfiltration
+# (e.g. open("config/default_config.yaml").read() to steal API keys).
+# Introspection builtins (getattr, dir, vars, etc.) are kept because the
+# subprocess has no dangerous modules loaded, making __subclasses__()
+# escape chains non-exploitable.
+_dangerous = {'open', 'exec', 'eval', 'compile', 'breakpoint',
+              'exit', 'quit', '__import__'}
+_safe_builtins = {k: v for k, v in builtins.__dict__.items()
+                  if k not in _dangerous}
+
 # --- Execute ---
-_g = {{"__builtins__": builtins.__dict__, "__name__": "__sandbox__"}}
+_g = {{"__builtins__": _safe_builtins, "__name__": "__sandbox__"}}
 try:
     try:
         _compiled = compile(_code, "<sandbox>", "eval")

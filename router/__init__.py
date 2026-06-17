@@ -434,7 +434,7 @@ class SmartRouter(Plugin):
         
         for h in history:
             messages.append({"role": "user", "content": h["input"]})
-            if h["reply"]:
+            if h["reply"] is not None:
                 messages.append({"role": "assistant", "content": h["reply"]})
         messages.append({"role": "user", "content": turn.input_text})
         return messages

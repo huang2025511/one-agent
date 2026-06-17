@@ -32,23 +32,25 @@ MCP_REQUEST_TIMEOUT = 30.0
 
 def _is_private_ip(ip_str: str) -> bool:
     """Check if IP address is private/internal.
-    
+
     Args:
         ip_str: IP address string (IPv4 or IPv6)
-        
+
     Returns:
         True if IP is private/internal, False otherwise
     """
     try:
         ip = ipaddress.ip_address(ip_str)
-        # Check if IP is private, loopback, link-local, or reserved
-        return (
-            ip.is_private or
-            ip.is_loopback or
-            ip.is_link_local or
-            ip.is_reserved or
-            ip.is_multicast
-        )
+        # Check if IP is private, loopback, link-local, reserved, multicast,
+        # or unspecified (0.0.0.0 / ::).
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return True
+        # IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) bypasses is_private on
+        # some Python versions — extract the embedded IPv4 and re-check.
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            return _is_private_ip(str(ip.ipv4_mapped))
+        return False
     except ValueError:
         return True  # If we can't parse it, treat as private for safety
 
@@ -92,12 +94,13 @@ class MCPServer:
         # If hostname is already an IP literal, validate directly.
         try:
             ipaddress.ip_address(hostname)
-            if _is_private_ip(hostname):
-                raise ValueError(f"Private/internal IP not allowed: {hostname}")
-            return hostname
         except ValueError:
             # Not an IP literal — must be a hostname; resolve it.
             pass
+        else:
+            if _is_private_ip(hostname):
+                raise ValueError(f"Private/internal IP not allowed: {hostname}")
+            return hostname
 
         try:
             addr_infos = socket.getaddrinfo(

@@ -210,12 +210,15 @@ class ShellExecutor(Plugin):
                 return result
 
         try:
-            # Use asyncio.create_subprocess_exec to avoid blocking the event loop
+            # Use asyncio.create_subprocess_exec to avoid blocking the event loop.
+            # start_new_session=True creates a new process group so we can
+            # kill the entire group on timeout (prevents orphaned children).
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._workdir,
+                start_new_session=True,
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(),
@@ -228,7 +231,14 @@ class ShellExecutor(Plugin):
                 "blocked": False,
             }
         except asyncio.TimeoutError:
-            proc.kill()
+            # Kill the entire process group to prevent orphaned child
+            # processes (e.g. `find . -exec grep ... +` spawns children
+            # that survive proc.kill() if only the parent is killed).
+            try:
+                import signal
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
             await proc.wait()  # 等待进程终止，避免僵尸进程
             result = {
                 "stdout": "",

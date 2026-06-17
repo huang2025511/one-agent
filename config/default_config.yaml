@@ -80,10 +80,13 @@ rest:
   host: 127.0.0.1
   port: 18792
   api_key: ''
-  rate_limit_per_minute: 10000
+  rate_limit_per_minute: 60
   max_chat_bytes: 65536
+  # Restrict CORS to localhost origins — '*' allows any website (including
+  # malicious pages in the user's browser) to call the API via DNS rebinding.
   cors_origins:
-  - '*'
+  - 'http://localhost'
+  - 'http://127.0.0.1'
 monitoring: {}
 multimodal: {}
 marketplace:
