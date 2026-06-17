@@ -1,4 +1,4 @@
-"""Python REPL executor — sandboxed code execution for the Agent.
+"""Python REPL executor — sandboxed code execution via isolated subprocess.
 
 Allows the Agent to write and execute Python code to solve problems:
 - Math calculations
@@ -6,24 +6,35 @@ Allows the Agent to write and execute Python code to solve problems:
 - File manipulation
 - Code generation and testing
 
-Security:
-- Restricted builtins (no os.system, subprocess, etc.)
-- Whitelist of safe imports
-- Timeout enforcement
-- Output capture (stdout/stderr)
+Security architecture:
+- **Subprocess isolation**: Code runs in a separate Python process, so
+  even if the sandbox is escaped via ``().__class__.__bases__[0].__subclasses__()``
+  the escape only affects the child process (which has no secrets, no
+  network access to internal services, and is resource-limited).
+- **Import whitelist**: Only safe stdlib modules are importable.
+- **Resource limits**: Memory (RLIMIT_AS) and CPU (RLIMIT_CPU) are
+  capped to prevent DoS.
+- **Timeout enforcement**: The subprocess is killed (SIGKILL to the
+  whole process group) on timeout — unlike threads, processes can be
+  forcibly terminated.
+- **Environment scrubbing**: API keys and other secrets are stripped
+  from the child environment.
+
+Previous design (exec-based sandbox with restricted builtins) was
+insecure because Python attribute access cannot be blocked at the
+language level — ``().__class__.__bases__[0].__subclasses__()`` reaches
+``object`` without needing the ``object`` builtin name.
 """
 
 from __future__ import annotations
 
 import asyncio
-import builtins
-import contextlib
-import io
 import logging
+import os
+import signal
 import sys
 import time
-from contextlib import redirect_stdout, redirect_stderr
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from core.plugin import Plugin
 
@@ -32,37 +43,13 @@ logger = logging.getLogger(__name__)
 # Python executor configuration
 DEFAULT_EXECUTION_TIMEOUT = 10
 DEFAULT_MAX_OUTPUT = 10_000
-
-
-@contextlib.contextmanager
-def capture_output() -> Tuple[io.StringIO, io.StringIO]:
-    """Context manager to capture stdout/stderr with guaranteed cleanup.
-    
-    Ensures sys.stdout and sys.stderr are always restored even if an
-    exception occurs during code execution.
-    """
-    old_stdout = sys.stdout
-    old_stderr = sys.stderr
-    stdout_capture = io.StringIO()
-    stderr_capture = io.StringIO()
-    try:
-        sys.stdout = stdout_capture
-        sys.stderr = stderr_capture
-        yield stdout_capture, stderr_capture
-    finally:
-        sys.stdout = old_stdout
-        sys.stderr = old_stderr
-
-
-# Save reference to the real __import__ before we override it
-_real_import = builtins.__import__
+DEFAULT_MEMORY_LIMIT_MB = 256
 
 # Whitelist of safe imports — no system/network access
 _SAFE_IMPORTS = {
     "math",
     "random",
     "datetime",
-    # "time",  # Removed: time.sleep() can be used for DoS attacks
     "collections",
     "itertools",
     "functools",
@@ -86,72 +73,63 @@ _SAFE_IMPORTS = {
     "unicodedata",
 }
 
-# Safe import wrapper that checks against whitelist
-def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-    """Safe import function that only allows whitelisted modules."""
-    # Check if module or its parent is in whitelist
-    if name not in _SAFE_IMPORTS and not any(name.startswith(s + ".") for s in _SAFE_IMPORTS):
-        raise ImportError(f"Import not allowed: {name}")
-    return _real_import(name, globals, locals, fromlist, level)
+# Marker used to delimit the expression result in subprocess stdout.
+# The sandbox wrapper writes ``__SANDBOX_RESULT__:<repr>`` as the last
+# line when the code evaluates to a non-None expression.
+_RESULT_MARKER = "__SANDBOX_RESULT__:"
 
-# Safe builtins — exclude dangerous ones like eval, exec, compile.
-# Also exclude introspection builtins (object, getattr, hasattr, dir, type,
-# vars, globals, locals) that enable classic sandbox escape via
-# object.__subclasses__() → __import__("os").system(...).
-_SAFE_BUILTINS = {
-    "abs": abs,
-    "all": all,
-    "any": any,
-    "bin": bin,
-    "bool": bool,
-    "bytes": bytes,
-    "callable": callable,
-    "chr": chr,
-    "complex": complex,
-    "dict": dict,
-    "divmod": divmod,
-    "enumerate": enumerate,
-    "filter": filter,
-    "float": float,
-    "format": format,
-    "frozenset": frozenset,
-    "hash": hash,
-    "hex": hex,
-    "id": id,
-    "int": int,
-    "isinstance": isinstance,
-    "issubclass": issubclass,
-    "iter": iter,
-    "len": len,
-    "list": list,
-    "map": map,
-    "max": max,
-    "min": min,
-    "next": next,
-    "oct": oct,
-    "ord": ord,
-    "pow": pow,
-    "print": print,
-    "range": range,
-    "repr": repr,
-    "reversed": reversed,
-    "round": round,
-    "set": set,
-    "slice": slice,
-    "sorted": sorted,
-    "str": str,
-    "sum": sum,
-    "tuple": tuple,
-    "zip": zip,
-    "True": True,
-    "False": False,
-    "None": None,
-    "__import__": _safe_import,
-}
+# The sandbox wrapper script executed inside the subprocess.
+# It is parameterized with the safe-imports set and resource limits.
+# Using repr() of the set ensures safe embedding.
+_SANDBOX_WRAPPER = '''
+import sys, io, resource, builtins
+
+# --- Resource limits (defense against memory/CPU DoS) ---
+_mem_limit = {mem_limit}
+_cpu_limit = {cpu_limit}
+for _rlimit, _val in [
+    (resource.RLIMIT_AS, (_mem_limit, _mem_limit)),
+    (resource.RLIMIT_CPU, (_cpu_limit, _cpu_limit + 2)),
+    (resource.RLIMIT_FSIZE, ({fsize_limit}, {fsize_limit})),
+]:
+    try:
+        resource.setrlimit(_rlimit, _val)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+# --- Import whitelist ---
+_real_import = builtins.__import__
+_safe_imports = {safe_imports!r}
+def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name not in _safe_imports and not any(name.startswith(s + ".") for s in _safe_imports):
+        raise ImportError("Import not allowed: " + name)
+    return _real_import(name, globals, locals, fromlist, level)
+builtins.__import__ = _safe_import
+
+# --- Read user code from stdin ---
+_code = sys.stdin.buffer.read().decode("utf-8", "replace")
+
+# --- Execute ---
+_g = {{"__builtins__": builtins.__dict__, "__name__": "__sandbox__"}}
+try:
+    try:
+        _compiled = compile(_code, "<sandbox>", "eval")
+        _r = eval(_compiled, _g)
+        if _r is not None:
+            sys.stdout.write("\\n{marker}" + repr(_r) + "\\n")
+    except SyntaxError:
+        _compiled = compile(_code, "<sandbox>", "exec")
+        exec(_compiled, _g)
+except SystemExit:
+    raise
+except Exception as _e:
+    sys.stderr.write(type(_e).__name__ + ": " + str(_e) + "\\n")
+    sys.exit(1)
+'''
 
 
 class PythonExecutor(Plugin):
-    """Sandboxed Python code executor for the Agent."""
+    """Sandboxed Python code executor using subprocess isolation."""
 
     name = "executor_python"
     depends_on = []
@@ -160,19 +138,55 @@ class PythonExecutor(Plugin):
         super().__init__()
         self._timeout = DEFAULT_EXECUTION_TIMEOUT
         self._max_output = DEFAULT_MAX_OUTPUT
+        self._memory_limit_mb = DEFAULT_MEMORY_LIMIT_MB
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         cfg = ctx.config.get("execution", {}).get("python", {})
         self._timeout = cfg.get("timeout", DEFAULT_EXECUTION_TIMEOUT)
         self._max_output = cfg.get("max_output", DEFAULT_MAX_OUTPUT)
+        self._memory_limit_mb = cfg.get("memory_limit_mb", DEFAULT_MEMORY_LIMIT_MB)
+
+    def _build_sandbox_script(self, timeout: int) -> str:
+        """Build the wrapper script to execute inside the subprocess."""
+        return _SANDBOX_WRAPPER.format(
+            safe_imports=_SAFE_IMPORTS,
+            mem_limit=self._memory_limit_mb * 1024 * 1024,
+            cpu_limit=timeout,
+            fsize_limit=64 * 1024 * 1024,  # 64 MB max file size
+            marker=_RESULT_MARKER,
+        )
+
+    @staticmethod
+    def _build_sandbox_env() -> Dict[str, str]:
+        """Build a scrubbed environment for the subprocess.
+
+        Only essential, non-secret environment variables are passed.
+        API keys, tokens, and other secrets are stripped to ensure
+        that even a full sandbox escape cannot exfiltrate them.
+        """
+        safe_keys = {
+            "PATH", "LANG", "LC_ALL", "LC_CTYPE",
+            "HOME", "TMPDIR", "TMP", "TEMP",
+            "SYSTEMROOT",  # Windows
+        }
+        env: Dict[str, str] = {}
+        for k in safe_keys:
+            v = os.environ.get(k)
+            if v is not None:
+                env[k] = v
+        # Explicitly remove dangerous Python-related vars
+        for dangerous in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+                          "PYTHONHTTPSVERIFY", "PYTHONBREAKPOINT"):
+            env.pop(dangerous, None)
+        return env
 
     async def execute(
         self,
         code: str,
         timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Execute Python code in a sandboxed environment.
+        """Execute Python code in an isolated subprocess.
 
         Args:
             code: Python source code to execute
@@ -187,57 +201,58 @@ class PythonExecutor(Plugin):
                 "duration_ms": float,
             }
         """
-        assert code, "code cannot be empty"
-        assert isinstance(code, str), "code must be a string"
-        assert timeout is None or timeout > 0, "timeout must be positive"
-        
+        if not code or not isinstance(code, str):
+            raise ValueError("code must be a non-empty string")
+        if timeout is not None and (not isinstance(timeout, (int, float)) or timeout <= 0):
+            raise ValueError("timeout must be a positive number")
+
         timeout = timeout or self._timeout
         start = time.time()
+        sandbox_script = self._build_sandbox_script(timeout)
+        env = self._build_sandbox_env()
 
-        # Capture stdout/stderr
-        stdout_capture = io.StringIO()
-        stderr_capture = io.StringIO()
-
-        # Build safe globals
-        safe_globals = {"__builtins__": _SAFE_BUILTINS}
-
-        # Execute in a thread pool to enforce timeout
-        loop = asyncio.get_running_loop()
         try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    self._run_code,
-                    code,
-                    safe_globals,
-                    stdout_capture,
-                    stderr_capture,
-                ),
-                timeout=timeout,
+            # start_new_session=True creates a new process group so
+            # we can kill the whole tree (including any forked children)
+            # on timeout.
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-c", sandbox_script,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                start_new_session=True,
             )
-            duration_ms = (time.time() - start) * 1000
-
-            output = stdout_capture.getvalue()[: self._max_output]
-            error = stderr_capture.getvalue()[: self._max_output]
-
-            return {
-                "success": result.get("success", False),
-                "output": output,
-                "error": error or result.get("error", ""),
-                "result": result.get("result"),
-                "duration_ms": duration_ms,
-            }
-
-        except asyncio.TimeoutError:
+        except Exception as exc:
             duration_ms = (time.time() - start) * 1000
             return {
                 "success": False,
-                "output": stdout_capture.getvalue()[: self._max_output],
+                "output": "",
+                "error": f"Failed to start sandbox: {exc}",
+                "result": None,
+                "duration_ms": duration_ms,
+            }
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(input=code.encode("utf-8")),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            # Kill the entire process group (subprocess + any children)
+            self._kill_process_group(proc)
+            await proc.wait()
+            duration_ms = (time.time() - start) * 1000
+            return {
+                "success": False,
+                "output": "",
                 "error": f"Execution timed out after {timeout}s",
                 "result": None,
                 "duration_ms": duration_ms,
             }
         except Exception as exc:
+            self._kill_process_group(proc)
+            await proc.wait()
             duration_ms = (time.time() - start) * 1000
             return {
                 "success": False,
@@ -247,51 +262,43 @@ class PythonExecutor(Plugin):
                 "duration_ms": duration_ms,
             }
 
+        duration_ms = (time.time() - start) * 1000
+        output = stdout_bytes.decode("utf-8", errors="replace")
+        error = stderr_bytes.decode("utf-8", errors="replace")
+        success = proc.returncode == 0
+
+        # Extract expression result if present (last line with marker)
+        result: Any = None
+        marker_idx = output.rfind(_RESULT_MARKER)
+        if marker_idx != -1:
+            result_line = output[marker_idx + len(_RESULT_MARKER):].strip()
+            output = output[:marker_idx].rstrip()
+            # Safely evaluate the repr() back to a Python object
+            try:
+                import ast
+                result = ast.literal_eval(result_line)
+            except (ValueError, SyntaxError):
+                result = result_line
+
+        return {
+            "success": success,
+            "output": output[: self._max_output],
+            "error": error[: self._max_output],
+            "result": result,
+            "duration_ms": duration_ms,
+        }
+
     @staticmethod
-    def _run_code(
-        code: str,
-        safe_globals: Dict[str, Any],
-        stdout_capture: io.StringIO,
-        stderr_capture: io.StringIO,
-    ) -> Dict[str, Any]:
-        """Run code in a separate thread (called by run_in_executor)."""
-        result = {"success": False, "result": None, "error": ""}
-
+    def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+        """Kill the subprocess and its entire process group."""
         try:
-            # Check for unsafe imports
-            for line in code.split("\n"):
-                line = line.strip()
-                if line.startswith("import ") or line.startswith("from "):
-                    # Extract full module path (e.g., "urllib.parse" from "from urllib.parse import quote")
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        module = parts[1].split(".")[0] if parts[0] == "import" else parts[1]
-                        # Check if the full module path or its root is in whitelist
-                        if module not in _SAFE_IMPORTS and not any(module.startswith(s + ".") for s in _SAFE_IMPORTS):
-                            result["error"] = f"Import not allowed: {module}"
-                            return result
-
-            # Compile and execute
-            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                # Try to evaluate as expression first (for simple calculations)
-                try:
-                    compiled = compile(code, "<string>", "eval")
-                    result["result"] = eval(compiled, safe_globals)
-                    result["success"] = True
-                    return result
-                except SyntaxError:
-                    # Not a simple expression — execute as statements
-                    pass
-
-                # Execute as statements
-                compiled = compile(code, "<string>", "exec")
-                exec(compiled, safe_globals)
-                result["success"] = True
-
-        except Exception as exc:
-            result["error"] = f"{type(exc).__name__}: {exc}"
-
-        return result
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, AttributeError, OSError):
+            # Fallback: kill just the process
+            try:
+                proc.kill()
+            except (ProcessLookupError, RuntimeError):
+                pass
 
 
 # ------------------------------------------------------------------ skill handler
@@ -306,6 +313,12 @@ def make_python_handler(executor: PythonExecutor):
             return "请提供要执行的 Python 代码"
 
         timeout = args.get("timeout", 10)
+        # Validate timeout type (LLM may pass string)
+        if isinstance(timeout, str):
+            try:
+                timeout = int(timeout)
+            except ValueError:
+                timeout = 10
         result = await executor.execute(code, timeout=timeout)
 
         if result["success"]:

@@ -59,6 +59,45 @@ class MonitoringPlugin(Plugin):
         if len(self._token_history) > 100:
             self._token_history.pop(0)
 
+    def collect_metrics(self) -> dict:
+        """Synchronously collect a metrics snapshot for the alert manager.
+
+        This is the sync counterpart of the /api/metrics endpoint, usable
+        as a metrics_getter for AlertManager._check_loop.
+        """
+        _ctx = self.ctx
+        _bus = _ctx.bus if _ctx else None
+        _llm = next((p for p in (_ctx._plugins if _ctx else []) if getattr(p, "name", "") == "llm"), None) if _ctx else None
+        _memory = next((p for p in (_ctx._plugins if _ctx else []) if getattr(p, "name", "") == "memory"), None) if _ctx else None
+        _skills = next((p for p in (_ctx._plugins if _ctx else []) if getattr(p, "name", "") == "skills"), None) if _ctx else None
+
+        bus_m = _bus.metrics() if _bus else {}
+        llm_s = _llm.stats() if _llm else {}
+        mem_s = _memory.stats() if _memory else {}
+        skills = _skills.all_skill_ids() if _skills else []
+        uptime = _ctx.uptime() if _ctx else 0
+
+        return {
+            "timestamp": time.time(),
+            "uptime_seconds": round(uptime, 1),
+            "bus": bus_m,
+            "llm": {
+                "calls": llm_s.get("calls", 0),
+                "tokens_used": llm_s.get("tokens_used", 0),
+                "total_cost_usd": llm_s.get("total_cost_usd", 0),
+                "cache": llm_s.get("cache", {}),
+            },
+            "memory": {
+                "long_term_rows": mem_s.get("long_term", {}).get("rows", 0),
+                "avg_weight": mem_s.get("long_term", {}).get("avg_weight", 1.0),
+                "procedural_skills": mem_s.get("procedural_skills", 0),
+            },
+            "skills_count": len(skills),
+            "request_count": self._request_count,
+            "error_count": self._error_count,
+            "total_tokens": self._total_tokens,
+        }
+
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         cfg = ctx.config.get("monitoring") or {}

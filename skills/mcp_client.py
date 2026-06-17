@@ -55,49 +55,101 @@ def _is_private_ip(ip_str: str) -> bool:
 
 class MCPServer:
     """单个 MCP 服务器连接。"""
-    
+
     def __init__(self, name: str, url: str, api_key: Optional[str] = None):
-        # Security: Validate URL to prevent SSRF attacks
+        # Security: Validate URL scheme to prevent SSRF via non-http schemes.
+        # DNS resolution + private-IP validation is deferred to connect() so
+        # the check and the actual connection use the SAME resolved IP,
+        # eliminating the DNS-rebinding TOCTOU window.
         parsed = urlparse(url)
         if parsed.scheme not in ('http', 'https'):
             raise ValueError(f"Invalid URL scheme: {parsed.scheme}. Only http/https allowed.")
-        
-        # Block private/internal IPs to prevent SSRF
-        hostname = parsed.hostname
-        if hostname:
-            # Try to resolve hostname to IP
-            try:
-                # Use getaddrinfo to handle both IPv4 and IPv6
-                addr_infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-                for addr_info in addr_infos:
-                    ip = addr_info[4][0]
-                    if _is_private_ip(ip):
-                        raise ValueError(f"Private/internal IP not allowed: {ip} (resolved from {hostname})")
-            except socket.gaierror:
-                # DNS resolution failed - will fail on connect anyway
-                pass
-        
+        if not parsed.hostname:
+            raise ValueError("Invalid URL: missing hostname")
+
         self.name = name
         self.url = url
+        self._parsed = parsed
         self.api_key = api_key
         self.tools: List[Dict[str, Any]] = []
         self._client: Optional[httpx.AsyncClient] = None
-        
+        # Populated by connect() after IP pinning; used by call_tool() so
+        # subsequent requests reuse the validated IP (no SSRF re-resolution).
+        self._pinned_base: Optional[str] = None
+        self._original_host: str = parsed.hostname or ""
+        if parsed.port:
+            self._original_host = f"{self._original_host}:{parsed.port}"
+
+    def _resolve_and_validate_ip(self) -> str:
+        """Resolve hostname NOW and validate against private-IP blocklist.
+
+        Returns the validated IP string. Raises ValueError if resolution
+        fails or resolves to a private/internal address. Called immediately
+        before building the httpx request so the validated IP is the one
+        actually used for the connection (no TOCTOU gap).
+        """
+        hostname = self._parsed.hostname
+        # If hostname is already an IP literal, validate directly.
+        try:
+            ipaddress.ip_address(hostname)
+            if _is_private_ip(hostname):
+                raise ValueError(f"Private/internal IP not allowed: {hostname}")
+            return hostname
+        except ValueError:
+            # Not an IP literal — must be a hostname; resolve it.
+            pass
+
+        try:
+            addr_infos = socket.getaddrinfo(
+                hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            # Fail-closed: DNS resolution failure must NOT silently pass,
+            # otherwise an attacker could make the first resolution fail and
+            # the second (at connect time) return a private IP.
+            raise ValueError(f"DNS resolution failed for '{hostname}': {exc}")
+
+        for addr_info in addr_infos:
+            ip = addr_info[4][0]
+            if _is_private_ip(ip):
+                raise ValueError(
+                    f"Private/internal IP not allowed: {ip} (resolved from {hostname})")
+        # Return the first resolved IP for pinning.
+        return addr_infos[0][4][0]
+
     async def connect(self) -> bool:
         """连接到 MCP 服务器并发现工具。"""
         try:
-            self._client = httpx.AsyncClient(timeout=MCP_REQUEST_TIMEOUT)
-            
+            # SSRF defense: resolve + validate IP at the moment of connection
+            # and pin the httpx client to that IP via a custom transport so
+            # the connection cannot be redirected to a different (private) IP.
+            pinned_ip = self._resolve_and_validate_ip()
+            transport = httpx.AsyncHTTPTransport()
+            # Build a base_url that uses the pinned IP but preserves port/path.
+            scheme = self._parsed.scheme
+            port = self._parsed.port
+            netloc = pinned_ip if ":" not in pinned_ip else f"[{pinned_ip}]"
+            if port:
+                netloc = f"{netloc}:{port}"
+            pinned_base = f"{scheme}://{netloc}"
+            self._pinned_base = pinned_base
+            self._client = httpx.AsyncClient(
+                timeout=MCP_REQUEST_TIMEOUT,
+                transport=transport,
+                base_url=pinned_base,
+            )
+            # Preserve original Host header so virtual-hosted servers route correctly.
+            original_host = self._original_host
+
             # 获取服务器信息
-            headers = {}
+            headers = {"Host": original_host}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            
+
             # 发现工具 — wrap with asyncio.wait_for for timeout safety
             try:
                 response = await asyncio.wait_for(
                     self._client.get(
-                        f"{self.url}/tools",
+                        f"{pinned_base}/tools",
                         headers=headers
                     ),
                     timeout=MCP_CONNECTION_TIMEOUT
@@ -106,13 +158,13 @@ class MCPServer:
                 await self.close()  # Fix Bug #15: Close client on timeout
                 raise TimeoutError(f"Connection to MCP server '{self.name}' timed out after {MCP_CONNECTION_TIMEOUT:.0f}s")
             response.raise_for_status()
-            
+
             data = response.json()
             self.tools = data.get("tools", [])
-            
+
             logger.info("MCP server '%s' connected: %d tools", self.name, len(self.tools))
             return True
-            
+
         except TimeoutError:
             raise
         except Exception as e:
@@ -122,24 +174,24 @@ class MCPServer:
     
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """调用 MCP 工具。"""
-        if not self._client:
+        if not self._client or not self._pinned_base:
             raise RuntimeError(f"MCP server '{self.name}' not connected")
-        
+
         try:
-            headers = {}
+            headers = {"Host": self._original_host}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
-            
+
             response = await self._client.post(
-                f"{self.url}/tools/{tool_name}/call",
+                f"{self._pinned_base}/tools/{tool_name}/call",
                 headers=headers,
                 json=arguments
             )
             response.raise_for_status()
-            
+
             result = response.json()
             return result.get("result")
-            
+
         except Exception as e:
             logger.error("MCP tool call failed: %s - %s", tool_name, e)
             raise

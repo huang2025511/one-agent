@@ -494,7 +494,11 @@ class MemoryPlugin(Plugin):
             return
         if turn.result and not turn.error:
             content = f"Q: {turn.input_text}\nA: {turn.result}"
-            memory_id = self._long.add(
+            # All operations below are synchronous SQLite / CPU-bound work
+            # (embedding encode is especially heavy). Run them in a worker
+            # thread to avoid blocking the event loop (mirrors _on_user_message).
+            memory_id = await asyncio.to_thread(
+                self._long.add,
                 content=content,
                 source=turn.source,
                 tags="interaction",
@@ -506,15 +510,17 @@ class MemoryPlugin(Plugin):
             # multi-threaded context.
             if self._embeddings is not None and memory_id is not None:
                 try:
-                    vec = self._embeddings.embed(content)
+                    vec = await asyncio.to_thread(self._embeddings.embed, content)
                     if vec is not None:
-                        self._embeddings.store(str(memory_id), vec)
+                        await asyncio.to_thread(
+                            self._embeddings.store, str(memory_id), vec)
                 except Exception as exc:
                     logger.debug("embedding store failed: %s", exc)
             # Auto-extract entities into knowledge graph
             if self._kg is not None:
                 combined = turn.input_text + " " + (turn.result or "")
-                self._kg.extract_from_text(combined, source=turn.source)
+                await asyncio.to_thread(
+                    self._kg.extract_from_text, combined, source=turn.source)
         if self._auto_create_skills and self._procedural and self._looks_teachable(turn):
             triggers = [w for w in re.findall(r"\w{4,}", turn.input_text)][:5]
             if triggers:
@@ -523,7 +529,8 @@ class MemoryPlugin(Plugin):
                     body = f"# Skill: {triggers[0]}\n\n"
                     body += f"When the user writes something like: *{turn.input_text[:120]}*\n\n"
                     body += "## Tool Plan\n\n```\n" + (turn.result or "")[:2000] + "\n```\n"
-                    self._procedural.save(triggers[0], triggers, body)
+                    await asyncio.to_thread(
+                        self._procedural.save, triggers[0], triggers, body)
 
     async def _on_cron(self, event: Event) -> None:
         """Handle scheduled maintenance tasks."""

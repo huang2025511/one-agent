@@ -184,6 +184,10 @@ class WebGateway(Plugin):
         self._enabled = True
         self._task: Optional[asyncio.Task] = None
         self._agent_callback = None
+        # Security knobs (mirror RESTAPIGateway defaults)
+        self._api_key: str = ""
+        self._rate_limit_per_minute: int = 60
+        self._max_chat_bytes: int = 65536
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -191,6 +195,13 @@ class WebGateway(Plugin):
         self._host = cfg.get("host", self._host)
         self._port = int(cfg.get("port", self._port))
         self._enabled = bool(cfg.get("enabled", True))
+        # Auth: if api_key configured, require X-API-Key header on /api/* routes.
+        # Reuse the same key as the REST API by default for operator convenience.
+        self._api_key = cfg.get("api_key") or (
+            (ctx.config.get("api") or {}).get("key") or ""
+        )
+        self._rate_limit_per_minute = int(cfg.get("rate_limit_per_minute", 60))
+        self._max_chat_bytes = int(cfg.get("max_chat_bytes", 65536))
         if not self._enabled:
             return
 
@@ -202,12 +213,51 @@ class WebGateway(Plugin):
             return
         try:
             import uvicorn  # type: ignore
-            from fastapi import FastAPI  # type: ignore
-            from fastapi.responses import HTMLResponse  # type: ignore
+            from fastapi import FastAPI, Request  # type: ignore
+            from fastapi.responses import HTMLResponse, JSONResponse  # type: ignore
         except Exception:
             logger.warning("fastapi/uvicorn not installed — web UI disabled")
             return
+        import hmac as _hmac
         app = FastAPI(title="One-Agent")
+
+        # ---- Security middleware ----
+        # Per-IP sliding-window rate limit (mirrors RESTAPIGateway logic)
+        _rate_window: dict = {}  # ip -> list[timestamps]
+        gw = self
+
+        @app.middleware("http")
+        async def security_middleware(request: Request, call_next):
+            # 1) Body size limit for chat endpoints
+            cl = request.headers.get("content-length")
+            if cl and request.url.path.startswith("/api/chat"):
+                try:
+                    if int(cl) > gw._max_chat_bytes:
+                        return JSONResponse(
+                            {"error": "request body too large"}, status_code=413
+                        )
+                except ValueError:
+                    pass
+            # 2) Rate limit by client IP
+            client_ip = request.client.host if request.client else "unknown"
+            now = time.time()
+            window = _rate_window.get(client_ip, [])
+            window = [t for t in window if now - t < 60.0]
+            if len(window) >= gw._rate_limit_per_minute:
+                return JSONResponse(
+                    {"error": "rate limit exceeded"}, status_code=429
+                )
+            window.append(now)
+            _rate_window[client_ip] = window
+            return await call_next(request)
+
+        def _check_auth(request: Request) -> bool:
+            """Return True if authorized (or no api_key configured)."""
+            if not gw._api_key:
+                return True
+            provided = request.headers.get("X-API-Key", "")
+            return bool(provided) and _hmac.compare_digest(provided, gw._api_key)
+
         ui_html = Path(__file__).with_name("index.html")
         if ui_html.exists():
             @app.get("/", response_class=HTMLResponse)
@@ -215,8 +265,12 @@ class WebGateway(Plugin):
                 return ui_html.read_text(encoding="utf-8")
 
         @app.post("/api/chat")
-        async def api_chat(body: dict):
+        async def api_chat(body: dict, request: Request):
+            if not _check_auth(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
             text = body.get("text", "")
+            if not isinstance(text, str) or not text.strip():
+                return JSONResponse({"error": "empty text"}, status_code=400)
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
             if self._agent_callback is None:
                 return {"reply": "[no agent callback bound]"}
@@ -224,13 +278,29 @@ class WebGateway(Plugin):
             return {"reply": reply, "session_id": session_id}
 
         @app.post("/api/chat/stream")
-        async def api_chat_stream(body: dict):
+        async def api_chat_stream(body: dict, request: Request):
+            if not _check_auth(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
             text = body.get("text", "")
+            if not isinstance(text, str) or not text.strip():
+                return JSONResponse({"error": "empty text"}, status_code=400)
             session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            # Clamp / sanitize caller-controlled params to prevent cost abuse
             model = body.get("model")
             temperature = body.get("temperature")
+            if temperature is not None:
+                try:
+                    temperature = max(0.0, min(2.0, float(temperature)))
+                except (TypeError, ValueError):
+                    temperature = None
             max_tokens = body.get("max_tokens")
-            tools = body.get("tools")
+            if max_tokens is not None:
+                try:
+                    max_tokens = max(1, min(8192, int(max_tokens)))
+                except (TypeError, ValueError):
+                    max_tokens = None
+            # Force tools=None: web stream must not execute arbitrary tools
+            tools = None
 
             _llm = self.ctx.get_plugin("llm") if self.ctx else None
             if _llm is None:

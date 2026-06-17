@@ -492,8 +492,12 @@ class RESTAPIGateway(Plugin):
             if _ctx is None:
                 raise HTTPException(503, "Context not initialized")
             
-            # Return a sanitized view of config (no secrets)
-            config = _ctx.config.copy() if _ctx.config else {}
+            # Deep-copy the config so sanitization doesn't mutate the
+            # live runtime config. A shallow copy shares nested dict
+            # references, so modifying config["llm"]["api_keys"] would
+            # overwrite the real API keys with "***" permanently.
+            import copy
+            config = copy.deepcopy(_ctx.config) if _ctx.config else {}
             
             # Mask sensitive fields
             if "llm" in config and "api_keys" in config["llm"]:
@@ -983,10 +987,14 @@ class RESTAPIGateway(Plugin):
             if not target_dir:
                 target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
             else:
-                # Validate path is within allowed directory
-                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
-                target_real = os.path.realpath(target_dir)
-                if not target_real.startswith(allowed_base):
+                # Validate path is within allowed directory.
+                # Use Path.relative_to instead of str.startswith to
+                # prevent "/data/skills_evil" bypassing "/data/skills".
+                allowed_base = Path(os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills")))
+                target_real = Path(os.path.realpath(target_dir))
+                try:
+                    target_real.relative_to(allowed_base)
+                except ValueError:
                     raise HTTPException(403, "target_dir must be within skills directory")
             
             ok = mp.uninstall(name, target_dir)
@@ -1278,18 +1286,23 @@ class RESTAPIGateway(Plugin):
             
             if path:
                 # Security: restrict path to data/documents directory only
+                # Use Path.relative_to() for strict containment (startswith can be bypassed
+                # e.g. "/data/skills_evil" starts with "/data/skills")
                 import os.path
-                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "documents"))
-                path_real = os.path.realpath(path)
-                if not path_real.startswith(allowed_base):
+                allowed_base = Path(os.path.realpath(os.path.join(
+                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "documents")))
+                path_real = Path(os.path.realpath(path))
+                try:
+                    path_real.relative_to(allowed_base)
+                except ValueError:
                     raise HTTPException(403, "path must be within data/documents directory")
-                
+
                 # Also check file exists and is a regular file
-                if not os.path.isfile(path_real):
+                if not path_real.is_file():
                     raise HTTPException(404, "file not found")
-                
-                count = _doc_store.ingest_file(path_real)
-                return {"ingested": True, "name": Path(path_real).name, "chunks": count}
+
+                count = _doc_store.ingest_file(str(path_real))
+                return {"ingested": True, "name": path_real.name, "chunks": count}
             
             raise HTTPException(400, _("need_file_or_path"))
 

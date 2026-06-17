@@ -158,9 +158,11 @@ def classify_command(command: str) -> Tuple[int, str]:
     if not stripped:
         return (0, "empty")
 
-    # Check DANGEROUS first (most specific patterns)
+    # Check DANGEROUS first (most specific patterns).
+    # Use re.search (not re.match) so patterns like ";", "&&", "$("
+    # are detected anywhere in the command, not just at the start.
     for pattern in _DANGEROUS_PATTERNS:
-        if re.match(pattern, stripped, re.IGNORECASE):
+        if re.search(pattern, stripped, re.IGNORECASE):
             return (3, f"dangerous operations: {stripped[:60]}")
 
     # Check MEDIUM
@@ -393,8 +395,11 @@ class SystemExecutor(Plugin):
         # If password was provided in the request body
         if provided_password:
             if mgr.verify(provided_password):
-                # 记录成功，缓存 60 分钟 —— 所有 level 都走同一套缓存逻辑
-                mgr.record_success(3)  # 最高级授权：level 3
+                # Cache only up to the requested risk level, not
+                # unconditionally level 3. This prevents a low-risk
+                # command's password from silently authorizing a
+                # later DANGEROUS command.
+                mgr.record_success(risk_level)
                 return (True, False)
             else:
                 mgr.record_failure()

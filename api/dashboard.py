@@ -231,6 +231,21 @@ DASHBOARD_HTML = """
                 .replace(/'/g, '&#39;');
         }
 
+        // JS string escape — for values inserted into inline JS handlers
+        // (onclick="..."). HTML entity escaping alone is NOT sufficient
+        // here because the browser decodes entities before executing JS.
+        // We must escape backslash and single-quote so the value cannot
+        // break out of the JS string literal.
+        function escJs(s) {
+            if (s == null) return '';
+            return String(s)
+                .replace(/\\/g, '\\\\')
+                .replace(/'/g, "\\'")
+                .replace(/"/g, '\\"')
+                .replace(/\n/g, '\\n')
+                .replace(/\r/g, '\\r');
+        }
+
         async function fetchJSON(url) {
             try {
                 const resp = await fetch(url);
@@ -278,14 +293,14 @@ DASHBOARD_HTML = """
             }
             
             container.innerHTML = data.sessions.map(s => `
-                <div class="session-item" onclick="viewSession('${esc(s.id)}')">
+                <div class="session-item" onclick="viewSession('${escJs(s.id)}')">
                     <div class="session-title">${esc(s.title || '未命名会话')}</div>
                     <div class="session-meta">
                         ${esc(s.message_count)} 条消息 · 
                         最后更新: ${new Date(s.updated_at * 1000).toLocaleString('zh-CN')}
                     </div>
                     <div class="session-actions">
-                        <button class="btn btn-small btn-fork" onclick="forkSession('${esc(s.id)}', event)">分支</button>
+                        <button class="btn btn-small btn-fork" onclick="forkSession('${escJs(s.id)}', event)">分支</button>
                     </div>
                 </div>
             `).join('');
@@ -305,8 +320,8 @@ DASHBOARD_HTML = """
                     <div><strong>${esc(r.action)}</strong></div>
                     <div style="font-size: 0.9em; color: #fbbf24;">${esc(r.description)}</div>
                     <div class="approval-actions">
-                        <button class="btn btn-approve" onclick="approveRequest('${esc(r.id)}')">批准</button>
-                        <button class="btn btn-deny" onclick="denyRequest('${esc(r.id)}')">拒绝</button>
+                        <button class="btn btn-approve" onclick="approveRequest('${escJs(r.id)}')">批准</button>
+                        <button class="btn btn-deny" onclick="denyRequest('${escJs(r.id)}')">拒绝</button>
                     </div>
                 </div>
             `).join('');

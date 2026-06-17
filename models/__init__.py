@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import time
 from collections import deque
 from typing import Any, Dict, List, Optional
@@ -912,7 +913,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                             tokens_completion=result.get("tokens_completion", 0),
                         )
                         result["cost_usd"] = cost_tracked
-                    except (ValueError, KeyError, OSError) as exc:
+                    except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
                         logger.error("cost_tracker record failed: %s", exc, exc_info=True)
 
                 # Store in cache (tools included in key; stateful tools should use use_cache=False)
@@ -959,7 +960,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                                         tokens_completion=result.get("tokens_completion", 0),
                                     )
                                     result["cost_usd"] = cost_tracked
-                                except (ValueError, KeyError, OSError) as exc:
+                                except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
                                     logger.error("cost_tracker record failed in retry: %s", exc, exc_info=True)
                             if use_cache and self._cache is not None:
                                 self._cache.set(messages, model, [], result, temperature)
@@ -1010,7 +1011,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                                                 tokens_completion=result.get("tokens_completion", 0),
                                             )
                                             result["cost_usd"] = cost_tracked
-                                        except (ValueError, KeyError, OSError) as exc:
+                                        except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
                                             logger.error("cost_tracker record failed in last resort: %s", exc, exc_info=True)
                                     logger.info("last resort succeeded")
                                     return result
@@ -1056,7 +1057,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                                             tokens_completion=result.get("tokens_completion", 0),
                                         )
                                         result["cost_usd"] = cost_tracked
-                                    except (ValueError, KeyError, OSError) as exc:
+                                    except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
                                         logger.error("cost_tracker record failed in fallback: %s", exc, exc_info=True)
                                 if use_cache and self._cache is not None:
                                     self._cache.set(messages, model, tools or [], result, temperature)
@@ -1141,6 +1142,18 @@ class LLMProvider(RecommendationMixin, Plugin):
         temperature = self._default_temperature if temperature is None else temperature
         max_tokens = self._default_max_tokens if max_tokens is None else max_tokens
 
+        # --- Budget check (mirror non-streaming path) ---
+        # Without this, streaming callers could bypass the daily/monthly
+        # budget cap and keep using expensive models indefinitely.
+        if self._cost_tracker:
+            budget = self._cost_tracker.check_budget()
+            if budget["overall_exceeded"]:
+                logger.warning(
+                    "Budget exceeded in stream path (daily=$%.4f/%.2f), downgrading",
+                    budget["daily"]["cost"], budget["daily"]["budget"],
+                )
+                model = self._find_cheapest_free_model()
+
         provider = model.split("/", 1)[0] if "/" in model else "openai"
         base = self._provider_base_urls.get(
             provider,
@@ -1151,6 +1164,22 @@ class LLMProvider(RecommendationMixin, Plugin):
 
         if not api_key:
             yield {"delta": "", "done": True, "error": f"no API key for provider '{provider}'"}
+            return
+
+        # --- Circuit breaker check (mirror non-streaming path) ---
+        # Without this, streaming callers keep hitting a provider that is
+        # already in OPEN state, preventing recovery.
+        if provider not in self._circuit_breakers:
+            self._circuit_breakers[provider] = CircuitBreaker()
+        circuit_breaker = self._circuit_breakers[provider]
+        if not circuit_breaker.can_execute():
+            logger.warning("Circuit breaker OPEN for provider %s in stream path", provider)
+            yield {
+                "delta": "",
+                "done": True,
+                "error": f"服务暂时不可用（{provider}），请稍后重试",
+                "circuit_breaker_open": True,
+            }
             return
 
         # Try streaming first; fall back to non-streaming on 400
@@ -1210,15 +1239,20 @@ class LLMProvider(RecommendationMixin, Plugin):
                         elif event_type == "message_stop":
                             yield {"delta": "", "done": True, "tokens_used": 0}
                     # Ensure we always yield a final done event
+                    circuit_breaker.record_success()
+                    self._call_stats.append({"model": model, "tokens_used": 0, "t": time.time()})
                     yield {"delta": "", "done": True, "tokens_used": 0}
             except httpx.HTTPStatusError as exc:
+                circuit_breaker.record_failure()
                 yield {"delta": "", "done": True, "error": f"stream error: {exc.response.status_code}"}
                 return
             except (httpx.RequestError, httpx.TimeoutException) as exc:
+                circuit_breaker.record_failure()
                 logger.error("stream error for anthropic %s: %s", bare_model, exc, exc_info=True)
                 yield {"delta": "", "done": True, "error": str(exc)}
                 return
             except Exception as exc:
+                circuit_breaker.record_failure()
                 logger.error("stream error for anthropic %s with unexpected error: %s", bare_model, exc, exc_info=True)
                 raise
         else:
@@ -1267,18 +1301,25 @@ class LLMProvider(RecommendationMixin, Plugin):
                         usage = data.get("usage")
                         if usage:
                             tokens_used = usage.get("total_tokens", 0)
+                            circuit_breaker.record_success()
+                            self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
                             yield {"delta": "", "done": True, "tokens_used": tokens_used}
                             return
                     # Ensure we always yield a final done event
+                    circuit_breaker.record_success()
+                    self._call_stats.append({"model": model, "tokens_used": 0, "t": time.time()})
                     yield {"delta": "", "done": True, "tokens_used": 0}
             except httpx.HTTPStatusError as exc:
+                circuit_breaker.record_failure()
                 yield {"delta": "", "done": True, "error": f"stream error: {exc.response.status_code}"}
                 return
             except (httpx.RequestError, httpx.TimeoutException) as exc:
+                circuit_breaker.record_failure()
                 logger.error("stream error for %s/%s: %s", provider, bare_model, exc, exc_info=True)
                 yield {"delta": "", "done": True, "error": str(exc)}
                 return
             except Exception as exc:
+                circuit_breaker.record_failure()
                 logger.error("stream error for %s/%s with unexpected error: %s", provider, bare_model, exc, exc_info=True)
                 raise
 
@@ -1378,10 +1419,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                         "args": block.get("input", {}),
                         "id": block.get("id"),
                     })
-            tokens_used = (data.get("usage") or {}).get("total_tokens", 0)
+            # Anthropic Messages API usage only contains input_tokens and
+            # output_tokens (no total_tokens field). Compute the sum so
+            # tokens_used / cost estimates are accurate.
             usage = data.get("usage") or {}
             tokens_prompt = usage.get("input_tokens", 0)
             tokens_completion = usage.get("output_tokens", 0)
+            tokens_used = tokens_prompt + tokens_completion
             result = {
                 "text": text.strip(),
                 "tool_calls": tool_calls,

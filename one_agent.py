@@ -454,13 +454,19 @@ class OneAgentApp:
             ))
         self.router.bind_llm(self.llm)
         self.coordinator.bind(self.llm, self.skills)
-        self.web.bind_callback(self.chat)
+        # Guard against optional gateways that may be None if their import failed
+        if self.web is not None:
+            self.web.bind_callback(self.chat)
         self.rest_api.bind_callback(self.chat)
         # wire marketplace to skills plugin
         self.marketplace._skills_plugin = self.skills  # type: ignore[attr-defined]
 
         # Setup and start alert manager
         await self._alert_manager.setup(self.config.model_dump())
+        # Wire the monitoring plugin's metrics collector into the alert
+        # manager so _check_loop actually evaluates rules against live metrics.
+        if self.monitor is not None:
+            self._alert_manager.set_metrics_getter(self.monitor.collect_metrics)
         await self._alert_manager.start()
 
         await self._pm.start_all()

@@ -60,9 +60,22 @@ class AlertManager:
         self._check_interval = 30  # seconds
         self._alert_history: List[AlertEvent] = []
         self._max_history = 100
+        # Metrics getter injected by the monitoring plugin (e.g. MonitoringPlugin).
+        # Without this, _check_loop has nothing to evaluate.
+        self._metrics_getter: Optional[Callable[[], Dict[str, Any]]] = None
+
+    def set_metrics_getter(self, getter: Callable[[], Dict[str, Any]]) -> None:
+        """Inject a metrics getter (called by one_agent.py after monitoring starts)."""
+        self._metrics_getter = getter
+        logger.info("alert manager metrics getter registered")
 
     async def setup(self, config: Dict[str, Any]) -> None:
-        """Initialize alert manager from config."""
+        """Initialize alert manager from config.
+
+        Accepts both ``metric_path``/``operator`` (explicit) and
+        ``metric``/``window_minutes`` (shorthand from default_config.yaml)
+        field names for alert rules, defaulting operator to ``">"``.
+        """
         self._client = httpx.AsyncClient(timeout=10)
 
         # Load alert rules from config
@@ -70,8 +83,10 @@ class AlertManager:
         for rule_dict in rules_cfg:
             rule = AlertRule(
                 name=rule_dict["name"],
-                metric_path=rule_dict["metric_path"],
-                operator=rule_dict["operator"],
+                # Accept both "metric_path" (explicit) and "metric" (shorthand)
+                metric_path=rule_dict.get("metric_path") or rule_dict.get("metric", ""),
+                # Default to ">" if operator not specified
+                operator=rule_dict.get("operator", ">"),
                 threshold=float(rule_dict["threshold"]),
                 severity=rule_dict.get("severity", "warning"),
                 cooldown_seconds=rule_dict.get("cooldown_seconds", 300),
@@ -230,7 +245,7 @@ class AlertManager:
         """Periodically check metrics against alert rules."""
         while self._running:
             try:
-                await self._check_all_rules()
+                await self._check_all_rules(self._metrics_getter)
             except asyncio.CancelledError:
                 # Graceful shutdown
                 logger.debug("alert check loop cancelled")
@@ -242,8 +257,10 @@ class AlertManager:
 
     async def _check_all_rules(self, metrics_getter: Optional[Callable] = None) -> None:
         """Check all enabled rules against current metrics."""
-        # This would be called with a metrics getter from the monitoring plugin
-        # For now, we'll skip actual checking if no getter is provided
+        # If no metrics getter is available (neither passed in nor injected),
+        # there is nothing to evaluate — log once at debug to avoid spam.
+        if metrics_getter is None:
+            metrics_getter = self._metrics_getter
         if metrics_getter is None:
             return
 

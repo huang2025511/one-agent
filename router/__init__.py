@@ -149,10 +149,16 @@ class SmartRouter(Plugin):
         sid = turn.session_id
         hist = self._session_history.setdefault(sid, [])
         # Skip failed turns — None reply pollutes conversation history
-        # and breaks message alternation (user→assistant→user→assistant)
+        # and breaks message alternation (user→assistant→user→assistant).
+        # If reply is still None after error fallback, use a placeholder so
+        # the assistant turn is always represented in history.
         reply = turn.result
         if reply is None and turn.error is not None:
             reply = f"[error: {turn.error}]" if turn.error else None
+        if reply is None:
+            # No result and no error: use a neutral placeholder to preserve
+            # the user→assistant alternation required by most providers.
+            reply = "(无响应)"
         hist.append({"input": turn.input_text, "reply": reply})
         # Bounds check: ensure we don't keep more than 20 entries
         if len(hist) > 20:

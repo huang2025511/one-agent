@@ -364,16 +364,21 @@ class WeComGateway(BaseMessagingGateway):
             timestamp = request.query_params.get("timestamp", "")
             nonce = request.query_params.get("nonce", "")
             echostr = request.query_params.get("echostr", "")
-            
-            # Security: verify signature when token is configured
-            if gateway._token and msg_signature:
+
+            # Security: fail-closed signature verification.
+            # If a token is configured, signature MUST be present and valid;
+            # if no token is configured, callback server should not be started
+            # (setup() refuses to start), so we still reject missing signatures.
+            if gateway._token:
+                if not msg_signature:
+                    return Response(content="missing signature", status_code=403)
                 import hashlib
                 sort_list = sorted([gateway._token, timestamp, nonce, echostr])
                 expected_sig = hashlib.sha1("".join(sort_list).encode()).hexdigest()
                 if not hmac.compare_digest(expected_sig, msg_signature):
                     logger.warning("wecom callback signature verification failed")
                     return Response(content="signature verification failed", status_code=403)
-            
+
             if gateway._encoding_aes_key:
                 try:
                     echostr = gateway._decrypt_message(echostr, msg_signature, timestamp, nonce)
@@ -386,35 +391,43 @@ class WeComGateway(BaseMessagingGateway):
         async def receive_message(request: Request):
             """接收企业微信消息推送（POST 请求）。"""
             body = await request.body()
-            
-            # Security: verify signature for POST messages
+
+            # Security: fail-closed signature verification for POST messages
             msg_signature = request.query_params.get("msg_signature", "")
             timestamp = request.query_params.get("timestamp", "")
             nonce = request.query_params.get("nonce", "")
-            if gateway._token and msg_signature:
+            if gateway._token:
+                if not msg_signature:
+                    return Response(content="missing signature", status_code=403)
                 import hashlib
                 sort_list = sorted([gateway._token, timestamp, nonce, body.decode("utf-8", errors="replace")])
                 expected_sig = hashlib.sha1("".join(sort_list).encode()).hexdigest()
                 if not hmac.compare_digest(expected_sig, msg_signature):
                     logger.warning("wecom POST callback signature verification failed")
                     return Response(content="signature verification failed", status_code=403)
-            
+
+            # WeCom POST body is XML, not JSON. Parse with ElementTree (safe against
+            # XXE by default in Python's stdlib xml.etree).
+            import xml.etree.ElementTree as ET
             try:
-                data = json.loads(body)
+                root = ET.fromstring(body)
             except Exception:
+                logger.warning("wecom POST callback: invalid XML body")
                 return Response(content="ok")
 
-            xml_content = data.get("Content", "")
-            # 简化处理：提取文本消息
-            import re
-            content_match = re.search(r"<Content><!\[CDATA\[(.*?)\]\]></Content>", xml_content)
-            from_user_match = re.search(r"<FromUserName><!\[CDATA\[(.*?)\]\]></FromUserName>", xml_content)
+            # If encoding_aes_key is configured, the body is encrypted; decrypt first
+            if gateway._encoding_aes_key:
+                try:
+                    encrypted = root.findtext("Encrypt", default="")
+                    decrypted_xml = gateway._decrypt_message(
+                        encrypted, msg_signature, timestamp, nonce)
+                    root = ET.fromstring(decrypted_xml.encode("utf-8"))
+                except Exception:
+                    logger.warning("wecom POST callback decryption failed")
+                    return Response(content="decryption failed", status_code=403)
 
-            if not content_match or not from_user_match:
-                return Response(content="ok")
-
-            text = content_match.group(1).strip()
-            user_id = from_user_match.group(1)
+            text = (root.findtext("Content") or "").strip()
+            user_id = root.findtext("FromUserName") or ""
 
             if not text:
                 return Response(content="ok")
@@ -621,48 +634,125 @@ class DingTalkGateway(BaseMessagingGateway):
             return False
 
     async def _stream_loop(self) -> None:
-        """Stream 模式长连接轮询。"""
+        """Stream 模式：通过钉钉 Stream 协议（WebSocket）接收事件。
+
+        钉钉 Stream 协议流程：
+        1. POST https://api.dingtalk.com/v1.0/gateway/connections/open 获取
+           WebSocket endpoint (wss://...) 和 ticket。
+        2. 用 WebSocket 客户端连接 endpoint，发送注册帧 {"ticket": ...}。
+        3. 在 WS 长连接上接收事件推送，回复 Pong 心跳。
+        """
+        # 尝试加载 WebSocket 客户端库（优先 websockets，其次 aiohttp）
+        ws_connect = None
+        try:
+            import websockets  # type: ignore
+            async def _ws_connect(uri):
+                return await websockets.connect(uri)
+            ws_connect = _ws_connect
+        except ImportError:
+            try:
+                import aiohttp  # type: ignore
+                async def _ws_connect(uri):
+                    return await aiohttp.ClientSession().ws_connect(uri)
+                ws_connect = _ws_connect
+            except ImportError:
+                logger.warning(
+                    "dingtalk stream mode requires 'websockets' or 'aiohttp' "
+                    "package; neither is installed — stream mode disabled"
+                )
+                return
+
         while True:
             token = await self._get_access_token()
             if not token:
                 await asyncio.sleep(10)
                 continue
             try:
-                # 钉钉 Stream 协议：通过 HTTP 长轮询获取事件
-                resp = await self._client.get(  # type: ignore[union-attr]
+                # Step 1: open connection — must be POST (not GET)
+                resp = await self._client.post(  # type: ignore[union-attr]
                     "https://api.dingtalk.com/v1.0/gateway/connections/open",
                     headers={"x-acs-dingtalk-access-token": token},
-                    json={"clientId": self._client_id, "subscriptions": [{"type": "EVENT", "topic": "/v1.0/im/bot/messages/get"}]},
-                    timeout=60,
+                    json={
+                        "clientId": self._client_id,
+                        "subscriptions": [
+                            {"type": "EVENT", "topic": "/v1.0/im/bot/messages/get"}
+                        ],
+                    },
+                    timeout=30,
                 )
-                data = resp.json()
-                for event in data.get("events", []) or []:
-                    msg = event.get("data", {}) or {}
-                    text = msg.get("text", {}).get("content", "").strip()
-                    sender = msg.get("senderId", "")
-                    conversation_id = msg.get("conversationId", "")
-                    if not text:
-                        continue
-                    msg_key = f"dt-{conversation_id}-{time.time_ns()}"
-                    evt = asyncio.Event()
-                    self._sessions[msg_key] = evt
-                    if self.bus is not None:
-                        self.bus.publish({
-                            "type": "external_message",
-                            "source": "dingtalk",
-                            "session_id": msg_key,
-                            "text": text,
-                            "chat_id": sender,
-                        })
-                    try:
-                        await asyncio.wait_for(evt.wait(), 120)
-                        reply = self._replies.get(msg_key, "[no reply]")
-                        await self._send_message(sender, reply)
-                    except asyncio.TimeoutError:
-                        await self._send_message(sender, "[timeout]")
-                    finally:
-                        self._sessions.pop(msg_key, None)
-                        self._replies.pop(msg_key, None)
+                conn = resp.json()
+                endpoint = conn.get("endpoint")
+                ticket = conn.get("ticket")
+                if not endpoint or not ticket:
+                    logger.warning("dingtalk stream: no endpoint/ticket in response: %s", conn)
+                    await asyncio.sleep(10)
+                    continue
+
+                # Step 2: connect via WebSocket
+                async with await ws_connect(endpoint) as ws:
+                    # 注册帧
+                    await ws.send(json.dumps({"ticket": ticket}))
+                    # Step 3: receive loop
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=120)
+                        except asyncio.TimeoutError:
+                            # 心跳：发送 ping 保活
+                            try:
+                                await ws.send(json.dumps({"type": "ping"}))
+                            except Exception:
+                                break
+                            continue
+                        try:
+                            frame = json.loads(raw)
+                        except Exception:
+                            continue
+                        # 钉钉心跳协议：收到 SYSTEM 心跳需回复 ack
+                        if frame.get("type") == "SYSTEM":
+                            headers = frame.get("headers", {})
+                            if headers.get("contentType") == "application/json; charset=UTF-8":
+                                await ws.send(json.dumps({
+                                    "code": 200,
+                                    "headers": {"contentType": "application/json; charset=UTF-8"},
+                                    "message": "OK",
+                                    "data": json.dumps({"messageId": headers.get("messageId")}),
+                                }))
+                            continue
+                        # 业务事件
+                        data = frame.get("data") or {}
+                        msg = data.get("content") or data
+                        if isinstance(msg, str):
+                            try:
+                                msg = json.loads(msg)
+                            except Exception:
+                                msg = {}
+                        text = (msg.get("text", {}).get("content") or "").strip()
+                        sender = msg.get("senderId") or msg.get("senderStaffId") or ""
+                        conversation_id = msg.get("conversationId") or ""
+                        if not text:
+                            continue
+                        msg_key = f"dt-{conversation_id}-{time.time_ns()}"
+                        evt = asyncio.Event()
+                        self._sessions[msg_key] = evt
+                        if self.bus is not None:
+                            self.bus.publish({
+                                "type": "external_message",
+                                "source": "dingtalk",
+                                "session_id": msg_key,
+                                "text": text,
+                                "chat_id": sender,
+                            })
+                        try:
+                            await asyncio.wait_for(evt.wait(), 120)
+                            reply = self._replies.get(msg_key, "[no reply]")
+                            await self._send_message(sender, reply)
+                        except asyncio.TimeoutError:
+                            await self._send_message(sender, "[timeout]")
+                        finally:
+                            self._sessions.pop(msg_key, None)
+                            self._replies.pop(msg_key, None)
+            except asyncio.CancelledError:
+                break
             except Exception as exc:
                 logger.warning("dingtalk stream error: %s", exc)
                 await asyncio.sleep(5)
@@ -830,7 +920,48 @@ class FeishuGateway(BaseMessagingGateway):
 
         @app.post("/feishu/callback")
         async def callback(request: Request):
-            body = await request.json()
+            raw = await request.body()
+            try:
+                body = json.loads(raw)
+            except Exception:
+                return {"error": "invalid json"}, 400
+
+            # Decrypt payload if encrypt_key is configured (Feishu AES-256-CBC)
+            if gateway._encrypt_key and isinstance(body, dict) and body.get("encrypt"):
+                try:
+                    import hashlib as _hashlib
+                    import base64 as _base64
+                    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # type: ignore
+                    key = _hashlib.sha256(gateway._encrypt_key.encode()).digest()
+                    encrypted_b64 = body["encrypt"]
+                    encrypted = _base64.b64decode(encrypted_b64)
+                    iv, ciphertext = encrypted[:16], encrypted[16:]
+                    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+                    decryptor = cipher.decryptor()
+                    padded = decryptor.update(ciphertext) + decryptor.finalize()
+                    pad_len = padded[-1]
+                    plaintext = padded[:-pad_len].decode("utf-8")
+                    body = json.loads(plaintext)
+                except ImportError:
+                    logger.warning("cryptography not installed — cannot decrypt Feishu payload")
+                    return {"error": "decryption unavailable"}, 500
+                except Exception:
+                    logger.warning("feishu callback decryption failed")
+                    return {"error": "decryption failed"}, 403
+
+            # Security: verify verification_token (fail-closed).
+            # Feishu includes the token in header.token for both url_verification
+            # and event callbacks. Reject any request missing or mismatching it
+            # when a token is configured.
+            if gateway._verification_token:
+                header = (body.get("header") or {}) if isinstance(body, dict) else {}
+                token_in_req = header.get("token") or body.get("token") or ""
+                if not token_in_req:
+                    return {"error": "missing verification token"}, 403
+                if not hmac.compare_digest(token_in_req, gateway._verification_token):
+                    logger.warning("feishu callback token verification failed")
+                    return {"error": "token verification failed"}, 403
+
             # URL 验证挑战
             if body.get("type") == "url_verification":
                 return {"challenge": body.get("challenge", "")}

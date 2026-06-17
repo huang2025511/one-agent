@@ -11,46 +11,35 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 
-def make_wechat_login_handler():
-    """Create the WeChat login skill handler."""
+def make_wechat_login_handler(ctx_ref=None):
+    """Create the WeChat login skill handler.
+
+    Args:
+        ctx_ref: Optional AgentContext reference (passed in by SkillManager
+            so the handler can locate the wechat gateway plugin without
+            importing non-existent module-level names).
+    """
 
     async def handler(args: Dict[str, Any]) -> str:
         """Handle WeChat login request."""
-        from skills import _skills
-
         # 尝试获取微信网关实例
         wechat_gateway = None
 
-        # 方法1: 从 ctx 获取
-        try:
-            from skills import _ctx_ref
-            if _ctx_ref:
-                plugins = getattr(_ctx_ref, '_plugins', []) or []
-                for plugin in plugins:
-                    if plugin and getattr(plugin, 'name', '') == 'gateway_wechat_personal':
-                        wechat_gateway = plugin
-                        break
-        except Exception:
-            pass
+        # 方法1: 从传入的 ctx_ref 获取（推荐路径，由 SkillManager 注入）
+        if ctx_ref is not None:
+            plugins = getattr(ctx_ref, '_plugins', []) or []
+            for plugin in plugins:
+                if plugin and getattr(plugin, 'name', '') == 'gateway_wechat_personal':
+                    wechat_gateway = plugin
+                    break
 
-        # 方法2: 从全局变量获取
+        # 方法2: 回退 — 从 one_agent 模块的全局 app 实例获取
         if wechat_gateway is None:
             try:
-                # 尝试从全局变量获取
-                import sys
-                for name, obj in sys.modules.items():
-                    if 'wechat' in name.lower():
-                        pass
-            except Exception:
-                pass
-
-        # 直接尝试获取网关
-        if wechat_gateway is None:
-            try:
-                # 从 one_agent 获取
-                import one_agent as oa
-                if hasattr(oa, '_ctx'):
-                    plugins = getattr(oa._ctx, '_plugins', []) or []
+                import one_agent as oa  # type: ignore
+                app = getattr(oa, '_app_instance', None)
+                if app is not None and getattr(app, 'ctx', None) is not None:
+                    plugins = getattr(app.ctx, '_plugins', []) or []
                     for plugin in plugins:
                         if plugin and getattr(plugin, 'name', '') == 'gateway_wechat_personal':
                             wechat_gateway = plugin

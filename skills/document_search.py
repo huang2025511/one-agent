@@ -194,6 +194,72 @@ class DocumentStore:
 
 # ------------------------------------------------------------------ skill handler factory
 
+# Allowed roots for ingest (resolved absolute paths). Files outside these
+# directories are rejected to prevent reading sensitive files like
+# /etc/passwd or ~/.ssh/id_rsa via the skill interface.
+_ALLOWED_INGEST_ROOTS = [
+    Path("data/documents").resolve(),
+    Path("data/uploads").resolve(),
+    Path("data/docs").resolve(),
+]
+_ALLOWED_INGEST_EXTS = {".pdf", ".md", ".txt", ".markdown", ".text"}
+_MAX_INGEST_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _validate_ingest_path(path_str: str) -> Path:
+    """Validate a user-supplied ingest path against allow-list and size limits.
+
+    Returns the resolved Path if safe; raises ValueError otherwise.
+    """
+    if not path_str:
+        raise ValueError("empty path")
+    # Resolve to absolute, following symlinks (so symlink escapes are caught).
+    try:
+        resolved = Path(path_str).resolve(strict=True)
+    except FileNotFoundError:
+        raise ValueError(f"file not found: {path_str}")
+    except OSError as exc:
+        raise ValueError(f"cannot resolve path: {exc}")
+
+    # Extension whitelist
+    if resolved.suffix.lower() not in _ALLOWED_INGEST_EXTS:
+        raise ValueError(
+            f"unsupported file type: {resolved.suffix} "
+            f"(allowed: {', '.join(sorted(_ALLOWED_INGEST_EXTS))})"
+        )
+
+    # Directory containment check (strict, not startswith)
+    inside_allowed = False
+    for root in _ALLOWED_INGEST_ROOTS:
+        try:
+            resolved.relative_to(root)
+            inside_allowed = True
+            break
+        except ValueError:
+            continue
+    if not inside_allowed:
+        raise ValueError(
+            f"path '{resolved}' is outside allowed ingest directories: "
+            f"{', '.join(str(r) for r in _ALLOWED_INGEST_ROOTS)}"
+        )
+
+    # Must be a regular file
+    if not resolved.is_file():
+        raise ValueError(f"not a regular file: {resolved}")
+
+    # Size limit
+    try:
+        size = resolved.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"cannot stat file: {exc}")
+    if size > _MAX_INGEST_BYTES:
+        raise ValueError(
+            f"file too large: {size} bytes (max {_MAX_INGEST_BYTES} bytes)"
+        )
+
+    return resolved
+
+
 def make_doc_search_handler(store):
     async def handler(args):
         action = args.get("action", "search")
@@ -222,8 +288,15 @@ def make_doc_search_handler(store):
             path = args.get("path", "")
             if not path:
                 return "请提供文档路径"
+            # Security: validate path before reading to prevent reading
+            # sensitive files outside allowed directories.
+            try:
+                safe_path = _validate_ingest_path(path)
+            except ValueError as exc:
+                logger.warning("document_search ingest rejected: %s", exc)
+                return f"拒绝摄入文档：{exc}"
             loop = _asyncio.get_event_loop()
-            count = await loop.run_in_executor(None, store.ingest_file, path)
+            count = await loop.run_in_executor(None, store.ingest_file, str(safe_path))
             return f"已摄入文档，切分为 {count} 个 chunks"
         else:
             return f"未知操作: {action}，支持: search, list, ingest"

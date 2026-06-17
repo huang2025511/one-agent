@@ -324,6 +324,17 @@ def register_setup_endpoints(app) -> None:
 
     @app.post("/setup/configure")
     async def setup_configure(request: Request):
+        # Security: only allow setup from localhost. This endpoint
+        # writes API keys to .env and os.environ, so remote access
+        # would allow an attacker to overwrite keys and redirect all
+        # LLM traffic to a malicious endpoint.
+        client_host = request.client.host if request.client else ""
+        if client_host not in ("127.0.0.1", "::1", "localhost"):
+            return JSONResponse(
+                {"ok": False, "error": "setup endpoint only accessible from localhost"},
+                status_code=403,
+            )
+
         data = await request.json()
         provider = data.get("provider", "").lower()
         api_key = data.get("api_key", "").strip()
@@ -339,7 +350,20 @@ def register_setup_endpoints(app) -> None:
             "openrouter": "OPENROUTER_API_KEY",
             "ollama": "OLLAMA_HOST",
         }
-        env_var = env_var_map.get(provider, f"{provider.upper()}_API_KEY")
+        # Strict whitelist — reject unknown providers to prevent
+        # arbitrary environment variable injection.
+        if provider not in env_var_map:
+            return JSONResponse(
+                {"ok": False, "error": f"unsupported provider: {provider}"},
+                status_code=400,
+            )
+        env_var = env_var_map[provider]
+        # Reject values containing newlines (would corrupt .env format)
+        if "\n" in api_key or "\r" in api_key:
+            return JSONResponse(
+                {"ok": False, "error": "api_key must not contain newlines"},
+                status_code=400,
+            )
         _write_env(env_var, api_key)
         os.environ[env_var] = api_key
         _ensure_config()

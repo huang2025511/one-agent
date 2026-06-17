@@ -210,8 +210,12 @@ class EmbeddingStore(BaseSQLiteStore):
             return []
 
         try:
-            # Load vectors into cache if not yet loaded
-            if self._vector_cache is None:
+            # Load vectors into cache if not yet loaded.
+            # Capture the cache reference into a local variable so that a
+            # concurrent store()/delete() setting self._vector_cache = None
+            # cannot cause TypeError during iteration below (TOCTOU fix).
+            cache = self._vector_cache
+            if cache is None:
                 cursor = self._conn.execute(
                     "SELECT memory_id, vector FROM embeddings"
                 )
@@ -223,9 +227,11 @@ class EmbeddingStore(BaseSQLiteStore):
                         cache.append((memory_id, stored_vector))
                 self._vector_cache = cache
 
-            # Compute cosine similarity against cached vectors
+            # Compute cosine similarity against cached vectors.
+            # Iterate over the local `cache` reference, NOT self._vector_cache,
+            # so we are immune to concurrent invalidation.
             results = []
-            for memory_id, stored_vector in self._vector_cache:
+            for memory_id, stored_vector in cache:
                 similarity = _cosine_similarity(query_vector, stored_vector)
                 results.append((memory_id, similarity))
 

@@ -56,6 +56,13 @@ class SessionStore(BaseSQLiteStore):
             self._conn.execute("ALTER TABLE sessions ADD COLUMN fork_point INTEGER")
         except sqlite3.OperationalError:
             pass  # Column already exists
+        # Add tokens column to messages so fork_session can sum per-message
+        # token counts (previously messages had no tokens column, causing
+        # forked sessions to always report total_tokens=0).
+        try:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN tokens INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         self._conn.commit()
 
     # -------------------------------------------------------- public API
@@ -143,15 +150,15 @@ class SessionStore(BaseSQLiteStore):
                     # Insert message with optional ID
                     if message_id:
                         self._conn.execute(
-                            "INSERT INTO messages(id, session_id, role, content, meta, created_at) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (message_id, session_id, role, content, meta_json, now),
+                            "INSERT INTO messages(id, session_id, role, content, meta, created_at, tokens) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (message_id, session_id, role, content, meta_json, now, tokens),
                         )
                     else:
                         self._conn.execute(
-                            "INSERT INTO messages(session_id, role, content, meta, created_at) "
-                            "VALUES (?, ?, ?, ?, ?)",
-                            (session_id, role, content, meta_json, now),
+                            "INSERT INTO messages(session_id, role, content, meta, created_at, tokens) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (session_id, role, content, meta_json, now, tokens),
                         )
 
                     # Update session counters
@@ -294,16 +301,19 @@ class SessionStore(BaseSQLiteStore):
                 for msg in messages[:fork_point]:
                     meta = msg.get("meta", {})
                     meta_json = json.dumps(meta) if isinstance(meta, dict) else (meta or "{}")
+                    # Preserve per-message token count so the forked session's
+                    # total_tokens is accurate (was always 0 before tokens col).
+                    msg_tokens = msg.get("tokens", 0) or 0
                     self._conn.execute(
-                        "INSERT INTO messages(id, session_id, role, content, meta, created_at) "
-                        "VALUES (NULL, ?, ?, ?, ?, ?)",
-                        (new_session_id, msg["role"], msg["content"], meta_json, msg["created_at"]),
+                        "INSERT INTO messages(id, session_id, role, content, meta, created_at, tokens) "
+                        "VALUES (NULL, ?, ?, ?, ?, ?, ?)",
+                        (new_session_id, msg["role"], msg["content"], meta_json, msg["created_at"], msg_tokens),
                     )
 
                 # 更新消息计数和 token 统计
                 self._conn.execute(
                     "UPDATE sessions SET message_count = ?, total_tokens = ? WHERE id = ?",
-                    (fork_point, sum(m.get("tokens", 0) for m in messages[:fork_point]), new_session_id),
+                    (fork_point, sum((m.get("tokens", 0) or 0) for m in messages[:fork_point]), new_session_id),
                 )
 
                 self._conn.commit()

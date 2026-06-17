@@ -731,7 +731,9 @@ class SkillManager(Plugin):
         async def wechat_login_handler(args: Dict[str, Any]) -> str:
             """启动微信网关并显示登录二维码（按需启动）"""
             from skills.wechat_login import make_wechat_login_handler
-            wechat_handler = make_wechat_login_handler()
+            # Pass the SkillManager's ctx_ref so the handler can locate the
+            # wechat gateway plugin without importing non-existent names.
+            wechat_handler = make_wechat_login_handler(getattr(self, "_ctx_ref", None))
             return await wechat_handler(args)
         self.register(Skill(
             id="wechat_login", title="微信登录",
@@ -745,14 +747,18 @@ class SkillManager(Plugin):
 
         # ---------- 退出技能 ----------
         async def quit_handler(args: Dict[str, Any]) -> str:
-            """退出 One-Agent"""
+            """退出 One-Agent。
+
+            Use sys.exit(0) (raises SystemExit) instead of os._exit(0) so the
+            main loop's finally block runs app.stop() — flushing logs,
+            closing httpx clients, committing SQLite, and stopping plugins.
+            os._exit skips all cleanup (atexit, finally, asyncio shutdown).
+            """
             import sys
-            results = []
-            results.append("正在退出...")
-            results.append("再见！下次见 👋")
-            # 使用 os._exit 而不是 sys.exit，这样更干净
-            import os
-            os._exit(0)
+            results = ["正在退出...", "再见！下次见 👋"]
+            # Defer the exit slightly so the reply can be surfaced first.
+            loop = asyncio.get_event_loop()
+            loop.call_later(0.1, sys.exit, 0)
             return "\n".join(results)
         self.register(Skill(
             id="quit", title="退出",
@@ -1039,11 +1045,16 @@ class SkillManager(Plugin):
         # 使用全局共享的 PythonExecutor 实例（由 one_agent.py 创建并通过 ctx 传递）
         from executors.python_runner import make_python_handler
         python_executor = None
-        
-        # 尝试从 AgentContext 获取共享实例（在 start() 时设置）
-        if hasattr(self, '_ctx') and hasattr(self._ctx, 'python_executor'):
-            python_executor = self._ctx.python_executor
-        
+
+        # 尝试从 AgentContext 获取共享实例（在 start() 时设置）。
+        # NOTE: SkillManager stores its context reference as self._ctx_ref
+        # (set in setup()), NOT self._ctx — using the wrong name silently
+        # fell through to creating a fresh executor every time, defeating
+        # the shared-sandbox design.
+        ctx_ref = getattr(self, "_ctx_ref", None)
+        if ctx_ref is not None and hasattr(ctx_ref, "python_executor"):
+            python_executor = ctx_ref.python_executor
+
         if python_executor is None:
             # 如果未提供，创建新实例（向后兼容或测试环境）
             from executors.python_runner import PythonExecutor
