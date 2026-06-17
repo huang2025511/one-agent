@@ -53,6 +53,18 @@ TYPE_MAP = {
     dict: "object",
 }
 
+# Name-to-JSON-Schema mapping — used instead of eval() to convert
+# type name strings (extracted from Optional[T] / Union[T, None])
+# to their JSON Schema equivalents safely.
+_NAME_TO_JSON = {
+    "str": "string",
+    "int": "integer",
+    "float": "number",
+    "bool": "boolean",
+    "list": "array",
+    "dict": "object",
+}
+
 
 def _parse_docstring(docstring: str) -> Dict[str, Any]:
     """解析 docstring 提取函数描述和参数说明。
@@ -123,8 +135,9 @@ def _get_json_type(python_type: Any) -> str:
         match = re.search(r'(?:Optional|Union)\[(\w+)', type_str)
         if match:
             inner_type = match.group(1)
-            if inner_type in ['str', 'int', 'float', 'bool', 'list', 'dict']:
-                return TYPE_MAP[eval(inner_type)]
+            # Use safe name→json mapping instead of eval()
+            if inner_type in _NAME_TO_JSON:
+                return _NAME_TO_JSON[inner_type]
     
     # 默认返回 string
     return "string"

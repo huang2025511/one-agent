@@ -148,7 +148,12 @@ class SmartRouter(Plugin):
             return
         sid = turn.session_id
         hist = self._session_history.setdefault(sid, [])
-        hist.append({"input": turn.input_text, "reply": turn.result})
+        # Skip failed turns — None reply pollutes conversation history
+        # and breaks message alternation (user→assistant→user→assistant)
+        reply = turn.result
+        if reply is None and turn.error is not None:
+            reply = f"[error: {turn.error}]" if turn.error else None
+        hist.append({"input": turn.input_text, "reply": reply})
         # Bounds check: ensure we don't keep more than 20 entries
         if len(hist) > 20:
             self._session_history[sid] = hist[-20:]
@@ -399,22 +404,21 @@ class SmartRouter(Plugin):
             # If we have a summary capability, use it
             if compression_cfg.get("summarize_old_turns", False) and len(history) > 6:
                 old_turns = history[:-6]
-                # Create a summary of old turns
+                # Create a summary of old turns — use reply (assistant output)
+                # rather than input (user message) for meaningful context
                 summary_parts = []
                 for h in old_turns:
                     if h.get("reply"):
-                        # Extract key points from old replies
-                        summary_parts.append(f"Earlier: {h['input'][:50]}...")
+                        summary_parts.append(f"Earlier reply: {str(h['reply'])[:80]}...")
                 
+                # Always preserve the system prompt — it contains core rules
+                messages = [{"role": "system", "content": system}]
                 if summary_parts:
-                    # Insert summary as first message
                     summary_msg = {
                         "role": "system",
                         "content": "Previous context summary:\n" + "\n".join(summary_parts[-3:])
                     }
-                    messages = [summary_msg]
-                else:
-                    messages = [{"role": "system", "content": system}]
+                    messages.append(summary_msg)
             else:
                 messages = [{"role": "system", "content": system}]
             

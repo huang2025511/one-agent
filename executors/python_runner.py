@@ -94,7 +94,10 @@ def _safe_import(name, globals=None, locals=None, fromlist=(), level=0):
         raise ImportError(f"Import not allowed: {name}")
     return _real_import(name, globals, locals, fromlist, level)
 
-# Safe builtins — exclude dangerous ones like eval, exec, compile
+# Safe builtins — exclude dangerous ones like eval, exec, compile.
+# Also exclude introspection builtins (object, getattr, hasattr, dir, type,
+# vars, globals, locals) that enable classic sandbox escape via
+# object.__subclasses__() → __import__("os").system(...).
 _SAFE_BUILTINS = {
     "abs": abs,
     "all": all,
@@ -106,15 +109,12 @@ _SAFE_BUILTINS = {
     "chr": chr,
     "complex": complex,
     "dict": dict,
-    "dir": dir,
     "divmod": divmod,
     "enumerate": enumerate,
     "filter": filter,
     "float": float,
     "format": format,
     "frozenset": frozenset,
-    "getattr": getattr,
-    "hasattr": hasattr,
     "hash": hash,
     "hex": hex,
     "id": id,
@@ -128,7 +128,6 @@ _SAFE_BUILTINS = {
     "max": max,
     "min": min,
     "next": next,
-    "object": object,
     "oct": oct,
     "ord": ord,
     "pow": pow,

@@ -76,20 +76,21 @@ class KnowledgeGraph(BaseSQLiteStore):
         name = re.sub(r'\s+', ' ', name)
         
         now = time.time()
-        cur = self._conn.execute("SELECT id FROM entities WHERE name = ?", (name,))
-        row = cur.fetchone()
-        if row:
-            self._conn.execute(
-                "UPDATE entities SET type = ?, updated_at = ? WHERE id = ?",
-                (etype, now, row["id"])
+        with self._write_lock:
+            cur = self._conn.execute("SELECT id FROM entities WHERE name = ?", (name,))
+            row = cur.fetchone()
+            if row:
+                self._conn.execute(
+                    "UPDATE entities SET type = ?, updated_at = ? WHERE id = ?",
+                    (etype, now, row["id"])
+                )
+                return row["id"]
+            cur = self._conn.execute(
+                "INSERT INTO entities (name, type, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (name, etype, source, now, now)
             )
-            return row["id"]
-        cur = self._conn.execute(
-            "INSERT INTO entities (name, type, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (name, etype, source, now, now)
-        )
-        self._conn.commit()
-        return cur.lastrowid
+            self._conn.commit()
+            return cur.lastrowid
 
     def add_relation(self, subject: str, predicate: str, obj: str,
                     weight: float = 1.0, source: str = "") -> bool:
@@ -108,27 +109,28 @@ class KnowledgeGraph(BaseSQLiteStore):
         subj_id = self.add_entity(subject, source=source)
         obj_id = self.add_entity(obj, source=source)
 
-        try:
-            with self._conn:  # automatic transaction
-                # Check if relation already exists
-                cur = self._conn.execute(
-                    "SELECT id FROM relations WHERE subject_id = ? AND predicate = ? AND object_id = ?",
-                    (subj_id, predicate, obj_id)
-                )
-                if cur.fetchone():
-                    # Update weight
-                    self._conn.execute(
-                        "UPDATE relations SET weight = weight + ? WHERE subject_id = ? AND predicate = ? AND object_id = ?",
-                        (weight, subj_id, predicate, obj_id)
+        with self._write_lock:
+            try:
+                with self._conn:  # automatic transaction
+                    # Check if relation already exists
+                    cur = self._conn.execute(
+                        "SELECT id FROM relations WHERE subject_id = ? AND predicate = ? AND object_id = ?",
+                        (subj_id, predicate, obj_id)
                     )
-                else:
-                    self._conn.execute(
-                        "INSERT INTO relations (subject_id, predicate, object_id, weight, source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (subj_id, predicate, obj_id, weight, source, time.time())
-                    )
-        except sqlite3.Error as e:
-            logger.error("Transaction failed in add_relation: %s", e)
-            raise
+                    if cur.fetchone():
+                        # Update weight
+                        self._conn.execute(
+                            "UPDATE relations SET weight = weight + ? WHERE subject_id = ? AND predicate = ? AND object_id = ?",
+                            (weight, subj_id, predicate, obj_id)
+                        )
+                    else:
+                        self._conn.execute(
+                            "INSERT INTO relations (subject_id, predicate, object_id, weight, source, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                            (subj_id, predicate, obj_id, weight, source, time.time())
+                        )
+            except sqlite3.Error as e:
+                logger.error("Transaction failed in add_relation: %s", e)
+                raise
         return True
 
     def query_entity(self, name: str) -> Optional[Dict[str, Any]]:

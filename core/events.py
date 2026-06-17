@@ -141,10 +141,13 @@ class EventBus:
         "mcp_tool_called",
         "python_executed",
         "cron_triggered",
+        "cron",
         "shutdown",
         "startup",
         # User interaction
         "user_message",
+        # Gateway / external messages
+        "external_message",
     }
 
     @classmethod
@@ -210,6 +213,23 @@ class EventBus:
 
     def subscribe_all(self, handler: Handler) -> None:
         self._wildcards.append(handler)
+
+    def unsubscribe(self, event_type: str, handler: Handler) -> None:
+        """Remove a previously subscribed handler from an event type.
+
+        Safe to call even if the handler was never subscribed or the
+        event type has no subscribers — it silently does nothing.
+        """
+        handlers = self._subscribers.get(event_type)
+        if not handlers:
+            return
+        try:
+            handlers.remove(handler)
+        except ValueError:
+            pass  # handler not in list — nothing to do
+        if not handlers:
+            del self._subscribers[event_type]
+        logger.debug("unsubscribed %s from %s", handler, event_type)
 
     def publish(self, event) -> None:
         """Accept either an Event object OR a dict with 'type'/'payload' keys."""

@@ -218,6 +218,19 @@ DASHBOARD_HTML = """
         const API_BASE = '/api';
         let refreshInterval;
 
+        // HTML escape function to prevent XSS — all user-controlled
+        // data (session titles, approval descriptions, etc.) must be
+        // escaped before inserting into innerHTML.
+        function esc(s) {
+            if (s == null) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         async function fetchJSON(url) {
             try {
                 const resp = await fetch(url);
@@ -265,14 +278,14 @@ DASHBOARD_HTML = """
             }
             
             container.innerHTML = data.sessions.map(s => `
-                <div class="session-item" onclick="viewSession('${s.id}')">
-                    <div class="session-title">${s.title || '未命名会话'}</div>
+                <div class="session-item" onclick="viewSession('${esc(s.id)}')">
+                    <div class="session-title">${esc(s.title || '未命名会话')}</div>
                     <div class="session-meta">
-                        ${s.message_count} 条消息 · 
+                        ${esc(s.message_count)} 条消息 · 
                         最后更新: ${new Date(s.updated_at * 1000).toLocaleString('zh-CN')}
                     </div>
                     <div class="session-actions">
-                        <button class="btn btn-small btn-fork" onclick="forkSession('${s.id}', event)">分支</button>
+                        <button class="btn btn-small btn-fork" onclick="forkSession('${esc(s.id)}', event)">分支</button>
                     </div>
                 </div>
             `).join('');
@@ -289,11 +302,11 @@ DASHBOARD_HTML = """
             
             container.innerHTML = data.pending.map(r => `
                 <div class="approval-item">
-                    <div><strong>${r.action}</strong></div>
-                    <div style="font-size: 0.9em; color: #fbbf24;">${r.description}</div>
+                    <div><strong>${esc(r.action)}</strong></div>
+                    <div style="font-size: 0.9em; color: #fbbf24;">${esc(r.description)}</div>
                     <div class="approval-actions">
-                        <button class="btn btn-approve" onclick="approveRequest('${r.id}')">批准</button>
-                        <button class="btn btn-deny" onclick="denyRequest('${r.id}')">拒绝</button>
+                        <button class="btn btn-approve" onclick="approveRequest('${esc(r.id)}')">批准</button>
+                        <button class="btn btn-deny" onclick="denyRequest('${esc(r.id)}')">拒绝</button>
                     </div>
                 </div>
             `).join('');

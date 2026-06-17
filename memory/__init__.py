@@ -8,11 +8,13 @@ Enhanced with:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -78,6 +80,10 @@ class LongTermMemory:
         self._decay_enabled = decay_enabled
         self._decay_factor = decay_factor
         self._has_weight_col: Optional[bool] = None
+        # Write lock — serializes write operations across threads to
+        # prevent "database is locked" errors when multiple asyncio
+        # tasks (via asyncio.to_thread) access this connection.
+        self._write_lock = threading.RLock()
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -96,61 +102,67 @@ class LongTermMemory:
             c.execute("CREATE INDEX IF NOT EXISTS idx_memory_ts ON memory(timestamp)")
         self._conn.commit()
 
-    def add(self, content: str, source: str = "user", tags: str = "", weight: float = 1.0) -> None:
-        """Add a memory entry with retry logic for transient lock errors."""
-        c = self._conn.cursor()
-        # Cache the column-presence check so we don't run PRAGMA on every
-        # insert.  The schema is fixed for the lifetime of the connection
-        # (no ALTER TABLE happens in this codebase), so caching is safe.
-        # Wrap in a transaction so the schema check and insert are atomic
-        # (autocommit mode would otherwise interleave them).
-        
-        # Retry logic for "database is locked" errors
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                self._conn.execute("BEGIN IMMEDIATE")
-                if self._has_weight_col is None:
-                    try:
-                        # Use a separate cursor for schema check to avoid state issues
-                        schema_cursor = self._conn.cursor()
-                        schema_cursor.execute("PRAGMA table_info(memory)")
-                        self._has_weight_col = "weight" in {row[1] for row in schema_cursor.fetchall()}
-                        schema_cursor.close()
-                    except sqlite3.DatabaseError:
-                        self._has_weight_col = False
-                if self._has_weight_col:
-                    c.execute(
-                        "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
-                        (content, source, tags, time.time(), weight),
-                    )
-                else:
-                    c.execute(
-                        "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
-                        (content, source, tags, time.time()),
-                    )
-                self._conn.commit()
-                break  # Success
-            except sqlite3.OperationalError as exc:
-                self._conn.rollback()
-                if "locked" in str(exc).lower() and attempt < max_retries - 1:
-                    import time as time_module
-                    delay = min(0.01 * (2 ** attempt), 0.1)  # 10ms, 20ms, 40ms
-                    logger.warning(
-                        "memory add: database locked (attempt %d/%d), retrying in %.0fms: %s",
-                        attempt + 1, max_retries, delay * 1000, exc
-                    )
-                    time_module.sleep(delay)
-                    continue
-                # Non-lock error or final attempt
-                logger.error("memory add failed: %s", exc)
-                raise
-            except sqlite3.Error as exc:
-                self._conn.rollback()
-                logger.error("memory add failed: %s", exc)
-                raise
-            finally:
-                c.close()
+    def add(self, content: str, source: str = "user", tags: str = "", weight: float = 1.0) -> Optional[int]:
+        """Add a memory entry with retry logic for transient lock errors.
+
+        Returns the rowid of the inserted entry so callers can associate
+        related data (e.g. embeddings) without a separate
+        ``last_insert_rowid()`` query, which would be racy in a
+        multi-threaded context.
+        """
+        with self._write_lock:
+            # Retry logic for "database is locked" errors
+            max_retries = 3
+            result_rowid: Optional[int] = None
+            for attempt in range(max_retries):
+                # Create a fresh cursor inside the loop — closing it in finally
+                # and reusing a closed cursor was the original bug.
+                c = self._conn.cursor()
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    if self._has_weight_col is None:
+                        try:
+                            # Use a separate cursor for schema check to avoid state issues
+                            schema_cursor = self._conn.cursor()
+                            schema_cursor.execute("PRAGMA table_info(memory)")
+                            self._has_weight_col = "weight" in {row[1] for row in schema_cursor.fetchall()}
+                            schema_cursor.close()
+                        except sqlite3.DatabaseError:
+                            self._has_weight_col = False
+                    if self._has_weight_col:
+                        c.execute(
+                            "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
+                            (content, source, tags, time.time(), weight),
+                        )
+                    else:
+                        c.execute(
+                            "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
+                            (content, source, tags, time.time()),
+                        )
+                    result_rowid = c.lastrowid
+                    self._conn.commit()
+                    break  # Success
+                except sqlite3.OperationalError as exc:
+                    self._conn.rollback()
+                    if "locked" in str(exc).lower() and attempt < max_retries - 1:
+                        import time as time_module
+                        delay = min(0.01 * (2 ** attempt), 0.1)  # 10ms, 20ms, 40ms
+                        logger.warning(
+                            "memory add: database locked (attempt %d/%d), retrying in %.0fms: %s",
+                            attempt + 1, max_retries, delay * 1000, exc
+                        )
+                        time_module.sleep(delay)
+                        continue
+                    # Non-lock error or final attempt
+                    logger.error("memory add failed: %s", exc)
+                    raise
+                except sqlite3.Error as exc:
+                    self._conn.rollback()
+                    logger.error("memory add failed: %s", exc)
+                    raise
+                finally:
+                    c.close()
+            return result_rowid
 
     def search(
         self,
@@ -251,7 +263,8 @@ class LongTermMemory:
             return {"rows": c.fetchone()[0] or 0, "avg_weight": 1.0}
 
     def vacuum(self) -> None:
-        self._conn.execute("VACUUM")
+        with self._write_lock:
+            self._conn.execute("VACUUM")
 
     def get_by_id(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """Get a memory entry by its rowid."""
@@ -326,21 +339,27 @@ class ProceduralMemory:
 
     def lookup(self, text: str) -> Optional[Dict[str, Any]]:
         best: Optional[Dict[str, Any]] = None
+        best_id: Optional[str] = None
         best_hits = 0
         for skill_id, meta in self._index["skills"].items():
             hits = sum(1 for t in meta["triggers"] if t and t.lower() in text.lower())
             if hits > best_hits:
                 best_hits = hits
                 best = meta
-        if best is None or best_hits == 0:
+                best_id = skill_id
+        if best is None or best_id is None or best_hits == 0:
             return None
-        body = Path(best["path"]).read_text(encoding="utf-8")
+        try:
+            body = Path(best["path"]).read_text(encoding="utf-8")
+        except (FileNotFoundError, OSError) as exc:
+            logger.warning("procedural memory: skill file missing: %s", exc)
+            return None
         best["uses"] += 1
         # Increment dirty count; only persist on the next flush.
         self._dirty_count += 1
         if self._dirty_count >= self._dirty_threshold:
             self._persist_index()
-        return {"id": skill_id, "body": body, "meta": best}
+        return {"id": best_id, "body": body, "meta": best}
 
     def list(self) -> List[str]:
         return list(self._index["skills"].keys())
@@ -411,41 +430,51 @@ class MemoryPlugin(Plugin):
         turn: TurnContext | None = event.get("turn")
         if turn is None or self._long is None:
             return
-        
-        # FTS5 keyword search
-        fts_hits = self._long.search(turn.input_text, limit=self._max_results)
-        
+
+        # FTS5 keyword search — wrap in to_thread to avoid blocking
+        # the event loop on SQLite I/O
+        fts_hits = await asyncio.to_thread(
+            self._long.search, turn.input_text, limit=self._max_results
+        )
+
         # Hybrid search: combine FTS + embedding semantic search
         if self._hybrid_search and self._embeddings:
             try:
-                # Get embedding for query
-                query_vec = self._embeddings.embed(turn.input_text)
+                # Get embedding for query — SentenceTransformer.encode()
+                # is CPU-bound and must not block the event loop
+                query_vec = await asyncio.to_thread(
+                    self._embeddings.embed, turn.input_text
+                )
                 if query_vec is not None:
-                    # Semantic search
-                    semantic_results = self._embeddings.search(query_vec, top_k=self._max_results)
-                    
+                    # Semantic search — also offload (may scan all vectors)
+                    semantic_results = await asyncio.to_thread(
+                        self._embeddings.search, query_vec, top_k=self._max_results
+                    )
+
                     # Merge results: FTS hits + semantic hits
                     # Use memory_id to avoid duplicates
                     seen_ids = set()
                     merged_hits = []
-                    
+
                     # Add FTS hits first (keyword match has higher priority)
                     for hit in fts_hits:
                         memory_id = hit.get("id")
                         if memory_id and memory_id not in seen_ids:
                             seen_ids.add(memory_id)
                             merged_hits.append(hit)
-                    
+
                     # Add semantic results
                     for memory_id, score in semantic_results:
                         if memory_id not in seen_ids:
                             seen_ids.add(memory_id)
                             # Fetch full memory content
-                            hit = self._long.get_by_id(memory_id)
+                            hit = await asyncio.to_thread(
+                                self._long.get_by_id, memory_id
+                            )
                             if hit:
                                 hit["semantic_score"] = score
                                 merged_hits.append(hit)
-                    
+
                     hits = merged_hits[:self._max_results]
                 else:
                     hits = fts_hits
@@ -454,7 +483,7 @@ class MemoryPlugin(Plugin):
                 hits = fts_hits
         else:
             hits = fts_hits
-        
+
         if hits:
             snippets = "\n".join(f"- {h['content'][:160]}" for h in hits)
             turn.meta["memory_snippets"] = snippets
@@ -464,11 +493,24 @@ class MemoryPlugin(Plugin):
         if turn is None or self._long is None:
             return
         if turn.result and not turn.error:
-            self._long.add(
-                content=f"Q: {turn.input_text}\nA: {turn.result}",
+            content = f"Q: {turn.input_text}\nA: {turn.result}"
+            memory_id = self._long.add(
+                content=content,
                 source=turn.source,
                 tags="interaction",
             )
+            # Store embedding vector for semantic search — this was missing,
+            # causing hybrid search to degenerate to FTS-only.
+            # Use the rowid returned by add() instead of a separate
+            # last_insert_rowid() query, which would be racy in a
+            # multi-threaded context.
+            if self._embeddings is not None and memory_id is not None:
+                try:
+                    vec = self._embeddings.embed(content)
+                    if vec is not None:
+                        self._embeddings.store(str(memory_id), vec)
+                except Exception as exc:
+                    logger.debug("embedding store failed: %s", exc)
             # Auto-extract entities into knowledge graph
             if self._kg is not None:
                 combined = turn.input_text + " " + (turn.result or "")

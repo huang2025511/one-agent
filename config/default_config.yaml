@@ -3,7 +3,7 @@ agent:
   description: Test configuration for One-Agent
   version: 2.0.0
   data_dir: ./data
-  log_level: WARNING
+  log_level: INFO
   timezone: Asia/Shanghai
   language: zh
 llm:
@@ -13,12 +13,12 @@ llm:
   local_endpoint: http://localhost:11434
   local_model: qwen2.5:7b
   api_keys:
-    openrouter: null
-    openai: null
-    anthropic: null
-    deepseek: null
-    dashscope: null
-    sensenova: sk-6HEk7kCx2aBkMIcv75LoVrvIubXTXRhT
+    openrouter: ${OPENROUTER_API_KEY}
+    openai: ${OPENAI_API_KEY}
+    anthropic: ${ANTHROPIC_API_KEY}
+    deepseek: ${DEEPSEEK_API_KEY}
+    dashscope: ${DASHSCOPE_API_KEY}
+    sensenova: ${SENSENOVA_API_KEY}
   default_temperature: 0.3
   default_max_tokens: 2048
   timeout: 30
@@ -64,41 +64,52 @@ gateways:
     enabled: true
   web:
     enabled: true
-    host: 0.0.0.0
+    host: 127.0.0.1
     port: 18791
     cors_origins:
-    - '*'
+    - http://localhost:18791
   telegram:
     enabled: false
     bot_token: ${TELEGRAM_BOT_TOKEN}
     allowed_users: []
   wecom:
     enabled: false
-    corp_id: ''
-    corp_secret: ''
-    agent_id: ''
+    mode: webhook
+    corp_id: ${WECOM_CORP_ID}
+    secret: ${WECOM_CORP_SECRET}
+    agent_id: ${WECOM_AGENT_ID}
+    webhook_key: ${WECOM_WEBHOOK_KEY}
+    callback_token: ${WECOM_CALLBACK_TOKEN}
+    encoding_aes_key: ${WECOM_ENCODING_AES_KEY}
     allowed_users: []
   dingtalk:
     enabled: false
-    app_key: ''
-    app_secret: ''
-    token: ''
-    aes_key: ''
+    mode: webhook
+    client_id: ${DINGTALK_CLIENT_ID}
+    client_secret: ${DINGTALK_CLIENT_SECRET}
+    webhook_url: ${DINGTALK_WEBHOOK_URL}
+    secret: ${DINGTALK_SECRET}
     allowed_users: []
   feishu:
     enabled: false
-    app_id: ''
-    app_secret: ''
+    mode: webhook
+    app_id: ${FEISHU_APP_ID}
+    app_secret: ${FEISHU_APP_SECRET}
+    webhook_url: ${FEISHU_WEBHOOK_URL}
+    verification_token: ${FEISHU_VERIFICATION_TOKEN}
+    encrypt_key: ${FEISHU_ENCRYPT_KEY}
+    callback_host: 0.0.0.0
+    callback_port: 18793
     allowed_users: []
   discord:
     enabled: false
-    bot_token: ''
-    allowed_users: []
+    bot_token: ${DISCORD_BOT_TOKEN}
+    allowed_channels: []
   slack:
     enabled: false
-    bot_token: ''
-    signing_secret: ''
-    allowed_users: []
+    bot_token: ${SLACK_BOT_TOKEN}
+    app_token: ${SLACK_APP_TOKEN}
+    allowed_channels: []
   wechat_personal:
     enabled: false
     allowed_users: []
@@ -114,12 +125,20 @@ execution:
     image: python:3.12-slim
     timeout: 120
     memory_limit_mb: 512
+    cpu_quota: 50000
   python:
     timeout: 10
     max_output: 10000
-scheduler: {}
+scheduler:
+  enabled: true
+  timezone: Asia/Shanghai
+  builtin_jobs:
+    memory_housekeeping: "0 3 * * *"
+    router_statistics: "0 * * * *"
+  user_jobs_file: ""
 security:
-  system_executor_password: ""
+  system_executor_enabled: true
+  system_executor_password: ${SYSTEM_EXECUTOR_PASSWORD}
   password_cache_minutes: 60
   max_password_attempts: 3
   lockout_minutes: 5
@@ -130,14 +149,42 @@ rest:
   enabled: true
   host: 127.0.0.1
   port: 18792
-  api_key: ''
+  api_key: ${REST_API_KEY}
   rate_limit_per_minute: 10000
   max_chat_bytes: 65536
   cors_origins:
-  - '*'
-monitoring: {}
-multimodal: {}
+  - http://localhost:18792
+alerting:
+  rules:
+  - name: high_error_rate
+    metric: error_rate
+    threshold: 0.15
+    window_minutes: 10
+    severity: warning
+  - name: high_latency
+    metric: avg_latency_ms
+    threshold: 5000
+    window_minutes: 10
+    severity: warning
+  - name: cost_budget
+    metric: daily_cost
+    threshold: 0.8
+    window_minutes: 1440
+    severity: critical
+  channels:
+  - type: log
+    enabled: true
+monitoring:
+  enabled: true
+  port: 18793
+multimodal:
+  enabled: true
+  whisper_model: tiny
 marketplace:
   enabled: true
   registry_url: ''
-llm_cache: {}
+llm_cache:
+  enabled: true
+  max_entries: 1000
+  max_memory_mb: 100
+  ttl_seconds: 3600

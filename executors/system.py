@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import shlex
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -138,9 +139,16 @@ _DANGEROUS_PATTERNS: List[str] = [
     r"^wipefs\s",                  # wipefs
     r"^crontab\s",                 # crontab
     r"^iptables\s",                # iptables
-    r"\\\s*\|\s*sh",               # pipe to sh
-    r"\\\s*\|\s*bash",             # pipe to bash
+    r"\|\s*sh\b",                  # pipe to sh
+    r"\|\s*bash\b",                # pipe to bash
     r"&\s*>/dev/null",             # background with redirect
+    # Command chain injection detection — these operators allow
+    # chaining multiple commands, bypassing per-command classification.
+    r";",                          # command separator
+    r"&&",                         # AND operator
+    r"\|\|",                       # OR operator
+    r"`",                          # backtick command substitution
+    r"\$\(",                       # $(...) command substitution
 ]
 
 
@@ -399,10 +407,29 @@ class SystemExecutor(Plugin):
     async def _execute(
         self, command: str, workdir: str, risk_level: int,
     ) -> Dict[str, Any]:
-        """Execute the command via subprocess."""
+        """Execute the command via subprocess.
+
+        Uses ``create_subprocess_exec`` with ``shlex.split`` instead of
+        ``create_subprocess_shell`` to avoid shell metacharacter injection.
+        Commands containing shell operators (``;``, ``|``, ``&&``, ``$()``)
+        are already classified as DANGEROUS by ``classify_command`` and
+        should never reach this point without explicit confirmation.
+        """
+        import shlex
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            # Parse command into argv — avoids shell interpretation.
+            # shlex.split handles quoting correctly.
+            argv = shlex.split(command)
+            if not argv:
+                return {
+                    "ok": False,
+                    "error": "empty command after parsing",
+                    "risk_level": risk_level,
+                    "risk_label": self.RISK_LABELS.get(risk_level, "UNKNOWN"),
+                }
+
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workdir or ".",
@@ -413,9 +440,14 @@ class SystemExecutor(Plugin):
                     proc.communicate(), timeout=self._timeout_seconds,
                 )
             except asyncio.TimeoutError:
+                # Kill the entire process group (os.setsid created one)
+                # so child processes don't become orphans.
                 try:
-                    proc.kill()
-                except Exception:  # noqa: BLE001
+                    if hasattr(os, "killpg"):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except (ProcessLookupError, OSError):
                     pass
                 await proc.wait()
                 return {

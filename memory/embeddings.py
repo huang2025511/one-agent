@@ -61,13 +61,19 @@ def _blob_to_vector(blob: bytes) -> List[float]:
 class EmbeddingStore(BaseSQLiteStore):
     """Vector store for semantic memory search."""
 
-    def __init__(self, db_path: str = "data/memory/embeddings.db"):
+    def __init__(
+        self, db_path: str = "data/memory/embeddings.db",
+    ):
         """Initialize embedding store.
 
         Args:
             db_path: Path to SQLite database for vector storage
         """
         self._model = None
+        # In-memory vector cache: {(memory_id, vector_list)}.
+        # Avoids reloading all vectors from SQLite on every search.
+        # Invalidated on store()/delete().
+        self._vector_cache: Optional[List[Tuple[str, List[float]]]] = None
         super().__init__(db_path)
         self._load_model()
 
@@ -171,19 +177,25 @@ class EmbeddingStore(BaseSQLiteStore):
         assert isinstance(vector, list), "vector must be a list"
         assert len(vector) == EMBEDDING_DIM, f"vector must have {EMBEDDING_DIM} dimensions"
         
-        try:
-            vector_blob = _vector_to_blob(vector)
-            self._conn.execute(
-                """INSERT OR REPLACE INTO embeddings (memory_id, vector, created_at)
-                   VALUES (?, ?, ?)""",
-                (memory_id, vector_blob, time.time()),
-            )
-            self._conn.commit()
-        except Exception as e:
-            logger.warning("Failed to store embedding for %s: %s", memory_id, e)
+        with self._write_lock:
+            try:
+                vector_blob = _vector_to_blob(vector)
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO embeddings (memory_id, vector, created_at)
+                       VALUES (?, ?, ?)""",
+                    (memory_id, vector_blob, time.time()),
+                )
+                self._conn.commit()
+                # Invalidate cache so next search reloads
+                self._vector_cache = None
+            except Exception as e:
+                logger.warning("Failed to store embedding for %s: %s", memory_id, e)
 
     def search(self, query_vector: List[float], top_k: int = 10) -> List[Tuple[str, float]]:
         """Search for similar memories using cosine similarity.
+
+        Uses an in-memory cache of all vectors to avoid repeated SQLite
+        reads. The cache is invalidated on store()/delete().
 
         Args:
             query_vector: Query embedding vector
@@ -192,23 +204,28 @@ class EmbeddingStore(BaseSQLiteStore):
         Returns:
             List of (memory_id, similarity_score) tuples, sorted by score desc
         """
-        assert query_vector is not None, "query_vector cannot be None"
-        assert isinstance(query_vector, list), "query_vector must be a list"
-        assert len(query_vector) == EMBEDDING_DIM, f"query_vector must have {EMBEDDING_DIM} dimensions"
-        assert top_k > 0, "top_k must be positive"
-        
+        if query_vector is None or not isinstance(query_vector, list):
+            return []
+        if top_k <= 0:
+            return []
+
         try:
-            # Load all embeddings
-            cursor = self._conn.execute(
-                "SELECT memory_id, vector FROM embeddings"
-            )
+            # Load vectors into cache if not yet loaded
+            if self._vector_cache is None:
+                cursor = self._conn.execute(
+                    "SELECT memory_id, vector FROM embeddings"
+                )
+                cache = []
+                for row in cursor:
+                    memory_id = row["memory_id"]
+                    stored_vector = _blob_to_vector(row["vector"])
+                    if stored_vector:
+                        cache.append((memory_id, stored_vector))
+                self._vector_cache = cache
+
+            # Compute cosine similarity against cached vectors
             results = []
-
-            for row in cursor:
-                memory_id = row["memory_id"]
-                stored_vector = _blob_to_vector(row["vector"])
-
-                # Cosine similarity
+            for memory_id, stored_vector in self._vector_cache:
                 similarity = _cosine_similarity(query_vector, stored_vector)
                 results.append((memory_id, similarity))
 
@@ -229,14 +246,17 @@ class EmbeddingStore(BaseSQLiteStore):
         assert memory_id, "memory_id cannot be empty"
         assert isinstance(memory_id, str), "memory_id must be a string"
         
-        try:
-            self._conn.execute(
-                "DELETE FROM embeddings WHERE memory_id = ?",
-                (memory_id,),
-            )
-            self._conn.commit()
-        except Exception as e:
-            logger.warning("Failed to delete embedding for %s: %s", memory_id, e)
+        with self._write_lock:
+            try:
+                self._conn.execute(
+                    "DELETE FROM embeddings WHERE memory_id = ?",
+                    (memory_id,),
+                )
+                self._conn.commit()
+                # Invalidate cache so next search reloads
+                self._vector_cache = None
+            except Exception as e:
+                logger.warning("Failed to delete embedding for %s: %s", memory_id, e)
 
     def count(self) -> int:
         """Return total number of stored embeddings."""

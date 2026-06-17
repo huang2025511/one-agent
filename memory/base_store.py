@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
@@ -37,10 +38,11 @@ class BaseSQLiteStore:
     Subclasses are responsible for creating their own schema by overriding
     :meth:`_init_db`, which is called after the connection has been
     established and WAL mode enabled.
-    
-    .. note::
-        Designed for single-process asyncio usage. For multi-process scenarios,
-        implement external write serialization (e.g., connection pool with queue).
+
+    Thread safety: a ``threading.Lock`` serializes all write operations
+    to prevent "database is locked" errors and data corruption when
+    multiple asyncio tasks (running via ``asyncio.to_thread``) access
+    the same connection concurrently.
     """
 
     def __init__(self, db_path: str) -> None:
@@ -53,6 +55,10 @@ class BaseSQLiteStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         # Set busy timeout to wait up to 5 seconds for locks
         self._conn.execute("PRAGMA busy_timeout=5000")
+        # Write lock — serializes all write operations across threads.
+        # Uses RLock (reentrant) because some write methods call other
+        # write methods (e.g. KnowledgeGraph.add_relation calls add_entity).
+        self._write_lock = threading.RLock()
         self._init_db()
 
     def _init_db(self) -> None:  # pragma: no cover - abstract
