@@ -404,23 +404,121 @@ class Coordinator(Plugin):
                     turn.tokens_used, turn.duration_seconds or 0)
 
     def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
-        """Prepare message list with memory snippets if present."""
+        """Prepare message list with memory snippets from long-term memory + KG.
+
+        Memory is injected as a dedicated assistant-style "relevant memory" message
+        rather than quietly appended to the user message, so the LLM can reliably
+        see it. The router is responsible for putting the system prompt + history
+        + user message into ``turn.messages``; we layer memory on top here.
+        """
         if turn is None:
             raise RuntimeError("turn cannot be None")
         if turn.input_text is None:
             raise RuntimeError("turn.input_text cannot be None")
-        
+
         messages = list(turn.messages)
-        if turn.meta.get("memory_snippets"):
-            mem_note = (
-                "\n\nRelevant past interactions (use them to keep context):\n"
-                + turn.meta["memory_snippets"]
-            )
-            if messages:
-                messages[-1] = {"role": "user", "content": turn.input_text + mem_note}
+
+        # ——— Active memory retrieval (the core fix) ———
+        # MemoryPlugin subscribes to user_message too, but we can't rely on
+        # subscription order. Instead, reach directly for ctx.memory and run
+        # the search here, so memory_snippets are guaranteed to be present
+        # before the LLM call.
+        memory_snippets = turn.meta.get("memory_snippets")
+        if not memory_snippets and self.ctx is not None:
+            memory_plugin = getattr(self.ctx, "memory", None)
+            if memory_plugin is not None:
+                try:
+                    retrieved = self._retrieve_memory_for(turn, memory_plugin)
+                    if retrieved:
+                        memory_snippets = retrieved
+                        turn.meta["memory_snippets"] = retrieved
+                except Exception as exc:
+                    logger.warning("active memory retrieval failed: %s", exc)
+
+        if memory_snippets:
+            from i18n import get_language
+            lang = (get_language() or "zh").lower()
+            if lang.startswith("zh"):
+                mem_header = "【相关记忆】（来自长期记忆/知识图谱/语义检索）\n以下内容是我从之前的对话和知识中记住的，最与当前问题相关的信息。\n如果与问题直接相关，请优先使用，不要重复问或重复查；如果不相关请忽略，不要编造。\n\n"
             else:
-                messages.append({"role": "user", "content": turn.input_text + mem_note})
+                mem_header = "[Relevant Memory] (from long-term memory / knowledge graph / semantic retrieval)\nThe following lines are what I remembered from earlier that best relate to the current question.\nIf directly relevant, USE THEM first; if not, ignore — don't make things up.\n\n"
+            memory_block = {"role": "assistant", "content": mem_header + memory_snippets}
+
+            # Insert memory block right BEFORE the last user message, so the LLM
+            # sees memory right before reading the user's actual request. If no
+            # user message exists at the end, append instead.
+            if messages and messages[-1].get("role") == "user":
+                messages.insert(len(messages) - 1, memory_block)
+            else:
+                messages.append(memory_block)
+                # Guarantee at least one user message carries the input
+                if not any(m.get("role") == "user" for m in messages):
+                    messages.append({"role": "user", "content": turn.input_text})
+
         return messages
+
+    def _retrieve_memory_for(self, turn: TurnContext, memory_plugin) -> str:
+        """Query long-term memory + knowledge graph for relevant snippets."""
+        hits: List[str] = []
+        query = turn.input_text or ""
+        if not query.strip():
+            return ""
+
+        # 1) Long-term FTS5 / hybrid search
+        long_term = getattr(memory_plugin, "_long", None)
+        if long_term is not None:
+            try:
+                fts_hits = long_term.search(query, limit=5) or []
+                for h in fts_hits:
+                    content = h.get("content", "")
+                    source = h.get("source", "memory")
+                    if content and len(content) > 5:
+                        hits.append(f"- [记忆/{source}] {content[:300]}")
+            except Exception as exc:
+                logger.debug("long-term memory search failed: %s", exc)
+
+        # 2) Embedding semantic search
+        embeddings = getattr(memory_plugin, "_embeddings", None)
+        if embeddings is not None:
+            try:
+                query_vec = embeddings.embed(query)
+                if query_vec is not None:
+                    sem = embeddings.search(query_vec, top_k=5) or []
+                    seen_contents = {h.split("] ", 1)[1][:40] for h in hits}
+                    for memory_id, _score in sem:
+                        entry = long_term.get_by_id(memory_id) if long_term else None
+                        content = (entry or {}).get("content", "") if isinstance(entry, dict) else str(entry or "")
+                        if content and content[:40] not in seen_contents:
+                            seen_contents.add(content[:40])
+                            hits.append(f"- [语义记忆] {content[:300]}")
+            except Exception as exc:
+                logger.debug("embedding memory search failed: %s", exc)
+
+        # 3) Knowledge Graph — entities related to keywords in query
+        kg = getattr(memory_plugin, "_kg", None)
+        if kg is not None:
+            try:
+                kg_hits = kg.search(query, limit=5) or []
+                for h in kg_hits:
+                    if isinstance(h, dict):
+                        content = h.get("content", h.get("label", ""))
+                    else:
+                        content = str(h)
+                    if content:
+                        hits.append(f"- [知识图谱] {content[:300]}")
+            except Exception as exc:
+                logger.debug("KG memory search failed: %s", exc)
+
+        if not hits:
+            return ""
+
+        from i18n import get_language
+        lang = (get_language() or "zh").lower()
+        if lang.startswith("zh"):
+            header = "以下是从我的记忆系统中检索到的、与当前问题最相关的内容 — 请优先参考：\n"
+        else:
+            header = "Retrieved from memory — most relevant to current question:\n"
+        return header + "\n".join(hits[:5])
 
     def _prepare_tools(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Pick relevant skills and prepare tool schemas."""
@@ -440,35 +538,100 @@ class Coordinator(Plugin):
         return tools
 
     async def _think_phase(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
-        """Execute thinking phase to plan approach."""
+        """Execute structured thinking phase (Chain-of-Thought style planning).
+
+        This is the thinking backbone of One-Agent. Instead of the previous
+        "think 2-4 sentences then act", we ask the LLM to produce a real
+        7-step plan. The plan is appended to ``messages`` as a structured
+        assistant response, so every subsequent tool-loop call can see the
+        plan and is more likely to follow it instead of drifting into
+        superficial chatter.
+
+        Steps we guide the model to produce:
+        1. Intent + output form
+        2. Known facts / memory hits / prior context
+        3. Information gaps (must lookup vs. can infer)
+        4. Breakdown into 3-5 concrete sub-steps
+        5. Tool assignment per sub-step with rationale
+        6. Failure modes + fallbacks
+        7. Envisioned final output shape
+
+        The thinking is NOT shown to the user directly — it drives execution.
+        """
         if messages is None:
             raise RuntimeError("messages cannot be None")
         if turn is None:
             raise RuntimeError("turn cannot be None")
-        
-        think_prompt = (
-            "[思考阶段] 在动手之前，请用 2-4 句话快速思考：\n"
-            "1. 用户真正要什么？（一句话）\n"
-            "2. 需要分几步？用什么工具？\n"
-            "3. 先执行，不要在这步就给出最终答案，思考完直接开始调用工具。"
-        )
+
+        from i18n import get_language
+        lang = (get_language() or "zh").lower()
+
+        # Build the thinking prompt.  We attach it as an additional user
+        # message so the model has access to the full conversation history
+        # (including memory) while planning.
+        memory_snippets = turn.meta.get("memory_snippets") or ""
+        if lang.startswith("zh"):
+            plan_prompt = (
+                "【内部思考 — 不要输出给用户，只用于内部规划】\n\n"
+                "请按以下 7 步为当前用户的问题做一个结构化规划。每一步都必须写清楚，不能省略。\n\n"
+                "Step 1. 真正要什么：用一句话提炼用户的核心意图和期望输出形式（代码/答案/方案/列表/对比等）。\n"
+                "Step 2. 我已经知道什么：列出对话上下文、相关记忆、常识里已经有的信息。"
+                + (("\n  - 相关记忆摘要：" + memory_snippets[:300]) if memory_snippets else "")
+                + "\nStep 3. 还缺什么：明确哪些信息必须外部获取（查/算/跑），哪些可以合理推断。\n"
+                "Step 4. 拆解任务：把整个任务拆成 3-5 个可执行的小步骤，每一步用一行描述。\n"
+                "Step 5. 工具选择：为每个子步骤指定一个最合适的工具（例如 web_search / calc / now / system_run / 具体 skill），并写一句为什么选它。\n"
+                "Step 6. 风险与兜底：如果某个步骤失败，有什么替代方案？如果所有工具都不可用，最后怎么给用户一个有用的答案？\n"
+                "Step 7. 预期输出：用 1-2 句话描述最终结果应该长什么样（例如『一个对比表格』、『可运行的 Python 代码』、『分 4 点的行动建议』）。\n\n"
+                "重要：不要输出最终答案给用户。只输出上述 7 步的规划内容，作为你自己的执行计划。"
+            )
+        else:
+            plan_prompt = (
+                "[Internal thinking — DO NOT show this to the user, planning only]\n\n"
+                "Please produce a structured plan in 7 steps. Do not skip any step.\n\n"
+                "Step 1. What does the user actually want? one sentence capturing intent + output form (code / answer / plan / list / comparison, etc.).\n"
+                "Step 2. What do I already know? list context from conversation, relevant memory, and common sense."
+                + (("\n  - Memory summary: " + memory_snippets[:300]) if memory_snippets else "")
+                + "\nStep 3. What am I still missing? clearly separate what must be looked up from what can be reasonably inferred.\n"
+                "Step 4. Break it down: cut the task into 3-5 concrete, executable sub-steps — one line each.\n"
+                "Step 5. Pick tools: assign the BEST tool per sub-step (e.g. web_search / calc / now / system_run / a specific skill) and one-sentence rationale.\n"
+                "Step 6. Risks and fallbacks: if a step fails, what is plan B? If every tool fails, what useful answer can I still give?\n"
+                "Step 7. Envision final output: 1-2 sentences describing what the result should look like (e.g. 'a comparison table', 'runnable Python code', '4-point action plan').\n\n"
+                "Important: do NOT write the final user answer. Produce only these 7 steps as your own execution plan."
+            )
+
+        thinking_messages = list(messages) + [{"role": "user", "content": plan_prompt}]
+
         try:
             think_resp = await self._llm.chat_completion(
-                messages=messages + [{"role": "user", "content": think_prompt}],
+                messages=thinking_messages,
                 model=turn.model,
-                max_tokens=min(turn.token_budget, 512),
-                tools=None,
+                max_tokens=min(turn.token_budget or 2048, 900),
+                tools=None,  # planning only, no tools
             )
-            thinking_text = think_resp.get("text", "").strip()
-            if thinking_text:
-                turn.meta["thinking"] = thinking_text
-                messages.append({
-                    "role": "assistant",
-                    "content": f"[思考]\n{thinking_text}",
-                })
-                logger.debug("think phase completed (%d chars)", len(thinking_text))
+            thinking_text = (think_resp.get("text") or "").strip()
         except Exception as exc:
             logger.warning("think phase skipped: %s", exc)
+            thinking_text = ""
+
+        if thinking_text:
+            turn.meta["thinking"] = thinking_text
+            # Inject the plan as an assistant message so the subsequent tool
+            # loop sees it — this is the key behavioral change. We also tag
+            # it with a visible header so the LLM understands this is its
+            # own plan.
+            header = "【我的执行计划】\n" if lang.startswith("zh") else "[My execution plan]\n"
+            plan_message = {"role": "assistant", "content": header + thinking_text}
+            messages.append(plan_message)
+            # Append a short user follow-up so conversation flow is preserved
+            # and the model knows it should now execute the plan.
+            prompt = (
+                "好。现在按照上面的计划一步一步执行。"
+                if lang.startswith("zh")
+                else "Good. Now execute the plan step by step."
+            )
+            messages.append({"role": "user", "content": prompt})
+            logger.debug("think phase completed (%d chars)", len(thinking_text))
+        else:
             turn.meta["thinking"] = ""
 
     async def _compress_context(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
