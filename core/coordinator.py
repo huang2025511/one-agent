@@ -502,7 +502,16 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------------- main loop
     async def _run_turn(self, turn: TurnContext) -> None:
-        """Execute a single turn: think → compress → delegate/tool-loop → reply."""
+        """Execute a single turn with tiered execution strategy based on complexity.
+        
+        Tiered execution strategy (independent from model selection):
+        - trivial/simple (< 0.5): direct execution, no thinking/reflection
+        - complex (0.5–0.8): think + reflect before executing
+        - expert (≥ 0.8): multi-agent pattern (planner + executor)
+        
+        This is orthogonal to model tier selection — both work together:
+        e.g., an expert task gets both the strongest model AND multi-agent execution.
+        """
         if turn is None:
             raise RuntimeError("turn cannot be None")
         if turn.input_text is None:
@@ -519,24 +528,43 @@ class Coordinator(Plugin):
         messages = self._prepare_messages(turn)
         tools = self._prepare_tools(turn)
 
-        # Think phase
-        await self._think_phase(messages, turn)
+        # Get complexity from router classification
+        complexity = getattr(turn, "estimated_complexity", 0.0)
+        logger.debug("turn complexity: %.2f", complexity)
 
-        # Context compression
-        await self._compress_context(messages, turn)
-
-        # Delegation check
-        if await self._try_delegation(turn, messages):
+        # Expert level: multi-agent pattern
+        if complexity >= 0.8:
+            if await self._multi_agent_phase(messages, turn):
+                return  # multi-agent handled it, skip normal flow
+        
+        # Complex level: think + reflect
+        elif complexity >= 0.5:
+            await self._think_phase(messages, turn)
+            await self._reflect_phase(messages, turn)
+        
+        # Simple/trivial: skip thinking entirely for speed
+        else:
+            # Still do context compression for long conversations
+            await self._compress_context(messages, turn)
+            # Direct tool loop without thinking overhead
+            await self._tool_loop(messages, turn, tools)
+            self._extract_entities(turn)
+            self.publish("turn_completed", turn=turn)
+            logger.info("reply produced (simple mode, %d tokens, %.2fs)",
+                        turn.tokens_used, turn.duration_seconds or 0)
             return
 
-        # Tool-call loop
+        # Context compression (for complex/expert after thinking phases)
+        await self._compress_context(messages, turn)
+
+        # Tool-call loop (for complex level that didn't use multi-agent)
         await self._tool_loop(messages, turn, tools)
 
         # Auto-extract entities
         self._extract_entities(turn)
 
         self.publish("turn_completed", turn=turn)
-        logger.info("reply produced (%d tokens, %.2fs)",
+        logger.info("reply produced (complex mode, %d tokens, %.2fs)",
                     turn.tokens_used, turn.duration_seconds or 0)
 
     def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
@@ -778,6 +806,137 @@ class Coordinator(Plugin):
             logger.debug("think phase completed (%d chars)", len(thinking_text))
         else:
             turn.meta["thinking"] = ""
+
+    async def _reflect_phase(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
+        """Execute reflection phase — critically review the plan before execution.
+
+        For complex tasks (complexity >= 0.5), after creating the initial plan,
+        we ask the model to reflect on potential flaws and improvements. This
+        meta-cognition step helps catch errors before they lead to wasted
+        execution.
+
+        The reflection is injected into the message flow as an assistant message,
+        so the subsequent tool loop can benefit from the improved plan.
+        """
+        if messages is None:
+            raise RuntimeError("messages cannot be None")
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
+
+        from i18n import get_language
+        lang = (get_language() or "zh").lower()
+
+        plan_text = turn.meta.get("thinking", "")
+        if not plan_text:
+            logger.debug("reflect phase skipped: no thinking available")
+            return
+
+        if lang.startswith("zh"):
+            reflect_prompt = (
+                "【内部反思 — 不要输出给用户】\n\n"
+                "你刚刚制定了一个执行计划。现在请站在更高的角度审视这个计划，找出潜在问题和改进空间。\n\n"
+                "请思考并回答以下问题：\n"
+                "1. 计划中最大的风险是什么？哪个环节最可能失败？\n"
+                "2. 是否遗漏了用户可能关心的边界情况或细节？\n"
+                "3. 各个步骤之间是否存在依赖关系没考虑到？\n"
+                "4. 如果某个工具调用失败，备用方案是否足够有效？\n"
+                "5. 是否有更高效的路径可以达到相同目标？\n"
+                "6. 最终输出是否真的能满足用户的核心需求？\n\n"
+                "请用简洁的语言总结你的反思结论，并给出具体的改进建议（如果有的话）。"
+            )
+        else:
+            reflect_prompt = (
+                "[Internal reflection — DO NOT show this to the user]\n\n"
+                "You've created an execution plan. Now step back and critically review it for potential flaws.\n\n"
+                "Please answer these questions:\n"
+                "1. What is the biggest risk in this plan? Which step is most likely to fail?\n"
+                "2. Are there any edge cases or details the user might care about that were missed?\n"
+                "3. Are there dependencies between steps that weren't considered?\n"
+                "4. If a tool call fails, is the fallback sufficient?\n"
+                "5. Is there a more efficient path to the same goal?\n"
+                "6. Will the final output truly address the user's core need?\n\n"
+                "Summarize your reflections and provide specific improvement suggestions if any."
+            )
+
+        reflect_messages = list(messages) + [{"role": "user", "content": reflect_prompt}]
+
+        try:
+            reflect_resp = await self._llm.chat_completion(
+                messages=reflect_messages,
+                model=turn.model,
+                max_tokens=min(turn.token_budget or 2048, 500),
+                tools=None,
+            )
+            reflect_text = (reflect_resp.get("text") or "").strip()
+        except Exception as exc:
+            logger.warning("reflect phase skipped: %s", exc)
+            reflect_text = ""
+
+        if reflect_text:
+            turn.meta["reflection"] = reflect_text
+            header = "【我的反思与改进】\n" if lang.startswith("zh") else "[My reflection and improvements]\n"
+            reflect_message = {"role": "assistant", "content": header + reflect_text}
+            messages.append(reflect_message)
+            # Append a user prompt to acknowledge reflection and continue
+            prompt = (
+                "好。根据你的反思，如果需要调整计划，请立即执行调整后的方案。"
+                if lang.startswith("zh")
+                else "Good. Based on your reflection, execute with any adjustments needed."
+            )
+            messages.append({"role": "user", "content": prompt})
+            logger.debug("reflect phase completed (%d chars)", len(reflect_text))
+        else:
+            turn.meta["reflection"] = ""
+
+    async def _multi_agent_phase(self, messages: List[Dict[str, Any]], turn: TurnContext) -> bool:
+        """Execute multi-agent pattern for expert-level tasks (complexity >= 0.8).
+
+        This implements a Planner-Executor pattern:
+        1. Planner agent: deep analysis of the problem, breaking it into sub-tasks
+        2. Executor agent: executes each sub-task sequentially
+
+        Returns True if delegation was successful (no need for further processing),
+        False otherwise (fall back to normal flow).
+        """
+        if messages is None:
+            raise RuntimeError("messages cannot be None")
+        if turn is None:
+            raise RuntimeError("turn cannot be None")
+
+        from i18n import get_language
+        lang = (get_language() or "zh").lower()
+
+        try:
+            from core.sub_agent import DelegationManager
+            delegator = DelegationManager(self._llm, self._skills)
+            result = await delegator.execute(turn.input_text, turn.model)
+
+            if result.get("parallel"):
+                turn.result = result["result"]
+                turn.meta["delegation_used"] = True
+                turn.meta["subtask_count"] = len(result["subtasks"])
+                turn.meta["delegation_total_tokens"] = result["total_tokens"]
+                turn.record_success(result["result"], result.get("total_tokens", 0))
+
+                if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
+                    full_text = f"{turn.input_text}\n{result['result']}"
+                    try:
+                        count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
+                        if count > 0:
+                            logger.debug("Extracted %d entities from multi-agent turn %s", count, turn.session_id)
+                    except Exception as exc:
+                        logger.debug("KG extraction failed in multi-agent: %s", exc)
+
+                self.publish("turn_completed", turn=turn)
+                logger.info("multi-agent completed (%d subtasks, %d tokens)",
+                            result.get("subtask_count", 0),
+                            result.get("total_tokens", 0))
+                return True
+
+        except Exception as exc:
+            logger.warning("multi-agent failed, falling back to normal flow: %s", exc)
+
+        return False
 
     async def _compress_context(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Compress context if approaching token limit."""
