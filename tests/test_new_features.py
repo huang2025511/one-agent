@@ -330,13 +330,18 @@ def test_system_executor_dangerous_denied_without_password():
 
 
 def test_system_executor_static_hash():
-    """Static hash_password utility returns deterministic SHA-256."""
+    """Static hash_password utility returns a verifiable PBKDF2 hash."""
     from executors.system import SystemExecutor
     h1 = SystemExecutor.hash_password("hello")
     h2 = SystemExecutor.hash_password("hello")
-    assert h1 == h2
-    assert len(h1) == 64
-    assert all(c in "0123456789abcdef" for c in h1)
+    # PBKDF2 uses a random salt, so two hashes differ but both verify.
+    assert h1 != h2
+    assert h1.startswith("pbkdf2_sha256$")
+    # Both must verify against the same plaintext.
+    from executors.system import PasswordManager
+    assert PasswordManager(h1).verify("hello") is True
+    assert PasswordManager(h2).verify("hello") is True
+    assert PasswordManager(h1).verify("wrong") is False
 
 
 # ============================================================
@@ -423,4 +428,4 @@ if __name__ == "__main__":
 # Also make it runnable with pytest
 def test_all_features():
     """Entry point for pytest discovery."""
-    return main() == 0
+    assert main() == 0

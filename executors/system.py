@@ -18,7 +18,8 @@ Permission Levels (0–3):
                   they understand the risk.
 
 Password Policy:
-  - Hash: SHA-256 (stored in config or env var)
+  - Hash: PBKDF2-HMAC-SHA256 (salted, 200k iterations) for new passwords;
+          legacy SHA-256 hashes are still accepted for backward compatibility.
   - Cache: Valid for 15 minutes (configurable) after first entry
   - Max Tries: 3 failures before 5-minute lockout
   - Session-based: Password cache lives in memory only
@@ -27,8 +28,8 @@ Configuration (config/default_config.yaml):
 .. code-block:: yaml
 
    security:
-     system_executor_password: ""   # SHA-256 hash.  Empty = allow all SAFE ops
-                                    # Generate: python -c "import hashlib; print(hashlib.sha256(b'your_pass').hexdigest())"
+     system_executor_password: ""   # PBKDF2 hash (recommended) or legacy SHA-256.  Empty = allow all SAFE ops
+                                    # Generate: python -c "from executors.system import SystemExecutor; print(SystemExecutor.hash_password('your_pass'))"
      password_cache_minutes: 15
      max_password_attempts: 3
      lockout_minutes: 5
@@ -52,6 +53,38 @@ from typing import Any, Dict, List, Optional, Tuple
 from executors.base import BaseExecutor, ExecutorResult, _to_executor_result
 
 logger = logging.getLogger(__name__)
+
+# ============================================================
+#  Password hashing helpers (PBKDF2-HMAC-SHA256, salted)
+# ============================================================
+
+_PBKDF2_ITERATIONS = 200_000
+_PBKDF2_ALGO = "pbkdf2_sha256"
+
+
+def _hash_password_pbkdf2(plaintext: str) -> str:
+    """Return ``pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>``."""
+    import base64
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", plaintext.encode(), salt, _PBKDF2_ITERATIONS, dklen=32)
+    return f"{_PBKDF2_ALGO}${_PBKDF2_ITERATIONS}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+
+
+def _verify_pbkdf2(plaintext: str, stored: str) -> bool:
+    """Verify a plaintext against a ``pbkdf2_sha256$...`` hash string."""
+    import base64
+    try:
+        algo, iter_str, salt_b64, hash_b64 = stored.split("$", 3)
+        if algo != _PBKDF2_ALGO:
+            return False
+        iterations = int(iter_str)
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(hash_b64)
+    except (ValueError, TypeError):
+        return False
+    dk = hashlib.pbkdf2_hmac("sha256", plaintext.encode(), salt, iterations, dklen=len(expected))
+    return hmac.compare_digest(dk, expected)
+
 
 # ============================================================
 #  Risk classification
@@ -193,7 +226,7 @@ class PasswordManager:
         max_attempts: int = 3,
         lockout_minutes: int = 5,
     ) -> None:
-        self._password_hash: str = password_hash    # SHA-256 hex
+        self._password_hash: str = password_hash    # PBKDF2 (new) or SHA-256 (legacy)
         self._cache_minutes: float = cache_minutes * 60
         self._max_attempts: int = max_attempts
         self._lockout_minutes: float = lockout_minutes * 60
@@ -204,14 +237,26 @@ class PasswordManager:
 
     def is_configured(self) -> bool:
         """Return True if a password hash is actually set."""
-        return bool(self._password_hash) and len(self._password_hash) == 64
+        return bool(self._password_hash) and (
+            len(self._password_hash) == 64  # legacy SHA-256 hex
+            or self._password_hash.startswith("pbkdf2_sha256$")  # new format
+        )
 
     def verify(self, password: str) -> bool:
-        """Check plaintext password against stored hash."""
+        """Check plaintext password against stored hash.
+
+        Supports two formats:
+        - ``pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>`` (recommended)
+        - 64-char hex SHA-256 (legacy, unsalted — accepted for backward compat)
+        """
         if not self._password_hash:
             return True  # no password configured = always pass
+        stored = self._password_hash
+        if stored.startswith("pbkdf2_sha256$"):
+            return _verify_pbkdf2(password, stored)
+        # Legacy SHA-256 (unsalted) — still accepted so existing configs keep working.
         trial = hashlib.sha256(password.encode()).hexdigest()
-        return hmac.compare_digest(trial, self._password_hash)
+        return hmac.compare_digest(trial, stored)
 
     def can_attempt(self) -> bool:
         """True if we are not in lockout."""
@@ -505,8 +550,14 @@ class SystemExecutor(BaseExecutor):
 
     @staticmethod
     def hash_password(plaintext: str) -> str:
-        """Generate SHA-256 hash for config storage."""
-        return hashlib.sha256(plaintext.encode()).hexdigest()
+        """Generate a salted PBKDF2 hash for config storage.
+
+        The returned string has the format
+        ``pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>`` and is verified
+        by :meth:`PasswordManager.verify`.  Legacy 64-char SHA-256 hashes are
+        still accepted for verification, so existing configs keep working.
+        """
+        return _hash_password_pbkdf2(plaintext)
 
 
 __all__ = [

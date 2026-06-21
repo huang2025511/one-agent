@@ -49,6 +49,9 @@ data/logs/
 .pytest_cache/
 .coverage
 htmlcov/
+test-results.xml
+test-report.log
+coverage.xml
 
 # Node (in case MCP tools get installed)
 node_modules/

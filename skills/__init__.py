@@ -681,7 +681,7 @@ class SkillManager(Plugin):
             password = str(args.get("password", ""))
 
             if not password:
-                return "用法: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中 security.system_executor_password = \"hash值\"\n  hash值生成: python -c \"import hashlib; print(hashlib.sha256(b'你的密码').hexdigest())\""
+                return "用法: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中 security.system_executor_password = \"hash值\"\n  hash值生成: python -c \"from executors.system import SystemExecutor; print(SystemExecutor.hash_password('你的密码'))\""
 
             try:
                 ok = await executor.verify_password(password)

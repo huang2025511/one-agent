@@ -1,0 +1,48 @@
+# ============================================================
+# One-Agent — locked dependencies (pip-tools compatible)
+# ============================================================
+# Generated for One-Agent v2.0.0
+# Install:  pip install -r requirements.lock
+# Update:   pip-compile requirements.txt -o requirements.lock
+# ============================================================
+
+# ── 核心依赖 ──────────────────────────────────────────────────
+httpx==0.28.1
+pyyaml==6.0.2
+pydantic==2.10.4
+pydantic-core==2.27.2
+typing-extensions==4.12.2
+annotated-types==0.7.0
+
+# ── Web UI / REST API ────────────────────────────────────────
+fastapi==0.115.6
+uvicorn==0.34.0
+starlette==0.41.3
+anyio==4.7.0
+sniffio==1.3.1
+idna==3.10
+h11==0.14.0
+click==8.1.8
+
+# ── 调度器 ────────────────────────────────────────────────────
+APScheduler==3.11.0
+tzlocal==5.2
+tzdata==2024.2
+
+# ── 加密 ──────────────────────────────────────────────────────
+cryptography==44.0.0
+cffi==1.17.1
+pycparser==2.22
+
+# ── HTTP 相关 ─────────────────────────────────────────────────
+certifi==2024.12.14
+httpcore==1.0.7
+
+# ── 测试 ──────────────────────────────────────────────────────
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-cov==6.0.0
+coverage==7.6.10
+iniconfig==2.0.1
+pluggy==1.5.0
+packaging==24.2
