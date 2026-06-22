@@ -342,14 +342,18 @@ class WebGateway(Plugin):
 
         config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning")
         server = uvicorn.Server(config)
+        self._server = server
         self._task = asyncio.create_task(server.serve())
         logger.info("web ui on http://%s:%d", self._host, self._port)
 
     async def stop(self) -> None:
+        # 优雅关闭 uvicorn：设置 should_exit 让其自行完成 in-flight 请求
+        server = getattr(self, "_server", None)
+        if server is not None:
+            server.should_exit = True
         if self._task:
-            self._task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         await super().stop()

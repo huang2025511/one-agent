@@ -799,6 +799,10 @@ async def _interactive(app: OneAgentApp) -> None:
             print("[timeout — try again]")
             continue
         print(reply)
+        # 检测退出标志（quit_handler 设置）
+        _quit_ev = getattr(app.ctx, "_quit_event", None)
+        if _quit_ev is not None and _quit_ev.is_set():
+            return
 
 
 async def main() -> None:

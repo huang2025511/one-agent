@@ -272,6 +272,7 @@ class MonitoringPlugin(Plugin):
             import uvicorn
             config = uvicorn.Config(app, host="127.0.0.1", port=self._port, log_level="warning")
             server = uvicorn.Server(config)
+            self._server = server
             self._task = asyncio.create_task(server.serve())
             logger.info("monitoring dashboard on http://127.0.0.1:%d", self._port)
         except Exception as exc:
@@ -298,11 +299,14 @@ class MonitoringPlugin(Plugin):
             self.record_token_usage(int(tokens))
 
     async def stop(self) -> None:
+        # 优雅关闭 uvicorn：设置 should_exit 让其自行完成 in-flight 请求
+        server = getattr(self, "_server", None)
+        if server is not None:
+            server.should_exit = True
         if self._task:
-            self._task.cancel()
             try:
-                await self._task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(self._task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         await super().stop()
 

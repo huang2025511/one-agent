@@ -771,16 +771,18 @@ class SkillManager(Plugin):
         async def quit_handler(args: Dict[str, Any]) -> str:
             """退出 One-Agent。
 
-            Use sys.exit(0) (raises SystemExit) instead of os._exit(0) so the
-            main loop's finally block runs app.stop() — flushing logs,
-            closing httpx clients, committing SQLite, and stopping plugins.
-            os._exit skips all cleanup (atexit, finally, asyncio shutdown).
+            通过设置 ctx._quit_event 让主循环正常退出，
+            从而触发 main() 的 finally 块执行 app.stop() 优雅清理。
+            不使用 sys.exit/os._exit，避免跳过异步清理。
             """
-            import sys
             results = ["正在退出...", "再见！下次见 👋"]
-            # Defer the exit slightly so the reply can be surfaced first.
-            loop = asyncio.get_running_loop()
-            loop.call_later(0.1, sys.exit, 0)
+            # 设置退出标志，让 _interactive 主循环检测后正常 return
+            quit_event = getattr(self._ctx_ref, "_quit_event", None) if self._ctx_ref else None
+            if quit_event is None and self._ctx_ref:
+                self._ctx_ref._quit_event = asyncio.Event()
+                quit_event = self._ctx_ref._quit_event
+            if quit_event is not None:
+                quit_event.set()
             return "\n".join(results)
         self.register(Skill(
             id="quit", title="退出",
