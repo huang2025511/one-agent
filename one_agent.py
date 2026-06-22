@@ -553,39 +553,39 @@ async def _interactive(app: OneAgentApp) -> None:
     # 用户无需记住精准命令，用自然语言即可触发内置功能
     _INTENT_PATTERNS = {
         "exit": [
-            r"退出|再见|拜拜|结束|关闭|退出程序|再见啦|bye|goodbye|see you",
+            r"^退出$|^再见$|^拜拜$|^结束$|^退出程序$|^bye$|^goodbye$|^quit$",
         ],
         "help": [
-            r"帮助|怎么用|使用说明|能做什么|有什么功能|help|命令列表|功能列表|怎么操作|使用方法",
+            r"^帮助$|^怎么用$|^使用说明$|^help$|^命令列表$|^功能列表$",
         ],
         "skills": [
-            r"技能|会什么|能做什么|有哪些能力|有什么技能|skill|能力列表|你会啥|你会什么",
+            r"^技能$|^会什么$|^有什么技能$|^skill$|^能力列表$|^你会啥$|^你会什么$",
         ],
         "status": [
-            r"状态|运行状态|当前状态|系统状态|运行情况|status|还好吗|活着吗|运行多久",
+            r"^状态$|^运行状态$|^系统状态$|^status$|^运行情况$",
         ],
         "metrics": [
-            r"指标|统计|性能|调用量|token|用量|metrics|stats|统计数据|性能指标|使用量",
+            r"^指标$|^统计$|^metrics$|^stats$|^性能指标$",
         ],
         "dlq": [
-            r"死信|失败事件|未处理|错误队列|死信队列|dlq|dead.?letter|失败的消息",
+            r"^死信$|^死信队列$|^dlq$|^dead.?letter$",
         ],
         "bus": [
-            r"事件|总线|event.?bus|事件类型|总线状态|bus",
+            r"^事件总线$|^bus$|^event.?bus$",
         ],
         "clear": [
-            r"清屏|清除屏幕|清理屏幕|clear|刷新屏幕",
+            r"^清屏$|^clear$|^清除屏幕$",
         ],
+        # settings 只匹配精确的 /set 命令格式，自然语言交给 LLM
         "settings": [
-            r"设置|配置|修改设置|查看设置|更改|切换模型|改模型|改温度|开启|关闭|启用|禁用|把.*改|set.*to|change|configure",
+            r"^/set\s+|^设置\s+\S+\s*[=＝]|^配置\s+\S+\s*[=＝]|^/config\s+",
         ],
         "models": [
-            r"\bmodels?\b|模型列表|有哪些模型|看模型|看.*模型|可.*模型|所有模型|免费模型|列出模型|列出.*模型|model.*list",
+            r"^/models?$|^模型列表$|^列出模型$|^所有模型$|^免费模型$",
         ],
         # 智能分层：把 provider 的全部模型按 free/paid、context、features 自动分配到 4 层
         "rebuild_tiers": [
-            r"智能分层|自动分层|自动分配|重新分层|刷新分层|rebuild.?tiers|auto.?tier|"
-            r"分层|分类|分档|auto.?classif|smart.?tier|分配.*模型|模型.*分配",
+            r"^智能分层$|^自动分层$|^重新分层$|^刷新分层$|^rebuild.?tiers$",
         ],
     }
 

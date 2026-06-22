@@ -609,6 +609,7 @@ class Coordinator(Plugin):
             # Direct tool loop without thinking overhead
             await self._tool_loop(messages, turn, tools)
             self._extract_entities(turn)
+            self._learn_user_preferences(turn)
             self.publish("turn_completed", turn=turn)
             logger.info("reply produced (simple mode, %d tokens, %.2fs)",
                         turn.tokens_used, turn.duration_seconds or 0)
@@ -622,6 +623,7 @@ class Coordinator(Plugin):
 
         # Auto-extract entities
         self._extract_entities(turn)
+        self._learn_user_preferences(turn)
 
         self.publish("turn_completed", turn=turn)
         logger.info("reply produced (complex mode, %d tokens, %.2fs)",
@@ -1081,6 +1083,66 @@ class Coordinator(Plugin):
 
         return False
 
+    def _parse_text_tool_calls(self, text: str, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """工具降级：从 LLM 文本回复中解析工具调用意图。
+
+        当模型不支持 function calling 时，LLM 可能在文本中表达工具调用意图。
+        支持以下格式：
+        1. ```json {"tool": "web_search", "args": {...}} ```
+        2. ```tool_call:web_search({"query": "..."})```
+        3. <tool_call>{"name": "web_search", "arguments": {...}}</tool_call>
+        """
+        if not text or not tools:
+            return []
+
+        import json
+        import re
+
+        # 构建可用工具名集合
+        tool_names = set()
+        for t in tools:
+            name = t.get("function", {}).get("name") or t.get("name")
+            if name:
+                tool_names.add(name)
+
+        parsed_calls: List[Dict[str, Any]] = []
+
+        # 格式1: ```json {"tool": "...", "args": {...}} ```
+        for match in re.finditer(r"```(?:json)?\s*(\{[^`]+?\})\s*```", text, re.DOTALL):
+            try:
+                data = json.loads(match.group(1))
+                name = data.get("tool") or data.get("name") or data.get("function")
+                args = data.get("args") or data.get("arguments") or data.get("parameters") or {}
+                if name and name in tool_names:
+                    parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+
+        # 格式2: <tool_call>...</tool_call>
+        if not parsed_calls:
+            for match in re.finditer(r"<tool_call>\s*(\{[^<]+?\})\s*</tool_call>", text, re.DOTALL):
+                try:
+                    data = json.loads(match.group(1))
+                    name = data.get("name") or data.get("tool")
+                    args = data.get("arguments") or data.get("args") or {}
+                    if name and name in tool_names:
+                        parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    continue
+
+        # 格式3: tool_name({"key": "value"}) 行内调用
+        if not parsed_calls:
+            for name in tool_names:
+                pattern = rf"{re.escape(name)}\s*\(\s*(\{{[^)]+\}})\s*\)"
+                for match in re.finditer(pattern, text):
+                    try:
+                        args = json.loads(match.group(1))
+                        parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+        return parsed_calls[:3]  # 最多解析 3 个调用，防止滥用
+
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
         """Execute tool-call loop until final reply."""
         if messages is None:
@@ -1103,6 +1165,18 @@ class Coordinator(Plugin):
             )
             total_tokens += int(resp.get("tokens_used") or 0)
             tool_calls = resp.get("tool_calls") or []
+
+            # --- 工具降级方案 ---
+            # 当模型不支持 tools（如 sensenova）时，tool_calls 为空
+            # 但 LLM 可能在文本中表达了工具调用意图
+            # 检测文本中的 JSON 工具调用格式并解析
+            # 支持多轮（ReAct 循环）：每轮都可以解析文本工具调用
+            if not tool_calls and tools:
+                text = resp.get("text", "") or ""
+                parsed_calls = self._parse_text_tool_calls(text, tools)
+                if parsed_calls:
+                    tool_calls = parsed_calls
+                    # 不 break，继续执行工具调用
 
             if not tool_calls:
                 final_text = resp.get("text", "") or ""
@@ -1278,3 +1352,56 @@ class Coordinator(Plugin):
                 logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
         except Exception as exc:
             logger.debug("KG extraction failed: %s", exc)
+
+    def _learn_user_preferences(self, turn: TurnContext) -> None:
+        """从对话中自动提取用户偏好并保存到记忆。
+
+        检测用户输入中的偏好信号：
+        - "我喜欢/不喜欢/偏好/讨厌..."
+        - "用 xxx 不要 yyy"
+        - "以后都用 xxx"
+        - "记住我喜欢 xxx"
+        """
+        if not self.ctx or not hasattr(self.ctx, 'memory'):
+            return
+
+        text = turn.input_text or ""
+        if not text.strip():
+            return
+
+        import re
+
+        preferences: List[str] = []
+
+        # 模式1: "我喜欢/偏好/讨厌..."
+        for match in re.finditer(r"(?:我喜欢|我偏好|我讨厌|我不喜欢|我爱|我习惯)(.+?)[。，.!？\n]", text):
+            pref = match.group(1).strip()
+            if 2 <= len(pref) <= 50:
+                sentiment = "喜欢" if "喜欢" in match.group(0) or "偏好" in match.group(0) or "爱" in match.group(0) else "不喜欢"
+                preferences.append(f"用户{sentiment}：{pref}")
+
+        # 模式2: "以后都用 xxx" / "记住..."
+        for match in re.finditer(r"(?:以后都?用|记住|默认用|总是用)(.+?)[。，.!？\n]", text):
+            pref = match.group(1).strip()
+            if 2 <= len(pref) <= 50:
+                preferences.append(f"用户偏好：{pref}")
+
+        # 模式3: "用 xxx 不要 yyy"
+        for match in re.finditer(r"用\s*(\S+?)\s*(?:不要|别|不)\s*(\S+)", text):
+            preferences.append(f"用户偏好：用{match.group(1)}，不用{match.group(2)}")
+
+        if not preferences:
+            return
+
+        # 保存到记忆
+        try:
+            memory = self.ctx.memory
+            for pref in preferences:
+                # 使用 memory.add 如果可用，否则用 remember
+                if hasattr(memory, 'add'):
+                    memory.add(text=pref, metadata={"type": "preference", "session": turn.session_id})
+                elif hasattr(memory, 'remember'):
+                    memory.remember(text=pref, metadata={"type": "preference"})
+            logger.debug("Learned %d user preferences from turn %s", len(preferences), turn.session_id)
+        except Exception as exc:
+            logger.debug("Preference learning failed: %s", exc)
