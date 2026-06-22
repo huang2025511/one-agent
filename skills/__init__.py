@@ -1578,8 +1578,9 @@ def _process_settings_command(input_text: str, config: dict) -> str:
                 break
 
     if matched_path is None:
-        chinese_aliases = [a for a in _SETTING_ALIASES if any('\u4e00' <= c <= '\u9fff' for c in a)]
-        return f"未识别的设置项。可设置的选项：{', '.join(chinese_aliases)}"
+        # 未识别的设置项：交给 LLM 处理，而不是直接报错
+        # 这样用户说"启用微信网关"等复杂命令时，LLM 可以理解并执行
+        return "__SKIP__"
 
     # 敏感项写入检查
     if is_write and any(sk in matched_path for sk in _SENSITIVE_KEYS):
