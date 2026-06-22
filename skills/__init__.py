@@ -829,52 +829,100 @@ class SkillManager(Plugin):
             if not input_text:
                 return "请提供服务商名称和 API key，例如：'英伟达 nvapi-xxxx' 或 'openai sk-xxxx'"
 
-            # 1. 解析服务商名和 API key
+            # 1. 解析服务商名、API key、可选 base URL
             provider_name = None
             api_key = None
+            base_url = None
 
-            # 格式: "服务商 key" 或 "服务商key"
-            parts = input_text.split()
-            if len(parts) >= 2:
-                provider_name = parts[0].strip()
-                api_key = parts[1].strip()
-            elif len(parts) == 1:
-                # 尝试用 key= 或 key: 分割
-                import re as _re
-                m = _re.search(r"(?:添加|新增|注册)?\s*([\u4e00-\u9fff_a-zA-Z][\u4e00-\u9fff_a-zA-Z0-9]*)\s*[key=:]?\s*([a-zA-Z0-9_\-]+)", input_text, _re.IGNORECASE)
-                if m:
-                    provider_name = m.group(1).strip()
-                    api_key = m.group(2).strip()
+            # 去掉前缀"添加服务商"/"新增服务商"等
+            import re as _re_parse
+            clean = _re_parse.sub(r"^(?:添加|新增|注册|设置|配置)\s*(?:服务商|provider)?\s*", "", input_text, flags=_re_parse.IGNORECASE)
+
+            # 尝试提取 base URL（http(s)://...）
+            url_m = _re_parse.search(r"(https?://\S+)", clean)
+            if url_m:
+                base_url = url_m.group(1).rstrip(",，;；")
+                clean = clean.replace(url_m.group(1), "").strip()
+
+            # 尝试提取 API key（nvapi-/sk-/ak-/key=xxx/key:xxx 等格式）
+            key_m = _re_parse.search(r"(?:key\s*[=：:]\s*)?((?:nvapi-|sk-|ak-)[a-zA-Z0-9_\-]+)", clean, _re_parse.IGNORECASE)
+            if key_m:
+                api_key = key_m.group(1)
+                clean = clean.replace(key_m.group(0), "").strip()
+            else:
+                # 尝试 key=xxx 格式
+                key_m2 = _re_parse.search(r"key\s*[=：:]\s*([a-zA-Z0-9_\-]+)", clean, _re_parse.IGNORECASE)
+                if key_m2:
+                    api_key = key_m2.group(1)
+                    clean = clean.replace(key_m2.group(0), "").strip()
+
+            # 剩下的第一个词就是 provider 名称
+            parts = clean.split()
+            if parts:
+                provider_name = _re_parse.sub(r"^[，,。.：:：]+|[，,。.：:：]+$", "", parts[0])
+
+            # 如果还没解析到，回退到原始分割
+            if not provider_name or not api_key:
+                orig_parts = input_text.split()
+                if len(orig_parts) >= 2 and not provider_name:
+                    provider_name = orig_parts[0].strip()
+                if len(orig_parts) >= 2 and not api_key:
+                    # 找最长的 token 作为 key
+                    for p in orig_parts[1:]:
+                        if _re_parse.search(r"(?:nvapi-|sk-|ak-)", p, _re_parse.IGNORECASE) or len(p) > 20:
+                            api_key = p.strip()
+                            break
+                    if not api_key:
+                        api_key = orig_parts[-1].strip()
 
             if not provider_name or not api_key:
                 return ("无法解析服务商和 key。请用以下格式发送：\n"
                         "  英伟达 nvapi-xxxxx\n"
                         "  openai sk-xxxxx\n"
-                        "  添加服务商 英伟达 key=nvapi-xxxxx")
+                        "  添加服务商 英伟达 key=nvapi-xxxxx\n"
+                        "  自定义服务商 https://api.example.com/v1 key=xxxx")
 
             # 2. 解析 provider 名称（支持中文别名）
             try:
-                from models.resolver import _PROVIDER_ALIASES, lookup
+                from models.resolver import _PROVIDER_ALIASES, KNOWN_PROVIDERS, lookup
             except ImportError:
                 return "❌ resolver 模块不可用"
 
-            # 先尝试直接映射
-            canonical = _PROVIDER_ALIASES.get(provider_name)
-            if canonical:
+            # 先尝试直接映射（中文别名 → canonical）
+            canonical = _PROVIDER_ALIASES.get(provider_name) or _PROVIDER_ALIASES.get(provider_name.lower())
+            if canonical and canonical in KNOWN_PROVIDERS:
                 resolved_provider = canonical
             elif lookup(provider_name):
                 resolved_provider = provider_name.lower()
             else:
                 # 尝试大小写不敏感匹配
                 provider_lower = provider_name.lower()
+                resolved_provider = None
                 for alias, canon in _PROVIDER_ALIASES.items():
                     if alias.lower() == provider_lower:
                         resolved_provider = canon
                         break
-                else:
-                    # 未知 provider，记录警告但继续尝试
-                    resolved_provider = provider_name.lower()
-                    logger.warning("add_provider: unknown provider '%s', trying anyway", provider_name)
+                if not resolved_provider:
+                    # 未知 provider：如果用户提供了 base URL，直接注册
+                    if base_url:
+                        # 将自定义 provider 加入 KNOWN_PROVIDERS
+                        from models import resolver as _resolver_mod
+                        _resolver_mod.KNOWN_PROVIDERS[provider_name.lower()] = base_url
+                        resolved_provider = provider_name.lower()
+                        logger.info("add_provider: registered custom provider '%s' → %s", resolved_provider, base_url)
+                    else:
+                        # 未知 provider 且无 base URL：列出本地已知服务商，询问用户
+                        known_list = ", ".join(sorted(
+                            v for v in _PROVIDER_ALIASES.values()
+                        ))
+                        return (
+                            f"❓ 未在本地注册表中找到服务商「{provider_name}」。\n\n"
+                            f"📋 本地已知的服务商：\n{known_list}\n\n"
+                            f"🔍 如果「{provider_name}」是一个 OpenAI 兼容的服务商，\n"
+                            f"   你可以回复「搜索 {provider_name}」让我到网上查找其 API 地址，\n"
+                            f"   或者直接告诉我它的 base URL，例如：\n"
+                            f"   「{provider_name} https://api.example.com/v1 key=xxxx」"
+                        )
 
             # 3. 获取 llm 实例
             llm = getattr(self, "_llm_ref", None)

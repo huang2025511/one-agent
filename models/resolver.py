@@ -153,42 +153,62 @@ def _candidate_hosts(name: str) -> List[str]:
 
 
 # Chinese / friendly name → canonical provider name mapping
+# NOTE: This is the SINGLE source of truth for aliases. Do not redeclare
+# _PROVIDER_ALIASES elsewhere in this module.
 _PROVIDER_ALIASES: Dict[str, str] = {
-    # China providers
+    # --- China providers (Chinese names) ---
     "英伟达": "nvidia",
     "英伟": "nvidia",
-    "NVIDIA": "nvidia",
     "商汤": "sensenova",
-    "SenseNova": "sensenova",
-    "智谱": "zhipu",
-    "GLM": "zhipu",
-    "ChatGLM": "zhipu",
-    "月之暗面": "moonshot",
-    "Moonshot": "moonshot",
-    "Kimi": "moonshot",
+    "日日新": "sensenova",
+    "智谱": "glm",
+    "月之暗面": "kimi",
     "零一": "yi",
     "零一万物": "yi",
     "百川": "baichuan",
     "豆包": "doubao",
     "字节": "doubao",
-    "腾讯": "tencent",
+    "腾讯": "hunyuan",
     "混元": "hunyuan",
-    "科大讯飞": "iflytek",
-    "讯飞": "iflytek",
-    "iFLYTEK": "iflytek",
-    "百度": "qianfan",
-    "文心": "qianfan",
-    "阿里": "dashscope",
-    "通义": "dashscope",
-    "Qwen": "dashscope",
-    # US providers
-    "OpenAI": "openai",
-    "Anthropic": "anthropic",
-    "谷歌": "google",
-    "Google": "google",
-    "Gemini": "google",
-    "DeepSeek": "deepseek",
+    "科大讯飞": "spark",
+    "讯飞": "spark",
+    "百度": "wenxin",
+    "文心": "wenxin",
+    "阿里": "qwen",
+    "通义": "qwen",
+    "阶跃": "stepfun",
     "深度求索": "deepseek",
+    "谷歌": "google",
+    "本地": "ollama",
+    # --- English / canonical aliases ---
+    "openai": "openai", "gpt": "openai", "chatgpt": "openai", "OpenAI": "openai",
+    "anthropic": "anthropic", "claude": "anthropic", "sonnet": "anthropic",
+    "haiku": "anthropic", "opus": "anthropic", "Anthropic": "anthropic",
+    "google": "google", "gemini": "google", "bard": "google",
+    "Gemini": "google", "Google": "google",
+    "deepseek": "deepseek", "ds": "deepseek", "DeepSeek": "deepseek",
+    "qwen": "qwen", "tongyi": "qwen", "dashscope": "qwen",
+    "glm": "glm", "zhipu": "glm", "chatglm": "glm", "ChatGLM": "glm", "GLM": "glm",
+    "kimi": "kimi", "moonshot": "kimi", "Moonshot": "kimi", "Kimi": "kimi",
+    "yi": "yi", "lingyi": "yi", "lingyiwanwu": "yi",
+    "sensenova": "sensenova", "SenseNova": "sensenova",
+    "doubao": "doubao", "volcengine": "doubao", "ark": "doubao",
+    "hunyuan": "hunyuan", "tencent": "hunyuan",
+    "spark": "spark", "xfyun": "spark", "iflytek": "spark",
+    "iFLYTEK": "spark",
+    "wenxin": "wenxin", "qianfan": "wenxin", "ernie": "wenxin",
+    "baichuan": "baichuan",
+    "stepfun": "stepfun",
+    "minimax": "minimax", "minimaxi": "minimax", "abab": "minimax",
+    "nvidia": "nvidia", "nvapi": "nvidia", "NVIDIA": "nvidia",
+    "ollama": "ollama", "local": "ollama",
+    "openrouter": "openrouter",
+    "groq": "groq", "together": "together", "fireworks": "fireworks",
+    "mistral": "mistral", "cohere": "cohere", "xai": "xai", "grok": "xai",
+    "perplexity": "perplexity", "huggingface": "huggingface",
+    "replicate": "replicate",
+    "lmstudio": "lmstudio", "vllm": "vllm", "llamacpp": "llamacpp",
+    "text-generation-webui": "text-generation-webui", "localai": "localai",
 }
 
 
@@ -316,34 +336,7 @@ def clear_cache() -> None:
 # Chinese provider names like "为商汤重建分层" and have the
 # correct provider be picked.
 # ============================================================
-# Chinese / English alias map — the key is the alias, the value
-# is the canonical provider name (matching KNOWN_PROVIDERS).
-_PROVIDER_ALIASES: Dict[str, str] = {
-    # English
-    "openai": "openai", "gpt": "openai", "chatgpt": "openai",
-    "anthropic": "anthropic", "claude": "anthropic", "sonnet": "anthropic",
-    "haiku": "anthropic", "opus": "anthropic",
-    "google": "google", "gemini": "google", "bard": "google",
-    "deepseek": "deepseek", "ds": "deepseek",
-    "qwen": "qwen", "tongyi": "qwen", "dashscope": "qwen", "通义": "qwen",
-    "glm": "glm", "zhipu": "glm", "chatglm": "glm", "智谱": "glm",
-    "kimi": "kimi", "moonshot": "kimi", "月之暗面": "kimi",
-    "yi": "yi", "lingyi": "yi", "零一": "yi", "零一万物": "yi",
-    "sensenova": "sensenova", "商汤": "sensenova", "日日新": "sensenova",
-    "doubao": "doubao", "volcengine": "doubao", "ark": "doubao", "豆包": "doubao",
-    "hunyuan": "hunyuan", "tencent": "hunyuan", "混元": "hunyuan",
-    "spark": "spark", "xfyun": "spark", "iflytek": "spark", "讯飞": "spark",
-    "wenxin": "wenxin", "qianfan": "wenxin", "ernie": "wenxin", "文心": "wenxin",
-    "baichuan": "baichuan", "百川": "baichuan",
-    "stepfun": "stepfun", "阶跃": "stepfun",
-    "minimax": "minimax", "minimaxi": "minimax", "abab": "minimax",
-    "ollama": "ollama", "local": "ollama", "本地": "ollama",
-    "openrouter": "openrouter",
-    "groq": "groq", "together": "together", "fireworks": "fireworks",
-    "mistral": "mistral", "cohere": "cohere", "xai": "xai", "grok": "xai",
-    "perplexity": "perplexity", "huggingface": "huggingface",
-    "replicate": "replicate",
-}
+# _PROVIDER_ALIASES is defined above (single source of truth).
 
 
 def _extract_provider_hint(text: str) -> Optional[str]:

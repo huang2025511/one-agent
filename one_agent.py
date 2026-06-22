@@ -640,6 +640,27 @@ async def _interactive(app: OneAgentApp) -> None:
             except Exception as exc:
                 print(f"[add_provider error: {exc}]")
                 continue
+        # 检测"搜索 服务商名"命令：网上搜索未知服务商的 API 地址
+        _search_m = _re_key.match(r"^(?:搜索|search|查找|find)\s+(.+)", line, _re_key.IGNORECASE)
+        if _search_m:
+            _provider_query = _search_m.group(1).strip()
+            print(f"🔍 正在网上搜索「{_provider_query}」的 API 地址...")
+            try:
+                from models.resolver import resolve
+                _resolved = await resolve(_provider_query, probe=True, timeout=8.0)
+                if _resolved.found:
+                    print(f"✅ 找到「{_provider_query}」的 API 地址：{_resolved.base_url}")
+                    print(f"   （来源：{_resolved.via}）")
+                    print(f"   现在你可以发送：{_provider_query} {_resolved.base_url} key=你的API密钥")
+                else:
+                    print(f"❌ 未能自动找到「{_provider_query}」的 API 地址。")
+                    print("   请直接提供 base URL，例如：")
+                    print(f"   {_provider_query} https://api.example.com/v1 key=你的API密钥")
+            except Exception as exc:
+                print(f"❌ 搜索失败: {exc}")
+                print("   请直接提供 base URL，例如：")
+                print(f"   {_provider_query} https://api.example.com/v1 key=你的API密钥")
+            continue
         intent = _match_intent(line)
         if intent == "exit":
             return
