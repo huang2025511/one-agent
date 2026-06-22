@@ -104,6 +104,13 @@ class MemoryConfig(BaseModel):
     procedural: MemoryProcedural = Field(default_factory=MemoryProcedural)
 
 
+class RoleConfig(BaseModel):
+    """角色系统配置 — 让 Agent 扮演不同行业/场景的专家角色。"""
+    enabled: bool = True
+    current: str = ""  # 当前角色名（空 = 默认 One-Agent 身份）
+    library: str = "data/roles/prompts-zh.json"  # 角色库 JSON 文件路径
+
+
 class AgentConfig(BaseModel):
     name: str = "One-Agent"
     description: str = "Token-efficient self-evolving microkernel AI agent"
@@ -112,6 +119,7 @@ class AgentConfig(BaseModel):
     log_level: str = Field(default="INFO")
     timezone: str = Field(default="UTC")
     language: str = Field(default="en")  # 语言设置: en | zh
+    role: RoleConfig = Field(default_factory=RoleConfig)
 
     @field_validator("log_level")
     @classmethod

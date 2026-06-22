@@ -11,6 +11,13 @@ agent:
   log_level: INFO  # DEBUG | INFO | WARNING | ERROR
   timezone: UTC  # IANA timezone (e.g. Asia/Shanghai, America/Los_Angeles)
   language: en  # en | zh — default UI/system-prompt language
+  # 角色系统 — 让 Agent 扮演不同行业/场景的专家角色
+  # 角色库来自 awesome-chatgpt-prompts-zh（CC0-1.0），124 个中文角色
+  # 用 /role list 查看所有角色，/role <角色名> 切换角色
+  role:
+    enabled: true  # 是否启用角色系统
+    current: ''  # 当前角色名（空 = 默认 One-Agent 身份；填角色名即切换）
+    library: data/roles/prompts-zh.json  # 角色库 JSON 文件路径
 
 llm:
   primary_provider: sensenova  # Provider key in api_keys below

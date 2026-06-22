@@ -342,6 +342,7 @@ class SkillManager(Plugin):
                 ("🔢 /calc /计算", "执行数学计算，如 /calc 2+2"),
                 ("📝 /note /笔记", "保存笔记到文件"),
                 ("⏰ /time /时间", "显示当前时间"),
+                ("🎭 /role /角色", "角色系统（/role list 列出，/role <名> 切换，/role off 关闭）"),
                 ("🚪 /quit /退出", "退出程序"),
             ]
             lines = ["可用命令列表：", ""]
@@ -370,6 +371,13 @@ class SkillManager(Plugin):
                     llm = cfg.get("llm", {})
                     lines.append(f"  🧠 主模型: {llm.get('primary_provider', '?')}/{llm.get('primary_model', '?')}")
                     lines.append(f"  🪶 轻量模型: {llm.get('lightweight_model', '?')}")
+                    # 当前角色
+                    role_cfg = cfg.get("agent", {}).get("role", {}) or {}
+                    current_role = role_cfg.get("current", "").strip()
+                    if current_role:
+                        lines.append(f"  🎭 当前角色: {current_role}")
+                    else:
+                        lines.append("  🎭 当前角色: 默认（One-Agent）")
             except Exception:
                 pass
             lines.append(f"  🧰 已加载技能: {len(self._skills)}")
@@ -1371,6 +1379,11 @@ _SETTING_ALIASES: Dict[str, tuple] = {
     "时区": ("agent.timezone", str),
     "timezone": ("agent.timezone", str),
     "数据目录": ("agent.data_dir", str),
+    # 角色系统
+    "角色": ("agent.role.current", str),
+    "role": ("agent.role.current", str),
+    "人设": ("agent.role.current", str),
+    "persona": ("agent.role.current", str),
     # 网关开关
     "web": ("gateways.web.enabled", bool),
     "telegram": ("gateways.telegram.enabled", bool),

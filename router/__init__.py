@@ -406,6 +406,17 @@ class SmartRouter(Plugin):
                     "   shutdown/reboot/mkfs/dd/fdisk/iptables. Tell the user and wait for confirmation before these;\n"
                     "6. After each system command, report the result."
                 )
+
+        # 角色系统注入：如果有当前角色，把角色 prompt 追加到 system prompt
+        try:
+            from core.roles import build_role_prompt
+            if self.ctx is not None and self.ctx.config is not None:
+                role_fragment = build_role_prompt(self.ctx.config)
+                if role_fragment:
+                    system += role_fragment
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("role prompt injection skipped: %s", exc)
+
         history = self._history_tail(turn.session_id)
         # Smart compression: keep recent turns + important context
         compression_cfg = self._cfg.get("context_compression", {}) or {}

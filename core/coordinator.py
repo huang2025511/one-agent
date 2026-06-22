@@ -310,6 +310,179 @@ class Coordinator(Plugin):
         except Exception as exc:
             logger.warning("system_lock handler failed: %s", exc)
 
+    # ------------------------------------------------------------ 角色系统
+    async def _handle_role_command(self, turn: TurnContext, args_text: str) -> None:
+        """Handle /role command — 角色系统管理。
+
+        用法：
+            /role              — 查看当前角色
+            /role list         — 列出所有可用角色
+            /role off          — 关闭角色（恢复默认 One-Agent 身份）
+            /role <角色名>      — 切换到指定角色
+            /role search <关键词> — 搜索角色
+        """
+        from core.roles import get_library
+        from i18n import get_language
+        lang = (get_language() or "zh").lower()
+        is_zh = lang.startswith("zh")
+
+        args = args_text.strip()
+        library = get_library()
+
+        # 确保角色库已加载
+        if not library.loaded:
+            role_cfg = {}
+            if self.ctx is not None and self.ctx.config is not None:
+                role_cfg = self.ctx.config.get("agent", {}).get("role", {}) or {}
+            lib_path = role_cfg.get("library", "data/roles/prompts-zh.json")
+            library.load(lib_path)
+
+        # /role（无参数）— 查看当前角色
+        if not args:
+            current = self._get_current_role_name()
+            if current:
+                role = library.find(current)
+                if role:
+                    prompt_preview = role["prompt"][:200] + ("..." if len(role["prompt"]) > 200 else "")
+                    turn.result = (
+                        f"🎭 当前角色：{role['act']}\n\n"
+                        f"提示词预览：\n{prompt_preview}\n\n"
+                        f"用 /role list 查看所有角色，/role off 关闭角色"
+                        if is_zh
+                        else f"🎭 Current role: {role['act']}\n\n"
+                        f"Prompt preview:\n{prompt_preview}\n\n"
+                        f"Use /role list to see all roles, /role off to disable"
+                    )
+                else:
+                    turn.result = (
+                        f"⚠️ 当前角色「{current}」在角色库中未找到，可能已被移除。\n"
+                        f"用 /role list 查看可用角色，或 /role off 关闭角色"
+                        if is_zh
+                        else f"⚠️ Current role '{current}' not found in library.\n"
+                        f"Use /role list to see available roles, or /role off to disable"
+                    )
+            else:
+                size = library.size
+                turn.result = (
+                    f"🎭 角色系统\n"
+                    f"当前状态：未启用角色（使用默认 One-Agent 身份）\n"
+                    f"角色库：{size} 个角色可用\n\n"
+                    f"用法：\n"
+                    f"  /role list         — 列出所有角色\n"
+                    f"  /role <角色名>      — 切换到指定角色\n"
+                    f"  /role search <关键词> — 搜索角色\n"
+                    f"  /role off          — 关闭角色"
+                    if is_zh
+                    else f"🎭 Role System\n"
+                    f"Status: No role active (default One-Agent identity)\n"
+                    f"Library: {size} roles available\n\n"
+                    f"Usage:\n"
+                    f"  /role list         — list all roles\n"
+                    f"  /role <name>       — switch to a role\n"
+                    f"  /role search <kw>  — search roles\n"
+                    f"  /role off          — disable role"
+                )
+            return
+
+        # /role list — 列出所有角色
+        low = args.lower()
+        if low in ("list", "ls", "列表", "所有", "all"):
+            roles = library.list_all()
+            if not roles:
+                turn.result = "角色库为空或未加载" if is_zh else "Role library is empty or not loaded"
+                return
+            lines = [f"📋 角色库（共 {len(roles)} 个角色）：" if is_zh else f"📋 Role Library ({len(roles)} roles):"]
+            for i, r in enumerate(roles, 1):
+                lines.append(f"  {i:3d}. {r['act']}")
+            lines.append("")
+            lines.append("用法：/role <角色名> 切换角色" if is_zh else "Usage: /role <name> to switch")
+            turn.result = "\n".join(lines)
+            return
+
+        # /role off — 关闭角色
+        if low in ("off", "default", "none", "关闭", "默认", "取消"):
+            self._set_current_role("")
+            turn.result = (
+                "✅ 已关闭角色，恢复默认 One-Agent 身份"
+                if is_zh
+                else "✅ Role disabled, restored to default One-Agent identity"
+            )
+            return
+
+        # /role search <关键词>
+        if low.startswith("search ") or low.startswith("搜索 ") or low.startswith("查找 "):
+            keyword = args.split(maxsplit=1)[1] if len(args.split(maxsplit=1)) > 1 else ""
+            if not keyword:
+                turn.result = "用法：/role search <关键词>" if is_zh else "Usage: /role search <keyword>"
+                return
+            results = library.search(keyword, limit=20)
+            if not results:
+                turn.result = f"未找到匹配「{keyword}」的角色" if is_zh else f"No roles matching '{keyword}'"
+                return
+            lines = [f"🔍 搜索「{keyword}」找到 {len(results)} 个角色：" if is_zh else f"🔍 Found {len(results)} roles for '{keyword}':"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"  {i}. {r['act']}")
+            turn.result = "\n".join(lines)
+            return
+
+        # /role <角色名> — 切换到指定角色
+        role = library.find(args)
+        if role is None:
+            # 模糊搜索建议
+            suggestions = library.search(args, limit=5)
+            if suggestions:
+                sug_text = "\n".join(f"  • {r['act']}" for r in suggestions)
+                turn.result = (
+                    f"❌ 未找到角色「{args}」\n\n"
+                    f"你是否想找：\n{sug_text}\n\n"
+                    f"用 /role list 查看所有角色"
+                    if is_zh
+                    else f"❌ Role '{args}' not found\n\nDid you mean:\n{sug_text}\n\nUse /role list to see all roles"
+                )
+            else:
+                turn.result = (
+                    f"❌ 未找到角色「{args}」\n用 /role list 查看所有角色"
+                    if is_zh
+                    else f"❌ Role '{args}' not found\nUse /role list to see all roles"
+                )
+            return
+
+        self._set_current_role(role["act"])
+        prompt_preview = role["prompt"][:150] + ("..." if len(role["prompt"]) > 150 else "")
+        turn.result = (
+            f"✅ 已切换到角色：{role['act']}\n\n"
+            f"提示词预览：\n{prompt_preview}\n\n"
+            f"现在开始，Agent 将以「{role['act']}」的身份回答问题。\n"
+            f"用 /role off 可恢复默认身份"
+            if is_zh
+            else f"✅ Switched to role: {role['act']}\n\n"
+            f"Prompt preview:\n{prompt_preview}\n\n"
+            f"From now on, Agent will respond as '{role['act']}'.\n"
+            f"Use /role off to restore default identity"
+        )
+
+    def _get_current_role_name(self) -> str:
+        """从配置中读取当前角色名。"""
+        if self.ctx is None or self.ctx.config is None:
+            return ""
+        role_cfg = self.ctx.config.get("agent", {}).get("role", {}) or {}
+        if not role_cfg.get("enabled", True):
+            return ""
+        return role_cfg.get("current", "").strip()
+
+    def _set_current_role(self, role_name: str) -> None:
+        """设置当前角色名并持久化到配置文件。"""
+        if self.ctx is None or self.ctx.config is None:
+            return
+        try:
+            config = self.ctx.config
+            config.setdefault("agent", {}).setdefault("role", {})["current"] = role_name
+            from skills import _save_config
+            _save_config(config)
+            logger.info("role switched to: %s", role_name or "(default)")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("failed to persist role: %s", exc)
+
     # ------------------------------------------------------------ slash commands
     # Mapping from slash command names (both EN and CN) to skill IDs
     _SLASH_COMMANDS: Dict[str, str] = {
@@ -360,6 +533,8 @@ class Coordinator(Plugin):
         "os-mode": "_os_mode", "osmode": "_os_mode", "os": "_os_mode",
         "enable-os": "_os_on", "disable-os": "_os_off",
         "开启os": "_os_on", "关闭os": "_os_off", "开启系统权限": "_os_on", "关闭系统权限": "_os_off",
+        # ---------- 角色系统 ----------
+        "role": "_role", "角色": "_role", "人设": "_role", "persona": "_role",
     }
 
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
@@ -398,6 +573,12 @@ class Coordinator(Plugin):
         # ---- OS mode commands (handled directly, not via skill dispatch) ----
         if skill_id in ("_os_on", "_os_off", "_os_mode"):
             await self._handle_os_mode(turn, skill_id, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+
+        # ---- Role commands (handled directly) ----
+        if skill_id == "_role":
+            await self._handle_role_command(turn, args_text)
             self.publish("turn_completed", turn=turn)
             return True
 
