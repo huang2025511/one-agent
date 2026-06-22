@@ -952,30 +952,65 @@ class SkillManager(Plugin):
             config["llm"]["api_keys"][resolved_provider] = key_clean
             _save_config(ctx_ref.config if ctx_ref else {})
 
-            # 6. 重建模型分层（异步）
-            results = [f"✅ 已添加服务商: {resolved_provider}", ""]
-            results.append(f"🔑 API key 已配置（{len(key_clean)} 字符）")
-            results.append("")
-            results.append("📡 正在拉取模型列表...")
+            # 6. 拉取模型列表（但不立即集成），让用户先选择
+            results = [f"✅ 服务商「{resolved_provider}」API key 已配置（{len(key_clean)} 字符）", ""]
+            results.append("📡 正在拉取可用模型列表...")
 
             try:
-                rebuild_result = await llm.rebuild_tiers(provider=resolved_provider, persist=True)
-                if rebuild_result.get("ok"):
-                    tiers = rebuild_result.get("tiers", {})
-                    total = rebuild_result.get("model_count", 0)
-                    results.append(f"✅ 模型拉取成功！共 {total} 个模型已分配到 4 层：")
-                    for tier_name in ("trivial", "simple", "complex", "expert"):
-                        models = tiers.get(tier_name, [])
-                        results.append(f"  [{tier_name:8s}] {len(models)} 个: {', '.join(models[:3])}{'...' if len(models) > 3 else ''}")
+                models = await llm.list_models(provider=resolved_provider)
+                if not models:
+                    results.append("⚠️ 未拉取到任何模型，API key 可能无效或网络问题")
+                    results.append("API key 已保存，可稍后重试")
+                    return "\n".join(results)
+
+                # 分类显示：免费 vs 收费
+                free_models = [m for m in models if m.get("is_free")]
+                paid_models = [m for m in models if not m.get("is_free")]
+
+                results.append(f"✅ 拉取成功！共 {len(models)} 个模型"
+                               f"（免费 {len(free_models)} 个，收费 {len(paid_models)} 个）")
+                results.append("")
+
+                # 显示免费模型（优先推荐）
+                if free_models:
+                    results.append(f"🆓 免费模型（推荐，共 {len(free_models)} 个）：")
+                    for i, m in enumerate(free_models[:15], 1):
+                        ctx_len = m.get("context_length", 0)
+                        ctx_str = f" ctx={ctx_len:,}" if ctx_len else ""
+                        feats = m.get("features", [])
+                        feat_str = f" ({','.join(feats[:3])})" if feats else ""
+                        results.append(f"  {i:2d}. {m['id']}{ctx_str}{feat_str}")
+                    if len(free_models) > 15:
+                        results.append(f"  ... 还有 {len(free_models) - 15} 个免费模型")
                     results.append("")
-                    results.append("💡 如需切换到此服务商，可以对我说：'使用英伟达' 或 '/set provider nvidia'")
-                else:
-                    err = rebuild_result.get("error", "unknown")
-                    results.append(f"⚠️ 模型拉取失败: {err}")
-                    results.append("API key 可能无效或网络问题，请检查后重新发送")
+
+                # 显示收费模型（简要）
+                if paid_models:
+                    results.append(f"💰 收费模型（共 {len(paid_models)} 个，前 5 个）：")
+                    for i, m in enumerate(paid_models[:5], 1):
+                        results.append(f"  {i}. {m['id']}")
+                    results.append("")
+
+                # 保存待确认状态，等用户选择后再集成
+                if ctx_ref:
+                    ctx_ref._pending_provider = {
+                        "provider": resolved_provider,
+                        "models": models,
+                        "free_models": free_models,
+                    }
+
+                results.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                results.append("📋 请选择要集成的模型：")
+                results.append("  • 输入「全部」→ 集成所有模型（自动分层）")
+                if free_models:
+                    results.append("  • 输入「免费」→ 只集成免费模型")
+                    results.append("  • 输入「选择 1,3,5」→ 只集成指定编号的模型")
+                results.append("  • 输入「取消」→ 放弃集成（key 已保存）")
+                results.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
             except Exception as exc:
-                logger.warning("add_provider rebuild_tiers failed: %s", exc)
-                results.append(f"⚠️ 模型分层失败: {exc}")
+                logger.warning("add_provider list_models failed: %s", exc)
+                results.append(f"⚠️ 模型拉取失败: {exc}")
                 results.append("API key 已保存，但需要重启才能拉取模型")
 
             return "\n".join(results)

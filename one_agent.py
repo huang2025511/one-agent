@@ -621,9 +621,78 @@ async def _interactive(app: OneAgentApp) -> None:
             return
         if not line:
             continue
+        import re as _re_key
+
+        # 检测待确认的 provider 集成命令（全部/免费/选择 N/取消）
+        _pending = getattr(app.ctx, "_pending_provider", None)
+        if _pending:
+            _low = line.lower().strip()
+            _handled = False
+            if _low in ("取消", "cancel", "放弃", "exit", "退出"):
+                app.ctx._pending_provider = None
+                print("已取消集成。API key 已保存，可稍后重新发送服务商+key 来集成。")
+                continue
+            elif _low in ("全部", "all", "所有", "全部集成"):
+                _handled = True
+                _selected = _pending["models"]
+            elif _low in ("免费", "free", "免费模型"):
+                _handled = True
+                _selected = _pending.get("free_models", [])
+                if not _selected:
+                    print("❌ 没有免费模型可选")
+                    continue
+            elif _re_key.match(r"(?:选择|select|pick)\s+([\d,\s]+)", _low):
+                _handled = True
+                _nums = [int(x) for x in _re_key.findall(r"\d+", _low)]
+                _free = _pending.get("free_models", [])
+                _selected = [_free[i - 1] for i in _nums if 0 < i <= len(_free)]
+                if not _selected:
+                    print(f"❌ 编号无效，请输入 1-{len(_free)} 之间的数字")
+                    continue
+            elif _re_key.match(r"^[\d,\s]+$", _low):
+                # 直接输入数字 "1,3,5"
+                _handled = True
+                _nums = [int(x) for x in _re_key.findall(r"\d+", _low)]
+                _free = _pending.get("free_models", [])
+                _selected = [_free[i - 1] for i in _nums if 0 < i <= len(_free)]
+                if not _selected:
+                    print(f"❌ 编号无效，请输入 1-{len(_free)} 之间的数字")
+                    continue
+
+            if _handled:
+                _prov = _pending["provider"]
+                app.ctx._pending_provider = None
+                print(f"🔄 正在将 {len(_selected)} 个模型集成到 {_prov}...")
+                try:
+                    _llm = getattr(app, "llm", None)
+                    if _llm:
+                        _result = await _llm.rebuild_tiers(provider=_prov, persist=True)
+                        if _result.get("ok"):
+                            _tiers = _result.get("tiers", {})
+                            print(f"✅ 集成成功！共 {_result.get('model_count', 0)} 个模型已分配到 4 层：")
+                            for _tier_name in ("trivial", "simple", "complex", "expert"):
+                                _models = _tiers.get(_tier_name, [])
+                                print(f"  [{_tier_name:8s}] {len(_models)} 个: {', '.join(_models[:3])}{'...' if len(_models) > 3 else ''}")
+                            print(f"\n💡 如需切换到此服务商，可以对我说：'使用{_prov}' 或 '/set provider {_prov}'")
+                        else:
+                            print(f"⚠️ 集成失败: {_result.get('error', 'unknown')}")
+                    else:
+                        print("❌ LLM provider 不可用")
+                except Exception as exc:
+                    print(f"❌ 集成错误: {exc}")
+                continue
+            # 不是确认命令，清除待确认状态，继续正常处理
+            app.ctx._pending_provider = None
+
         # 检测"服务商 + API key"模式，直接调用 add_provider 技能
         # 不依赖 LLM 工具调用（某些模型不支持 tools）
-        import re as _re_key
+        # 支持多行输入：如果当前行只有 key，检查上一行是否是服务商名
+        _key_only = _re_key.match(r"^\s*key\s*[=：:]\s*(\S+)\s*$", line, _re_key.IGNORECASE)
+        if _key_only:
+            _last_provider = getattr(app, "_last_provider_hint", None)
+            if _last_provider:
+                line = f"{_last_provider} {_key_only.group(1)}"
+                app._last_provider_hint = None
         if _re_key.search(r"(?:key[:：]?\s*)?(nvapi-\S+|sk-\S+|ak-\S+)", line):
             try:
                 from skills import SkillManager
@@ -661,6 +730,14 @@ async def _interactive(app: OneAgentApp) -> None:
                 print("   请直接提供 base URL，例如：")
                 print(f"   {_provider_query} https://api.example.com/v1 key=你的API密钥")
             continue
+        # 保存服务商名作为 hint（用于多行输入：用户先发服务商名，下一行发 key）
+        try:
+            from models.resolver import _PROVIDER_ALIASES
+            _hint = _re_key.sub(r"[，,。.：:：]+$", "", line.strip())
+            if _hint in _PROVIDER_ALIASES or _hint.lower() in _PROVIDER_ALIASES:
+                app._last_provider_hint = _hint
+        except Exception:
+            pass
         intent = _match_intent(line)
         if intent == "exit":
             return
