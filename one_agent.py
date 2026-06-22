@@ -621,6 +621,25 @@ async def _interactive(app: OneAgentApp) -> None:
             return
         if not line:
             continue
+        # 检测"服务商 + API key"模式，直接调用 add_provider 技能
+        # 不依赖 LLM 工具调用（某些模型不支持 tools）
+        import re as _re_key
+        if _re_key.search(r"(?:key[:：]?\s*)?(nvapi-\S+|sk-\S+|ak-\S+)", line):
+            try:
+                from skills import SkillManager
+                _sm = getattr(app, "_skills_mgr", None)
+                if _sm is None:
+                    # 临时创建 SkillManager 来执行 add_provider
+                    _sm = SkillManager()
+                    await _sm.setup(app.ctx)
+                    app._skills_mgr = _sm
+                _result = await _sm.dispatch("add_provider", {"input": line})
+                if _result and str(_result) != "__SKIP__":
+                    print(_result)
+                    continue
+            except Exception as exc:
+                print(f"[add_provider error: {exc}]")
+                continue
         intent = _match_intent(line)
         if intent == "exit":
             return
@@ -668,13 +687,13 @@ async def _interactive(app: OneAgentApp) -> None:
             # 将设置请求路由到 settings 技能
             from skills import _process_settings_command
             result = _process_settings_command(line, app.config)
-            # None 表示不是设置命令（疑问句等），跳过继续正常对话
-            if result is None:
+            # None 或 "__SKIP__" 表示不是设置命令，跳过继续正常对话
+            if result is None or result == "__SKIP__":
                 pass  # 继续到下面的 LLM 对话
             else:
                 print(result)
             # 只有明确返回了内容才结束，继续时不要 continue
-            if result is not None:
+            if result is not None and result != "__SKIP__":
                 continue
         if intent == "models":
             # 模型发现：拉取当前 provider 的模型列表并按需过滤

@@ -475,6 +475,26 @@ class Coordinator(Plugin):
                 # Persist language preference to config
                 self._persist_language(detected_lang)
 
+        # 模式匹配：检测"服务商名 + API key"格式，直接调用 add_provider
+        # 不依赖 LLM 工具调用（某些模型如 sensenova 不支持 tools）
+        if turn.input_text and self._skills is not None:
+            _api_key_m = __import__("re").search(
+                r"(?:key[:：]?\s*)?(nvapi-\S+|sk-\S+|ak-\S+)",
+                turn.input_text
+            )
+            if _api_key_m:
+                try:
+                    logger.info("检测到 API key，调用 add_provider 技能")
+                    _result = await self._skills.dispatch(
+                        "add_provider", {"input": turn.input_text}
+                    )
+                    if _result and str(_result) != "__SKIP__":
+                        turn.record_success(str(_result), 0)
+                        self.publish("turn_completed", turn=turn)
+                        return
+                except Exception as exc:
+                    logger.warning("add_provider dispatch failed: %s", exc)
+
         # avoid double-processing — if something already published a reply,
         # skip this turn entirely
         try:
