@@ -172,6 +172,8 @@ class SkillManager(Plugin):
         self._max_loaded_per_turn = cfg.get("max_skills_per_turn", self._max_loaded_per_turn)
         # 保存 ctx 引用供 settings 技能使用
         self._ctx_ref = ctx
+        # 保存 llm 引用供 add_provider 等技能使用
+        self._llm_ref = getattr(ctx, "_llm", None)
         self.bus.subscribe("cron", self._on_cron)
         logger.info("skills loaded: %d", len(self._skills))
 
@@ -812,6 +814,136 @@ class SkillManager(Plugin):
                 # 不是设置命令，返回特殊标记让 coordinator 继续正常对话
                 return "__SKIP__"
             return result
+
+        # ---------- 智能添加服务商技能 ----------
+        async def add_provider_handler(args: Dict[str, Any]) -> str:
+            """智能添加服务商：解析"服务商+key"，自动配置API key、拉取模型、分配到4层。
+
+            支持的输入格式：
+            - "英伟达 nvapi-xxxxx"
+            - "nvidia key-xxxxx"
+            - "openai sk-xxxxx"
+            - "添加服务商 英伟达 key=nvapi-xxx"
+            """
+            input_text = str(args.get("input", "")).strip()
+            if not input_text:
+                return "请提供服务商名称和 API key，例如：'英伟达 nvapi-xxxx' 或 'openai sk-xxxx'"
+
+            # 1. 解析服务商名和 API key
+            provider_name = None
+            api_key = None
+
+            # 格式: "服务商 key" 或 "服务商key"
+            parts = input_text.split()
+            if len(parts) >= 2:
+                provider_name = parts[0].strip()
+                api_key = parts[1].strip()
+            elif len(parts) == 1:
+                # 尝试用 key= 或 key: 分割
+                import re as _re
+                m = _re.search(r"(?:添加|新增|注册)?\s*([\u4e00-\u9fff_a-zA-Z][\u4e00-\u9fff_a-zA-Z0-9]*)\s*[key=:]?\s*([a-zA-Z0-9_\-]+)", input_text, _re.IGNORECASE)
+                if m:
+                    provider_name = m.group(1).strip()
+                    api_key = m.group(2).strip()
+
+            if not provider_name or not api_key:
+                return ("无法解析服务商和 key。请用以下格式发送：\n"
+                        "  英伟达 nvapi-xxxxx\n"
+                        "  openai sk-xxxxx\n"
+                        "  添加服务商 英伟达 key=nvapi-xxxxx")
+
+            # 2. 解析 provider 名称（支持中文别名）
+            try:
+                from models.resolver import _PROVIDER_ALIASES, lookup
+            except ImportError:
+                return "❌ resolver 模块不可用"
+
+            # 先尝试直接映射
+            canonical = _PROVIDER_ALIASES.get(provider_name)
+            if canonical:
+                resolved_provider = canonical
+            elif lookup(provider_name):
+                resolved_provider = provider_name.lower()
+            else:
+                # 尝试大小写不敏感匹配
+                provider_lower = provider_name.lower()
+                for alias, canon in _PROVIDER_ALIASES.items():
+                    if alias.lower() == provider_lower:
+                        resolved_provider = canon
+                        break
+                else:
+                    # 未知 provider，记录警告但继续尝试
+                    resolved_provider = provider_name.lower()
+                    logger.warning("add_provider: unknown provider '%s', trying anyway", provider_name)
+
+            # 3. 获取 llm 实例
+            llm = getattr(self, "_llm_ref", None)
+            if llm is None:
+                return "❌ 无法访问 LLM provider，请重启程序后再试"
+
+            # 4. 设置 API key
+            key_clean = api_key.strip()
+            if key_clean.startswith("${") and key_clean.endswith("}"):
+                return f"❌ 环境变量引用 ${{{key_clean[2:-1]}}} 不支持直接添加，请提供真实的 API key"
+
+            set_result = llm.set_api_key(resolved_provider, key_clean)
+            if not set_result.get("ok"):
+                return f"❌ 设置 API key 失败: {set_result.get('error', 'unknown')}"
+
+            # 5. 保存到配置文件
+            ctx_ref = getattr(self, "_ctx_ref", None)
+            config = ctx_ref.config if ctx_ref else {}
+            if isinstance(config, type(None)):
+                config = {}
+            if "llm" not in config:
+                config["llm"] = {}
+            if "api_keys" not in config["llm"]:
+                config["llm"]["api_keys"] = {}
+            config["llm"]["api_keys"][resolved_provider] = key_clean
+            _save_config(ctx_ref.config if ctx_ref else {})
+
+            # 6. 重建模型分层（异步）
+            results = [f"✅ 已添加服务商: {resolved_provider}", ""]
+            results.append(f"🔑 API key 已配置（{len(key_clean)} 字符）")
+            results.append("")
+            results.append("📡 正在拉取模型列表...")
+
+            try:
+                rebuild_result = await llm.rebuild_tiers(provider=resolved_provider, persist=True)
+                if rebuild_result.get("ok"):
+                    tiers = rebuild_result.get("tiers", {})
+                    total = rebuild_result.get("model_count", 0)
+                    results.append(f"✅ 模型拉取成功！共 {total} 个模型已分配到 4 层：")
+                    for tier_name in ("trivial", "simple", "complex", "expert"):
+                        models = tiers.get(tier_name, [])
+                        results.append(f"  [{tier_name:8s}] {len(models)} 个: {', '.join(models[:3])}{'...' if len(models) > 3 else ''}")
+                    results.append("")
+                    results.append("💡 如需切换到此服务商，可以对我说：'使用英伟达' 或 '/set provider nvidia'")
+                else:
+                    err = rebuild_result.get("error", "unknown")
+                    results.append(f"⚠️ 模型拉取失败: {err}")
+                    results.append("API key 可能无效或网络问题，请检查后重新发送")
+            except Exception as exc:
+                logger.warning("add_provider rebuild_tiers failed: %s", exc)
+                results.append(f"⚠️ 模型分层失败: {exc}")
+                results.append("API key 已保存，但需要重启才能拉取模型")
+
+            return "\n".join(results)
+        self.register(Skill(
+            id="add_provider", title="添加服务商",
+            description="发送'英伟达 nvapi-xxxx'或'openai sk-xxxx'，自动配置API key并拉取模型",
+            schema={
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "服务商名称和 API key，格式：'服务商 key' 或 '添加服务商 服务商 key=xxx'"
+                    }
+                },
+                "required": ["input"]
+            },
+            handler=add_provider_handler,
+        ))
 
         # ---------- 网页搜索技能 ----------
         async def web_search_handler(args: Dict[str, Any]) -> str:

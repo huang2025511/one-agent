@@ -404,6 +404,9 @@ class OneAgentApp:
         # Attach Python executor to agent context (shared instance)
         self.ctx.python_executor = self.exec_python
 
+        # Attach llm provider to ctx so skills can call set_api_key / rebuild_tiers
+        self.ctx._llm = self.llm
+
         await self.bus.start()
         await self._pm.setup_all(self.ctx)
         # Register knowledge graph search skill (KG is created by MemoryPlugin during setup)

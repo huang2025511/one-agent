@@ -1560,7 +1560,7 @@ class RESTAPIGateway(Plugin):
         self._app = app
         try:
             import uvicorn
-            config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning", capture_output=False)
+            config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning")
             server = uvicorn.Server(config)
             self._task = __import__("asyncio").create_task(server.serve())
             logger.info("REST API running on http://%s:%d", self._host, self._port)

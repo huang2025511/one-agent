@@ -88,6 +88,8 @@ KNOWN_PROVIDERS: Dict[str, str] = {
     "wenxin": "https://qianfan.baidubce.com/v2",
     "qianfan": "https://qianfan.baidubce.com/v2",
     "ernie": "https://qianfan.baidubce.com/v2",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "nvapi": "https://integrate.api.nvidia.com/v1",
     # --- local / self-hosted ---
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
@@ -150,11 +152,55 @@ def _candidate_hosts(name: str) -> List[str]:
     ]
 
 
+# Chinese / friendly name → canonical provider name mapping
+_PROVIDER_ALIASES: Dict[str, str] = {
+    # China providers
+    "英伟达": "nvidia",
+    "英伟": "nvidia",
+    "NVIDIA": "nvidia",
+    "商汤": "sensenova",
+    "SenseNova": "sensenova",
+    "智谱": "zhipu",
+    "GLM": "zhipu",
+    "ChatGLM": "zhipu",
+    "月之暗面": "moonshot",
+    "Moonshot": "moonshot",
+    "Kimi": "moonshot",
+    "零一": "yi",
+    "零一万物": "yi",
+    "百川": "baichuan",
+    "豆包": "doubao",
+    "字节": "doubao",
+    "腾讯": "tencent",
+    "混元": "hunyuan",
+    "科大讯飞": "iflytek",
+    "讯飞": "iflytek",
+    "iFLYTEK": "iflytek",
+    "百度": "qianfan",
+    "文心": "qianfan",
+    "阿里": "dashscope",
+    "通义": "dashscope",
+    "Qwen": "dashscope",
+    # US providers
+    "OpenAI": "openai",
+    "Anthropic": "anthropic",
+    "谷歌": "google",
+    "Google": "google",
+    "Gemini": "google",
+    "DeepSeek": "deepseek",
+    "深度求索": "deepseek",
+}
+
+
 def lookup(name: str) -> Optional[str]:
     """Synchronous registry-only lookup.  No network.  Returns URL or None."""
     n = (name or "").lower().strip()
     if not n:
         return None
+    # Resolve Chinese / friendly name first
+    canonical = _PROVIDER_ALIASES.get(name) or _PROVIDER_ALIASES.get(n)
+    if canonical and canonical in KNOWN_PROVIDERS:
+        return KNOWN_PROVIDERS[canonical]
     if n in KNOWN_PROVIDERS:
         return KNOWN_PROVIDERS[n]
     # try a few common aliases
