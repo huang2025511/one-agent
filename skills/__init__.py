@@ -808,6 +808,9 @@ class SkillManager(Plugin):
             config = ctx_ref.config if ctx_ref else {}
 
             result = _process_settings_command(input_text, config)
+            if result is None:
+                # 不是设置命令，返回特殊标记让 coordinator 继续正常对话
+                return "__SKIP__"
             return result
 
         # ---------- 网页搜索技能 ----------
@@ -1315,6 +1318,13 @@ def _process_settings_command(input_text: str, config: dict) -> str:
     ]
     is_write = any(re.search(p, lower) for p in write_patterns)
 
+    # 检测疑问句：如果是疑问句，不触发设置命令
+    is_question = bool(re.search(r"吗[？?]?|呢[？?]?|怎么|如何|能不能|可以吗|是否|能不能|能否", lower))
+
+    if is_question and not re.search(r"改为|改成|设为|切换成|换成|调整成", lower):
+        # 疑问句但没有明确的修改意图，返回 None 让 coordinator 处理
+        return None
+
     if not is_read and not is_write:
         # 尝试推断：如果包含值，则是写操作；否则是读操作
         is_write = bool(re.search(r"\d+|true|false|开|关|启用|禁用|on|off|yes|no", lower))
@@ -1391,6 +1401,14 @@ def _process_settings_command(input_text: str, config: dict) -> str:
             if m:
                 value_text = m.group(1).strip()
                 break
+
+    # 过滤无意义的值（疑问词、标点等）
+    if value_text:
+        # 去掉末尾标点
+        value_text = value_text.rstrip("？?！!。.")
+        # 如果只剩疑问词或太短，视为无效
+        if value_text.lower() in {"吗", "么", "呢", "啊", "呀", "吧", "？", "?", ""} or len(value_text) < 2:
+            value_text = ""
 
     if not value_text:
         return f"请指定 {matched_alias} 的新值。例如：'把{matched_alias}改为xxx'"

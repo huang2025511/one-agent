@@ -442,6 +442,9 @@ class Coordinator(Plugin):
 
         try:
             result = await self._skills.dispatch(skill_id, args)
+            # 如果 settings 技能返回 "__SKIP__"，表示不是设置命令，继续正常对话
+            if result == "__SKIP__":
+                return False
             turn.result = str(result)
         except Exception as exc:
             logger.exception("slash command dispatch failed: %s", exc)
