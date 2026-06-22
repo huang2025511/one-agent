@@ -537,8 +537,6 @@ class SkillManager(Plugin):
             def _eval(node):
                 if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
                     return node.value
-                if isinstance(node, ast.Num):  # py<3.8 compat
-                    return node.n
                 if isinstance(node, ast.BinOp):
                     return _ops[type(node.op)](_eval(node.left), _eval(node.right))
                 if isinstance(node, ast.UnaryOp):
