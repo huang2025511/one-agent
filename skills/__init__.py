@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from pydantic import BaseModel
+
 from core.events import Event
 from core.exceptions import InputValidationError, SkillExecutionError  # noqa: F401
 from core.plugin import Plugin
@@ -1219,18 +1221,35 @@ def _get_nested(d: dict, path: str, default=None):
     return current
 
 
-def _set_nested(d: dict, path: str, value) -> None:
-    """按点分隔路径设置嵌套字典值。"""
+def _set_nested(obj, path: str, value) -> None:
+    """按点分隔路径设置嵌套值，支持 dict 和 Pydantic BaseModel。"""
     keys = path.split(".")
     if not keys:
         raise ValueError("Path cannot be empty")
-    current = d
+    current = obj
     for k in keys[:-1]:
-        if k not in current or not isinstance(current[k], dict):
-            current[k] = {}
-        current = current[k]
-    if keys[-1]:
-        current[keys[-1]] = value
+        # 支持 dict 和 Pydantic 对象
+        if isinstance(current, dict):
+            if k not in current or not isinstance(current[k], (dict, BaseModel)):
+                current[k] = {}
+            current = current[k]
+        else:
+            # Pydantic BaseModel
+            if hasattr(current, k):
+                next_val = getattr(current, k)
+                if not isinstance(next_val, (dict, BaseModel)):
+                    setattr(current, k, {})
+                    next_val = {}
+                current = next_val
+            else:
+                setattr(current, k, {})
+                current = getattr(current, k)
+    # 设置最终值
+    final_key = keys[-1]
+    if isinstance(current, dict):
+        current[final_key] = value
+    else:
+        setattr(current, final_key, value)
 
 
 def _parse_bool_value(text: str) -> Optional[bool]:
@@ -1389,11 +1408,17 @@ def _process_settings_command(input_text: str, config: dict) -> str:
     return f"已将 {matched_alias} 修改为 {new_value}"
 
 
-def _save_config(config: dict) -> None:
-    """将配置写回 YAML 文件（原子写入，带文件锁）。"""
+def _save_config(config) -> None:
+    """将配置写回 YAML 文件（原子写入，带文件锁）。支持 dict 和 Pydantic BaseModel。"""
     import tempfile
 
     import yaml
+    # 如果是 Pydantic 对象，转为 dict
+    if isinstance(config, BaseModel):
+        config_dict = config.model_dump(mode="python")
+    else:
+        config_dict = config
+
     config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
     lock_path = config_path + ".lock"
 
@@ -1433,7 +1458,7 @@ def _save_config(config: dict) -> None:
                 dir=dir_name,
                 delete=False,
             ) as f:
-                yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                yaml.dump(config_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 temp_path = f.name
             # Atomic rename
             os.replace(temp_path, config_path)
