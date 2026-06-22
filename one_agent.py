@@ -665,8 +665,14 @@ async def _interactive(app: OneAgentApp) -> None:
             # 将设置请求路由到 settings 技能
             from skills import _process_settings_command
             result = _process_settings_command(line, app.config)
-            print(result)
-            continue
+            # None 表示不是设置命令（疑问句等），跳过继续正常对话
+            if result is None:
+                pass  # 继续到下面的 LLM 对话
+            else:
+                print(result)
+            # 只有明确返回了内容才结束，继续时不要 continue
+            if result is not None:
+                continue
         if intent == "models":
             # 模型发现：拉取当前 provider 的模型列表并按需过滤
             llm = getattr(app, "llm", None)
