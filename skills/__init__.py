@@ -1421,6 +1421,10 @@ def _process_settings_command(input_text: str, config: dict) -> str:
 
     lower = input_text.lower()
 
+    # 如果输入包含 API key 模式，跳过设置命令，让 add_provider 处理
+    if re.search(r"(?:key[:：]?\s*)?(?:nvapi-|sk-|ak-|api[_-]?key)", lower):
+        return "__SKIP__"
+
     # ---- 列出所有设置 ----
     if re.search(r"列出|所有|全部|list|all|show.?all", lower):
         lines = ["当前配置：\n"]

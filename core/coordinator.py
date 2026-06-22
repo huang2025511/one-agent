@@ -744,6 +744,15 @@ class Coordinator(Plugin):
                 system_run = self._skills.get("system_run")
                 if system_run and system_run not in chosen:
                     chosen.append(system_run)
+            # 检测用户尝试添加服务商（包含 API key 模式），强制添加 add_provider 技能
+            _text = turn.input_text.lower()
+            _has_api_key = bool(__import__("re").search(
+                r"(?:key[:：]?\s*)?(?:nvapi-|sk-|ak-|api[_-]?key)", _text
+            ))
+            if _has_api_key:
+                add_provider = self._skills.get("add_provider")
+                if add_provider and add_provider not in chosen:
+                    chosen.insert(0, add_provider)
             turn.skills = [s.id for s in chosen]
             tools = [s.schema for s in chosen]
         else:
