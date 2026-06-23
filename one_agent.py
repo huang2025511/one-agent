@@ -258,49 +258,26 @@ class OneAgentApp:
     """Top-level assembly: builds plugin manager, coordinates plugins."""
 
     def __init__(self, config_path: str) -> None:
-        from api import RESTAPIGateway
         from core.coordinator import Coordinator
         from core.events import EventBus
+        from core.module_registry import create_default_registry
         from executors import BrowserExecutor, DockerExecutor, PythonExecutor, ShellExecutor
 
-        # Import gateways with graceful degradation — if a gateway's dependencies
-        # are missing (e.g., cryptography for WeCom), log warning and skip it
-        # rather than crashing the entire startup.
+        # Import only CORE modules eagerly — everything else is lazy-loaded.
         from gateways import CLIGateway
-        from marketplace import MarketplacePlugin
         from memory import MemoryPlugin
         from models import LLMProvider
-        from monitor import MonitoringPlugin
-        from multimodal import MultimodalPlugin
         from router import SmartRouter
         from scheduler import SchedulerPlugin
         from skills import SkillManager
         self.cli = CLIGateway()
-
-        gateways_to_load = [
-            ("telegram", "TelegramGateway"),
-            ("wecom", "WeComGateway"),
-            ("dingtalk", "DingTalkGateway"),
-            ("feishu", "FeishuGateway"),
-            ("discord", "DiscordGateway"),
-            ("slack", "SlackGateway"),
-            ("web", "WebGateway"),
-        ]
-
-        for attr_name, class_name in gateways_to_load:
-            try:
-                module = __import__("gateways", fromlist=[class_name])
-                cls = getattr(module, class_name)
-                setattr(self, attr_name, cls())
-            except (ImportError, AttributeError) as e:
-                logger.warning(f"Gateway {class_name} not available: {e}")
-                setattr(self, attr_name, None)
 
         self.config = load_config(config_path)
         setup_logging(self.config)  # type: ignore[arg-type]
 
         self.bus = EventBus()
 
+        # --- 核心模块：始终立即加载 ---
         self.llm = LLMProvider()
         self.router = SmartRouter()
         self.memory = MemoryPlugin()
@@ -311,32 +288,42 @@ class OneAgentApp:
         self.exec_python = PythonExecutor()
         self.coordinator = Coordinator()
         self.scheduler = SchedulerPlugin()
-        self.multimodal = MultimodalPlugin()
-        self.rest_api = RESTAPIGateway()
-        self.monitor = MonitoringPlugin()
-        self.marketplace = MarketplacePlugin()
 
         # Initialize MCP client for external tool servers
         from skills.mcp_client import MCPClient
         self.mcp_client = MCPClient()
 
-        # Initialize alert manager
-        from alerting import AlertManager
-        self._alert_manager = AlertManager()
-
         # Initialize approval manager for human-in-the-loop
         from core.approval import ApprovalManager
         self._approval_manager = ApprovalManager()
 
+        # --- 可选模块：通过 ModuleRegistry 按需加载 ---
+        # 网关类初始化为 None，由 registry 管理
+        self.telegram = None
+        self.wecom = None
+        self.dingtalk = None
+        self.feishu = None
+        self.discord = None
+        self.slack = None
+        self.web = None
+        # 可选增强模块初始化为 None，由 registry 按需加载
+        self.multimodal = None
+        self.rest_api = None
+        self.monitor = None
+        self.marketplace = None
+        self._alert_manager = None
+
+        # 创建模块注册表并从配置加载策略
+        self._registry = create_default_registry()
+        self._registry.set_policies_from_config(self.config.model_dump())
+
         self._pm = PluginManager()
+        # 仅注册核心模块
         for p in (
             self.llm, self.router, self.memory, self.skills,
             self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
             self.coordinator, self.scheduler,
-            self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
-            self.discord, self.slack, self.web,
-            self.multimodal, self.rest_api, self.monitor, self.marketplace,
-            self._alert_manager,
+            self.cli,
         ):
             if p is not None:
                 self._pm.register(p)
@@ -396,9 +383,7 @@ class OneAgentApp:
                 self.llm, self.router, self.memory, self.skills,
                 self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
                 self.coordinator, self.scheduler,
-                self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
-                self.discord, self.slack, self.web,
-                self.multimodal, self.rest_api, self.monitor, self.marketplace,
+                self.cli,
             ) if p is not None
         ]
         self.ctx._alert_manager = self._alert_manager
@@ -417,6 +402,27 @@ class OneAgentApp:
 
         await self.bus.start()
         await self._pm.setup_all(self.ctx)
+
+        # --- 加载 eager 策略的可选模块 ---
+        self._registry.bind(self.ctx, self._pm)
+        eager_plugins = await self._registry.setup_eager(self.ctx, self._pm)
+        # 将已加载的 eager 模块挂到 self 上（方便后续引用）
+        for plugin in eager_plugins:
+            if hasattr(plugin, 'name'):
+                # 映射插件名到属性名
+                attr_map = {
+                    'multimodal': 'multimodal', 'rest_api': 'rest_api',
+                    'monitor': 'monitor', 'monitoring': 'monitor',
+                    'marketplace': 'marketplace', 'alerting': '_alert_manager',
+                    'web': 'web',
+                }
+                attr_name = attr_map.get(plugin.name)
+                if attr_name:
+                    setattr(self, attr_name, plugin)
+
+        # 将 registry 挂到 ctx，供 /module 命令和其他模块使用
+        self.ctx._registry = self._registry
+
         # Register knowledge graph search skill (KG is created by MemoryPlugin during setup)
         if self.memory._kg is not None:
             from memory.knowledge_graph import make_graph_search_handler
@@ -468,18 +474,18 @@ class OneAgentApp:
             ))
         self.router.bind_llm(self.llm)
         self.coordinator.bind(self.llm, self.skills)
-        # Guard against optional gateways that may be None if their import failed
+        # 可选模块可能尚未加载（lazy），安全检查后再调用
         if self.web is not None:
             self.web.bind_callback(self.chat)
-        self.rest_api.bind_callback(self.chat)
+        if self.rest_api is not None:
+            self.rest_api.bind_callback(self.chat)
         # wire marketplace to skills plugin
-        self.marketplace._skills_plugin = self.skills  # type: ignore[attr-defined]
+        if self.marketplace is not None:
+            self.marketplace._skills_plugin = self.skills  # type: ignore[attr-defined]
 
         # Wire the monitoring plugin's metrics collector into the alert
         # manager so _check_loop actually evaluates rules against live metrics.
-        # AlertManager.setup is invoked by PluginManager.setup_all above
-        # (depends_on=["monitoring"]); start/stop are handled by start_all/stop_all.
-        if self.monitor is not None:
+        if self.monitor is not None and self._alert_manager is not None:
             self._alert_manager.set_metrics_getter(self.monitor.collect_metrics)
 
         await self._pm.start_all()
@@ -543,6 +549,9 @@ class OneAgentApp:
         return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
 
     async def stop(self) -> None:
+        # 先卸载按需加载的模块
+        if hasattr(self, '_registry'):
+            await self._registry.unload_all()
         await self._pm.stop_all()
         await self.bus.stop()
 
@@ -594,6 +603,9 @@ async def _interactive(app: OneAgentApp) -> None:
         # 智能分层：把 provider 的全部模型按 free/paid、context、features 自动分配到 4 层
         "rebuild_tiers": [
             r"^智能分层$|^自动分层$|^重新分层$|^刷新分层$|^rebuild.?tiers$",
+        ],
+        "module": [
+            r"^/module|^模块列表$|^模块状态$|^/modules?$",
         ],
     }
 
@@ -760,6 +772,9 @@ async def _interactive(app: OneAgentApp) -> None:
             print("  事件/总线/bus       → 事件总线")
             print("  清屏/clear          → 清除屏幕")
             print("  设置/配置/改模型    → 修改设置")
+            print("  /module list       → 查看模块加载状态")
+            print("  /module load <名>  → 按需加载模块")
+            print("  /module unload <名>→ 卸载模块")
             print("  其他任何文字        → 与 AI 对话")
             continue
         if intent == "skills":
@@ -801,6 +816,53 @@ async def _interactive(app: OneAgentApp) -> None:
             # 只有明确返回了内容才结束，继续时不要 continue
             if result is not None and result != "__SKIP__":
                 continue
+        if intent == "module":
+            # 模块管理：/module list | /module load <name> | /module unload <name>
+            registry = getattr(app, '_registry', None)
+            if registry is None:
+                print("[module registry not available]")
+                continue
+            parts = line.strip().split()
+            if len(parts) < 2 or parts[1] in ("list", "ls", "列表", "状态"):
+                # 列出所有模块
+                status = registry.get_status()
+                print(f"\n模块状态 (共{status['total_modules']}个, 已加载{status['loaded']}, "
+                      f"eager={status['eager']}, lazy={status['lazy']}, off={status['off']})")
+                print("-" * 70)
+                for m in status["modules"]:
+                    mark = "✓" if m["loaded"] else "✗"
+                    policy = m["load_policy"]
+                    err = f" [错误: {m['error']}]" if m["error"] else ""
+                    print(f"  {mark} {m['name']:<22} {policy:<6} {m['description']}{err}")
+                print()
+            elif parts[1] in ("load", "加载") and len(parts) >= 3:
+                mod_name = parts[2]
+                if registry.is_loaded(mod_name):
+                    print(f"模块 {mod_name} 已加载")
+                else:
+                    print(f"正在加载模块 {mod_name}...")
+                    plugin = await registry.get(mod_name, app.ctx)
+                    if plugin is not None:
+                        print(f"✓ 模块 {mod_name} 加载成功")
+                    else:
+                        entry = registry.get_entry(mod_name)
+                        if entry and entry.load_policy.value == "off":
+                            print(f"✗ 模块 {mod_name} 已禁用(off)，请在配置中改为 lazy 或 eager")
+                        else:
+                            print(f"✗ 模块 {mod_name} 加载失败")
+            elif parts[1] in ("unload", "卸载") and len(parts) >= 3:
+                mod_name = parts[2]
+                if not registry.is_loaded(mod_name):
+                    print(f"模块 {mod_name} 未加载")
+                else:
+                    ok = await registry.unload(mod_name)
+                    if ok:
+                        print(f"✓ 模块 {mod_name} 已卸载")
+                    else:
+                        print(f"✗ 模块 {mod_name} 卸载失败")
+            else:
+                print("用法: /module list | /module load <名称> | /module unload <名称>")
+            continue
         if intent == "models":
             # 模型发现：拉取当前 provider 的模型列表并按需过滤
             llm = getattr(app, "llm", None)

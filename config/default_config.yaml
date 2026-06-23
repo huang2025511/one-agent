@@ -143,3 +143,52 @@ export:
   enabled: true  # 是否启用数据导出
   max_sessions: 10000  # 单次导出最大会话数
   max_memory_items: 5000  # 单次导出最大记忆条数
+
+# ======================================================================
+# 模块按需加载配置
+# ======================================================================
+# 控制可选模块的加载策略。核心模块（llm/router/memory/skills/executors/
+# coordinator/scheduler/cli）始终启动时加载，不在此配置。
+#
+# 加载策略：
+#   eager — 启动时立即加载（适合常用模块）
+#   lazy  — 按需加载，首次访问时才初始化（默认，节省资源）
+#   off   — 完全不加载
+#
+# 未列出的模块默认使用 lazy 策略。
+# 在对话中可用 /module list 查看状态，/module load <name> 手动加载。
+modules:
+  # --- 基础增强 ---
+  multimodal: lazy        # 多模态能力增强
+  monitor: lazy           # 系统监控
+  marketplace: lazy       # 技能市场
+  alerting: lazy          # 告警系统
+  rest_api: lazy          # REST API 服务器
+  # --- AI 能力扩展 ---
+  rag: lazy               # RAG 知识库检索
+  automl: lazy            # AutoML 自动化机器学习
+  active_learning: lazy   # 主动学习与自我进化
+  document_intelligence: lazy  # 文档智能处理
+  multi_agent: lazy       # 多智能体协作
+  fine_tune: lazy         # 模型微调
+  recommender: lazy       # 推荐引擎
+  prompt_studio: lazy     # Prompt 工程工作台
+  agent_templates: lazy   # Agent 模板市场
+  code_interpreter: lazy  # 代码解释器沙箱
+  # --- 企业级功能 ---
+  auth: lazy              # RBAC 访问控制
+  backup: lazy            # 备份恢复
+  webhooks: lazy          # Webhook 系统
+  tasks: lazy             # 异步任务队列
+  ws: lazy                # WebSocket 实时推送
+  export: lazy            # 数据导出
+  data_lineage: lazy      # 数据血缘
+  security: lazy          # 安全性增强
+  performance: lazy       # 性能优化
+  # --- 前沿探索 ---
+  smart_contract: lazy    # 智能合约
+  spatial_3d: lazy        # 3D 空间交互
+  kg_visualizer: lazy     # 知识图谱可视化
+  analytics: lazy         # 对话分析
+  ux: lazy                # 用户体验增强
+  plugin_sdk: lazy        # 插件开发 SDK
