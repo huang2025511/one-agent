@@ -415,7 +415,7 @@ def create_default_registry() -> ModuleRegistry:
         load_policy=LoadPolicy.LAZY,
     )
     registry.register(
-        name="fine_tune", import_path="fine_tune", class_name="FineTunePlugin",
+        name="fine_tune", import_path="fine_tune", class_name="FineTuneManager",
         description="模型微调支持", category="ai_capability",
         load_policy=LoadPolicy.LAZY,
     )
@@ -431,7 +431,7 @@ def create_default_registry() -> ModuleRegistry:
     )
     registry.register(
         name="agent_templates", import_path="agent_templates",
-        class_name="AgentTemplatePlugin",
+        class_name="AgentTemplatesPlugin",
         description="Agent 模板市场", category="ai_capability",
         load_policy=LoadPolicy.LAZY,
     )
@@ -444,32 +444,32 @@ def create_default_registry() -> ModuleRegistry:
 
     # --- 企业级功能类 ---
     registry.register(
-        name="auth", import_path="auth", class_name="AuthPlugin",
+        name="auth", import_path="auth", class_name="RBACManager",
         description="RBAC 访问控制", category="enterprise",
         load_policy=LoadPolicy.LAZY,
     )
     registry.register(
-        name="backup", import_path="backup", class_name="BackupPlugin",
+        name="backup", import_path="backup", class_name="BackupManager",
         description="备份恢复系统", category="enterprise",
         load_policy=LoadPolicy.LAZY,
     )
     registry.register(
-        name="webhooks", import_path="webhooks", class_name="WebhookPlugin",
+        name="webhooks", import_path="webhooks", class_name="WebhookManager",
         description="Webhook 系统", category="enterprise",
         load_policy=LoadPolicy.LAZY,
     )
     registry.register(
-        name="tasks", import_path="tasks", class_name="TaskQueuePlugin",
+        name="tasks", import_path="tasks", class_name="TaskQueue",
         description="异步任务队列", category="enterprise",
         load_policy=LoadPolicy.LAZY,
     )
     registry.register(
-        name="ws", import_path="ws", class_name="WebSocketPlugin",
+        name="ws", import_path="ws", class_name="WebSocketManager",
         description="WebSocket 实时消息推送", category="enterprise",
         load_policy=LoadPolicy.LAZY,
     )
     registry.register(
-        name="export", import_path="export", class_name="ExportPlugin",
+        name="export", import_path="export", class_name="DataExporter",
         description="数据导出", category="enterprise",
         load_policy=LoadPolicy.LAZY,
     )
@@ -503,18 +503,13 @@ def create_default_registry() -> ModuleRegistry:
     )
     registry.register(
         name="kg_visualizer", import_path="kg_visualizer",
-        class_name="KGVisualizerPlugin",
+        class_name="KnowledgeGraphVisualizerPlugin",
         description="知识图谱可视化", category="frontier",
         load_policy=LoadPolicy.LAZY,
     )
     registry.register(
         name="analytics", import_path="analytics", class_name="AnalyticsPlugin",
         description="对话分析与洞察", category="frontier",
-        load_policy=LoadPolicy.LAZY,
-    )
-    registry.register(
-        name="i18n_ext", import_path="i18n", class_name="I18NPlugin",
-        description="多语言国际化增强", category="frontier",
         load_policy=LoadPolicy.LAZY,
     )
     registry.register(

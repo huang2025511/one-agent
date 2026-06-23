@@ -671,6 +671,27 @@ MODULE_SKILLS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "module": "plugin_sdk",
+        "skill_id": "plugin_dev",
+        "title": "插件开发",
+        "description": "插件开发 SDK 脚手架 插件测试 plugin_sdk 开发插件 创建插件 插件模板",
+        "schema": {
+            "type": "function",
+            "function": {
+                "name": "plugin_dev",
+                "description": "插件开发SDK：生成插件脚手架、测试插件、生成文档和打包发布。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "description": "操作：scaffold/test/docs/list_templates", "default": "list_templates"},
+                        "template": {"type": "string", "description": "模板类型：basic/skill/api_extension/gateway", "default": "basic"},
+                        "name": {"type": "string", "description": "插件名称", "default": ""},
+                    },
+                },
+            },
+        },
+    },
 ]
 
 
@@ -809,9 +830,9 @@ class ModuleAutoLoader:
 
             elif module_name == "marketplace":
                 if action in ("list", ""):
-                    return str(await _call(plugin.list_packages))
+                    return str(await _call(plugin.list_installed))
                 elif action == "search":
-                    return str(await _call(plugin.search, args.get("query", "")))
+                    return str(await _call(plugin.browse_registry, args.get("query", "")))
                 elif action == "install":
                     return str(await _call(plugin.install, args.get("skill_id", "")))
 
@@ -819,12 +840,17 @@ class ModuleAutoLoader:
                 if action in ("list_rules", ""):
                     return str(await _call(plugin.list_rules))
                 elif action == "list_alerts":
-                    return str(await _call(plugin.list_alerts))
+                    return str(await _call(plugin.list_history))
 
             elif module_name == "rag":
                 if skill_id == "knowledge_search":
+                    # search 需要 kb_id，先获取可用的知识库列表
+                    kbs = plugin.list_knowledge_bases()
+                    if not kbs:
+                        return "[暂无知识库，请先上传文档创建知识库]"
+                    kb_id = kbs[0].id  # 使用第一个知识库
                     result = await _call(plugin.search, args.get("query", ""),
-                                         top_k=args.get("top_k", 5))
+                                         kb_id, top_k=args.get("top_k", 5))
                     return str(result)
 
             elif module_name == "automl":
@@ -850,7 +876,8 @@ class ModuleAutoLoader:
                 elif action == "contract":
                     return str(await _call(plugin.review_contract, text))
                 elif action in ("vqa", ""):
-                    return str(await _call(plugin.ask_document, text, args.get("question", "")))
+                    # ask_document 签名: (question, document)
+                    return str(await _call(plugin.ask_document, args.get("question", ""), text))
                 elif action == "table":
                     return str(await _call(plugin.recognize_tables, text))
                 elif action == "layout":
@@ -871,17 +898,30 @@ class ModuleAutoLoader:
 
             elif module_name == "prompt_studio":
                 if action in ("list", ""):
-                    return str(await _call(getattr(plugin, "list_templates", lambda: [])))
+                    return str(await _call(getattr(plugin, "list_templates", lambda **kw: [])))
+                elif action == "create":
+                    return str(await _call(getattr(plugin, "create_template", lambda **kw: {}),
+                                           name=args.get("content", "")[:50] or "untitled",
+                                           description=args.get("content", ""),
+                                           system_prompt=args.get("content", "")))
+                elif action == "test":
+                    return str(await _call(getattr(plugin, "get_versions", lambda tid: []), args.get("template_id", "")))
+                elif action == "optimize":
+                    return str(await _call(getattr(plugin, "list_ab_tests", lambda: [])))
 
             elif module_name == "agent_templates":
                 if action in ("list", ""):
-                    return str(await _call(getattr(plugin, "list_templates", lambda: [])))
+                    return str(await _call(getattr(plugin, "list_templates", lambda **kw: [])))
                 elif action == "search":
-                    return str(await _call(getattr(plugin, "search_templates", lambda cat: []), args.get("category", "")))
+                    # list_templates 签名: (category=None, tag=None, search=None)
+                    return str(await _call(plugin.list_templates, search=args.get("category", "")))
+                elif action == "apply":
+                    return str(await _call(getattr(plugin, "apply_template", lambda tid: {}), args.get("template_id", "")))
 
             elif module_name == "code_interpreter":
                 code = args.get("code", "")
-                result = await _call(plugin.execute, code, timeout=args.get("timeout", 30))
+                # CodeInterpreterPlugin 没有 execute 方法，使用 execute_and_format(code, session_id=None)
+                result = await _call(plugin.execute_and_format, code)
                 return str(result)
 
             elif module_name == "backup":
@@ -919,6 +959,15 @@ class ModuleAutoLoader:
                     return str({"status": "analytics ready", "message": "使用 analyze_conversation 分析对话"})
                 elif action == "sentiment":
                     return str(await _call(plugin.analyze_sentiment, args.get("text", "")))
+
+            elif module_name == "plugin_sdk":
+                if action in ("list_templates", ""):
+                    return str(await _call(plugin.list_templates))
+                elif action == "scaffold":
+                    scaffolder = getattr(plugin, "_scaffolder", None)
+                    if scaffolder:
+                        return str(await _call(scaffolder.create, args.get("template", "basic"), args.get("name", "my_plugin")))
+                    return "[脚手架未初始化]"
 
             # 通用回退：返回模块状态
             return f"[模块 {module_name} 已加载，技能 {skill_id} 调用完成。action={action}]"

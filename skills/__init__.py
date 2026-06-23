@@ -184,7 +184,7 @@ class SkillManager(Plugin):
     def get(self, id: str) -> Optional[Skill]:
         return self._skills.get(id)
 
-    def pick_relevant(self, text: str, limit: int = 4) -> List[Skill]:
+    def pick_relevant(self, text: str, limit: int = 8) -> List[Skill]:
         """Simple keyword relevance — pick N skills whose title/description
         contain words from the user query.  This avoids loading the entire
         skill catalog into the LLM context.
