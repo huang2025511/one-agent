@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from pydantic import BaseModel
+
 from core.events import Event
 from core.exceptions import InputValidationError, SkillExecutionError  # noqa: F401
 from core.plugin import Plugin
@@ -170,6 +172,8 @@ class SkillManager(Plugin):
         self._max_loaded_per_turn = cfg.get("max_skills_per_turn", self._max_loaded_per_turn)
         # 保存 ctx 引用供 settings 技能使用
         self._ctx_ref = ctx
+        # 保存 llm 引用供 add_provider 等技能使用
+        self._llm_ref = getattr(ctx, "_llm", None)
         self.bus.subscribe("cron", self._on_cron)
         logger.info("skills loaded: %d", len(self._skills))
 
@@ -338,6 +342,7 @@ class SkillManager(Plugin):
                 ("🔢 /calc /计算", "执行数学计算，如 /calc 2+2"),
                 ("📝 /note /笔记", "保存笔记到文件"),
                 ("⏰ /time /时间", "显示当前时间"),
+                ("🎭 /role /角色", "角色系统（/role list 列出，/role <名> 切换，/role off 关闭）"),
                 ("🚪 /quit /退出", "退出程序"),
             ]
             lines = ["可用命令列表：", ""]
@@ -366,6 +371,13 @@ class SkillManager(Plugin):
                     llm = cfg.get("llm", {})
                     lines.append(f"  🧠 主模型: {llm.get('primary_provider', '?')}/{llm.get('primary_model', '?')}")
                     lines.append(f"  🪶 轻量模型: {llm.get('lightweight_model', '?')}")
+                    # 当前角色
+                    role_cfg = cfg.get("agent", {}).get("role", {}) or {}
+                    current_role = role_cfg.get("current", "").strip()
+                    if current_role:
+                        lines.append(f"  🎭 当前角色: {current_role}")
+                    else:
+                        lines.append("  🎭 当前角色: 默认（One-Agent）")
             except Exception:
                 pass
             lines.append(f"  🧰 已加载技能: {len(self._skills)}")
@@ -765,16 +777,18 @@ class SkillManager(Plugin):
         async def quit_handler(args: Dict[str, Any]) -> str:
             """退出 One-Agent。
 
-            Use sys.exit(0) (raises SystemExit) instead of os._exit(0) so the
-            main loop's finally block runs app.stop() — flushing logs,
-            closing httpx clients, committing SQLite, and stopping plugins.
-            os._exit skips all cleanup (atexit, finally, asyncio shutdown).
+            通过设置 ctx._quit_event 让主循环正常退出，
+            从而触发 main() 的 finally 块执行 app.stop() 优雅清理。
+            不使用 sys.exit/os._exit，避免跳过异步清理。
             """
-            import sys
             results = ["正在退出...", "再见！下次见 👋"]
-            # Defer the exit slightly so the reply can be surfaced first.
-            loop = asyncio.get_running_loop()
-            loop.call_later(0.1, sys.exit, 0)
+            # 设置退出标志，让 _interactive 主循环检测后正常 return
+            quit_event = getattr(self._ctx_ref, "_quit_event", None) if self._ctx_ref else None
+            if quit_event is None and self._ctx_ref:
+                self._ctx_ref._quit_event = asyncio.Event()
+                quit_event = self._ctx_ref._quit_event
+            if quit_event is not None:
+                quit_event.set()
             return "\n".join(results)
         self.register(Skill(
             id="quit", title="退出",
@@ -804,11 +818,223 @@ class SkillManager(Plugin):
             config = ctx_ref.config if ctx_ref else {}
 
             result = _process_settings_command(input_text, config)
-            if result == "__SKIP__":
-                # settings 无法识别该请求：改用自然语言提示，让 LLM 回应
-                chinese_aliases = [a for a in _SETTING_ALIASES if any('\u4e00' <= c <= '\u9fff' for c in a)]
-                return f"未识别的设置项。可设置的选项：{', '.join(chinese_aliases)}"
+            if result is None:
+                # 不是设置命令，返回特殊标记让 coordinator 继续正常对话
+                return "__SKIP__"
             return result
+
+        # ---------- 智能添加服务商技能 ----------
+        async def add_provider_handler(args: Dict[str, Any]) -> str:
+            """智能添加服务商：解析"服务商+key"，自动配置API key、拉取模型、分配到4层。
+
+            支持的输入格式：
+            - "英伟达 nvapi-xxxxx"
+            - "nvidia key-xxxxx"
+            - "openai sk-xxxxx"
+            - "添加服务商 英伟达 key=nvapi-xxx"
+            """
+            input_text = str(args.get("input", "")).strip()
+            if not input_text:
+                return "请提供服务商名称和 API key，例如：'英伟达 nvapi-xxxx' 或 'openai sk-xxxx'"
+
+            # 1. 解析服务商名、API key、可选 base URL
+            provider_name = None
+            api_key = None
+            base_url = None
+
+            # 去掉前缀"添加服务商"/"新增服务商"等
+            import re as _re_parse
+            clean = _re_parse.sub(r"^(?:添加|新增|注册|设置|配置)\s*(?:服务商|provider)?\s*", "", input_text, flags=_re_parse.IGNORECASE)
+
+            # 尝试提取 base URL（http(s)://...）
+            url_m = _re_parse.search(r"(https?://\S+)", clean)
+            if url_m:
+                base_url = url_m.group(1).rstrip(",，;；")
+                clean = clean.replace(url_m.group(1), "").strip()
+
+            # 尝试提取 API key（nvapi-/sk-/ak-/key=xxx/key:xxx 等格式）
+            key_m = _re_parse.search(r"(?:key\s*[=：:]\s*)?((?:nvapi-|sk-|ak-)[a-zA-Z0-9_\-]+)", clean, _re_parse.IGNORECASE)
+            if key_m:
+                api_key = key_m.group(1)
+                clean = clean.replace(key_m.group(0), "").strip()
+            else:
+                # 尝试 key=xxx 格式
+                key_m2 = _re_parse.search(r"key\s*[=：:]\s*([a-zA-Z0-9_\-]+)", clean, _re_parse.IGNORECASE)
+                if key_m2:
+                    api_key = key_m2.group(1)
+                    clean = clean.replace(key_m2.group(0), "").strip()
+
+            # 剩下的第一个词就是 provider 名称
+            parts = clean.split()
+            if parts:
+                provider_name = _re_parse.sub(r"^[，,。.：:：]+|[，,。.：:：]+$", "", parts[0])
+
+            # 如果还没解析到，回退到原始分割
+            if not provider_name or not api_key:
+                orig_parts = input_text.split()
+                if len(orig_parts) >= 2 and not provider_name:
+                    provider_name = orig_parts[0].strip()
+                if len(orig_parts) >= 2 and not api_key:
+                    # 找最长的 token 作为 key
+                    for p in orig_parts[1:]:
+                        if _re_parse.search(r"(?:nvapi-|sk-|ak-)", p, _re_parse.IGNORECASE) or len(p) > 20:
+                            api_key = p.strip()
+                            break
+                    if not api_key:
+                        api_key = orig_parts[-1].strip()
+
+            if not provider_name or not api_key:
+                return ("无法解析服务商和 key。请用以下格式发送：\n"
+                        "  英伟达 nvapi-xxxxx\n"
+                        "  openai sk-xxxxx\n"
+                        "  添加服务商 英伟达 key=nvapi-xxxxx\n"
+                        "  自定义服务商 https://api.example.com/v1 key=xxxx")
+
+            # 2. 解析 provider 名称（支持中文别名）
+            try:
+                from models.resolver import _PROVIDER_ALIASES, KNOWN_PROVIDERS, lookup
+            except ImportError:
+                return "❌ resolver 模块不可用"
+
+            # 先尝试直接映射（中文别名 → canonical）
+            canonical = _PROVIDER_ALIASES.get(provider_name) or _PROVIDER_ALIASES.get(provider_name.lower())
+            if canonical and canonical in KNOWN_PROVIDERS:
+                resolved_provider = canonical
+            elif lookup(provider_name):
+                resolved_provider = provider_name.lower()
+            else:
+                # 尝试大小写不敏感匹配
+                provider_lower = provider_name.lower()
+                resolved_provider = None
+                for alias, canon in _PROVIDER_ALIASES.items():
+                    if alias.lower() == provider_lower:
+                        resolved_provider = canon
+                        break
+                if not resolved_provider:
+                    # 未知 provider：如果用户提供了 base URL，直接注册
+                    if base_url:
+                        # 将自定义 provider 加入 KNOWN_PROVIDERS
+                        from models import resolver as _resolver_mod
+                        _resolver_mod.KNOWN_PROVIDERS[provider_name.lower()] = base_url
+                        resolved_provider = provider_name.lower()
+                        logger.info("add_provider: registered custom provider '%s' → %s", resolved_provider, base_url)
+                    else:
+                        # 未知 provider 且无 base URL：列出本地已知服务商，询问用户
+                        known_list = ", ".join(sorted(
+                            v for v in _PROVIDER_ALIASES.values()
+                        ))
+                        return (
+                            f"❓ 未在本地注册表中找到服务商「{provider_name}」。\n\n"
+                            f"📋 本地已知的服务商：\n{known_list}\n\n"
+                            f"🔍 如果「{provider_name}」是一个 OpenAI 兼容的服务商，\n"
+                            f"   你可以回复「搜索 {provider_name}」让我到网上查找其 API 地址，\n"
+                            f"   或者直接告诉我它的 base URL，例如：\n"
+                            f"   「{provider_name} https://api.example.com/v1 key=xxxx」"
+                        )
+
+            # 3. 获取 llm 实例
+            llm = getattr(self, "_llm_ref", None)
+            if llm is None:
+                return "❌ 无法访问 LLM provider，请重启程序后再试"
+
+            # 4. 设置 API key
+            key_clean = api_key.strip()
+            if key_clean.startswith("${") and key_clean.endswith("}"):
+                return f"❌ 环境变量引用 ${{{key_clean[2:-1]}}} 不支持直接添加，请提供真实的 API key"
+
+            set_result = llm.set_api_key(resolved_provider, key_clean)
+            if not set_result.get("ok"):
+                return f"❌ 设置 API key 失败: {set_result.get('error', 'unknown')}"
+
+            # 5. 保存到配置文件
+            ctx_ref = getattr(self, "_ctx_ref", None)
+            config = ctx_ref.config if ctx_ref else {}
+            if isinstance(config, type(None)):
+                config = {}
+            if "llm" not in config:
+                config["llm"] = {}
+            if "api_keys" not in config["llm"]:
+                config["llm"]["api_keys"] = {}
+            config["llm"]["api_keys"][resolved_provider] = key_clean
+            _save_config(ctx_ref.config if ctx_ref else {})
+
+            # 6. 拉取模型列表（但不立即集成），让用户先选择
+            results = [f"✅ 服务商「{resolved_provider}」API key 已配置（{len(key_clean)} 字符）", ""]
+            results.append("📡 正在拉取可用模型列表...")
+
+            try:
+                models = await llm.list_models(provider=resolved_provider)
+                if not models:
+                    results.append("⚠️ 未拉取到任何模型，API key 可能无效或网络问题")
+                    results.append("API key 已保存，可稍后重试")
+                    return "\n".join(results)
+
+                # 分类显示：免费 vs 收费
+                free_models = [m for m in models if m.get("is_free")]
+                paid_models = [m for m in models if not m.get("is_free")]
+
+                results.append(f"✅ 拉取成功！共 {len(models)} 个模型"
+                               f"（免费 {len(free_models)} 个，收费 {len(paid_models)} 个）")
+                results.append("")
+
+                # 显示免费模型（优先推荐）
+                if free_models:
+                    results.append(f"🆓 免费模型（推荐，共 {len(free_models)} 个）：")
+                    for i, m in enumerate(free_models[:15], 1):
+                        ctx_len = m.get("context_length", 0)
+                        ctx_str = f" ctx={ctx_len:,}" if ctx_len else ""
+                        feats = m.get("features", [])
+                        feat_str = f" ({','.join(feats[:3])})" if feats else ""
+                        results.append(f"  {i:2d}. {m['id']}{ctx_str}{feat_str}")
+                    if len(free_models) > 15:
+                        results.append(f"  ... 还有 {len(free_models) - 15} 个免费模型")
+                    results.append("")
+
+                # 显示收费模型（简要）
+                if paid_models:
+                    results.append(f"💰 收费模型（共 {len(paid_models)} 个，前 5 个）：")
+                    for i, m in enumerate(paid_models[:5], 1):
+                        results.append(f"  {i}. {m['id']}")
+                    results.append("")
+
+                # 保存待确认状态，等用户选择后再集成
+                if ctx_ref:
+                    ctx_ref._pending_provider = {
+                        "provider": resolved_provider,
+                        "models": models,
+                        "free_models": free_models,
+                    }
+
+                results.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                results.append("📋 请选择要集成的模型：")
+                results.append("  • 输入「全部」→ 集成所有模型（自动分层）")
+                if free_models:
+                    results.append("  • 输入「免费」→ 只集成免费模型")
+                    results.append("  • 输入「选择 1,3,5」→ 只集成指定编号的模型")
+                results.append("  • 输入「取消」→ 放弃集成（key 已保存）")
+                results.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+            except Exception as exc:
+                logger.warning("add_provider list_models failed: %s", exc)
+                results.append(f"⚠️ 模型拉取失败: {exc}")
+                results.append("API key 已保存，但需要重启才能拉取模型")
+
+            return "\n".join(results)
+        self.register(Skill(
+            id="add_provider", title="添加服务商",
+            description="发送'英伟达 nvapi-xxxx'或'openai sk-xxxx'，自动配置API key并拉取模型",
+            schema={
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "服务商名称和 API key，格式：'服务商 key' 或 '添加服务商 服务商 key=xxx'"
+                    }
+                },
+                "required": ["input"]
+            },
+            handler=add_provider_handler,
+        ))
 
         # ---------- 网页搜索技能 ----------
         async def web_search_handler(args: Dict[str, Any]) -> str:
@@ -1151,6 +1377,11 @@ _SETTING_ALIASES: Dict[str, tuple] = {
     "时区": ("agent.timezone", str),
     "timezone": ("agent.timezone", str),
     "数据目录": ("agent.data_dir", str),
+    # 角色系统
+    "角色": ("agent.role.current", str),
+    "role": ("agent.role.current", str),
+    "人设": ("agent.role.current", str),
+    "persona": ("agent.role.current", str),
     # 网关开关
     "web": ("gateways.web.enabled", bool),
     "telegram": ("gateways.telegram.enabled", bool),
@@ -1221,18 +1452,35 @@ def _get_nested(d: dict, path: str, default=None):
     return current
 
 
-def _set_nested(d: dict, path: str, value) -> None:
-    """按点分隔路径设置嵌套字典值。"""
+def _set_nested(obj, path: str, value) -> None:
+    """按点分隔路径设置嵌套值，支持 dict 和 Pydantic BaseModel。"""
     keys = path.split(".")
     if not keys:
         raise ValueError("Path cannot be empty")
-    current = d
+    current = obj
     for k in keys[:-1]:
-        if k not in current or not isinstance(current[k], dict):
-            current[k] = {}
-        current = current[k]
-    if keys[-1]:
-        current[keys[-1]] = value
+        # 支持 dict 和 Pydantic 对象
+        if isinstance(current, dict):
+            if k not in current or not isinstance(current[k], (dict, BaseModel)):
+                current[k] = {}
+            current = current[k]
+        else:
+            # Pydantic BaseModel
+            if hasattr(current, k):
+                next_val = getattr(current, k)
+                if not isinstance(next_val, (dict, BaseModel)):
+                    setattr(current, k, {})
+                    next_val = {}
+                current = next_val
+            else:
+                setattr(current, k, {})
+                current = getattr(current, k)
+    # 设置最终值
+    final_key = keys[-1]
+    if isinstance(current, dict):
+        current[final_key] = value
+    else:
+        setattr(current, final_key, value)
 
 
 def _parse_bool_value(text: str) -> Optional[bool]:
@@ -1269,6 +1517,10 @@ def _process_settings_command(input_text: str, config: dict) -> str:
 
     lower = input_text.lower()
 
+    # 如果输入包含 API key 模式，跳过设置命令，让 add_provider 处理
+    if re.search(r"(?:key[:：]?\s*)?(?:nvapi-|sk-|ak-|api[_-]?key)", lower):
+        return "__SKIP__"
+
     # ---- 列出所有设置 ----
     if re.search(r"列出|所有|全部|list|all|show.?all", lower):
         lines = ["当前配置：\n"]
@@ -1297,6 +1549,13 @@ def _process_settings_command(input_text: str, config: dict) -> str:
         r"改成|改为|设置|设为|切换|修改|换成|调整|set|change|turn.?on|turn.?off|enable|disable|开启|关闭|启用|禁用|打开",
     ]
     is_write = any(re.search(p, lower) for p in write_patterns)
+
+    # 检测疑问句：如果是疑问句，不触发设置命令
+    is_question = bool(re.search(r"吗[？?]?|呢[？?]?|怎么|如何|能不能|可以吗|是否|能不能|能否", lower))
+
+    if is_question and not re.search(r"改为|改成|设为|切换成|换成|调整成", lower):
+        # 疑问句但没有明确的修改意图，返回 None 让 coordinator 处理
+        return None
 
     if not is_read and not is_write:
         # 尝试推断：如果包含值，则是写操作；否则是读操作
@@ -1330,7 +1589,8 @@ def _process_settings_command(input_text: str, config: dict) -> str:
                 break
 
     if matched_path is None:
-        # 未识别的设置项：回退给 LLM，让用户在自然对话中表达意图
+        # 未识别的设置项：交给 LLM 处理，而不是直接报错
+        # 这样用户说"启用微信网关"等复杂命令时，LLM 可以理解并执行
         return "__SKIP__"
 
     # 敏感项写入检查
@@ -1375,6 +1635,14 @@ def _process_settings_command(input_text: str, config: dict) -> str:
                 value_text = m.group(1).strip()
                 break
 
+    # 过滤无意义的值（疑问词、标点等）
+    if value_text:
+        # 去掉末尾标点
+        value_text = value_text.rstrip("？?！!。.")
+        # 如果只剩疑问词或太短，视为无效
+        if value_text.lower() in {"吗", "么", "呢", "啊", "呀", "吧", "？", "?", ""} or len(value_text) < 2:
+            value_text = ""
+
     if not value_text:
         return f"请指定 {matched_alias} 的新值。例如：'把{matched_alias}改为xxx'"
 
@@ -1391,11 +1659,17 @@ def _process_settings_command(input_text: str, config: dict) -> str:
     return f"已将 {matched_alias} 修改为 {new_value}"
 
 
-def _save_config(config: dict) -> None:
-    """将配置写回 YAML 文件（原子写入，带文件锁）。"""
+def _save_config(config) -> None:
+    """将配置写回 YAML 文件（原子写入，带文件锁）。支持 dict 和 Pydantic BaseModel。"""
     import tempfile
 
     import yaml
+    # 如果是 Pydantic 对象，转为 dict
+    if isinstance(config, BaseModel):
+        config_dict = config.model_dump(mode="python")
+    else:
+        config_dict = config
+
     config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
     lock_path = config_path + ".lock"
 
@@ -1435,7 +1709,7 @@ def _save_config(config: dict) -> None:
                 dir=dir_name,
                 delete=False,
             ) as f:
-                yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                yaml.dump(config_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 temp_path = f.name
             # Atomic rename
             os.replace(temp_path, config_path)

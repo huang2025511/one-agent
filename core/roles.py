@@ -1,152 +1,206 @@
-"""角色系统 — 预定义一组 LLM 行为模板，用户可通过 /role 切换。
+"""角色系统 — 让 Agent 能扮演不同行业/场景的专家角色。
 
-每个角色由一个 "system prompt" 描述其身份、风格和目标。实现上：
-- RoleLibrary 从 data/roles/prompts-zh.json 加载角色；
-- build_role_prompt() 根据当前选中的角色生成 system 提示文本，
-  由 router 和 coordinator 注入到消息列表的最前面；
-- /role list / /role search / /role <名称> / /role off 由 coordinator
-  的 SLASH_COMMANDS 提供支持。
+角色库来自开源项目 awesome-chatgpt-prompts-zh（CC0-1.0），
+包含 124 个中文角色提示词，覆盖编程、写作、教育、翻译、咨询等场景。
+
+用法：
+    /role              — 查看当前角色
+    /role list         — 列出所有可用角色
+    /role <角色名>      — 切换到指定角色
+    /role off          — 关闭角色（恢复默认 One-Agent 身份）
+    /role search <关键词> — 搜索角色
+
+角色 prompt 会追加到默认 system prompt 之后，不替换核心铁律。
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# 默认角色库路径（相对于工作目录）
 DEFAULT_LIBRARY_PATH = "data/roles/prompts-zh.json"
 
 
 class RoleLibrary:
-    """加载并管理角色库的单例式容器。"""
+    """角色库 — 加载、查询、列出角色。
+
+    惰性加载：首次访问时才读取 JSON 文件。
+    """
 
     def __init__(self) -> None:
-        self._roles: List[Dict[str, Any]] = []
-        self._current: Optional[str] = None  # 当前角色名
-        self._loaded = False
-
-    # ------------------------------------------------------------ load / list
+        self._roles: List[Dict[str, str]] = []
+        self._loaded: bool = False
+        self._library_path: Optional[Path] = None
 
     def load(self, library_path: str = DEFAULT_LIBRARY_PATH) -> bool:
-        """尝试从 JSON 文件加载角色库。"""
-        path = library_path or DEFAULT_LIBRARY_PATH
-        try:
-            if not os.path.exists(path):
-                logger.warning("role library not found: %s", path)
-                self._roles = []
-                return False
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # 支持 { "roles": [...] } 格式，也支持纯列表
-            if isinstance(data, dict) and isinstance(data.get("roles"), list):
-                self._roles = [r for r in data["roles"] if isinstance(r, dict)]
-            elif isinstance(data, list):
-                self._roles = [r for r in data if isinstance(r, dict)]
-            else:
-                logger.warning("role library: unexpected format in %s", path)
-                self._roles = []
-                return False
-            self._loaded = True
-            logger.info("role library loaded: %d roles from %s", len(self._roles), path)
-            return True
-        except json.JSONDecodeError as exc:
-            logger.warning("role library JSON decode error: %s", exc)
-            self._roles = []
+        """从 JSON 文件加载角色库。
+
+        Args:
+            library_path: JSON 文件路径（相对于工作目录或绝对路径）
+
+        Returns:
+            True 如果加载成功，False 否则
+        """
+        path = Path(library_path)
+        if not path.is_absolute():
+            # 尝试相对于当前工作目录
+            path = Path.cwd() / library_path
+
+        if not path.exists():
+            logger.warning("角色库文件不存在: %s", path)
+            self._loaded = False
             return False
-        except OSError as exc:
-            logger.warning("role library read error: %s", exc)
-            self._roles = []
+
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._roles = [
+                    {
+                        "act": str(r.get("act", "")).strip(),
+                        "prompt": str(r.get("prompt", "")).strip(),
+                    }
+                    for r in data
+                    if r.get("act") and r.get("prompt")
+                ]
+            elif isinstance(data, dict):
+                # 兼容 {角色名: prompt} 格式
+                self._roles = [
+                    {"act": k.strip(), "prompt": str(v).strip()}
+                    for k, v in data.items()
+                    if k and v
+                ]
+            else:
+                logger.error("角色库格式不支持: %s", type(data))
+                self._loaded = False
+                return False
+
+            self._library_path = path
+            self._loaded = True
+            logger.info("角色库加载成功: %d 个角色 (from %s)", len(self._roles), path)
+            return True
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.error("角色库加载失败: %s", exc)
+            self._loaded = False
             return False
 
     @property
-    def is_loaded(self) -> bool:
+    def loaded(self) -> bool:
         return self._loaded
 
-    def all(self) -> List[Dict[str, Any]]:
-        """返回所有角色的副本，避免外部修改内部状态。"""
-        return [dict(r) for r in self._roles]
+    @property
+    def size(self) -> int:
+        return len(self._roles)
 
-    # ------------------------------------------------------------ lookup
+    def list_all(self) -> List[Dict[str, str]]:
+        """返回所有角色。"""
+        if not self._loaded:
+            self.load()
+        return list(self._roles)
 
     def find(self, name: str) -> Optional[Dict[str, str]]:
-        """模糊匹配角色名，返回最匹配的角色（阈值 0.45）。"""
-        if not name or not self._roles:
+        """精确查找角色（支持模糊匹配）。
+
+        先尝试精确匹配，再尝试包含匹配，最后尝试去掉前缀匹配
+        （如 "担任雅思写作考官" → "雅思写作考官"）。
+        """
+        if not self._loaded:
+            self.load()
+        if not self._roles:
             return None
-        q = name.strip().lower()
-        best: Optional[Dict[str, Any]] = None
-        best_score = 0.0
-        for role in self._roles:
-            rname = str(role.get("name") or "")
-            aliases = [rname] + [str(a) for a in (role.get("aliases") or [])]
-            for cand in aliases:
-                score = SequenceMatcher(None, q, cand.lower()).ratio()
-                if cand.lower() == q:
-                    score = 1.0
-                if score > best_score:
-                    best_score = score
-                    best = role
-        if best and best_score >= 0.45:
-            return {
-                "name": str(best.get("name") or ""),
-                "prompt": str(best.get("prompt") or ""),
-                "description": str(best.get("description") or ""),
-            }
+
+        target = name.strip()
+        # 1. 精确匹配
+        for r in self._roles:
+            if r["act"] == target:
+                return r
+
+        # 2. 去掉常见前缀后再精确匹配
+        prefixes = ["担任", "充当", "作为", "扮演", "act as "]
+        normalized_target = target
+        for p in prefixes:
+            if normalized_target.lower().startswith(p.lower()):
+                normalized_target = normalized_target[len(p):].strip()
+        for r in self._roles:
+            normalized_act = r["act"]
+            for p in prefixes:
+                if normalized_act.lower().startswith(p.lower()):
+                    normalized_act = normalized_act[len(p):].strip()
+                    break
+            if normalized_act == normalized_target:
+                return r
+
+        # 3. 包含匹配（target 是 act 的子串，或反过来）
+        for r in self._roles:
+            if target in r["act"] or r["act"] in target:
+                return r
+
         return None
 
-    # ------------------------------------------------------------ selection
+    def search(self, keyword: str, limit: int = 20) -> List[Dict[str, str]]:
+        """搜索角色（关键词匹配 act 字段）。"""
+        if not self._loaded:
+            self.load()
+        kw = keyword.strip().lower()
+        if not kw:
+            return []
+        results = [
+            r for r in self._roles
+            if kw in r["act"].lower() or kw in r["prompt"].lower()
+        ]
+        return results[:limit]
 
-    def select(self, name: str) -> Optional[str]:
-        """选择角色（会先调用 find 做模糊匹配），返回最终角色名。"""
-        match = self.find(name)
-        if match:
-            self._current = match["name"]
-            return match["name"]
+
+# 模块级单例
+_library = RoleLibrary()
+
+
+def get_library() -> RoleLibrary:
+    """获取全局角色库单例。"""
+    return _library
+
+
+def get_current_role(config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """从配置中读取当前激活的角色。
+
+    Args:
+        config: 完整配置字典
+
+    Returns:
+        角色字典 {"act": ..., "prompt": ...}，如果未启用角色则返回 None
+    """
+    role_cfg = config.get("agent", {}).get("role", {}) or {}
+    if not role_cfg.get("enabled", True):
         return None
 
-    def off(self) -> None:
-        """关闭角色系统，回到默认助手行为。"""
-        self._current = None
+    current_name = role_cfg.get("current", "").strip()
+    if not current_name or current_name.lower() in ("off", "default", "none", "关闭", "默认"):
+        return None
 
-    def current(self) -> Optional[str]:
-        return self._current
+    # 确保库已加载
+    library_path = role_cfg.get("library", DEFAULT_LIBRARY_PATH)
+    if not _library.loaded:
+        _library.load(library_path)
 
-    def current_prompt(self) -> Optional[str]:
-        if not self._current:
-            return None
-        match = self.find(self._current)
-        return match["prompt"] if match else None
+    return _library.find(current_name)
 
 
-# ----------------------------------------------------------- module helpers
+def build_role_prompt(config: Dict[str, Any]) -> str:
+    """构建角色 prompt 片段（追加到默认 system prompt 之后）。
 
-
-def build_role_prompt(library: RoleLibrary) -> str:
-    """构造供 LLM system 前缀使用的角色提示文本。未选角色时返回空串。"""
-    if library is None:
+    如果当前没有激活角色，返回空字符串。
+    """
+    role = get_current_role(config)
+    if role is None:
         return ""
-    name = library.current()
-    if not name:
-        return ""
-    match = library.find(name)
-    if not match:
-        return ""
-    body = match.get("prompt") or ""
-    if not body:
-        return ""
-    # 用一段清晰的前缀包裹角色描述，让 LLM 知道这是角色指令，且优先级高于
-    # 后续通用系统指令。
+
     return (
-        f"【当前角色：{name}】\n"
-        "请你以以下角色身份与用户对话，并保持该角色的语气、价值观和约束。"
-        "如果该角色的描述与用户的实际问题冲突，优先满足用户需求，但尽量在不"
-        "违背安全原则的前提下贴合角色设定。\n\n"
-        f"{body}\n"
+        f"\n\n【当前角色 — 你现在扮演：{role['act']}】\n"
+        f"{role['prompt']}\n"
+        f"【角色说明结束 — 请在保持上述角色身份的同时，继续遵循 One-Agent 的核心铁律】\n"
     )
-
-
-# 模块级单例 — 由 one_agent.py / coordinator.py 共享使用
-role_library = RoleLibrary()

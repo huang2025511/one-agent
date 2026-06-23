@@ -48,7 +48,6 @@ class Coordinator(Plugin):
         self._max_tool_iterations = MAX_TOOL_ITERATIONS
         self._max_tokens = DEFAULT_MAX_TOKENS
         self._os_mode_enabled: bool = False  # OS 操作权限模式（会话级）
-        self._preferences: Dict[str, Any] = {}  # 记忆增强：学习到的用户偏好
         # Track background turn-completion tasks so they aren't GC'd
         # mid-execution (Python's asyncio only holds a weak ref to tasks).
         self._pending_turn_tasks: set = set()
@@ -58,8 +57,6 @@ class Coordinator(Plugin):
         await super().setup(ctx)
         self.bus.subscribe("turn_routed", self._on_routed)
         self.bus.subscribe("external_message", self._on_external)
-        # 加载持久化的用户偏好（记忆增强）
-        self._preferences = self._load_preferences()
 
     def bind(self, llm: LLMProvider, skills: SkillManager) -> None:
         self._llm = llm
@@ -148,206 +145,6 @@ class Coordinator(Plugin):
             logger.info("persisted language '%s' to config", lang)
         except Exception as exc:  # noqa: BLE001
             logger.warning("failed to persist language: %s", exc)
-
-    # ----------------------------------------------------------- roles command
-
-    def _handle_role_command(self, skill_id: str, args_text: str) -> str:
-        """处理 /role、/role-list、/role-off 命令。"""
-        from core.roles import role_library
-        library = getattr(self.ctx, "role_library", None) if getattr(self, "ctx", None) else None
-        if library is None:
-            library = role_library
-            if not library.is_loaded:
-                library.load()
-
-        text = (args_text or "").strip()
-
-        # /role-off：关闭当前角色
-        if skill_id == "role_off":
-            library.off()
-            return "✅ 已关闭角色，回到默认助手行为。"
-
-        # /role-list：列出所有角色
-        if skill_id == "role_list":
-            roles = library.all()
-            if not roles:
-                return "角色库为空。"
-            lines = ["📋 可用角色（共 %d 个）：" % len(roles)]
-            for r in roles:
-                name = str(r.get("name") or "")
-                desc = str(r.get("description") or "")
-                marker = "（当前）" if library.current() == name else ""
-                lines.append("  - %s%s — %s" % (name, marker, desc))
-            lines.append("")
-            lines.append("用法：")
-            lines.append("  /role <角色名或关键词>   切换角色（支持模糊匹配）")
-            lines.append("  /role list               同 /role-list")
-            lines.append("  /role search <关键词>   搜索含关键词的角色")
-            lines.append("  /role off               同 /role-off，关闭角色")
-            return "\n".join(lines)
-
-        # /role <...>
-        if not text:
-            current = library.current()
-            if current:
-                return "当前角色：%s\n用 /role list 查看所有角色，用 /role off 关闭。" % current
-            return "当前未选择任何角色。用 /role list 查看，或用 /role <角色名> 切换。"
-
-        lowered = text.lower()
-        # /role list / off / search xxx
-        if lowered in ("list", "ls", "all", "列表", "所有", "清单"):
-            return self._handle_role_command("role_list", "")
-
-        if lowered in ("off", "关闭", "取消", "none", "off"):
-            library.off()
-            return "✅ 已关闭角色，回到默认助手行为。"
-
-        # /role search xxx 或 /role <关键词>
-        if lowered.startswith("search ") or lowered.startswith("搜索 "):
-            keyword = text.split(None, 1)[1].strip()
-        else:
-            keyword = text
-
-        # 先尝试精确 / 模糊匹配到单个角色
-        match = library.find(keyword)
-        if match:
-            name = match["name"]
-            library.select(name)
-            desc = match.get("description") or ""
-            return "🎭 已切换角色：%s\n  %s\n\n角色提示词已生效，会在下一条消息中影响助手回复。" % (name, desc)
-
-        # 否则，列出名称 / 描述里含关键词的所有角色
-        all_roles = library.all()
-        hits = []
-        key = keyword.lower()
-        for r in all_roles:
-            name = str(r.get("name") or "")
-            desc = str(r.get("description") or "")
-            aliases = " ".join(str(a) for a in (r.get("aliases") or []))
-            hay = (name + " " + desc + " " + aliases).lower()
-            if key and key in hay:
-                hits.append((name, desc))
-        if hits:
-            lines = ["🔍 匹配到 %d 个角色（用 /role <角色名> 切换）：" % len(hits)]
-            for name, desc in hits[:20]:
-                lines.append("  - %s — %s" % (name, desc))
-            return "\n".join(lines)
-        return "❌ 未找到与 \"%s\" 匹配的角色。用 /role list 查看所有可用角色。" % keyword
-
-    # ----------------------------------------------------------- memory / preferences
-
-    _PREFERENCES_PATH = "data/memory/preferences.json"
-
-    def _load_preferences(self) -> Dict[str, Any]:
-        """从 data/memory/preferences.json 加载偏好；失败时返回空字典。"""
-        import json as _json
-        import os as _os
-        try:
-            dir_path = _os.path.dirname(self._PREFERENCES_PATH)
-            if dir_path:
-                _os.makedirs(dir_path, exist_ok=True)
-            if _os.path.exists(self._PREFERENCES_PATH):
-                with open(self._PREFERENCES_PATH, "r", encoding="utf-8") as f:
-                    data = _json.load(f)
-                if isinstance(data, dict):
-                    return data
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("failed to load preferences: %s", exc)
-        return {
-            "preferences": [],  # ["偏好以自然语言描述", ...]
-            "facts": [],        # ["记住的事实", ...]
-            "user_name": "",
-            "updated_at": None,
-        }
-
-    def _save_preferences(self) -> None:
-        """把当前偏好持久化到 data/memory/preferences.json。"""
-        import json as _json
-        import os as _os
-        import time as _time
-        try:
-            dir_path = _os.path.dirname(self._PREFERENCES_PATH)
-            if dir_path:
-                _os.makedirs(dir_path, exist_ok=True)
-            self._preferences["updated_at"] = _time.strftime("%Y-%m-%d %H:%M:%S")
-            with open(self._PREFERENCES_PATH, "w", encoding="utf-8") as f:
-                _json.dump(self._preferences, f, ensure_ascii=False, indent=2)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("failed to save preferences: %s", exc)
-
-    def _format_preferences_prompt(self) -> str:
-        """把已学习到的偏好格式化成一段可插入 system prompt 的文本。"""
-        prefs = self._preferences or {}
-        items = []
-        if prefs.get("user_name"):
-            items.append(f"- 称呼用户：{prefs['user_name']}")
-        for p in prefs.get("preferences", []) or []:
-            if p and isinstance(p, str):
-                items.append(f"- {p}")
-        for f in prefs.get("facts", []) or []:
-            if f and isinstance(f, str):
-                items.append(f"- {f}")
-        if not items:
-            return ""
-        return "【用户长期偏好（请在合适时使用，不要逐条复述）】\n" + "\n".join(items)
-
-    def _learn_user_preferences(self, user_text: str, reply_text: str) -> bool:
-        """启发式地从一轮对话中学习潜在的用户偏好。
-
-        为了避免把噪音也当作记忆，只在检测到强信号时才记录：
-        - "我叫 X / 我是 X / 称呼我 X" → 记录 user_name
-        - "我喜欢 X / 我偏好 X / 我用 X / 我习惯 X / 请用 X"
-        - "我不喜欢 / 不要 X"
-        - 首字母大写的专有名词 / 明确的数字或 URL
-
-        返回是否更新了偏好。
-        """
-        import re as _re
-        if not user_text or not isinstance(user_text, str):
-            return False
-        ut = user_text.strip()
-
-        updated = False
-
-        # 姓名检测
-        m = _re.search(r"(?:我叫|我是|称呼我|请叫我|my\s+name\s+is|i['’ ]am)\s+([^\s，,。.!！？?]{2,20})", ut, flags=_re.IGNORECASE)
-        if m:
-            name = m.group(1).strip().rstrip("。.，,！!？?")
-            current = self._preferences.get("user_name") or ""
-            if current != name:
-                self._preferences["user_name"] = name
-                updated = True
-
-        # 中文明确偏好句式
-        pref_zh_patterns = [
-            (r"(我喜欢|我偏好|我常用|我习惯|请用|我希望|我想要|我需要|我应该用|我的\s*编辑器\s*是|我的\s*语言\s*是)\s*[:：]?\s*([^。!！?？\n]{2,60})", "用户"),
-            (r"(我不喜欢|不要|别用|请勿|不要用)\s*[:：]?\s*([^。!！?？\n]{2,40})", "用户不喜欢"),
-        ]
-        prefs = list(self._preferences.setdefault("preferences", []))
-        normalized_ut = ut.lower()
-        for pattern, prefix in pref_zh_patterns:
-            for m in _re.finditer(pattern, ut):
-                detail = f"{prefix}{m.group(1).strip()}：{m.group(2).strip()}"
-                # 去重：如果已有相似内容就不重复记录
-                if not any(p and detail in p for p in prefs):
-                    prefs.append(detail)
-                    updated = True
-        self._preferences["preferences"] = prefs
-
-        # 英文名/工具偏好检测（简单关键词）
-        for keyword in ("vscode", "vim", "neovim", "emacs", "sublime", "jetbrains", "github copilot", "linux", "macos", "windows", "python", "typescript", "rust", "go", "docker"):
-            if _re.search(rf"\b{keyword}\b", normalized_ut):
-                facts = list(self._preferences.setdefault("facts", []))
-                fact = f"用户提到并可能使用 {keyword}"
-                if fact not in facts and len(facts) < 30:
-                    facts.append(fact)
-                    updated = True
-                self._preferences["facts"] = facts
-
-        if updated:
-            self._save_preferences()
-            logger.info("preferences updated: %s", self._preferences)
-        return updated
 
     async def _compress_messages(self, messages: list, turn) -> str:
         """Use a lightweight LLM call to summarize early conversation."""
@@ -513,6 +310,179 @@ class Coordinator(Plugin):
         except Exception as exc:
             logger.warning("system_lock handler failed: %s", exc)
 
+    # ------------------------------------------------------------ 角色系统
+    async def _handle_role_command(self, turn: TurnContext, args_text: str) -> None:
+        """Handle /role command — 角色系统管理。
+
+        用法：
+            /role              — 查看当前角色
+            /role list         — 列出所有可用角色
+            /role off          — 关闭角色（恢复默认 One-Agent 身份）
+            /role <角色名>      — 切换到指定角色
+            /role search <关键词> — 搜索角色
+        """
+        from core.roles import get_library
+        from i18n import get_language
+        lang = (get_language() or "zh").lower()
+        is_zh = lang.startswith("zh")
+
+        args = args_text.strip()
+        library = get_library()
+
+        # 确保角色库已加载
+        if not library.loaded:
+            role_cfg = {}
+            if self.ctx is not None and self.ctx.config is not None:
+                role_cfg = self.ctx.config.get("agent", {}).get("role", {}) or {}
+            lib_path = role_cfg.get("library", "data/roles/prompts-zh.json")
+            library.load(lib_path)
+
+        # /role（无参数）— 查看当前角色
+        if not args:
+            current = self._get_current_role_name()
+            if current:
+                role = library.find(current)
+                if role:
+                    prompt_preview = role["prompt"][:200] + ("..." if len(role["prompt"]) > 200 else "")
+                    turn.result = (
+                        f"🎭 当前角色：{role['act']}\n\n"
+                        f"提示词预览：\n{prompt_preview}\n\n"
+                        f"用 /role list 查看所有角色，/role off 关闭角色"
+                        if is_zh
+                        else f"🎭 Current role: {role['act']}\n\n"
+                        f"Prompt preview:\n{prompt_preview}\n\n"
+                        f"Use /role list to see all roles, /role off to disable"
+                    )
+                else:
+                    turn.result = (
+                        f"⚠️ 当前角色「{current}」在角色库中未找到，可能已被移除。\n"
+                        f"用 /role list 查看可用角色，或 /role off 关闭角色"
+                        if is_zh
+                        else f"⚠️ Current role '{current}' not found in library.\n"
+                        f"Use /role list to see available roles, or /role off to disable"
+                    )
+            else:
+                size = library.size
+                turn.result = (
+                    f"🎭 角色系统\n"
+                    f"当前状态：未启用角色（使用默认 One-Agent 身份）\n"
+                    f"角色库：{size} 个角色可用\n\n"
+                    f"用法：\n"
+                    f"  /role list         — 列出所有角色\n"
+                    f"  /role <角色名>      — 切换到指定角色\n"
+                    f"  /role search <关键词> — 搜索角色\n"
+                    f"  /role off          — 关闭角色"
+                    if is_zh
+                    else f"🎭 Role System\n"
+                    f"Status: No role active (default One-Agent identity)\n"
+                    f"Library: {size} roles available\n\n"
+                    f"Usage:\n"
+                    f"  /role list         — list all roles\n"
+                    f"  /role <name>       — switch to a role\n"
+                    f"  /role search <kw>  — search roles\n"
+                    f"  /role off          — disable role"
+                )
+            return
+
+        # /role list — 列出所有角色
+        low = args.lower()
+        if low in ("list", "ls", "列表", "所有", "all"):
+            roles = library.list_all()
+            if not roles:
+                turn.result = "角色库为空或未加载" if is_zh else "Role library is empty or not loaded"
+                return
+            lines = [f"📋 角色库（共 {len(roles)} 个角色）：" if is_zh else f"📋 Role Library ({len(roles)} roles):"]
+            for i, r in enumerate(roles, 1):
+                lines.append(f"  {i:3d}. {r['act']}")
+            lines.append("")
+            lines.append("用法：/role <角色名> 切换角色" if is_zh else "Usage: /role <name> to switch")
+            turn.result = "\n".join(lines)
+            return
+
+        # /role off — 关闭角色
+        if low in ("off", "default", "none", "关闭", "默认", "取消"):
+            self._set_current_role("")
+            turn.result = (
+                "✅ 已关闭角色，恢复默认 One-Agent 身份"
+                if is_zh
+                else "✅ Role disabled, restored to default One-Agent identity"
+            )
+            return
+
+        # /role search <关键词>
+        if low.startswith("search ") or low.startswith("搜索 ") or low.startswith("查找 "):
+            keyword = args.split(maxsplit=1)[1] if len(args.split(maxsplit=1)) > 1 else ""
+            if not keyword:
+                turn.result = "用法：/role search <关键词>" if is_zh else "Usage: /role search <keyword>"
+                return
+            results = library.search(keyword, limit=20)
+            if not results:
+                turn.result = f"未找到匹配「{keyword}」的角色" if is_zh else f"No roles matching '{keyword}'"
+                return
+            lines = [f"🔍 搜索「{keyword}」找到 {len(results)} 个角色：" if is_zh else f"🔍 Found {len(results)} roles for '{keyword}':"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"  {i}. {r['act']}")
+            turn.result = "\n".join(lines)
+            return
+
+        # /role <角色名> — 切换到指定角色
+        role = library.find(args)
+        if role is None:
+            # 模糊搜索建议
+            suggestions = library.search(args, limit=5)
+            if suggestions:
+                sug_text = "\n".join(f"  • {r['act']}" for r in suggestions)
+                turn.result = (
+                    f"❌ 未找到角色「{args}」\n\n"
+                    f"你是否想找：\n{sug_text}\n\n"
+                    f"用 /role list 查看所有角色"
+                    if is_zh
+                    else f"❌ Role '{args}' not found\n\nDid you mean:\n{sug_text}\n\nUse /role list to see all roles"
+                )
+            else:
+                turn.result = (
+                    f"❌ 未找到角色「{args}」\n用 /role list 查看所有角色"
+                    if is_zh
+                    else f"❌ Role '{args}' not found\nUse /role list to see all roles"
+                )
+            return
+
+        self._set_current_role(role["act"])
+        prompt_preview = role["prompt"][:150] + ("..." if len(role["prompt"]) > 150 else "")
+        turn.result = (
+            f"✅ 已切换到角色：{role['act']}\n\n"
+            f"提示词预览：\n{prompt_preview}\n\n"
+            f"现在开始，Agent 将以「{role['act']}」的身份回答问题。\n"
+            f"用 /role off 可恢复默认身份"
+            if is_zh
+            else f"✅ Switched to role: {role['act']}\n\n"
+            f"Prompt preview:\n{prompt_preview}\n\n"
+            f"From now on, Agent will respond as '{role['act']}'.\n"
+            f"Use /role off to restore default identity"
+        )
+
+    def _get_current_role_name(self) -> str:
+        """从配置中读取当前角色名。"""
+        if self.ctx is None or self.ctx.config is None:
+            return ""
+        role_cfg = self.ctx.config.get("agent", {}).get("role", {}) or {}
+        if not role_cfg.get("enabled", True):
+            return ""
+        return role_cfg.get("current", "").strip()
+
+    def _set_current_role(self, role_name: str) -> None:
+        """设置当前角色名并持久化到配置文件。"""
+        if self.ctx is None or self.ctx.config is None:
+            return
+        try:
+            config = self.ctx.config
+            config.setdefault("agent", {}).setdefault("role", {})["current"] = role_name
+            from skills import _save_config
+            _save_config(config)
+            logger.info("role switched to: %s", role_name or "(default)")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("failed to persist role: %s", exc)
+
     # ------------------------------------------------------------ slash commands
     # Mapping from slash command names (both EN and CN) to skill IDs
     _SLASH_COMMANDS: Dict[str, str] = {
@@ -563,10 +533,8 @@ class Coordinator(Plugin):
         "os-mode": "_os_mode", "osmode": "_os_mode", "os": "_os_mode",
         "enable-os": "_os_on", "disable-os": "_os_off",
         "开启os": "_os_on", "关闭os": "_os_off", "开启系统权限": "_os_on", "关闭系统权限": "_os_off",
-        # ---------- 角色（roles） ----------
-        "role": "role", "roles": "role", "角色": "role", "切换角色": "role",
-        "role-list": "role_list", "角色列表": "role_list", "角色清单": "role_list",
-        "role-off": "role_off", "角色关闭": "role_off", "关闭角色": "role_off",
+        # ---------- 角色系统 ----------
+        "role": "_role", "角色": "_role", "人设": "_role", "persona": "_role",
     }
 
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
@@ -608,9 +576,9 @@ class Coordinator(Plugin):
             self.publish("turn_completed", turn=turn)
             return True
 
-        # ---- 角色系统（roles）：直接处理，避免依赖某个 skill ----
-        if skill_id in ("role", "role_list", "role_off"):
-            turn.result = self._handle_role_command(skill_id, args_text)
+        # ---- Role commands (handled directly) ----
+        if skill_id == "_role":
+            await self._handle_role_command(turn, args_text)
             self.publish("turn_completed", turn=turn)
             return True
 
@@ -655,6 +623,9 @@ class Coordinator(Plugin):
 
         try:
             result = await self._skills.dispatch(skill_id, args)
+            # 如果 settings 技能返回 "__SKIP__"，表示不是设置命令，继续正常对话
+            if result == "__SKIP__":
+                return False
             turn.result = str(result)
         except Exception as exc:
             logger.exception("slash command dispatch failed: %s", exc)
@@ -684,6 +655,26 @@ class Coordinator(Plugin):
                 logger.info("Auto-detected language: %s from user input", detected_lang)
                 # Persist language preference to config
                 self._persist_language(detected_lang)
+
+        # 模式匹配：检测"服务商名 + API key"格式，直接调用 add_provider
+        # 不依赖 LLM 工具调用（某些模型如 sensenova 不支持 tools）
+        if turn.input_text and self._skills is not None:
+            _api_key_m = __import__("re").search(
+                r"(?:key[:：]?\s*)?(nvapi-\S+|sk-\S+|ak-\S+)",
+                turn.input_text
+            )
+            if _api_key_m:
+                try:
+                    logger.info("检测到 API key，调用 add_provider 技能")
+                    _result = await self._skills.dispatch(
+                        "add_provider", {"input": turn.input_text}
+                    )
+                    if _result and str(_result) != "__SKIP__":
+                        turn.record_success(str(_result), 0)
+                        self.publish("turn_completed", turn=turn)
+                        return
+                except Exception as exc:
+                    logger.warning("add_provider dispatch failed: %s", exc)
 
         # avoid double-processing — if something already published a reply,
         # skip this turn entirely
@@ -799,6 +790,7 @@ class Coordinator(Plugin):
             # Direct tool loop without thinking overhead
             await self._tool_loop(messages, turn, tools)
             self._extract_entities(turn)
+            self._learn_user_preferences(turn)
             self.publish("turn_completed", turn=turn)
             logger.info("reply produced (simple mode, %d tokens, %.2fs)",
                         turn.tokens_used, turn.duration_seconds or 0)
@@ -812,6 +804,7 @@ class Coordinator(Plugin):
 
         # Auto-extract entities
         self._extract_entities(turn)
+        self._learn_user_preferences(turn)
 
         self.publish("turn_completed", turn=turn)
         logger.info("reply produced (complex mode, %d tokens, %.2fs)",
@@ -868,17 +861,6 @@ class Coordinator(Plugin):
                 # Guarantee at least one user message carries the input
                 if not any(m.get("role") == "user" for m in messages):
                     messages.append({"role": "user", "content": turn.input_text})
-
-        # ——— 偏好注入（记忆增强） ———
-        pref_text = self._format_preferences_prompt()
-        if pref_text:
-            pref_block = {"role": "system", "content": pref_text}
-            # 插入到最后一条 system 消息之后，保持上下文自然
-            insert_idx = 0
-            for i, m in enumerate(messages):
-                if m.get("role") == "system":
-                    insert_idx = i + 1
-            messages.insert(insert_idx, pref_block)
 
         return messages
 
@@ -965,6 +947,15 @@ class Coordinator(Plugin):
                 system_run = self._skills.get("system_run")
                 if system_run and system_run not in chosen:
                     chosen.append(system_run)
+            # 检测用户尝试添加服务商（包含 API key 模式），强制添加 add_provider 技能
+            _text = turn.input_text.lower()
+            _has_api_key = bool(__import__("re").search(
+                r"(?:key[:：]?\s*)?(?:nvapi-|sk-|ak-|api[_-]?key)", _text
+            ))
+            if _has_api_key:
+                add_provider = self._skills.get("add_provider")
+                if add_provider and add_provider not in chosen:
+                    chosen.insert(0, add_provider)
             turn.skills = [s.id for s in chosen]
             tools = [s.schema for s in chosen]
         else:
@@ -1273,6 +1264,66 @@ class Coordinator(Plugin):
 
         return False
 
+    def _parse_text_tool_calls(self, text: str, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """工具降级：从 LLM 文本回复中解析工具调用意图。
+
+        当模型不支持 function calling 时，LLM 可能在文本中表达工具调用意图。
+        支持以下格式：
+        1. ```json {"tool": "web_search", "args": {...}} ```
+        2. ```tool_call:web_search({"query": "..."})```
+        3. <tool_call>{"name": "web_search", "arguments": {...}}</tool_call>
+        """
+        if not text or not tools:
+            return []
+
+        import json
+        import re
+
+        # 构建可用工具名集合
+        tool_names = set()
+        for t in tools:
+            name = t.get("function", {}).get("name") or t.get("name")
+            if name:
+                tool_names.add(name)
+
+        parsed_calls: List[Dict[str, Any]] = []
+
+        # 格式1: ```json {"tool": "...", "args": {...}} ```
+        for match in re.finditer(r"```(?:json)?\s*(\{[^`]+?\})\s*```", text, re.DOTALL):
+            try:
+                data = json.loads(match.group(1))
+                name = data.get("tool") or data.get("name") or data.get("function")
+                args = data.get("args") or data.get("arguments") or data.get("parameters") or {}
+                if name and name in tool_names:
+                    parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+
+        # 格式2: <tool_call>...</tool_call>
+        if not parsed_calls:
+            for match in re.finditer(r"<tool_call>\s*(\{[^<]+?\})\s*</tool_call>", text, re.DOTALL):
+                try:
+                    data = json.loads(match.group(1))
+                    name = data.get("name") or data.get("tool")
+                    args = data.get("arguments") or data.get("args") or {}
+                    if name and name in tool_names:
+                        parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    continue
+
+        # 格式3: tool_name({"key": "value"}) 行内调用
+        if not parsed_calls:
+            for name in tool_names:
+                pattern = rf"{re.escape(name)}\s*\(\s*(\{{[^)]+\}})\s*\)"
+                for match in re.finditer(pattern, text):
+                    try:
+                        args = json.loads(match.group(1))
+                        parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+        return parsed_calls[:3]  # 最多解析 3 个调用，防止滥用
+
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
         """Execute tool-call loop until final reply."""
         if messages is None:
@@ -1296,40 +1347,25 @@ class Coordinator(Plugin):
             total_tokens += int(resp.get("tokens_used") or 0)
             tool_calls = resp.get("tool_calls") or []
 
-            # 工具降级方案：如果 provider 不支持结构化 tool_calls，
-            # 尝试从助手输出文本中解析 <|tool_call|>...<|/tool_call|> 或
-            # ```json {"name": ..., "arguments": {...}}``` 形式的工具调用。
-            if not tool_calls:
+            # --- 工具降级方案 ---
+            # 当模型不支持 tools（如 sensenova）时，tool_calls 为空
+            # 但 LLM 可能在文本中表达了工具调用意图
+            # 检测文本中的 JSON 工具调用格式并解析
+            # 支持多轮（ReAct 循环）：每轮都可以解析文本工具调用
+            if not tool_calls and tools:
                 text = resp.get("text", "") or ""
-                parsed = self._parse_text_tool_calls(text)
-                if parsed:
-                    tool_calls = parsed
-                    # 移除文本中被解析过的工具调用标记，把剩余文本作为
-                    # assistant 消息保留，以免工具循环无限重复。
-                    cleaned = self._strip_tool_call_markers(text)
-                    if cleaned.strip():
-                        messages.append({"role": "assistant", "content": cleaned})
-                    elif tool_calls:
-                        # 没有剩余文本，但有工具调用：保留一条 assistant 消息
-                        # 以维持对话交替结构；真实 tool_calls 在执行时追加。
-                        messages.append({
-                            "role": "assistant",
-                            "content": "",
-                            "tool_calls_raw": tool_calls,
-                        })
-                else:
-                    final_text = text
-                    if final_text:
-                        messages.append({"role": "assistant", "content": final_text})
-                    break
-            else:
-                # 正常结构化 tool_calls 路径：保留 text 到 messages
-                text = resp.get("text", "") or ""
-                if text:
-                    messages.append({"role": "assistant", "content": text})
+                parsed_calls = self._parse_text_tool_calls(text, tools)
+                if parsed_calls:
+                    tool_calls = parsed_calls
+                    # 不 break，继续执行工具调用
 
-            if tool_calls:
-                await self._execute_tool_calls(messages, turn, tool_calls, _failed_skills, i)
+            if not tool_calls:
+                final_text = resp.get("text", "") or ""
+                if final_text:
+                    messages.append({"role": "assistant", "content": final_text})
+                break
+
+            await self._execute_tool_calls(messages, turn, tool_calls, _failed_skills, i)
 
             # Check if all skills failed
             if i >= 1 and all(
@@ -1360,107 +1396,6 @@ class Coordinator(Plugin):
         if not final_text:
             final_text = "(no reply produced)"
         turn.record_success(final_text, total_tokens)
-
-        # 记忆增强：在每轮对话成功后，检查用户消息中是否有值得记住的内容
-        try:
-            self._learn_user_preferences(turn.input_text or "", final_text or "")
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("preference learning skipped: %s", exc)
-
-    def _parse_text_tool_calls(self, text: str) -> List[Dict[str, Any]]:
-        """从非结构化助手输出中解析工具调用指令。
-
-        当 provider 不支持结构化 tool_calls 时，用户的 system prompt 会
-        要求 LLM 用下列文本格式之一输出工具调用：
-
-        1) <|tool_call|>{"name": "skill_id", "arguments": {...}}<|/tool_call|>
-        2) ```json
-              {"name": "skill_id", "arguments": {...}}
-           ```
-        3) <tool name="skill_id">{"key": "value"}</tool>
-
-        返回与 provider tool_calls 相同结构的 dict 列表：
-            [{"id": "...", "name": "...", "arguments": {...}}, ...]
-        """
-        import json as _json
-        import re as _re
-        if not text:
-            return []
-
-        calls: List[Dict[str, Any]] = []
-
-        # 1) <|tool_call|>...<|/tool_call|>
-        for m in _re.finditer(r"<\|tool_call\|>([\s\S]*?)<\|/tool_call\|>", text):
-            try:
-                obj = _json.loads(m.group(1).strip())
-                name = str(obj.get("name") or obj.get("tool") or "")
-                args = obj.get("arguments") or obj.get("params") or obj.get("args") or {}
-                if name:
-                    calls.append({
-                        "id": f"txt_{len(calls)}",
-                        "name": name,
-                        "arguments": args if isinstance(args, dict) else {"value": args},
-                    })
-            except _json.JSONDecodeError:
-                continue
-
-        # 2) ```json ... ```
-        if not calls:
-            for m in _re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text):
-                try:
-                    obj = _json.loads(m.group(1).strip())
-                    if isinstance(obj, dict):
-                        objs = [obj]
-                    elif isinstance(obj, list):
-                        objs = obj
-                    else:
-                        continue
-                    for item in objs:
-                        if not isinstance(item, dict):
-                            continue
-                        name = str(item.get("name") or item.get("tool") or "")
-                        args = item.get("arguments") or item.get("params") or item.get("args") or {}
-                        if name:
-                            calls.append({
-                                "id": f"txt_{len(calls)}",
-                                "name": name,
-                                "arguments": args if isinstance(args, dict) else {"value": args},
-                            })
-                except _json.JSONDecodeError:
-                    continue
-
-        # 3) <tool name="...">...</tool>
-        if not calls:
-            for m in _re.finditer(r'<tool\s+name="([^"]+)"[^>]*>([\s\S]*?)</tool>', text):
-                try:
-                    name = m.group(1).strip()
-                    body = m.group(2).strip()
-                    try:
-                        args = _json.loads(body)
-                        if not isinstance(args, dict):
-                            args = {"value": args}
-                    except _json.JSONDecodeError:
-                        args = {"content": body}
-                    if name:
-                        calls.append({
-                            "id": f"txt_{len(calls)}",
-                            "name": name,
-                            "arguments": args,
-                        })
-                except Exception:
-                    continue
-
-        return calls
-
-    def _strip_tool_call_markers(self, text: str) -> str:
-        """移除文本中的工具调用标记，避免把它们再塞回 LLM 上下文重复执行。"""
-        import re as _re
-        if not text:
-            return text
-        text = _re.sub(r"<\|tool_call\|>[\s\S]*?<\|/tool_call\|>", "", text)
-        text = _re.sub(r"```(?:json)?\s*[\s\S]*?```", "", text)
-        text = _re.sub(r'<tool\s+name="[^"]+"[^>]*>[\s\S]*?</tool>', "", text)
-        return text.strip()
 
     async def _execute_tool_calls(
         self,
@@ -1598,3 +1533,56 @@ class Coordinator(Plugin):
                 logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
         except Exception as exc:
             logger.debug("KG extraction failed: %s", exc)
+
+    def _learn_user_preferences(self, turn: TurnContext) -> None:
+        """从对话中自动提取用户偏好并保存到记忆。
+
+        检测用户输入中的偏好信号：
+        - "我喜欢/不喜欢/偏好/讨厌..."
+        - "用 xxx 不要 yyy"
+        - "以后都用 xxx"
+        - "记住我喜欢 xxx"
+        """
+        if not self.ctx or not hasattr(self.ctx, 'memory'):
+            return
+
+        text = turn.input_text or ""
+        if not text.strip():
+            return
+
+        import re
+
+        preferences: List[str] = []
+
+        # 模式1: "我喜欢/偏好/讨厌..."
+        for match in re.finditer(r"(?:我喜欢|我偏好|我讨厌|我不喜欢|我爱|我习惯)(.+?)[。，.!？\n]", text):
+            pref = match.group(1).strip()
+            if 2 <= len(pref) <= 50:
+                sentiment = "喜欢" if "喜欢" in match.group(0) or "偏好" in match.group(0) or "爱" in match.group(0) else "不喜欢"
+                preferences.append(f"用户{sentiment}：{pref}")
+
+        # 模式2: "以后都用 xxx" / "记住..."
+        for match in re.finditer(r"(?:以后都?用|记住|默认用|总是用)(.+?)[。，.!？\n]", text):
+            pref = match.group(1).strip()
+            if 2 <= len(pref) <= 50:
+                preferences.append(f"用户偏好：{pref}")
+
+        # 模式3: "用 xxx 不要 yyy"
+        for match in re.finditer(r"用\s*(\S+?)\s*(?:不要|别|不)\s*(\S+)", text):
+            preferences.append(f"用户偏好：用{match.group(1)}，不用{match.group(2)}")
+
+        if not preferences:
+            return
+
+        # 保存到记忆
+        try:
+            memory = self.ctx.memory
+            for pref in preferences:
+                # 使用 memory.add 如果可用，否则用 remember
+                if hasattr(memory, 'add'):
+                    memory.add(text=pref, metadata={"type": "preference", "session": turn.session_id})
+                elif hasattr(memory, 'remember'):
+                    memory.remember(text=pref, metadata={"type": "preference"})
+            logger.debug("Learned %d user preferences from turn %s", len(preferences), turn.session_id)
+        except Exception as exc:
+            logger.debug("Preference learning failed: %s", exc)

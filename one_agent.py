@@ -104,6 +104,13 @@ class MemoryConfig(BaseModel):
     procedural: MemoryProcedural = Field(default_factory=MemoryProcedural)
 
 
+class RoleConfig(BaseModel):
+    """角色系统配置 — 让 Agent 扮演不同行业/场景的专家角色。"""
+    enabled: bool = True
+    current: str = ""  # 当前角色名（空 = 默认 One-Agent 身份）
+    library: str = "data/roles/prompts-zh.json"  # 角色库 JSON 文件路径
+
+
 class AgentConfig(BaseModel):
     name: str = "One-Agent"
     description: str = "Token-efficient self-evolving microkernel AI agent"
@@ -112,6 +119,7 @@ class AgentConfig(BaseModel):
     log_level: str = Field(default="INFO")
     timezone: str = Field(default="UTC")
     language: str = Field(default="en")  # 语言设置: en | zh
+    role: RoleConfig = Field(default_factory=RoleConfig)
 
     @field_validator("log_level")
     @classmethod
@@ -357,19 +365,6 @@ class OneAgentApp:
         self.ctx.self_improver = SelfImprover(improvements_db)
         logger.info("self-improver initialized at %s", improvements_db)
 
-        # 加载角色库（/role 命令共享使用）
-        from core.roles import role_library
-        try:
-            role_library.load()
-            # 如果配置里指定了默认角色，则预选
-            default_role = getattr(getattr(self.config, "agent", None), "default_role", None) or None
-            if default_role:
-                role_library.select(str(default_role))
-                logger.info("default role: %s", default_role)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("role library failed to load: %s", exc)
-        self.ctx.role_library = role_library
-
         # Initialize skill marketplace
         from marketplace import Marketplace
         marketplace_dir = str(_Path(self.config.agent.data_dir) / "marketplace")
@@ -416,6 +411,9 @@ class OneAgentApp:
 
         # Attach Python executor to agent context (shared instance)
         self.ctx.python_executor = self.exec_python
+
+        # Attach llm provider to ctx so skills can call set_api_key / rebuild_tiers
+        self.ctx._llm = self.llm
 
         await self.bus.start()
         await self._pm.setup_all(self.ctx)
@@ -560,58 +558,47 @@ async def _interactive(app: OneAgentApp) -> None:
     print("╚══════════════════════════════════════════════╝")
 
     # ---------- 自然语言意图匹配 ----------
-    # 用户无需记住精准命令，用自然语言即可触发内置功能。
-    # 设计原则：仅对明确的命令式短语做匹配，避免误伤自然对话。
+    # 用户无需记住精准命令，用自然语言即可触发内置功能
     _INTENT_PATTERNS = {
         "exit": [
-            r"^(退出|再见|拜拜|结束|关闭|退出程序|再见啦|bye|goodbye|see you)[!\uFF01\u3002\.\uFF1F\?]?$",
-            r"^(quit|exit)\s*$",
+            r"^退出$|^再见$|^拜拜$|^结束$|^退出程序$|^bye$|^goodbye$|^quit$",
         ],
         "help": [
-            r"^(帮助|怎么用|使用说明|能做什么|有什么功能|命令列表|功能列表|怎么操作|使用方法|有哪些功能)[\?\uFF1F!\uFF01\.\u3002]?$",
-            r"^(help|how to use|what can you do)\s*$",
+            r"^帮助$|^怎么用$|^使用说明$|^help$|^命令列表$|^功能列表$",
         ],
         "skills": [
-            r"^(技能|会什么|有哪些能力|有什么技能|能力列表|你会啥|你会什么)[\?\uFF1F!\uFF01\.\u3002]?$",
-            r"^(skills|list skills)\s*$",
+            r"^技能$|^会什么$|^有什么技能$|^skill$|^能力列表$|^你会啥$|^你会什么$",
         ],
         "status": [
-            r"^(状态|运行状态|当前状态|系统状态|运行情况|还好吗|活着吗|运行多久)[\?\uFF1F!\uFF01\.\u3002]?$",
-            r"^(status)\s*$",
+            r"^状态$|^运行状态$|^系统状态$|^status$|^运行情况$",
         ],
         "metrics": [
-            r"^(指标|统计|性能|调用量|token用量|使用量|metrics|stats)[\?\uFF1F!\uFF01\.\u3002]?$",
-            r"^show\s+(metrics|stats)\s*$",
+            r"^指标$|^统计$|^metrics$|^stats$|^性能指标$",
         ],
         "dlq": [
-            r"^(死信|失败事件|未处理|错误队列|死信队列|dlq|失败消息)[\?\uFF1F!\uFF01\.\u3002]?$",
+            r"^死信$|^死信队列$|^dlq$|^dead.?letter$",
         ],
         "bus": [
-            r"^(事件总线|event.?bus|总线状态|事件列表)[\?\uFF1F!\uFF01\.\u3002]?$",
+            r"^事件总线$|^bus$|^event.?bus$",
         ],
         "clear": [
-            r"^(清屏|清除屏幕|清理屏幕|clear|刷新屏幕)[!\uFF01\.\u3002]?$",
+            r"^清屏$|^clear$|^清除屏幕$",
         ],
-        # settings：仅捕获明确的设置短语，避免把"设置一个提醒"这类自然对话吃掉
+        # settings 只匹配精确的 /set 命令格式，自然语言交给 LLM
         "settings": [
-            r"^(查看|列出|显示|修改|更改|调整|设置|把|把你的)?\s*(模型|温度|最大token|超时|重试|提供商|日志级别|时区|数据目录|长期记忆|程序记忆|路由|上下文压缩|自进化|缓存|多模态|调度器|加密|审计日志|api_key|允许聊天改密钥|llm|llm模型|本地模型|轻量模型|主模型|web|telegram|企业微信|wecom|钉钉|dingtalk|飞书|feishu|discord|slack|docker|shell|浏览器|browser|docker镜像|docker内存|记忆衰减|缓存大小|缓存时间|api端口)\b.*",
-            r"^(settings|config|change|set)\b.*",
-            r"^(列出?设置|显示?设置|查看?设置|所有设置|全部设置|list\s+(all\s+)?settings?|show\s+(all\s+)?settings?)\s*$",
-            r"^(开启|关闭|启用|禁用)\s*(模型|温度|长期记忆|程序记忆|路由|上下文压缩|自进化|缓存|多模态|调度器|加密|审计日志|web|telegram|企业微信|wecom|钉钉|dingtalk|飞书|feishu|discord|slack|docker|shell|浏览器|browser|记忆衰减)\s*$",
+            r"^/set\s+|^设置\s+\S+\s*[=＝]|^配置\s+\S+\s*[=＝]|^/config\s+",
         ],
         "models": [
-            r"^(模型列表|有哪些模型|看模型|列出?模型|列出?所有模型|model.?list)\s*$",
+            r"^/models?$|^模型列表$|^列出模型$|^所有模型$|^免费模型$",
         ],
+        # 智能分层：把 provider 的全部模型按 free/paid、context、features 自动分配到 4 层
         "rebuild_tiers": [
-            r"^(智能分层|自动分层|重新分层|刷新分层|rebuild.?tiers|auto.?tier|分层|自动分配模型)\s*$",
+            r"^智能分层$|^自动分层$|^重新分层$|^刷新分层$|^rebuild.?tiers$",
         ],
     }
 
     def _match_intent(text: str) -> Optional[str]:
-        """从自然语言中匹配用户意图，返回命令名或 None。
-
-        采用短语级精确匹配 + 小范围正则，避免把自然对话误识别为命令。
-        """
+        """从自然语言中匹配用户意图，返回命令名或 None。"""
         import re
         lower = text.lower().strip()
         exact_map = {
@@ -626,7 +613,7 @@ async def _interactive(app: OneAgentApp) -> None:
             return exact_map[lower]
         for intent, patterns in _INTENT_PATTERNS.items():
             for pat in patterns:
-                if re.search(pat, lower, re.IGNORECASE):
+                if re.search(pat, lower):
                     return intent
         return None
 
@@ -642,6 +629,123 @@ async def _interactive(app: OneAgentApp) -> None:
             return
         if not line:
             continue
+        import re as _re_key
+
+        # 检测待确认的 provider 集成命令（全部/免费/选择 N/取消）
+        _pending = getattr(app.ctx, "_pending_provider", None)
+        if _pending:
+            _low = line.lower().strip()
+            _handled = False
+            if _low in ("取消", "cancel", "放弃", "exit", "退出"):
+                app.ctx._pending_provider = None
+                print("已取消集成。API key 已保存，可稍后重新发送服务商+key 来集成。")
+                continue
+            elif _low in ("全部", "all", "所有", "全部集成"):
+                _handled = True
+                _selected = _pending["models"]
+            elif _low in ("免费", "free", "免费模型"):
+                _handled = True
+                _selected = _pending.get("free_models", [])
+                if not _selected:
+                    print("❌ 没有免费模型可选")
+                    continue
+            elif _re_key.match(r"(?:选择|select|pick)\s+([\d,\s]+)", _low):
+                _handled = True
+                _nums = [int(x) for x in _re_key.findall(r"\d+", _low)]
+                _free = _pending.get("free_models", [])
+                _selected = [_free[i - 1] for i in _nums if 0 < i <= len(_free)]
+                if not _selected:
+                    print(f"❌ 编号无效，请输入 1-{len(_free)} 之间的数字")
+                    continue
+            elif _re_key.match(r"^[\d,\s]+$", _low):
+                # 直接输入数字 "1,3,5"
+                _handled = True
+                _nums = [int(x) for x in _re_key.findall(r"\d+", _low)]
+                _free = _pending.get("free_models", [])
+                _selected = [_free[i - 1] for i in _nums if 0 < i <= len(_free)]
+                if not _selected:
+                    print(f"❌ 编号无效，请输入 1-{len(_free)} 之间的数字")
+                    continue
+
+            if _handled:
+                _prov = _pending["provider"]
+                app.ctx._pending_provider = None
+                print(f"🔄 正在将 {len(_selected)} 个模型集成到 {_prov}...")
+                try:
+                    _llm = getattr(app, "llm", None)
+                    if _llm:
+                        _result = await _llm.rebuild_tiers(provider=_prov, persist=True)
+                        if _result.get("ok"):
+                            _tiers = _result.get("tiers", {})
+                            print(f"✅ 集成成功！共 {_result.get('model_count', 0)} 个模型已分配到 4 层：")
+                            for _tier_name in ("trivial", "simple", "complex", "expert"):
+                                _models = _tiers.get(_tier_name, [])
+                                print(f"  [{_tier_name:8s}] {len(_models)} 个: {', '.join(_models[:3])}{'...' if len(_models) > 3 else ''}")
+                            print(f"\n💡 如需切换到此服务商，可以对我说：'使用{_prov}' 或 '/set provider {_prov}'")
+                        else:
+                            print(f"⚠️ 集成失败: {_result.get('error', 'unknown')}")
+                    else:
+                        print("❌ LLM provider 不可用")
+                except Exception as exc:
+                    print(f"❌ 集成错误: {exc}")
+                continue
+            # 不是确认命令，清除待确认状态，继续正常处理
+            app.ctx._pending_provider = None
+
+        # 检测"服务商 + API key"模式，直接调用 add_provider 技能
+        # 不依赖 LLM 工具调用（某些模型不支持 tools）
+        # 支持多行输入：如果当前行只有 key，检查上一行是否是服务商名
+        _key_only = _re_key.match(r"^\s*key\s*[=：:]\s*(\S+)\s*$", line, _re_key.IGNORECASE)
+        if _key_only:
+            _last_provider = getattr(app, "_last_provider_hint", None)
+            if _last_provider:
+                line = f"{_last_provider} {_key_only.group(1)}"
+                app._last_provider_hint = None
+        if _re_key.search(r"(?:key[:：]?\s*)?(nvapi-\S+|sk-\S+|ak-\S+)", line):
+            try:
+                from skills import SkillManager
+                _sm = getattr(app, "_skills_mgr", None)
+                if _sm is None:
+                    # 临时创建 SkillManager 来执行 add_provider
+                    _sm = SkillManager()
+                    await _sm.setup(app.ctx)
+                    app._skills_mgr = _sm
+                _result = await _sm.dispatch("add_provider", {"input": line})
+                if _result and str(_result) != "__SKIP__":
+                    print(_result)
+                    continue
+            except Exception as exc:
+                print(f"[add_provider error: {exc}]")
+                continue
+        # 检测"搜索 服务商名"命令：网上搜索未知服务商的 API 地址
+        _search_m = _re_key.match(r"^(?:搜索|search|查找|find)\s+(.+)", line, _re_key.IGNORECASE)
+        if _search_m:
+            _provider_query = _search_m.group(1).strip()
+            print(f"🔍 正在网上搜索「{_provider_query}」的 API 地址...")
+            try:
+                from models.resolver import resolve
+                _resolved = await resolve(_provider_query, probe=True, timeout=8.0)
+                if _resolved.found:
+                    print(f"✅ 找到「{_provider_query}」的 API 地址：{_resolved.base_url}")
+                    print(f"   （来源：{_resolved.via}）")
+                    print(f"   现在你可以发送：{_provider_query} {_resolved.base_url} key=你的API密钥")
+                else:
+                    print(f"❌ 未能自动找到「{_provider_query}」的 API 地址。")
+                    print("   请直接提供 base URL，例如：")
+                    print(f"   {_provider_query} https://api.example.com/v1 key=你的API密钥")
+            except Exception as exc:
+                print(f"❌ 搜索失败: {exc}")
+                print("   请直接提供 base URL，例如：")
+                print(f"   {_provider_query} https://api.example.com/v1 key=你的API密钥")
+            continue
+        # 保存服务商名作为 hint（用于多行输入：用户先发服务商名，下一行发 key）
+        try:
+            from models.resolver import _PROVIDER_ALIASES
+            _hint = _re_key.sub(r"[，,。.：:：]+$", "", line.strip())
+            if _hint in _PROVIDER_ALIASES or _hint.lower() in _PROVIDER_ALIASES:
+                app._last_provider_hint = _hint
+        except Exception:
+            pass
         intent = _match_intent(line)
         if intent == "exit":
             return
@@ -686,14 +790,16 @@ async def _interactive(app: OneAgentApp) -> None:
             print("\033c", end="")
             continue
         if intent == "settings":
-            # 将设置请求路由到 settings 技能；若 settings 认为该请求不是真正
-            # 的设置操作，会返回 "__SKIP__"，此时我们回退到正常 LLM 对话流程。
+            # 将设置请求路由到 settings 技能
             from skills import _process_settings_command
             result = _process_settings_command(line, app.config)
-            if result == "__SKIP__":
-                intent = None
+            # None 或 "__SKIP__" 表示不是设置命令，跳过继续正常对话
+            if result is None or result == "__SKIP__":
+                pass  # 继续到下面的 LLM 对话
             else:
                 print(result)
+            # 只有明确返回了内容才结束，继续时不要 continue
+            if result is not None and result != "__SKIP__":
                 continue
         if intent == "models":
             # 模型发现：拉取当前 provider 的模型列表并按需过滤
@@ -778,6 +884,10 @@ async def _interactive(app: OneAgentApp) -> None:
             print("[timeout — try again]")
             continue
         print(reply)
+        # 检测退出标志（quit_handler 设置）
+        _quit_ev = getattr(app.ctx, "_quit_event", None)
+        if _quit_ev is not None and _quit_ev.is_set():
+            return
 
 
 async def main() -> None:

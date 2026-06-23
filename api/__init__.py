@@ -1560,21 +1560,29 @@ class RESTAPIGateway(Plugin):
         self._app = app
         try:
             import uvicorn
-            config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning", capture_output=False)
+            config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning")
             server = uvicorn.Server(config)
+            self._server = server
             self._task = __import__("asyncio").create_task(server.serve())
             logger.info("REST API running on http://%s:%d", self._host, self._port)
         except Exception as exc:
             logger.warning("could not start REST API: %s", exc)
 
     async def stop(self) -> None:
+        # 优雅关闭 uvicorn：设置 should_exit 让其自行完成 in-flight 请求
+        server = getattr(self, "_server", None)
+        if server is not None:
+            server.should_exit = True
         if self._task:
-            self._task.cancel()
             try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                # We don't care about shutdown errors — just make sure
-                # the task is awaited so we don't leak the unhandled
-                # "Task was destroyed but it is pending" warning.
-                pass
+                await asyncio.wait_for(self._task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                # 关闭超时或被取消，强制清理
+                self._task.cancel()
+                try:
+                    await self._task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            except Exception as exc:
+                logger.debug("REST API shutdown error: %s", exc)
         await super().stop()

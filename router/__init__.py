@@ -327,6 +327,13 @@ class SmartRouter(Plugin):
                 "- system_run：需要在本地执行命令（谨慎、受控）。\n"
                 "- skills / document_search / mcp_client / 其他动态加载的 skill：按需调用。\n"
                 "工具调用原则：能工具解决就不要问；工具失败就换工具或换关键词；连续失败 3 次再用知识兜底。\n\n"
+                "【工具降级 — 当 function calling 不可用时】\n"
+                "如果系统未返回工具调用结果（可能你的运行环境不支持 function calling），\n"
+                "你可以在回复中用以下格式表达工具调用意图，系统会自动解析并执行：\n"
+                "```json\n{\"tool\": \"工具名\", \"args\": {\"参数名\": \"参数值\"}}\n```\n"
+                "例如：\n"
+                "```json\n{\"tool\": \"web_search\", \"args\": {\"query\": \"英伟达最新股价\"}}\n```\n"
+                "系统会执行工具并把结果返回给你，你再根据结果继续回答。\n\n"
                 "【回复风格】\n"
                 "- 直接给答案，不啰嗦铺垫。\n"
                 "- 做了再说，不征求意见。\n"
@@ -399,6 +406,17 @@ class SmartRouter(Plugin):
                     "   shutdown/reboot/mkfs/dd/fdisk/iptables. Tell the user and wait for confirmation before these;\n"
                     "6. After each system command, report the result."
                 )
+
+        # 角色系统注入：如果有当前角色，把角色 prompt 追加到 system prompt
+        try:
+            from core.roles import build_role_prompt
+            if self.ctx is not None and self.ctx.config is not None:
+                role_fragment = build_role_prompt(self.ctx.config)
+                if role_fragment:
+                    system += role_fragment
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("role prompt injection skipped: %s", exc)
+
         history = self._history_tail(turn.session_id)
         # Smart compression: keep recent turns + important context
         compression_cfg = self._cfg.get("context_compression", {}) or {}
@@ -441,11 +459,8 @@ class SmartRouter(Plugin):
         # 【角色注入】：如果用户选择了角色，在 system prompt 后紧跟一条角色 system 消息
         try:
             from core.roles import build_role_prompt
-            role_text = build_role_prompt(
-                getattr(self.ctx, "role_library", None)
-                if getattr(self, "ctx", None)
-                else None
-            )
+            config = self.ctx.config if (getattr(self, "ctx", None) and hasattr(self.ctx, "config")) else None
+            role_text = build_role_prompt(config) if config else ""
             if role_text:
                 # 插入到第一条 system 消息之后，确保不覆盖原 system
                 insert_idx = 0

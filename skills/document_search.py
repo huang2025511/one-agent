@@ -199,13 +199,12 @@ class DocumentStore:
         return True
 
     def close(self) -> None:
-        """Close the underlying SQLite connection to release resources."""
-        if hasattr(self, "_conn") and self._conn is not None:
-            try:
+        """Close the database connection."""
+        try:
+            if self._conn:
                 self._conn.close()
-            except sqlite3.ProgrammingError:
-                    pass
-            self._conn = None
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------ skill handler factory
