@@ -357,6 +357,19 @@ class OneAgentApp:
         self.ctx.self_improver = SelfImprover(improvements_db)
         logger.info("self-improver initialized at %s", improvements_db)
 
+        # 加载角色库（/role 命令共享使用）
+        from core.roles import role_library
+        try:
+            role_library.load()
+            # 如果配置里指定了默认角色，则预选
+            default_role = getattr(getattr(self.config, "agent", None), "default_role", None) or None
+            if default_role:
+                role_library.select(str(default_role))
+                logger.info("default role: %s", default_role)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("role library failed to load: %s", exc)
+        self.ctx.role_library = role_library
+
         # Initialize skill marketplace
         from marketplace import Marketplace
         marketplace_dir = str(_Path(self.config.agent.data_dir) / "marketplace")
@@ -547,47 +560,58 @@ async def _interactive(app: OneAgentApp) -> None:
     print("╚══════════════════════════════════════════════╝")
 
     # ---------- 自然语言意图匹配 ----------
-    # 用户无需记住精准命令，用自然语言即可触发内置功能
+    # 用户无需记住精准命令，用自然语言即可触发内置功能。
+    # 设计原则：仅对明确的命令式短语做匹配，避免误伤自然对话。
     _INTENT_PATTERNS = {
         "exit": [
-            r"退出|再见|拜拜|结束|关闭|退出程序|再见啦|bye|goodbye|see you",
+            r"^(退出|再见|拜拜|结束|关闭|退出程序|再见啦|bye|goodbye|see you)[!\uFF01\u3002\.\uFF1F\?]?$",
+            r"^(quit|exit)\s*$",
         ],
         "help": [
-            r"帮助|怎么用|使用说明|能做什么|有什么功能|help|命令列表|功能列表|怎么操作|使用方法",
+            r"^(帮助|怎么用|使用说明|能做什么|有什么功能|命令列表|功能列表|怎么操作|使用方法|有哪些功能)[\?\uFF1F!\uFF01\.\u3002]?$",
+            r"^(help|how to use|what can you do)\s*$",
         ],
         "skills": [
-            r"技能|会什么|能做什么|有哪些能力|有什么技能|skill|能力列表|你会啥|你会什么",
+            r"^(技能|会什么|有哪些能力|有什么技能|能力列表|你会啥|你会什么)[\?\uFF1F!\uFF01\.\u3002]?$",
+            r"^(skills|list skills)\s*$",
         ],
         "status": [
-            r"状态|运行状态|当前状态|系统状态|运行情况|status|还好吗|活着吗|运行多久",
+            r"^(状态|运行状态|当前状态|系统状态|运行情况|还好吗|活着吗|运行多久)[\?\uFF1F!\uFF01\.\u3002]?$",
+            r"^(status)\s*$",
         ],
         "metrics": [
-            r"指标|统计|性能|调用量|token|用量|metrics|stats|统计数据|性能指标|使用量",
+            r"^(指标|统计|性能|调用量|token用量|使用量|metrics|stats)[\?\uFF1F!\uFF01\.\u3002]?$",
+            r"^show\s+(metrics|stats)\s*$",
         ],
         "dlq": [
-            r"死信|失败事件|未处理|错误队列|死信队列|dlq|dead.?letter|失败的消息",
+            r"^(死信|失败事件|未处理|错误队列|死信队列|dlq|失败消息)[\?\uFF1F!\uFF01\.\u3002]?$",
         ],
         "bus": [
-            r"事件|总线|event.?bus|事件类型|总线状态|bus",
+            r"^(事件总线|event.?bus|总线状态|事件列表)[\?\uFF1F!\uFF01\.\u3002]?$",
         ],
         "clear": [
-            r"清屏|清除屏幕|清理屏幕|clear|刷新屏幕",
+            r"^(清屏|清除屏幕|清理屏幕|clear|刷新屏幕)[!\uFF01\.\u3002]?$",
         ],
+        # settings：仅捕获明确的设置短语，避免把"设置一个提醒"这类自然对话吃掉
         "settings": [
-            r"设置|配置|修改设置|查看设置|更改|切换模型|改模型|改温度|开启|关闭|启用|禁用|把.*改|set.*to|change|configure",
+            r"^(查看|列出|显示|修改|更改|调整|设置|把|把你的)?\s*(模型|温度|最大token|超时|重试|提供商|日志级别|时区|数据目录|长期记忆|程序记忆|路由|上下文压缩|自进化|缓存|多模态|调度器|加密|审计日志|api_key|允许聊天改密钥|llm|llm模型|本地模型|轻量模型|主模型|web|telegram|企业微信|wecom|钉钉|dingtalk|飞书|feishu|discord|slack|docker|shell|浏览器|browser|docker镜像|docker内存|记忆衰减|缓存大小|缓存时间|api端口)\b.*",
+            r"^(settings|config|change|set)\b.*",
+            r"^(列出?设置|显示?设置|查看?设置|所有设置|全部设置|list\s+(all\s+)?settings?|show\s+(all\s+)?settings?)\s*$",
+            r"^(开启|关闭|启用|禁用)\s*(模型|温度|长期记忆|程序记忆|路由|上下文压缩|自进化|缓存|多模态|调度器|加密|审计日志|web|telegram|企业微信|wecom|钉钉|dingtalk|飞书|feishu|discord|slack|docker|shell|浏览器|browser|记忆衰减)\s*$",
         ],
         "models": [
-            r"\bmodels?\b|模型列表|有哪些模型|看模型|看.*模型|可.*模型|所有模型|免费模型|列出模型|列出.*模型|model.*list",
+            r"^(模型列表|有哪些模型|看模型|列出?模型|列出?所有模型|model.?list)\s*$",
         ],
-        # 智能分层：把 provider 的全部模型按 free/paid、context、features 自动分配到 4 层
         "rebuild_tiers": [
-            r"智能分层|自动分层|自动分配|重新分层|刷新分层|rebuild.?tiers|auto.?tier|"
-            r"分层|分类|分档|auto.?classif|smart.?tier|分配.*模型|模型.*分配",
+            r"^(智能分层|自动分层|重新分层|刷新分层|rebuild.?tiers|auto.?tier|分层|自动分配模型)\s*$",
         ],
     }
 
     def _match_intent(text: str) -> Optional[str]:
-        """从自然语言中匹配用户意图，返回命令名或 None。"""
+        """从自然语言中匹配用户意图，返回命令名或 None。
+
+        采用短语级精确匹配 + 小范围正则，避免把自然对话误识别为命令。
+        """
         import re
         lower = text.lower().strip()
         exact_map = {
@@ -602,7 +626,7 @@ async def _interactive(app: OneAgentApp) -> None:
             return exact_map[lower]
         for intent, patterns in _INTENT_PATTERNS.items():
             for pat in patterns:
-                if re.search(pat, lower):
+                if re.search(pat, lower, re.IGNORECASE):
                     return intent
         return None
 
@@ -662,11 +686,15 @@ async def _interactive(app: OneAgentApp) -> None:
             print("\033c", end="")
             continue
         if intent == "settings":
-            # 将设置请求路由到 settings 技能
+            # 将设置请求路由到 settings 技能；若 settings 认为该请求不是真正
+            # 的设置操作，会返回 "__SKIP__"，此时我们回退到正常 LLM 对话流程。
             from skills import _process_settings_command
             result = _process_settings_command(line, app.config)
-            print(result)
-            continue
+            if result == "__SKIP__":
+                intent = None
+            else:
+                print(result)
+                continue
         if intent == "models":
             # 模型发现：拉取当前 provider 的模型列表并按需过滤
             llm = getattr(app, "llm", None)

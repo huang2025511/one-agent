@@ -198,6 +198,15 @@ class DocumentStore:
         self._conn.commit()
         return True
 
+    def close(self) -> None:
+        """Close the underlying SQLite connection to release resources."""
+        if hasattr(self, "_conn") and self._conn is not None:
+            try:
+                self._conn.close()
+            except sqlite3.ProgrammingError:
+                    pass
+            self._conn = None
+
 
 # ------------------------------------------------------------------ skill handler factory
 

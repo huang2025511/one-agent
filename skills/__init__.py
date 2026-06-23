@@ -525,8 +525,6 @@ class SkillManager(Plugin):
             def _eval(node):
                 if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
                     return node.value
-                if isinstance(node, ast.Num):  # py<3.8 compat
-                    return node.n
                 if isinstance(node, ast.BinOp):
                     return _ops[type(node.op)](_eval(node.left), _eval(node.right))
                 if isinstance(node, ast.UnaryOp):
@@ -806,6 +804,10 @@ class SkillManager(Plugin):
             config = ctx_ref.config if ctx_ref else {}
 
             result = _process_settings_command(input_text, config)
+            if result == "__SKIP__":
+                # settings 无法识别该请求：改用自然语言提示，让 LLM 回应
+                chinese_aliases = [a for a in _SETTING_ALIASES if any('\u4e00' <= c <= '\u9fff' for c in a)]
+                return f"未识别的设置项。可设置的选项：{', '.join(chinese_aliases)}"
             return result
 
         # ---------- 网页搜索技能 ----------
@@ -1328,8 +1330,8 @@ def _process_settings_command(input_text: str, config: dict) -> str:
                 break
 
     if matched_path is None:
-        chinese_aliases = [a for a in _SETTING_ALIASES if any('\u4e00' <= c <= '\u9fff' for c in a)]
-        return f"未识别的设置项。可设置的选项：{', '.join(chinese_aliases)}"
+        # 未识别的设置项：回退给 LLM，让用户在自然对话中表达意图
+        return "__SKIP__"
 
     # 敏感项写入检查
     if is_write and any(sk in matched_path for sk in _SENSITIVE_KEYS):

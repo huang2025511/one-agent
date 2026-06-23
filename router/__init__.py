@@ -437,6 +437,24 @@ class SmartRouter(Plugin):
             if h["reply"] is not None:
                 messages.append({"role": "assistant", "content": h["reply"]})
         messages.append({"role": "user", "content": turn.input_text})
+
+        # 【角色注入】：如果用户选择了角色，在 system prompt 后紧跟一条角色 system 消息
+        try:
+            from core.roles import build_role_prompt
+            role_text = build_role_prompt(
+                getattr(self.ctx, "role_library", None)
+                if getattr(self, "ctx", None)
+                else None
+            )
+            if role_text:
+                # 插入到第一条 system 消息之后，确保不覆盖原 system
+                insert_idx = 0
+                for i, m in enumerate(messages):
+                    if m.get("role") == "system":
+                        insert_idx = i + 1
+                messages.insert(insert_idx, {"role": "system", "content": role_text})
+        except Exception as exc:
+            logger.debug("role injection skipped: %s", exc)
         return messages
 
     def _history_tail(self, session_id: str) -> List[Dict[str, Any]]:
