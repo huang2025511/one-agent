@@ -238,6 +238,10 @@ class RESTAPIGateway(Plugin):
             {"name": "MCP", "description": "Model Context Protocol 工具管理"},
             {"name": "Alerts", "description": "告警规则与历史"},
             {"name": "Approvals", "description": "人工审批请求"},
+            {"name": "Roles", "description": "角色系统管理"},
+            {"name": "Export", "description": "数据导出与会话/记忆备份"},
+            {"name": "Templates", "description": "提示词模板管理与渲染"},
+            {"name": "Workflows", "description": "工作流编排与定时任务"},
         ]
 
         app = FastAPI(
@@ -1600,6 +1604,195 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("mcp_client_not_available"))
             await _mcp_client.remove_server(server_name)
             return {"success": True, "server": server_name}
+
+        # ================================================================
+        # 角色 API
+        # ================================================================
+        @app.get("/api/roles", tags=["Roles"])
+        async def list_roles(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """列出所有可用角色"""
+            auth(x_api_key)
+            try:
+                from core.roles import get_library
+                library = get_library()
+                if not library.loaded:
+                    library.load()
+                roles = [{"act": r.get("act", ""), "title": r.get("title", r.get("act", ""))} for r in library.roles]
+                current = ""
+                if _ctx and hasattr(_ctx, "config"):
+                    current = (_ctx.config.get("agent", {}).get("role", {}) or {}).get("current", "")
+                return {"roles": roles, "current": current}
+            except Exception as exc:
+                logger.warning("list roles failed: %s", exc)
+                return {"roles": [], "current": ""}
+
+        @app.post("/api/roles/current", tags=["Roles"])
+        async def set_current_role(body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """设置当前角色"""
+            auth(x_api_key)
+            role_name = body.get("role", "")
+            if _ctx and hasattr(_ctx, "config"):
+                _ctx.config.setdefault("agent", {}).setdefault("role", {})["current"] = role_name
+                _save_config(_ctx.config)
+                # 审计日志
+                if self._audit_log:
+                    self._audit_log.log(
+                        action="role_change",
+                        actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
+                        resource="/api/roles/current",
+                        details={"role": role_name},
+                    )
+            return {"current": role_name}
+
+        # ================================================================
+        # 数据导出 API
+        # ================================================================
+        @app.post("/api/export/sessions", tags=["Export"])
+        async def export_sessions(body: dict = Body(default={}), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """导出会话历史"""
+            auth(x_api_key)
+            fmt = body.get("format", "json")
+            from export import DataExporter
+            exporter = DataExporter()
+            path = exporter.export_sessions(fmt)
+            if not path:
+                raise HTTPException(500, "导出失败")
+            return {"path": path, "format": fmt}
+
+        @app.post("/api/export/memory", tags=["Export"])
+        async def export_memory(body: dict = Body(default={}), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """导出长期记忆"""
+            auth(x_api_key)
+            fmt = body.get("format", "json")
+            limit = body.get("limit", 1000)
+            from export import DataExporter
+            exporter = DataExporter()
+            path = exporter.export_memory(fmt, limit)
+            if not path:
+                raise HTTPException(500, "导出失败")
+            return {"path": path, "format": fmt}
+
+        @app.post("/api/export/all", tags=["Export"])
+        async def export_all(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """导出所有数据为 ZIP"""
+            auth(x_api_key)
+            from export import DataExporter
+            exporter = DataExporter()
+            path = exporter.export_all()
+            if not path:
+                raise HTTPException(500, "导出失败")
+            return {"path": path}
+
+        # ================================================================
+        # 提示词模板 API
+        # ================================================================
+        @app.get("/api/templates", tags=["Templates"])
+        async def list_templates(category: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """列出提示词模板"""
+            auth(x_api_key)
+            from prompt_templates import PromptTemplateManager
+            mgr = PromptTemplateManager()
+            return {"templates": mgr.list_templates(category or None), "categories": mgr.list_categories()}
+
+        @app.post("/api/templates", tags=["Templates"])
+        async def add_template(body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """添加提示词模板"""
+            auth(x_api_key)
+            from prompt_templates import PromptTemplateManager
+            mgr = PromptTemplateManager()
+            tmpl = mgr.add_template(
+                name=body.get("name", ""),
+                template=body.get("template", ""),
+                category=body.get("category", "general"),
+                description=body.get("description", ""),
+            )
+            return {"template": tmpl}
+
+        @app.post("/api/templates/{template_id}/render", tags=["Templates"])
+        async def render_template(template_id: str, body: dict = Body(default={}), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """渲染提示词模板"""
+            auth(x_api_key)
+            from prompt_templates import PromptTemplateManager
+            mgr = PromptTemplateManager()
+            result = mgr.render(template_id, body.get("variables", {}))
+            if result is None:
+                raise HTTPException(404, "模板不存在")
+            return {"rendered": result}
+
+        # ================================================================
+        # 工作流 API
+        # ================================================================
+        @app.get("/api/workflows", tags=["Workflows"])
+        async def list_workflows(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """列出所有工作流"""
+            auth(x_api_key)
+            scheduler = getattr(_ctx, "scheduler", None) if _ctx else None
+            if scheduler is None:
+                return {"workflows": []}
+            return {"workflows": scheduler.list_workflows()}
+
+        @app.post("/api/workflows", tags=["Workflows"])
+        async def create_workflow(body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """创建工作流"""
+            auth(x_api_key)
+            scheduler = getattr(_ctx, "scheduler", None) if _ctx else None
+            if scheduler is None:
+                raise HTTPException(503, "调度器未启用")
+            from scheduler import Workflow, WorkflowStep
+            steps = [WorkflowStep(**s) for s in body.get("steps", [])]
+            wf = Workflow(
+                id=body.get("id", ""),
+                name=body.get("name", ""),
+                description=body.get("description", ""),
+                steps=steps,
+                trigger=body.get("trigger", "manual"),
+                cron=body.get("cron", ""),
+            )
+            scheduler.add_workflow(wf)
+            return {"workflow": wf.id, "created": True}
+
+        @app.post("/api/workflows/{workflow_id}/run", tags=["Workflows"])
+        async def run_workflow(workflow_id: str, body: dict = Body(default={}), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """执行工作流"""
+            auth(x_api_key)
+            scheduler = getattr(_ctx, "scheduler", None) if _ctx else None
+            if scheduler is None:
+                raise HTTPException(503, "调度器未启用")
+            result = await scheduler.run_workflow(workflow_id, body.get("context"))
+            return result
+
+        # ================================================================
+        # 技能市场扩展 API（依赖检查 + 评论）
+        # ================================================================
+        @app.get("/api/marketplace/{name}/deps", tags=["Marketplace"])
+        async def check_deps(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """检查技能包依赖"""
+            auth(x_api_key)
+            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            if mp is None:
+                raise HTTPException(503, "marketplace not available")
+            return mp.check_dependencies(name)
+
+        @app.post("/api/marketplace/{name}/comments", tags=["Marketplace"])
+        async def add_comment(name: str, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """添加技能评论"""
+            auth(x_api_key)
+            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            if mp is None:
+                raise HTTPException(503, "marketplace not available")
+            ok = mp.add_comment(name, body.get("author", "anonymous"), body.get("content", ""), body.get("rating"))
+            if not ok:
+                raise HTTPException(404, "技能包不存在或内容为空")
+            return {"added": True}
+
+        @app.get("/api/marketplace/{name}/comments", tags=["Marketplace"])
+        async def get_comments(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """获取技能评论"""
+            auth(x_api_key)
+            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            if mp is None:
+                raise HTTPException(503, "marketplace not available")
+            return {"comments": mp.get_comments(name)}
 
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):

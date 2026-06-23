@@ -130,3 +130,16 @@ llm_cache:
   ttl_seconds: 3600  # 缓存存活时间（秒）
   max_memory_mb: 100  # 内存缓存上限（MB）
   redis_url: ''  # Redis 连接 URL（留空 = 纯内存模式），例如 redis://localhost:6379/0
+
+# 提示词模板管理
+# 模板存储在 data/prompt_templates/templates.json
+# 支持 {{variable}} 变量替换，内置 5 个默认模板
+prompt_templates:
+  enabled: true  # 是否启用提示词模板系统
+
+# 数据导出设置
+# 导出文件保存到 data/exports/ 目录
+export:
+  enabled: true  # 是否启用数据导出
+  max_sessions: 10000  # 单次导出最大会话数
+  max_memory_items: 5000  # 单次导出最大记忆条数

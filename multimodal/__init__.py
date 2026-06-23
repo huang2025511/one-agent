@@ -415,6 +415,71 @@ class MultimodalPlugin(Plugin):
                 normalized.append(r)
         return normalized
 
+    # --------------------------------------------------------- OCR
+    async def ocr_image(
+        self,
+        image_path: str,
+        language: str = "chi_sim+eng",
+        model: str = "openai/gpt-4o",
+    ) -> Dict[str, Any]:
+        """对图片进行 OCR 文字识别。
+
+        优先使用本地 pytesseract（离线、快速），不可用时回退到
+        视觉大模型（GPT-4o / Claude Vision）进行文字提取。
+
+        Args:
+            image_path: 本地图片路径
+            language: tesseract 语言代码（默认中文+英文）
+            model: 回退视觉模型
+
+        Returns:
+            {"text": "识别到的文字", "method": "tesseract"|"vision", "confidence": float}
+        """
+        # 安全校验：防止目录遍历
+        try:
+            p = Path(image_path).resolve()
+            cwd = Path.cwd().resolve()
+            try:
+                p.relative_to(cwd)
+            except ValueError:
+                return {"text": "", "error": "access denied: path outside working directory", "method": ""}
+            allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
+            if p.suffix.lower() not in allowed_ext:
+                return {"text": "", "error": f"invalid file type: {p.suffix}", "method": ""}
+            if not p.exists() or not p.is_file():
+                return {"text": "", "error": "file not found or not a regular file", "method": ""}
+        except (OSError, ValueError) as exc:
+            return {"text": "", "error": f"invalid path: {exc}", "method": ""}
+
+        # 方案一：本地 pytesseract（离线）
+        try:
+            import pytesseract  # type: ignore
+            from PIL import Image  # type: ignore
+
+            img = Image.open(str(p))
+            text = pytesseract.image_to_string(img, lang=language)
+            text = text.strip()
+            if text:
+                return {"text": text, "method": "tesseract", "confidence": 0.9}
+        except ImportError:
+            logger.debug("pytesseract/PIL 未安装，回退到视觉模型 OCR")
+        except Exception as exc:
+            logger.debug("pytesseract OCR 失败，回退到视觉模型: %s", exc)
+
+        # 方案二：视觉大模型回退
+        try:
+            result = await self.analyze_image(
+                str(p),
+                prompt="请提取这张图片中的所有文字内容，保持原始格式和排版。只输出识别到的文字，不要添加解释。",
+                model=model,
+            )
+            if result.get("error"):
+                return {"text": "", "error": result["error"], "method": ""}
+            return {"text": result.get("analysis", ""), "method": "vision", "confidence": 0.8}
+        except Exception as exc:
+            logger.warning("vision OCR failed: %s", exc)
+            return {"text": "", "error": str(exc), "method": ""}
+
 
 # ------------------------------------------------------------------ skill handler factories
 
