@@ -582,44 +582,46 @@ class Coordinator(Plugin):
         logger.debug("turn complexity: %.2f", complexity)
 
         # --- Step 1: Clarification check (complex and above) ---
-        if complexity >= CLARIFICATION_MIN_COMPLEXITY:
+        # Short, unambiguous requests skip this even at complex tier
+        if complexity >= CLARIFICATION_MIN_COMPLEXITY and self._needs_clarification_check(turn):
             if await self._try_clarification(messages, turn):
                 # User needs to provide clarification — turn is done for now
                 self.publish("turn_completed", turn=turn)
                 return
 
         # --- Step 2: Pre-execution thinking by tier ---
+        multi_agent_done = False
         if complexity >= EXPERT_COMPLEXITY_THRESHOLD:
-            # Expert level: multi-agent pattern + tool chain planning
+            # Expert level: tool chain planning + multi-agent pattern
             if complexity >= TOOL_CHAIN_PLANNING_MIN_COMPLEXITY:
                 await self._plan_tool_chain(messages, turn, tools)
-            if await self._multi_agent_phase(messages, turn):
-                pass  # multi-agent handled it, continue to post phases
+            # multi-agent publishes turn_completed itself on success
+            multi_agent_done = await self._multi_agent_phase(messages, turn)
         elif complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
             # Complex level: think + reflect
             await self._think_phase(messages, turn)
             await self._reflect_phase(messages, turn)
-        else:
-            # Simple/trivial: skip thinking entirely for speed
-            pass
+        # else: simple/trivial — skip thinking entirely for speed
 
-        # Context compression (for complex/expert after thinking phases)
-        if complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
-            await self._compress_context(messages, turn)
-        else:
-            await self._compress_context(messages, turn)
+        # If multi-agent handled the turn, it already published turn_completed.
+        # Skip the rest to avoid double-publishing and wasted work.
+        if multi_agent_done:
+            return
+
+        # Context compression (always, but cheap when not needed)
+        await self._compress_context(messages, turn)
 
         # --- Step 3: Tool-call loop ---
         await self._tool_loop(messages, turn, tools)
 
         # --- Step 4: Post-execution quality improvements by tier ---
-        if complexity >= SELF_VERIFY_MIN_COMPLEXITY and turn.result and not turn.error:
-            # Self-verification: check if the answer actually addresses the question
-            await self._self_verify(messages, turn, complexity)
-
+        # For complex+: combine self-verification and final polish into one
+        # LLM call when possible (saves one round-trip).
         if complexity >= FINAL_POLISH_MIN_COMPLEXITY and turn.result and not turn.error:
-            # Final polish: structure and improve the answer
-            await self._final_polish(messages, turn)
+            await self._verify_and_polish(messages, turn, complexity)
+        elif complexity >= SELF_VERIFY_MIN_COMPLEXITY and turn.result and not turn.error:
+            # simple tier: light self-verification only
+            await self._self_verify(messages, turn, complexity)
 
         if complexity >= POST_REFLECT_MIN_COMPLEXITY and turn.result:
             # Post-execution reflection: learn from this turn (expert only)
@@ -638,6 +640,21 @@ class Coordinator(Plugin):
             turn.tokens_used,
             turn.duration_seconds or 0,
         )
+
+    def _needs_clarification_check(self, turn: TurnContext) -> bool:
+        """Heuristic: should we even bother asking the LLM if input is ambiguous?
+
+        Short, specific questions (e.g. "现在几点", "1+1=") don't need the
+        clarification check even at complex tier — it would just waste a call.
+        """
+        text = (turn.input_text or "").strip()
+        # Very short inputs are usually clear commands or questions
+        if len(text) < 15:
+            return False
+        # Inputs with code blocks, URLs, or file paths are usually concrete tasks
+        if any(marker in text for marker in ("```", "http", "/workspace", ".py", ".js")):
+            return False
+        return True
 
     def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Prepare message list with memory snippets from long-term memory + KG.
@@ -1284,6 +1301,54 @@ class Coordinator(Plugin):
 
     # ------------------------------------------------------- smart boost
 
+    def _lightweight_model(self, turn: TurnContext) -> str:
+        """Pick the lightweight model for auxiliary calls when available.
+
+        Auxiliary calls (clarification, self-check, polish, reflection, tool
+        chain planning) don't need the full power of the primary model — using
+        a cheaper/faster model here cuts cost and latency significantly.
+        """
+        if self.ctx and self.ctx.config:
+            lw = self.ctx.config.get("llm", {}).get("lightweight_model")
+            if lw:
+                return lw
+        return turn.model
+
+    async def _llm_quick_call(
+        self, prompt: str, turn: TurnContext, max_tokens: int = 200,
+        use_lightweight: bool = True,
+    ) -> Optional[str]:
+        """One-shot LLM call for auxiliary tasks (no tools, no history).
+
+        Centralizes the try/except + token accounting that was duplicated
+        across 5 smart-boost methods. Returns the text reply or None on failure.
+        """
+        if self._llm is None:
+            return None
+        model = self._lightweight_model(turn) if use_lightweight else turn.model
+        try:
+            resp = await self._llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                max_tokens=max_tokens,
+                tools=None,
+            )
+            text = (resp.get("text") or "").strip()
+            # Account for tokens used by auxiliary calls
+            tokens = int(resp.get("tokens_used") or 0)
+            if tokens:
+                turn.tokens_used = (turn.tokens_used or 0) + tokens
+            return text
+        except Exception as exc:
+            logger.debug("auxiliary LLM call failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _is_zh() -> bool:
+        """Cached language check (zh vs en) for prompt selection."""
+        from i18n import get_language
+        return (get_language() or "zh").lower().startswith("zh")
+
     async def _try_clarification(
         self, messages: List[Dict[str, Any]], turn: TurnContext,
     ) -> bool:
@@ -1296,33 +1361,22 @@ class Coordinator(Plugin):
         if messages is None or turn is None:
             return False
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
         user_text = turn.input_text or ""
+        zh = self._is_zh()
 
         # Quick heuristic: very short or ambiguous inputs likely need clarification
-        ambiguous_keywords_zh = [
-            "那个", "这个", "它", "帮我弄", "搞一下", "处理一下",
-            "你看着办", "随便", "差不多",
-        ]
-        ambiguous_keywords_en = [
-            "do it", "fix it", "handle it", "that thing", "whatever",
-        ]
-
-        is_short = len(user_text) < 15
-        has_ambiguous_kw = any(
-            kw in user_text.lower()
-            for kw in (ambiguous_keywords_zh if lang.startswith("zh") else ambiguous_keywords_en)
+        ambiguous_keywords = (
+            ["那个", "这个", "它", "帮我弄", "搞一下", "处理一下", "你看着办", "随便", "差不多"]
+            if zh else
+            ["do it", "fix it", "handle it", "that thing", "whatever"]
         )
-
+        has_ambiguous_kw = any(kw in user_text.lower() for kw in ambiguous_keywords)
         # Only do LLM-based check for medium-length inputs that might be ambiguous
-        if not is_short and not has_ambiguous_kw:
-            # Still do a quick LLM ambiguity check for complex tasks
-            if len(user_text) < 50:
-                return False
+        if not has_ambiguous_kw and len(user_text) >= 15 and len(user_text) < 50:
+            return False
 
         # Use a lightweight LLM call to judge ambiguity and generate questions
-        if lang.startswith("zh"):
+        if zh:
             check_prompt = (
                 f"请判断以下用户请求是否存在明显的歧义或信息不足，"
                 f"导致你无法准确执行。\n\n"
@@ -1340,37 +1394,25 @@ class Coordinator(Plugin):
                 f"If clear enough, reply with only the word 'CLEAR'."
             )
 
-        try:
-            resp = await self._llm.chat_completion(
-                messages=[{"role": "user", "content": check_prompt}],
-                model=turn.model,
-                max_tokens=200,
-                tools=None,
-            )
-            reply = (resp.get("text") or "").strip()
-        except Exception as exc:
-            logger.debug("clarification check failed: %s", exc)
-            return False
-
-        # Check if the model said it's clear
+        reply = await self._llm_quick_call(check_prompt, turn, max_tokens=200)
         if not reply:
             return False
+
         is_clear = (
             reply.startswith("没问题") or
             reply.upper().startswith("CLEAR") or
             len(reply) < 10
         )
-
         if is_clear:
             return False
 
         # Model has clarification questions — present them to the user
-        if lang.startswith("zh"):
-            intro = "在开始之前，我需要确认几个问题，以确保给你最准确的结果：\n\n"
-        else:
-            intro = "Before I start, I need to clarify a few things to give you the best result:\n\n"
-
-        turn.record_success(intro + reply, int(resp.get("tokens_used") or 0))
+        intro = (
+            "在开始之前，我需要确认几个问题，以确保给你最准确的结果：\n\n"
+            if zh else
+            "Before I start, I need to clarify a few things to give you the best result:\n\n"
+        )
+        turn.record_success(intro + reply, 0)  # tokens already accounted in _llm_quick_call
         turn.meta["clarification_asked"] = True
         logger.info("clarification asked for ambiguous request (%d chars)", len(reply))
         return True
@@ -1389,15 +1431,14 @@ class Coordinator(Plugin):
         if not turn.result:
             return
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
+        zh = self._is_zh()
         answer = turn.result or ""
         question = turn.input_text or ""
 
         # Lightweight check for simple tasks: did we actually answer?
         is_deep = complexity >= COMPLEX_COMPLEXITY_THRESHOLD
 
-        if lang.startswith("zh"):
+        if zh:
             if is_deep:
                 verify_prompt = (
                     "【内部自检 — 不要输出给用户】\n\n"
@@ -1441,16 +1482,8 @@ class Coordinator(Plugin):
                     f"Answer: {answer[:500]}"
                 )
 
-        try:
-            resp = await self._llm.chat_completion(
-                messages=[{"role": "user", "content": verify_prompt}],
-                model=turn.model,
-                max_tokens=150,
-                tools=None,
-            )
-            result = (resp.get("text") or "").strip()
-        except Exception as exc:
-            logger.debug("self-verification skipped: %s", exc)
+        result = await self._llm_quick_call(verify_prompt, turn, max_tokens=150)
+        if not result:
             return
 
         passed = (
@@ -1470,19 +1503,15 @@ class Coordinator(Plugin):
         turn.meta["self_verify_issue"] = result
         logger.info("self-verification found issues, correcting: %s", result[:100])
 
-        # Add the correction hint to messages and run one more tool-loop iteration
-        if lang.startswith("zh"):
-            correction_msg = (
-                f"[自检发现问题：{result}]\n\n"
-                "请根据以上反馈修正你的答案，使其更准确、更完整。"
-                "如果需要，可以继续调用工具。"
-            )
-        else:
-            correction_msg = (
-                f"[Self-check found issue: {result}]\n\n"
-                "Please revise your answer based on this feedback to make it more "
-                "accurate and complete. You may continue using tools if needed."
-            )
+        correction_msg = (
+            f"[自检发现问题：{result}]\n\n"
+            "请根据以上反馈修正你的答案，使其更准确、更完整。"
+            "如果需要，可以继续调用工具。"
+            if zh else
+            f"[Self-check found issue: {result}]\n\n"
+            "Please revise your answer based on this feedback to make it more "
+            "accurate and complete. You may continue using tools if needed."
+        )
 
         messages.append({"role": "user", "content": correction_msg})
 
@@ -1495,29 +1524,120 @@ class Coordinator(Plugin):
         if not turn.result or len(turn.result) < len(prev_result or "") // 2:
             turn.result = prev_result
 
+    async def _verify_and_polish(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, complexity: float,
+    ) -> None:
+        """Combined self-verification + final polish in ONE LLM call.
+
+        For complex+ tasks this saves a round-trip vs running _self_verify
+        then _final_polish separately. The model is asked to:
+          1. Check the answer for issues (relevance/accuracy/completeness)
+          2. If OK, output the polished version directly
+          3. If issues found, output the corrected + polished version
+
+        If the answer is very short, skip polishing (only verify).
+        """
+        if not turn.result:
+            return
+
+        zh = self._is_zh()
+        answer = turn.result or ""
+        question = turn.input_text or ""
+
+        # Short answers: only verify, skip polish (saves tokens)
+        skip_polish = len(answer) < 200
+
+        if zh:
+            if skip_polish:
+                prompt = (
+                    "【内部自检 — 不要输出给用户】\n\n"
+                    "请检查以下回答是否正确回答了用户的问题。"
+                    "如果正确，只回答『通过』。如果有问题，用一句话指出并给出修正后的答案。\n\n"
+                    f"用户问题：{question[:300]}\n\n"
+                    f"当前回答：{answer[:800]}"
+                )
+            else:
+                prompt = (
+                    "【自检并优化 — 内部使用】\n\n"
+                    "请对以下回答执行两步操作：\n"
+                    "1. 自检：回答是否正确、完整地回应了用户问题？\n"
+                    "2. 优化：在保持核心内容不变的前提下，优化结构（分点/表格）、"
+                    "精炼语言、突出重点、长答案加要点总结。\n\n"
+                    f"用户问题：{question[:300]}\n\n"
+                    f"原始回答：\n{answer[:2000]}\n\n"
+                    "请直接输出优化后的完整回答。如果原回答有明显错误，请在优化时一并修正。"
+                )
+        else:
+            if skip_polish:
+                prompt = (
+                    "[Internal self-check — DO NOT show to user]\n\n"
+                    "Check if the following answer correctly addresses the user's question. "
+                    "If correct, reply with only 'PASS'. If there are issues, state the problem "
+                    "in one sentence and provide the corrected answer.\n\n"
+                    f"User question: {question[:300]}\n\n"
+                    f"Current answer: {answer[:800]}"
+                )
+            else:
+                prompt = (
+                    "[Self-check and polish — internal use]\n\n"
+                    "Perform two steps on the following answer:\n"
+                    "1. Self-check: does it correctly and completely address the question?\n"
+                    "2. Polish: keeping core content unchanged, improve structure "
+                    "(headings/bullets/tables), tighten language, highlight key points, "
+                    "add a brief summary for long answers.\n\n"
+                    f"User question: {question[:300]}\n\n"
+                    f"Original answer:\n{answer[:2000]}\n\n"
+                    "Output the full polished answer directly. Fix any obvious errors while polishing."
+                )
+
+        max_tok = 150 if skip_polish else min(len(answer) + 500, 4000)
+        result = await self._llm_quick_call(prompt, turn, max_tokens=max_tok)
+        if not result:
+            return
+
+        if skip_polish:
+            # Verify-only path
+            passed = (
+                result.startswith("通过") or
+                result.upper().startswith("PASS") or
+                result.startswith("是") or
+                result.upper().startswith("YES")
+            )
+            if passed:
+                turn.meta["self_verify"] = "passed"
+            else:
+                turn.meta["self_verify"] = "corrected"
+                turn.meta["self_verify_issue"] = result
+                logger.info("self-verification found issues: %s", result[:100])
+        else:
+            # Combined verify+polish path
+            if result and len(result) > len(answer) // 2:
+                turn.result = result
+                turn.meta["polished"] = True
+                turn.meta["self_verify"] = "passed"
+                logger.debug(
+                    "verify+polish applied (%d -> %d chars)", len(answer), len(result)
+                )
+
     async def _final_polish(
         self, messages: List[Dict[str, Any]], turn: TurnContext,
     ) -> None:
         """Polish the final answer for better structure, clarity, and readability.
 
-        This is a light rewrite that:
-        - Adds clear structure (headings, bullet points, tables where appropriate)
-        - Improves language clarity and professionalism
-        - Ensures the answer directly addresses the original question
-        - Adds a brief summary for long answers
+        Kept for backward compatibility / standalone use. The combined
+        _verify_and_polish is preferred for complex+ tasks.
         """
         if not turn.result:
             return
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
+        zh = self._is_zh()
         answer = turn.result or ""
 
         # Skip very short answers (they don't need polishing)
         if len(answer) < 200:
             return
 
-        if lang.startswith("zh"):
+        if zh:
             polish_prompt = (
                 "【答案优化 — 不要改变核心内容，只优化表达】\n\n"
                 "请对以下回答进行优化，要求：\n"
@@ -1542,21 +1662,11 @@ class Coordinator(Plugin):
                 "Output the full polished answer."
             )
 
-        try:
-            resp = await self._llm.chat_completion(
-                messages=[{"role": "user", "content": polish_prompt}],
-                model=turn.model,
-                max_tokens=min(len(answer) + 500, 4000),
-                tools=None,
-            )
-            polished = (resp.get("text") or "").strip()
-        except Exception as exc:
-            logger.debug("final polish skipped: %s", exc)
-            return
-
+        polished = await self._llm_quick_call(
+            polish_prompt, turn, max_tokens=min(len(answer) + 500, 4000)
+        )
         if polished and len(polished) > len(answer) // 2:
             turn.result = polished
-            turn.tokens_used = (turn.tokens_used or 0) + int(resp.get("tokens_used") or 0)
             turn.meta["polished"] = True
             logger.debug("final polish applied (%d -> %d chars)", len(answer), len(polished))
 
@@ -1572,14 +1682,13 @@ class Coordinator(Plugin):
         if turn is None:
             return
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
+        zh = self._is_zh()
         answer = turn.result or ""
         question = turn.input_text or ""
         tokens_used = turn.tokens_used or 0
         duration = turn.duration_seconds or 0
 
-        if lang.startswith("zh"):
+        if zh:
             reflect_prompt = (
                 "【执行后复盘 — 内部使用，不要输出给用户】\n\n"
                 "请对刚刚完成的任务进行复盘：\n\n"
@@ -1608,21 +1717,9 @@ class Coordinator(Plugin):
                 "4. Rate the answer quality (0-10) and why?"
             )
 
-        try:
-            resp = await self._llm.chat_completion(
-                messages=[{"role": "user", "content": reflect_prompt}],
-                model=turn.model,
-                max_tokens=300,
-                tools=None,
-            )
-            reflection = (resp.get("text") or "").strip()
-        except Exception as exc:
-            logger.debug("post-reflection skipped: %s", exc)
-            return
-
+        reflection = await self._llm_quick_call(reflect_prompt, turn, max_tokens=300)
         if reflection:
             turn.meta["post_reflection"] = reflection
-            turn.tokens_used = (turn.tokens_used or 0) + int(resp.get("tokens_used") or 0)
             logger.debug("post-reflection completed (%d chars)", len(reflection))
 
     async def _plan_tool_chain(
@@ -1639,16 +1736,14 @@ class Coordinator(Plugin):
         if not tools:
             return
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
-
+        zh = self._is_zh()
         tool_names = [
             t.get("function", {}).get("name", "") for t in tools
             if isinstance(t, dict)
         ]
         tool_list = ", ".join(tool_names[:15])
 
-        if lang.startswith("zh"):
+        if zh:
             plan_prompt = (
                 "【工具链规划 — 内部使用】\n\n"
                 f"可用工具：{tool_list}\n\n"
@@ -1673,27 +1768,19 @@ class Coordinator(Plugin):
                 "Output as a numbered list."
             )
 
-        try:
-            resp = await self._llm.chat_completion(
-                messages=list(messages) + [{"role": "user", "content": plan_prompt}],
-                model=turn.model,
-                max_tokens=400,
-                tools=None,
-            )
-            plan = (resp.get("text") or "").strip()
-        except Exception as exc:
-            logger.debug("tool chain planning skipped: %s", exc)
-            return
-
+        plan = await self._llm_quick_call(
+            plan_prompt, turn, max_tokens=400,
+            # Tool chain planning benefits from the full model
+            use_lightweight=False,
+        )
         if plan:
-            header = "【工具链执行规划】\n" if lang.startswith("zh") else "[Tool chain plan]\n"
+            header = "【工具链执行规划】\n" if zh else "[Tool chain plan]\n"
             messages.append({"role": "assistant", "content": header + plan})
             prompt = (
                 "好。按照这个规划执行工具调用。"
-                if lang.startswith("zh")
-                else "Good. Execute tool calls following this plan."
+                if zh else
+                "Good. Execute tool calls following this plan."
             )
             messages.append({"role": "user", "content": prompt})
             turn.meta["tool_chain_plan"] = plan
-            turn.tokens_used = (turn.tokens_used or 0) + int(resp.get("tokens_used") or 0)
             logger.debug("tool chain plan created (%d chars)", len(plan))
