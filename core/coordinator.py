@@ -932,13 +932,18 @@ class Coordinator(Plugin):
 
         When OS mode is enabled (via /os-on), system_run is automatically added
         to the tool list so the LLM can directly call it for system operations.
+
+        Proxy skills (lazy-loaded modules) participate in keyword matching
+        alongside core skills, so the LLM can discover and auto-load optional
+        modules when the user's query is relevant.
         """
         if turn is None:
             raise RuntimeError("turn cannot be None")
 
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
-            chosen = self._skills.pick_relevant(turn.input_text, limit=4)
+            # 提高 limit 到 8，让代理技能（可选模块）也有机会被选中
+            chosen = self._skills.pick_relevant(turn.input_text, limit=8)
             web_search = self._skills.get("web_search")
             if web_search and web_search not in chosen:
                 chosen.insert(0, web_search)

@@ -188,12 +188,22 @@ class SkillManager(Plugin):
         """Simple keyword relevance — pick N skills whose title/description
         contain words from the user query.  This avoids loading the entire
         skill catalog into the LLM context.
+
+        Supports both English (\\w{3,}) and Chinese (2+ chars) keyword matching.
         """
-        query_words = set(w.lower() for w in re.findall(r"\w{3,}", text))
+        # 英文关键词：3字符以上的单词
+        query_words = set(w.lower() for w in re.findall(r"[a-zA-Z]{3,}", text))
+        # 中文关键词：提取2-4字的中文片段（滑动窗口）
+        chinese_chars = re.findall(r"[\u4e00-\u9fa5]+", text)
+        for segment in chinese_chars:
+            # 对每个中文连续片段，提取2字和3字子串
+            for length in (2, 3, 4):
+                for i in range(len(segment) - length + 1):
+                    query_words.add(segment[i:i + length])
         scored: List[tuple] = []
         for skill in self._skills.values():
             hay = f"{skill.title} {skill.description}".lower()
-            hits = sum(1 for w in query_words if w in hay)
+            hits = sum(1 for w in query_words if w.lower() in hay)
             if hits > 0:
                 scored.append((hits, skill.title, skill))
         scored.sort(reverse=True)

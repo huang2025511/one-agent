@@ -423,6 +423,14 @@ class OneAgentApp:
         # 将 registry 挂到 ctx，供 /module 命令和其他模块使用
         self.ctx._registry = self._registry
 
+        # --- 注册代理技能：让 LLM 能"看到"所有可选模块的能力 ---
+        # 代理技能在 LLM 调用时自动加载对应模块
+        from core.module_autoloader import ModuleAutoLoader
+        self._autoloader = ModuleAutoLoader(self._registry, self.skills)
+        self._autoloader.set_context(self.ctx)
+        proxy_count = self._autoloader.register_proxy_skills()
+        logger.info("registered %d proxy skills for lazy-loaded modules", proxy_count)
+
         # Register knowledge graph search skill (KG is created by MemoryPlugin during setup)
         if self.memory._kg is not None:
             from memory.knowledge_graph import make_graph_search_handler
