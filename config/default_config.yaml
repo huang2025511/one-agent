@@ -110,9 +110,23 @@ rest:
   - 'http://localhost'
   - 'http://127.0.0.1'
 
-monitoring: {}  # Monitoring plugin settings (uses defaults)
-multimodal: {}  # Multimodal plugin settings (uses defaults)
+monitoring: {}  # 监控插件设置（留空使用默认值）
+multimodal: {}  # 多模态插件设置（留空使用默认值）
+
 marketplace:
-  enabled: true
-  registry_url: ''  # Empty = use built-in registry
-llm_cache: {}  # LLM response cache settings (uses defaults)
+  enabled: true  # 是否启用技能市场
+  registry_url: ''  # 技能注册表 URL（留空 = 使用内置注册表）
+  community_hub: ''  # 社区技能仓库 URL（留空 = 使用官方仓库）
+  # 技能评分系统：用户可通过 API 对已安装技能打分（1.0-5.0）
+  # 评分采用加权平均，持久化到 data/marketplace/registry.json
+
+# LLM 响应缓存设置
+# 支持两种后端：
+#   - memory（默认）：进程内 LRU 缓存，TTL + 内存上限自动淘汰
+#   - redis（可选）：跨进程共享缓存，需安装 redis-py 并配置 redis_url
+# Redis 不可用时自动降级为纯内存缓存
+llm_cache:
+  max_size: 500  # 最大缓存条目数（1-10000）
+  ttl_seconds: 3600  # 缓存存活时间（秒）
+  max_memory_mb: 100  # 内存缓存上限（MB）
+  redis_url: ''  # Redis 连接 URL（留空 = 纯内存模式），例如 redis://localhost:6379/0

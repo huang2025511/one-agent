@@ -234,7 +234,7 @@ class AuditLog:
         except Exception:
             pass
 
-    def __del__(self):
+    def __del__(self) -> None:
         """Ensure connection is closed on garbage collection."""
         try:
             self.close()

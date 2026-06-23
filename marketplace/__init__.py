@@ -33,7 +33,7 @@ class SkillPackage:
     """Represents a skill package."""
     
     def __init__(self, name: str, version: str = "1.0.0", description: str = "",
-                 author: str = "", path: str = ""):
+                 author: str = "", path: str = "") -> None:
         self.name = name
         self.version = version
         self.description = description
@@ -42,6 +42,9 @@ class SkillPackage:
         self.sha256 = ""
         self.installed_at: Optional[float] = None
         self.tags: List[str] = []
+        # 评分相关字段
+        self.rating: float = 0.0
+        self.rating_count: int = 0
     
     @classmethod
     def from_directory(cls, dirpath: str) -> Optional["SkillPackage"]:
@@ -98,20 +101,22 @@ class SkillPackage:
             "author": self.author,
             "sha256": self.sha256,
             "tags": self.tags,
+            "rating": self.rating,
+            "rating_count": self.rating_count,
         }
 
 
 class Marketplace:
     """Skill marketplace for discovering and installing skill packages."""
     
-    def __init__(self, registry_dir: str = "data/marketplace"):
+    def __init__(self, registry_dir: str = "data/marketplace") -> None:
         self._registry_dir = Path(registry_dir)
         self._registry_dir.mkdir(parents=True, exist_ok=True)
         self._registry_file = self._registry_dir / "registry.json"
         self._packages: Dict[str, SkillPackage] = {}
         self._load_registry()
     
-    def _load_registry(self):
+    def _load_registry(self) -> None:
         if self._registry_file.exists():
             try:
                 data = json.loads(self._registry_file.read_text())
@@ -124,11 +129,15 @@ class Marketplace:
                     )
                     pkg.sha256 = entry.get("sha256", "")
                     pkg.tags = entry.get("tags", [])
+                    # 恢复评分相关字段
+                    pkg.rating = entry.get("rating", 0.0)
+                    pkg.rating_count = entry.get("rating_count", 0)
                     self._packages[pkg.name] = pkg
             except Exception as exc:
                 logger.warning("Failed to load marketplace registry: %s", exc)
     
-    def _save_registry(self):
+    def _save_registry(self) -> None:
+        # to_dict() 已包含 rating 和 rating_count，会一并持久化
         data = {
             "updated_at": time.time(),
             "packages": [p.to_dict() for p in self._packages.values()],
@@ -192,6 +201,36 @@ class Marketplace:
         if not path.exists():
             return []
         return [d.name for d in path.iterdir() if d.is_dir() and (d / "SKILL.md").exists()]
+
+    def rate_package(self, name: str, rating: float) -> bool:
+        """为指定技能包打分。
+
+        - rating 取值范围 1.0-5.0，超出范围返回 False
+        - 包不存在返回 False
+        - 使用加权平均更新评分，并持久化到 registry
+        - 成功返回 True
+        """
+        # 校验评分范围
+        if rating < 1.0 or rating > 5.0:
+            return False
+        # 校验包是否存在
+        if name not in self._packages:
+            return False
+        pkg = self._packages[name]
+        # 加权平均：新评分 = (旧评分 * 旧次数 + 本次评分) / (旧次数 + 1)
+        pkg.rating = (pkg.rating * pkg.rating_count + rating) / (pkg.rating_count + 1)
+        pkg.rating_count += 1
+        # 持久化到 registry
+        self._save_registry()
+        logger.info("Rated skill %s: %.2f (count=%d)", name, pkg.rating, pkg.rating_count)
+        return True
+
+    def get_top_rated(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """按评分降序返回前 N 个技能包。"""
+        packages = list(self._packages.values())
+        # 按 rating 降序排序
+        packages.sort(key=lambda p: p.rating, reverse=True)
+        return [p.to_dict() for p in packages[:limit]]
 
 
 # ============================================================

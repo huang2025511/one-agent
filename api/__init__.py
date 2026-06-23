@@ -221,10 +221,30 @@ class RESTAPIGateway(Plugin):
             logger.warning("fastapi not installed — REST API disabled")
             return
 
+        # OpenAPI 标签定义 — 用于 /docs 自动文档的端点分组
+        _openapi_tags = [
+            {"name": "Chat", "description": "对话与消息流接口"},
+            {"name": "Memory", "description": "长期记忆查询与管理"},
+            {"name": "Skills", "description": "技能列表与安装"},
+            {"name": "Marketplace", "description": "技能市场：发布、发现、安装、评分"},
+            {"name": "Sessions", "description": "会话管理与分叉"},
+            {"name": "Config", "description": "配置查看、热重载与备份"},
+            {"name": "Settings", "description": "运行时配置项读写"},
+            {"name": "Health", "description": "健康检查与就绪探针"},
+            {"name": "Metrics", "description": "系统指标与 Prometheus 监控"},
+            {"name": "Audit", "description": "审计日志查询"},
+            {"name": "Costs", "description": "成本追踪与预算"},
+            {"name": "Documents", "description": "文档 RAG 摄取与搜索"},
+            {"name": "MCP", "description": "Model Context Protocol 工具管理"},
+            {"name": "Alerts", "description": "告警规则与历史"},
+            {"name": "Approvals", "description": "人工审批请求"},
+        ]
+
         app = FastAPI(
             title="One-Agent API",
             version="2.0.0",
             description="REST API for One-Agent integration",
+            openapi_tags=_openapi_tags,
         )
         app.add_middleware(
             CORSMiddleware,
@@ -309,7 +329,7 @@ class RESTAPIGateway(Plugin):
         # ---------------------------------------------------------------- Health & Readiness
         _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
 
-        @app.get("/health")
+        @app.get("/health", tags=["Health"])
         async def health_check():
             """Basic health check - service is alive"""
             return {
@@ -318,7 +338,7 @@ class RESTAPIGateway(Plugin):
                 "version": "2.0.0"
             }
 
-        @app.get("/ready")
+        @app.get("/ready", tags=["Health"])
         async def readiness_check():
             """Readiness check - service can handle requests"""
             def _check_database():
@@ -346,7 +366,7 @@ class RESTAPIGateway(Plugin):
                 "timestamp": time.time()
             }
 
-        @app.get("/api/health")
+        @app.get("/api/health", tags=["Health"])
         async def health():
             """Enhanced health check with subsystem status for K8s probes."""
             if _ctx is None:
@@ -471,7 +491,7 @@ class RESTAPIGateway(Plugin):
             return HTMLResponse(content=get_dashboard_html())
 
         # ── Configuration Management ───────────────────────────────────
-        @app.post("/api/config/reload")
+        @app.post("/api/config/reload", tags=["Config"])
         async def reload_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Hot reload configuration without restarting the service.
 
@@ -510,6 +530,15 @@ class RESTAPIGateway(Plugin):
 
                 logger.info("Configuration reloaded successfully")
 
+                # 审计日志：记录配置热重载
+                if self._audit_log:
+                    self._audit_log.log(
+                        action="config_reload",
+                        actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
+                        resource="/api/config/reload",
+                        details={"config_path": config_path},
+                    )
+
                 return {
                     "status": "ok",
                     "message": "Configuration reloaded",
@@ -519,7 +548,7 @@ class RESTAPIGateway(Plugin):
                 logger.error("Failed to reload config: %s", e, exc_info=True)
                 raise HTTPException(500, f"Config reload failed: {str(e)}")
 
-        @app.get("/api/config")
+        @app.get("/api/config", tags=["Config"])
         async def get_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get current runtime configuration (sanitized)."""
             auth(x_api_key)
@@ -584,19 +613,19 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(404, _("session_not_found"))
             return tree
 
-        @app.get("/api/health/ready")
+        @app.get("/api/health/ready", tags=["Health"])
         async def readiness():
             """Kubernetes-style readiness probe — returns 503 if not ready."""
             if _ctx is None or _agent is None:
                 raise HTTPException(503, _("not_ready"))
             return {"ready": True}
 
-        @app.get("/api/health/live")
+        @app.get("/api/health/live", tags=["Health"])
         async def liveness():
             """Kubernetes-style liveness probe."""
             return {"alive": True}
 
-        @app.get("/api/stats")
+        @app.get("/api/stats", tags=["Metrics"])
         async def stats():
             """System statistics for dashboard."""
             _session_store = getattr(_ctx, "session_store", None) if _ctx else None
@@ -641,7 +670,7 @@ class RESTAPIGateway(Plugin):
                 "skills": {"installed": len(_skills.all_skill_ids()) if _skills else 0},
             }
 
-        @app.get("/api/metrics")
+        @app.get("/api/metrics", tags=["Metrics"])
         async def metrics():
             return {
                 "bus": _bus.metrics() if _bus else {},
@@ -728,7 +757,7 @@ class RESTAPIGateway(Plugin):
 
 
         # ── Audit Log Endpoints ────────────────────────────────────────
-        @app.get("/api/audit")
+        @app.get("/api/audit", tags=["Audit"])
         async def audit_query(
             action: Optional[str] = None,
             actor: Optional[str] = None,
@@ -742,7 +771,7 @@ class RESTAPIGateway(Plugin):
             entries = self._audit_log.query(action=action, actor=actor, limit=min(limit, 500))
             return {"entries": entries, "count": len(entries)}
 
-        @app.get("/api/audit/stats")
+        @app.get("/api/audit/stats", tags=["Audit"])
         async def audit_stats(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get audit log statistics."""
             auth(x_api_key)
@@ -750,7 +779,7 @@ class RESTAPIGateway(Plugin):
                 return {"error": {"code": 503, "message": "Audit log not initialized", "type": "service_unavailable"}}
             return self._audit_log.stats()
 
-        @app.post("/api/chat")
+        @app.post("/api/chat", tags=["Chat"])
         async def chat(request: Request, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
@@ -804,7 +833,7 @@ class RESTAPIGateway(Plugin):
                 result = {"reply": reply, "session_id": session_id, "thinking": ""}
             return result
 
-        @app.post("/api/chat/stream")
+        @app.post("/api/chat/stream", tags=["Chat"])
         async def chat_stream(body: dict, request: Request, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
@@ -875,7 +904,7 @@ class RESTAPIGateway(Plugin):
                 },
             )
 
-        @app.get("/api/memory/search")
+        @app.get("/api/memory/search", tags=["Memory"])
         async def memory_search(
             q: str,
             limit: int = 5,
@@ -888,7 +917,7 @@ class RESTAPIGateway(Plugin):
             results = _memory.search_facts(q, limit=limit, offset=offset)
             return {"query": q, "results": results, "limit": limit, "offset": offset}
 
-        @app.post("/api/memory/add")
+        @app.post("/api/memory/add", tags=["Memory"])
         async def memory_add(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _memory is None:
@@ -896,10 +925,17 @@ class RESTAPIGateway(Plugin):
             text = body.get("text", "")
             tags = body.get("tags", "")
             source = body.get("source", "api")
+
+            # 输入验证：text 不能为空，不能超过最大长度
+            try:
+                _validate_chat_text(text)
+            except InputValidationError as exc:
+                raise HTTPException(400, str(exc))
+
             _memory.add_fact(text, source=source, tags=tags)
             return {"added": True, "text": text[:100]}
 
-        @app.get("/api/memory/page")
+        @app.get("/api/memory/page", tags=["Memory"])
         async def memory_page(
             page: int = 1,
             page_size: int = 20,
@@ -910,7 +946,7 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("memory_not_available"))
             return _memory.paginate_facts(page=page, page_size=page_size)
 
-        @app.get("/api/skills")
+        @app.get("/api/skills", tags=["Skills"])
         async def skills_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _skills is None:
@@ -918,7 +954,7 @@ class RESTAPIGateway(Plugin):
             return {"skills": _skills.all_skill_ids()}
 
         # ---------------------------------------------------------------- Marketplace endpoints
-        @app.get("/api/marketplace")
+        @app.get("/api/marketplace", tags=["Marketplace"])
         async def list_marketplace(query: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Discover available skill packages in the marketplace."""
             auth(x_api_key)
@@ -927,7 +963,7 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("marketplace_not_available"))
             return {"packages": mp.discover(query)}
 
-        @app.post("/api/marketplace/publish")
+        @app.post("/api/marketplace/publish", tags=["Marketplace"])
         async def publish_skill(dirpath: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Publish a local skill directory to the marketplace."""
             auth(x_api_key)
@@ -971,9 +1007,19 @@ class RESTAPIGateway(Plugin):
             pkg = mp.publish(str(resolved_path))
             if pkg is None:
                 raise HTTPException(400, _("invalid_skill_package", path=dirpath))
+
+            # 审计日志：记录技能发布
+            if self._audit_log:
+                self._audit_log.log(
+                    action="marketplace_publish",
+                    actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
+                    resource=f"/api/marketplace/publish",
+                    details={"skill_name": pkg.name, "version": pkg.version},
+                )
+
             return {"published": True, "package": pkg.to_dict()}
 
-        @app.post("/api/marketplace/install")
+        @app.post("/api/marketplace/install", tags=["Marketplace"])
         async def install_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Install a skill package from the marketplace."""
             auth(x_api_key)
@@ -1003,9 +1049,19 @@ class RESTAPIGateway(Plugin):
             # Reload skills after installation
             if _skills is not None:
                 _skills._scan_directory(target_dir)
+
+            # 审计日志：记录技能安装
+            if self._audit_log:
+                self._audit_log.log(
+                    action="marketplace_install",
+                    actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
+                    resource=f"/api/marketplace/install",
+                    details={"skill_name": name, "target_dir": target_dir},
+                )
+
             return {"installed": True, "name": name, "target_dir": target_dir}
 
-        @app.delete("/api/marketplace/{name}")
+        @app.delete("/api/marketplace/{name}", tags=["Marketplace"])
         async def uninstall_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Uninstall a skill package from the target directory."""
             auth(x_api_key)
@@ -1030,9 +1086,19 @@ class RESTAPIGateway(Plugin):
             ok = mp.uninstall(name, target_dir)
             if not ok:
                 raise HTTPException(404, _("skill_not_found", name=name))
+
+            # 审计日志：记录技能卸载
+            if self._audit_log:
+                self._audit_log.log(
+                    action="marketplace_uninstall",
+                    actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
+                    resource=f"/api/marketplace/{name}",
+                    details={"skill_name": name},
+                )
+
             return {"uninstalled": True, "name": name}
 
-        @app.post("/api/cache/clear")
+        @app.post("/api/cache/clear", tags=["Config"])
         async def cache_clear(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _llm is None:
@@ -1169,7 +1235,7 @@ class RESTAPIGateway(Plugin):
             return {"deleted": True, "session_id": session_id}
 
         # ---------------------------------------------------------------- Settings
-        @app.get("/api/settings")
+        @app.get("/api/settings", tags=["Settings"])
         async def settings_get(key: Optional[str] = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """读取配置项。不传 key 则返回所有可配置项列表。"""
             auth(x_api_key)
@@ -1200,7 +1266,7 @@ class RESTAPIGateway(Plugin):
                     return {"alias": alias, "path": path, "value": val}
             return {"error": {"code": 404, "message": _("unknown_key", key=key), "type": "not_found"}}
 
-        @app.post("/api/settings")
+        @app.post("/api/settings", tags=["Settings"])
         async def settings_set(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """修改配置项。body: {"key": "模型", "value": "gpt-4o"}"""
             auth(x_api_key)
@@ -1234,6 +1300,20 @@ class RESTAPIGateway(Plugin):
                         backup_mgr.create_backup(reason="pre-change")
                         _set_nested(_ctx.config, path, parsed)
                         _save_config(_ctx.config)
+
+                        # 审计日志：记录配置项修改
+                        if self._audit_log:
+                            is_sensitive = any(sk in path for sk in _SENSITIVE_KEYS)
+                            self._audit_log.log(
+                                action="settings_change",
+                                actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
+                                resource="/api/settings",
+                                details={
+                                    "key": alias,
+                                    "path": path,
+                                    "value": "***" if is_sensitive else parsed,
+                                },
+                            )
                     return {"alias": alias, "path": path, "value": parsed, "saved": True}
             raise HTTPException(404, _("unknown_key", key=key))
 
