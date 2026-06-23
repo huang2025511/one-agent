@@ -243,6 +243,9 @@ class Coordinator(Plugin):
         import json as _json
         import os as _os
         try:
+            dir_path = _os.path.dirname(self._PREFERENCES_PATH)
+            if dir_path:
+                _os.makedirs(dir_path, exist_ok=True)
             if _os.path.exists(self._PREFERENCES_PATH):
                 with open(self._PREFERENCES_PATH, "r", encoding="utf-8") as f:
                     data = _json.load(f)
