@@ -30,6 +30,8 @@ from typing import Any, Dict, List
 import httpx
 
 from core.plugin import Plugin
+from core.security import is_path_within
+from core.subprocess_utils import run_subprocess_async
 
 logger = logging.getLogger(__name__)
 
@@ -193,11 +195,7 @@ class MultimodalPlugin(Plugin):
             try:
                 p = Path(image_data).resolve()
                 # Only allow files in current directory or subdirectories
-                # Use relative_to() for strict containment (startswith can be bypassed)
-                cwd = Path.cwd().resolve()
-                try:
-                    p.relative_to(cwd)
-                except ValueError:
+                if not is_path_within(p, Path.cwd()):
                     return {"error": "access denied: path outside working directory", "analysis": ""}
                 # Validate file extension
                 allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -300,8 +298,8 @@ class MultimodalPlugin(Plugin):
         # Security: validate path to prevent directory traversal
         try:
             p = Path(audio_path).resolve()
-            cwd = Path.cwd().resolve()
-            p.relative_to(cwd)  # raises ValueError if not within cwd
+            if not is_path_within(p, Path.cwd()):
+                return {"text": "", "error": "access denied: path outside working directory"}
             # Validate file extension
             allowed_ext = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
             if p.suffix.lower() not in allowed_ext:
@@ -314,10 +312,10 @@ class MultimodalPlugin(Plugin):
 
         # Try local whisper CLI first (fast, offline)
         try:
-            result = subprocess.run(
+            result = await run_subprocess_async(
                 ["whisper", audio_path, "--language", language, "--model", "tiny",
                  "--output_format", "txt", "--output_dir", "/tmp"],
-                capture_output=True, text=True, timeout=120,
+                timeout=120,
             )
             if result.returncode == 0:
                 out_path = os.path.splitext(audio_path)[0] + ".txt"
@@ -368,10 +366,7 @@ class MultimodalPlugin(Plugin):
 
         path = Path(image_path).resolve()
         # Security: validate path to prevent directory traversal
-        cwd = Path.cwd().resolve()
-        try:
-            path.relative_to(cwd)  # raises ValueError if not within cwd
-        except ValueError:
+        if not is_path_within(path, Path.cwd()):
             return {"error": "access denied: path outside working directory", "image_base64": "", "mime_type": "", "prompt": ""}
         allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
         if path.suffix.lower() not in allowed_ext:
@@ -432,8 +427,8 @@ def make_transcribe_handler():
         # Security: validate path to prevent directory traversal
         try:
             p = Path(path).resolve()
-            cwd = Path.cwd().resolve()
-            p.relative_to(cwd)  # raises ValueError if not within cwd
+            if not is_path_within(p, Path.cwd()):
+                return "access denied: path outside working directory"
             allowed_ext = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
             if p.suffix.lower() not in allowed_ext:
                 return f"invalid file type: {p.suffix}"
@@ -444,10 +439,10 @@ def make_transcribe_handler():
             return f"invalid path: {exc}"
 
         try:
-            result = subprocess.run(
+            result = await run_subprocess_async(
                 ["whisper", path, "--language", "zh", "--model", "tiny",
                  "--output_format", "txt", "--output_dir", "/tmp"],
-                capture_output=True, text=True, timeout=120,
+                timeout=120,
             )
             if result.returncode == 0:
                 out_path = os.path.splitext(path)[0] + ".txt"
@@ -479,8 +474,8 @@ def make_image_handler():
         # Security: validate path to prevent directory traversal
         try:
             p = Path(path).resolve()
-            cwd = Path.cwd().resolve()
-            p.relative_to(cwd)  # raises ValueError if not within cwd
+            if not is_path_within(p, Path.cwd()):
+                return "access denied: path outside working directory"
             allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
             if p.suffix.lower() not in allowed_ext:
                 return f"invalid file type: {p.suffix}"

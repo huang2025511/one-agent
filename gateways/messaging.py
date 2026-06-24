@@ -18,50 +18,11 @@ from typing import Any, Dict, Optional
 
 import httpx
 
+from core.log_sanitizer import install_sensitive_info_filter
 from core.plugin import Plugin
 
 logger = logging.getLogger(__name__)
-
-
-# Pre-compiled regex patterns for log sanitization (hot path — every log record).
-import re as _re_gw
-_GW_LOG_SANITIZE_PATTERNS = [
-    (_re_gw.compile(r'https?://[^\s]*\?key=[a-zA-Z0-9\-]+'), 'https://***?key=***'),
-    (_re_gw.compile(r'https?://[^\s]*\?access_token=[a-zA-Z0-9\-_\.]+'), 'https://***?access_token=***'),
-    (_re_gw.compile(r'[?&]key=[a-zA-Z0-9\-_]+'), '?key=***'),
-    (_re_gw.compile(r'https?://[^\s]*webhook[^\s]*'), 'https://***webhook***'),
-    (_re_gw.compile(r'bot[_-]?token[=:]\s*["\']?[a-zA-Z0-9:]+["\']?', _re_gw.IGNORECASE), 'bot_token=***'),
-    (_re_gw.compile(r'Bearer [a-zA-Z0-9\-\.]+'), 'Bearer ***'),
-    (_re_gw.compile(r'password[=:]\s*\S+', _re_gw.IGNORECASE), 'password=***'),
-    (_re_gw.compile(r'[?&](secret|token|access_token|app_secret|client_secret)=[^\s&]+', _re_gw.IGNORECASE), '?***=***'),
-]
-
-
-def _sanitize_log_message(msg: str) -> str:
-    """Remove sensitive information from log messages.
-
-    Filters out webhook URLs, tokens, passwords, and other secrets.
-    Uses pre-compiled patterns for performance (called on every log record).
-    """
-    for pattern, replacement in _GW_LOG_SANITIZE_PATTERNS:
-        msg = pattern.sub(replacement, msg)
-    return msg
-
-
-class _SensitiveInfoFilter(logging.Filter):
-    """Automatically filter sensitive information from log messages."""
-    def filter(self, record):
-        if isinstance(record.msg, str):
-            record.msg = _sanitize_log_message(record.msg)
-        if record.args:
-            if isinstance(record.args, tuple):
-                record.args = tuple(_sanitize_log_message(str(arg)) for arg in record.args)
-            elif isinstance(record.args, dict):
-                record.args = {k: _sanitize_log_message(str(v)) for k, v in record.args.items()}
-        return True
-
-
-logger.addFilter(_SensitiveInfoFilter())
+install_sensitive_info_filter(logger)
 
 
 class BaseMessagingGateway(Plugin):

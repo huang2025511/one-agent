@@ -15,6 +15,9 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
+from core.db import create_sqlite_connection
+from core.security import is_path_within_any
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,11 +25,7 @@ class DocumentStore:
     """SQLite FTS5 backed document store for RAG."""
 
     def __init__(self, db_path: str = "data/memory/docs.db"):
-        dir_path = os.path.dirname(db_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = create_sqlite_connection(db_path)
         # Thread-safe access: ingest_file runs in a thread pool via
         # run_in_executor while search/list run on the event loop thread.
         self._write_lock = threading.Lock()
@@ -236,15 +235,7 @@ def _validate_ingest_path(path_str: str) -> Path:
         )
 
     # Directory containment check (strict, not startswith)
-    inside_allowed = False
-    for root in _ALLOWED_INGEST_ROOTS:
-        try:
-            resolved.relative_to(root)
-            inside_allowed = True
-            break
-        except ValueError:
-            continue
-    if not inside_allowed:
+    if not is_path_within_any(resolved, _ALLOWED_INGEST_ROOTS):
         raise ValueError(
             f"path '{resolved}' is outside allowed ingest directories: "
             f"{', '.join(str(r) for r in _ALLOWED_INGEST_ROOTS)}"

@@ -16,6 +16,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from core.db import create_sqlite_connection
+
 logger = logging.getLogger(__name__)
 
 # Audit log configuration
@@ -38,11 +40,7 @@ class AuditLog:
     """
 
     def __init__(self, db_path: str = AUDIT_LOG_PATH) -> None:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn = create_sqlite_connection(db_path)
         # Serialize writes: check_same_thread=False allows cross-thread access
         # but SQLite connections are not safe for concurrent writes from
         # multiple threads — a threading.Lock prevents ProgrammingError and

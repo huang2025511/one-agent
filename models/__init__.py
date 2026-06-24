@@ -21,58 +21,15 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from core.log_sanitizer import install_sensitive_info_filter
 from core.plugin import Plugin
 from models.cache import LLMCache
 from models.cost_tracker import CostTracker
 from models.recommend import RecommendationMixin
 
 
-# Pre-compiled regex patterns for log sanitization (hot path — every log record).
-# Compiling once at module load avoids re-compiling on every _sanitize_log_message call.
-import re as _re
-_LOG_SANITIZE_PATTERNS = [
-    _re.compile(r"sk-[a-zA-Z0-9]{20,}"),                                    # OpenAI keys
-    _re.compile(r"Bearer [a-zA-Z0-9\-\.]+"),                                # Bearer tokens
-    _re.compile(r"sk-ant-[a-zA-Z0-9\-]+"),                                  # Anthropic keys
-    _re.compile(r"api[_-]?key[=:]\s*[\"']?[a-zA-Z0-9]{20,}[\"']?", _re.IGNORECASE),  # generic api_key
-    _re.compile(r"password[=:]\s*\S+", _re.IGNORECASE),                     # passwords
-]
-_LOG_SANITIZE_REPLACEMENTS = ["***", "Bearer ***", "***", "api_key=***", "password=***"]
-
-
-def _sanitize_log_message(msg: str) -> str:
-    """Remove sensitive information from log messages.
-
-    Filters out API keys, bearer tokens, passwords, and other secrets.
-    Uses pre-compiled patterns for performance (called on every log record).
-    """
-    for pattern, replacement in zip(_LOG_SANITIZE_PATTERNS, _LOG_SANITIZE_REPLACEMENTS):
-        msg = pattern.sub(replacement, msg)
-    return msg
-
-
-class _SensitiveInfoFilter(logging.Filter):
-    """Automatically filter sensitive information from log messages."""
-    def filter(self, record):
-        if isinstance(record.msg, str):
-            record.msg = _sanitize_log_message(record.msg)
-        # Only sanitize string args, preserve numeric types for % formatting
-        if record.args:
-            if isinstance(record.args, tuple):
-                record.args = tuple(
-                    _sanitize_log_message(arg) if isinstance(arg, str) else arg
-                    for arg in record.args
-                )
-            elif isinstance(record.args, dict):
-                record.args = {
-                    k: _sanitize_log_message(v) if isinstance(v, str) else v
-                    for k, v in record.args.items()
-                }
-        return True
-
-
 logger = logging.getLogger(__name__)
-logger.addFilter(_SensitiveInfoFilter())
+install_sensitive_info_filter(logger)
 
 # Default timeout values in seconds
 DEFAULT_TIMEOUT = 60

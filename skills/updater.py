@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
+from core.subprocess_utils import run_subprocess_async
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,14 +48,14 @@ async def _run_git_async(args: list, timeout: int = 10) -> subprocess.CompletedP
 
     Use this from async contexts (e.g. skill handlers) instead of _run_git.
     """
-    return await asyncio.to_thread(_run_git, args, timeout)
+    return await run_subprocess_async(
+        ["git"] + args, timeout=timeout, cwd=str(ROOT)
+    )
 
 
 async def _run_subprocess_async(cmd: list, timeout: int = 30) -> subprocess.CompletedProcess:
     """Run a subprocess in a thread to avoid blocking the event loop."""
-    return await asyncio.to_thread(
-        subprocess.run, cmd, capture_output=True, text=True, timeout=timeout
-    )
+    return await run_subprocess_async(cmd, timeout=timeout)
 
 
 def _detect_branch() -> str:

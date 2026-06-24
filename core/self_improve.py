@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from core.db import create_sqlite_connection
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,9 +39,7 @@ class SelfImprover:
     """Records failures, analyzes patterns, and generates improvements."""
 
     def __init__(self, db_path: str = "data/memory/improvements.db"):
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = create_sqlite_connection(db_path)
         # Serialize writes (see audit_log.py for rationale).
         self._write_lock = threading.Lock()
         self._failures: List[FailureCase] = []

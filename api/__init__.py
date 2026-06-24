@@ -42,10 +42,13 @@ except ImportError:
     pass
 
 from core.exceptions import InputValidationError
+from core.log_sanitizer import install_sensitive_info_filter
 from core.plugin import Plugin
+from core.security import is_path_within
 from i18n import _
 
 logger = logging.getLogger(__name__)
+install_sensitive_info_filter(logger)
 
 # API configuration constants
 DEFAULT_HOST = "0.0.0.0"
@@ -53,48 +56,6 @@ DEFAULT_PORT = 18792
 DEFAULT_RATE_LIMIT = 60
 MAX_CHAT_BODY_SIZE = 64 * 1024  # 64 KB
 MAX_CHAT_TEXT_LENGTH = 10000
-
-
-def _sanitize_log_message(msg: str) -> str:
-    """Remove sensitive information from log messages.
-
-    Filters out API keys, bearer tokens, passwords, and other secrets.
-    """
-    import re
-    # Remove OpenAI-style API keys (sk-...)
-    msg = re.sub(r'sk-[a-zA-Z0-9]{20,}', '***', msg)
-    # Remove Bearer tokens
-    msg = re.sub(r'Bearer [a-zA-Z0-9\-\.]+', 'Bearer ***', msg)
-    # Remove Anthropic-style API keys (sk-ant-...)
-    msg = re.sub(r'sk-ant-[a-zA-Z0-9\-]+', '***', msg)
-    # Remove generic API key patterns
-    msg = re.sub(r'api[_-]?key[=:]\s*["\']?[a-zA-Z0-9]{20,}["\']?', 'api_key=***', msg, flags=re.IGNORECASE)
-    # Remove passwords
-    msg = re.sub(r'password[=:]\s*\S+', 'password=***', msg, flags=re.IGNORECASE)
-    return msg
-
-
-class _SensitiveInfoFilter(logging.Filter):
-    """Automatically filter sensitive information from log messages."""
-    def filter(self, record):
-        if isinstance(record.msg, str):
-            record.msg = _sanitize_log_message(record.msg)
-        # Only sanitize string args, preserve numeric types for % formatting
-        if record.args:
-            if isinstance(record.args, tuple):
-                record.args = tuple(
-                    _sanitize_log_message(arg) if isinstance(arg, str) else arg
-                    for arg in record.args
-                )
-            elif isinstance(record.args, dict):
-                record.args = {
-                    k: _sanitize_log_message(v) if isinstance(v, str) else v
-                    for k, v in record.args.items()
-                }
-        return True
-
-
-logger.addFilter(_SensitiveInfoFilter())
 
 
 def _validate_chat_text(text: str) -> str:
@@ -1002,13 +963,9 @@ class RESTAPIGateway(Plugin):
                 # Validate path is within allowed directory (strict containment
                 # via Path.relative_to — startswith can be bypassed by sibling
                 # dirs like /data/skills_evil).
-                from pathlib import Path
-                allowed_base = Path(os.path.realpath(os.path.join(
-                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "skills")))
-                target_real = Path(os.path.realpath(target_dir))
-                try:
-                    target_real.relative_to(allowed_base)
-                except ValueError:
+                allowed_base = os.path.realpath(os.path.join(
+                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
+                if not is_path_within(target_dir, allowed_base):
                     raise HTTPException(403, "target_dir must be within skills directory")
 
             ok = mp.install(name, target_dir)
@@ -1034,11 +991,8 @@ class RESTAPIGateway(Plugin):
                 # Validate path is within allowed directory.
                 # Use Path.relative_to instead of str.startswith to
                 # prevent "/data/skills_evil" bypassing "/data/skills".
-                allowed_base = Path(os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills")))
-                target_real = Path(os.path.realpath(target_dir))
-                try:
-                    target_real.relative_to(allowed_base)
-                except ValueError:
+                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
+                if not is_path_within(target_dir, allowed_base):
                     raise HTTPException(403, "target_dir must be within skills directory")
 
             ok = mp.uninstall(name, target_dir)
@@ -1348,12 +1302,10 @@ class RESTAPIGateway(Plugin):
                 # Security: restrict path to data/documents directory only
                 # Use Path.relative_to() for strict containment (startswith can be bypassed
                 # e.g. "/data/skills_evil" starts with "/data/skills")
-                allowed_base = Path(os.path.realpath(os.path.join(
-                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "documents")))
+                allowed_base = os.path.realpath(os.path.join(
+                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "documents"))
                 path_real = Path(os.path.realpath(path))
-                try:
-                    path_real.relative_to(allowed_base)
-                except ValueError:
+                if not is_path_within(path_real, allowed_base):
                     raise HTTPException(403, "path must be within data/documents directory")
 
                 # Also check file exists and is a regular file
