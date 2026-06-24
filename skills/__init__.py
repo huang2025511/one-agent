@@ -32,6 +32,18 @@ from .wechat_login import make_wechat_login_handler  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+_DDG_RESULT_PATTERN = re.compile(
+    r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<span[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</span>',
+    re.DOTALL | re.IGNORECASE,
+)
+_DDG_LINK_PATTERN = re.compile(
+    r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', re.DOTALL,
+)
+_BING_ALGO_PATTERN = re.compile(
+    r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>',
+    re.DOTALL | re.IGNORECASE,
+)
+
 # Lazy singleton — opened on first use to avoid SQLite I/O at import time.
 _doc_store: Optional[DocumentStore] = None
 
@@ -873,21 +885,14 @@ class SkillManager(Plugin):
                         if resp.status_code != 200:
                             return False
                         html = resp.text
-                    pattern = _re.compile(
-                        r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<span[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</span>',
-                        _re.DOTALL | _re.IGNORECASE,
-                    )
-                    for m in pattern.finditer(html):
+                    for m in _DDG_RESULT_PATTERN.finditer(html):
                         url_r = m.group(1)
                         title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
                         snippet = _re.sub(r"<[^>]+>", "", m.group(3)).strip()
                         if title and snippet:
                             results.append(f"{title}\n  {snippet}\n  {url_r}")
                     if not results:
-                        link_pattern = _re.compile(
-                            r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', _re.DOTALL,
-                        )
-                        for m in link_pattern.finditer(html):
+                        for m in _DDG_LINK_PATTERN.finditer(html):
                             url_r = m.group(1)
                             title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
                             if title and "duckduckgo" not in url_r.lower():
@@ -907,11 +912,7 @@ class SkillManager(Plugin):
                             return False
                         html = resp.text
                     # Bing: results are in <li class="b_algo"> blocks
-                    algo_pattern = _re.compile(
-                        r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>',
-                        _re.DOTALL | _re.IGNORECASE,
-                    )
-                    for block in algo_pattern.finditer(html):
+                    for block in _BING_ALGO_PATTERN.finditer(html):
                         block_html = block.group(1)
                         link_m = _re.search(r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', block_html, _re.DOTALL)
                         snippet_m = _re.search(r'<p[^>]*>(.*?)</p>', block_html, _re.DOTALL)

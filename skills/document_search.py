@@ -80,11 +80,11 @@ class DocumentStore:
             )
             doc_id = cur.lastrowid
 
-            for i, chunk in enumerate(chunks):
-                self._conn.execute(
-                    "INSERT INTO doc_chunks (doc_id, chunk_idx, content) VALUES (?, ?, ?)",
-                    (doc_id, i, chunk)
-                )
+            rows = [(doc_id, i, chunk) for i, chunk in enumerate(chunks)]
+            self._conn.executemany(
+                "INSERT INTO doc_chunks (doc_id, chunk_idx, content) VALUES (?, ?, ?)",
+                rows
+            )
 
             self._conn.execute(
                 "UPDATE documents SET chunk_count = ? WHERE id = ?",
