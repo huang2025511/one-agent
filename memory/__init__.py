@@ -322,9 +322,19 @@ class LongTermMemory:
     def close(self) -> None:
         """Close the SQLite connection (called from MemoryPlugin.stop)."""
         try:
-            self._conn.close()
+            if self._conn:
+                self._conn.close()
+                self._conn = None
         except sqlite3.Error as exc:
-            logger.error("failed to close SQLite connection: %s", exc, exc_info=True)
+            logger.exception("failed to close SQLite connection: %s", exc)
+
+    def __del__(self) -> None:
+        """Ensure connection is closed on garbage collection."""
+        if hasattr(self, "_conn") and self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
 
 
 # ---------- tier 3: procedural memory (auto-generated skills) --------------
@@ -373,6 +383,12 @@ class ProceduralMemory:
             else:
                 logger.info("saved skill %s (%d triggers, %d dirty)",
                             safe, len(triggers), self._dirty_count)
+
+    def close(self) -> None:
+        """Flush dirty index to disk and release resources (called from MemoryPlugin.stop)."""
+        with self._lock:
+            if self._dirty_count > 0:
+                self._persist_index()
 
     def lookup(self, text: str) -> Optional[Dict[str, Any]]:
         with self._lock:
