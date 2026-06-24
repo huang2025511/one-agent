@@ -154,11 +154,11 @@ class LongTermMemory:
                         time_module.sleep(delay)
                         continue
                     # Non-lock error or final attempt
-                    logger.error("memory add failed: %s", exc)
+                    logger.exception("memory add failed: %s", exc)
                     raise
                 except sqlite3.Error as exc:
                     self._conn.rollback()
-                    logger.error("memory add failed: %s", exc)
+                    logger.exception("memory add failed: %s", exc)
                     raise
                 finally:
                     c.close()
@@ -284,7 +284,7 @@ class LongTermMemory:
                     "timestamp": row[4],
                 }
         except sqlite3.Error as exc:
-            logger.error("get_by_id(%s) failed: %s", memory_id, exc)
+            logger.exception("get_by_id(%s) failed: %s", memory_id, exc)
         return None
 
     def get_by_ids(self, memory_ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -316,7 +316,7 @@ class LongTermMemory:
                         "timestamp": row[4],
                     }
         except sqlite3.Error as exc:
-            logger.error("get_by_ids(%s) failed: %s", memory_ids, exc)
+            logger.exception("get_by_ids(%s) failed: %s", memory_ids, exc)
         return results
 
     def close(self) -> None:

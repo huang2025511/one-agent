@@ -34,13 +34,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.exceptions import InputValidationError
-from core.log_sanitizer import install_sensitive_info_filter
 from core.plugin import Plugin
 from core.security import is_path_within
 from i18n import _
 
 logger = logging.getLogger(__name__)
-install_sensitive_info_filter(logger)
 
 # API configuration constants
 DEFAULT_HOST = "0.0.0.0"
@@ -86,6 +84,7 @@ class RESTAPIGateway(Plugin):
         # survive any restart of the underlying FastAPI app (e.g. dev
         # mode auto-reload).  Format: {ip: [timestamp, ...]}
         self._rate_buckets: Dict[str, list] = {}
+        self._last_bucket_cleanup: float = 0.0
         # Default rate limit (overridden in setup() from config)
         self._rate_limit = DEFAULT_RATE_LIMIT
         # Audit log for tracking operations
@@ -1429,6 +1428,13 @@ class RESTAPIGateway(Plugin):
             bucket = self._rate_buckets.setdefault(ip, [])
             # evict entries older than 60s
             bucket[:] = [t for t in bucket if now - t < 60]
+            # Periodically clean up stale buckets to prevent unbounded growth
+            if not bucket and now - self._last_bucket_cleanup > 300:  # every 5 min
+                self._last_bucket_cleanup = now
+                stale = [k for k, v in self._rate_buckets.items()
+                         if not v or (now - v[-1] > 60)]
+                for k in stale:
+                    self._rate_buckets.pop(k, None)
             if len(bucket) >= self._rate_limit:
                 return JSONResponse({"error": {"code": 429, "message": _("rate_limit_exceeded"), "type": "rate_limit"}}, status_code=429)
             bucket.append(now)

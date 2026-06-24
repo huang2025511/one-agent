@@ -237,6 +237,10 @@ def setup_logging(config) -> None:
     root.addHandler(file_handler)
     root.addHandler(console_handler)
 
+    # Install sensitive info filter on root logger — all child loggers inherit
+    from core.log_sanitizer import install_sensitive_info_filter
+    install_sensitive_info_filter(root)
+
     # Silence noisy third-party loggers
     for noisy in ["httpx", "httpcore", "urllib3", "asyncio"]:
         logging.getLogger(noisy).setLevel(logging.WARNING)

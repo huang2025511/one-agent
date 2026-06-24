@@ -18,11 +18,9 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from core.log_sanitizer import install_sensitive_info_filter
 from core.plugin import Plugin
 
 logger = logging.getLogger(__name__)
-install_sensitive_info_filter(logger)
 
 
 class BaseMessagingGateway(Plugin):
@@ -105,8 +103,6 @@ class TelegramGateway(BaseMessagingGateway):
         self._token: Optional[str] = None
         self._allowed_users = []
         self._base = "https://api.telegram.org"
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -207,8 +203,6 @@ class WeComGateway(BaseMessagingGateway):
         self._access_token: str = ""
         self._token_expires_at: float = 0
         # common
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
         self._callback_host: str = "0.0.0.0"
         self._callback_port: int = 18794
 
@@ -315,7 +309,7 @@ class WeComGateway(BaseMessagingGateway):
             self._token_expires_at = time.time() + data.get("expires_in", 7200) - 300
             return self._access_token
         except Exception as exc:
-            logger.error("wecom gettoken error: %s", exc)
+            logger.exception("wecom gettoken error: %s", exc)
             return ""
 
     async def _send_app_message(self, user_id: str, text: str) -> bool:
@@ -492,9 +486,6 @@ class DingTalkGateway(BaseMessagingGateway):
         self._client_secret: str = ""
         self._access_token: str = ""
         self._token_expires_at: float = 0
-        # common
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -589,7 +580,7 @@ class DingTalkGateway(BaseMessagingGateway):
             self._token_expires_at = time.time() + data.get("expireIn", 7200) - 300
             return self._access_token
         except Exception as exc:
-            logger.error("dingtalk gettoken error: %s", exc)
+            logger.exception("dingtalk gettoken error: %s", exc)
             return ""
 
     async def _send_message(self, conversation_id: str, text: str) -> bool:
@@ -763,8 +754,6 @@ class FeishuGateway(BaseMessagingGateway):
         self._tenant_access_token: str = ""
         self._token_expires_at: float = 0
         # common
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
         self._callback_host: str = "0.0.0.0"
         self._callback_port: int = 18795
 
@@ -864,7 +853,7 @@ class FeishuGateway(BaseMessagingGateway):
             self._token_expires_at = time.time() + data.get("expire", 7200) - 300
             return self._tenant_access_token
         except Exception as exc:
-            logger.error("feishu gettoken error: %s", exc)
+            logger.exception("feishu gettoken error: %s", exc)
             return ""
 
     async def _reply_message(self, message_id: str, text: str) -> bool:
@@ -1002,8 +991,6 @@ class DiscordGateway(BaseMessagingGateway):
         self._token: str = ""
         self._allowed_channels: list = []
         self._base = "https://discord.com/api/v10"
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -1123,8 +1110,6 @@ class SlackGateway(BaseMessagingGateway):
         self._app_token: str = ""      # xapp-... (Socket Mode)
         self._allowed_channels: list = []
         self._base = "https://slack.com/api"
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
         self._bot_user_id: str = ""
 
     async def setup(self, ctx) -> None:

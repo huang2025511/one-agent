@@ -69,8 +69,10 @@ class SessionStore(BaseSQLiteStore):
 
     def create_session(self, session_id: str, title: str = "") -> None:
         """Create a new session record (idempotent — upsert)."""
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
 
         now = time.time()
         with self._write_lock:
@@ -82,7 +84,7 @@ class SessionStore(BaseSQLiteStore):
                 )
                 self._conn.commit()
             except sqlite3.Error as exc:
-                logger.error("create_session(%s) failed: %s", session_id, exc)
+                logger.exception("create_session(%s) failed: %s", session_id, exc)
 
     def add_message(
         self,
@@ -107,10 +109,14 @@ class SessionStore(BaseSQLiteStore):
             message_id: Optional unique message ID for idempotency. If provided and
                        a message with this ID already exists, the operation is skipped.
         """
-        assert session_id, "session_id cannot be empty"
-        assert role in ("user", "assistant", "system"), "role must be user/assistant/system"
-        assert isinstance(content, str), "content must be a string"
-        assert tokens >= 0, "tokens must be non-negative"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if role not in ("user", "assistant", "system"):
+            raise ValueError("role must be user/assistant/system")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        if tokens < 0:
+            raise ValueError("tokens must be non-negative")
 
         now = time.time()
         meta_json = json.dumps(meta or {})
@@ -171,13 +177,15 @@ class SessionStore(BaseSQLiteStore):
                         (now, tokens, session_id),
                     )
             except sqlite3.Error as exc:
-                logger.error("add_message(%s) transaction failed: %s", session_id, exc)
+                logger.exception("add_message(%s) transaction failed: %s", session_id, exc)
                 raise
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a session with all its messages."""
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
 
         try:
             cur = self._conn.execute(
@@ -203,13 +211,15 @@ class SessionStore(BaseSQLiteStore):
             session["messages"] = messages
             return session
         except sqlite3.Error as exc:
-            logger.error("get_session(%s) failed: %s", session_id, exc)
+            logger.exception("get_session(%s) failed: %s", session_id, exc)
             return None
 
     def list_sessions(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """List recent sessions ordered by last update time."""
-        assert limit > 0, "limit must be positive"
-        assert offset >= 0, "offset must be non-negative"
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
 
         try:
             cur = self._conn.execute(
@@ -218,13 +228,15 @@ class SessionStore(BaseSQLiteStore):
             )
             return [dict(row) for row in cur.fetchall()]
         except sqlite3.Error as exc:
-            logger.error("list_sessions failed: %s", exc)
+            logger.exception("list_sessions failed: %s", exc)
             return []
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all its messages. Returns True if deleted."""
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
 
         with self._write_lock:
             try:
@@ -237,7 +249,7 @@ class SessionStore(BaseSQLiteStore):
                 self._conn.commit()
                 return cur.rowcount > 0
             except sqlite3.Error as exc:
-                logger.error("delete_session(%s) failed: %s", session_id, exc)
+                logger.exception("delete_session(%s) failed: %s", session_id, exc)
                 return False
 
     def get_session_count(self) -> int:
@@ -246,7 +258,7 @@ class SessionStore(BaseSQLiteStore):
             cur = self._conn.execute("SELECT COUNT(*) FROM sessions")
             return cur.fetchone()[0]
         except sqlite3.Error as exc:
-            logger.error("get_session_count failed: %s", exc)
+            logger.exception("get_session_count failed: %s", exc)
             return 0
 
     def fork_session(self, session_id: str, fork_point: int, new_session_id: Optional[str] = None) -> Optional[str]:
@@ -265,9 +277,12 @@ class SessionStore(BaseSQLiteStore):
             new_id = store.fork_session("abc123", 5)
             # 新会话包含原会话的前 5 条消息
         """
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
-        assert fork_point >= 0, "fork_point must be non-negative"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
+        if fork_point < 0:
+            raise ValueError("fork_point must be non-negative")
 
         import uuid
 
@@ -321,7 +336,7 @@ class SessionStore(BaseSQLiteStore):
                 return new_session_id
 
             except sqlite3.Error as exc:
-                logger.error("fork_session(%s) failed: %s", session_id, exc)
+                logger.exception("fork_session(%s) failed: %s", session_id, exc)
                 self._conn.rollback()
                 return None
 
@@ -334,8 +349,10 @@ class SessionStore(BaseSQLiteStore):
         Returns:
             包含 parent_id, children, fork_point 的树结构
         """
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
 
         try:
             # 获取当前会话
@@ -370,5 +387,5 @@ class SessionStore(BaseSQLiteStore):
             return tree
 
         except sqlite3.Error as exc:
-            logger.error("get_session_tree(%s) failed: %s", session_id, exc)
+            logger.exception("get_session_tree(%s) failed: %s", session_id, exc)
             return {}

@@ -267,9 +267,12 @@ class KnowledgeGraph(BaseSQLiteStore):
 
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search entities by name (LIKE)."""
-        assert query, "query cannot be empty"
-        assert isinstance(query, str), "query must be a string"
-        assert limit > 0, "limit must be positive"
+        if not query:
+            raise ValueError("query cannot be empty")
+        if not isinstance(query, str):
+            raise ValueError("query must be a string")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
 
         # Escape LIKE wildcards to prevent unexpected matches
         escaped_query = query.replace('%', '\\%').replace('_', '\\_')
@@ -282,9 +285,12 @@ class KnowledgeGraph(BaseSQLiteStore):
 
     def get_neighbors(self, name: str, depth: int = 1) -> List[Dict[str, Any]]:
         """Get all entities within N hops of the given entity."""
-        assert name, "name cannot be empty"
-        assert isinstance(name, str), "name must be a string"
-        assert depth > 0, "depth must be positive"
+        if not name:
+            raise ValueError("name cannot be empty")
+        if not isinstance(name, str):
+            raise ValueError("name must be a string")
+        if depth <= 0:
+            raise ValueError("depth must be positive")
 
         entity = self.query_entity(name)
         if not entity:
@@ -319,8 +325,10 @@ class KnowledgeGraph(BaseSQLiteStore):
 
     def extract_from_text(self, text: str, source: str = "") -> int:
         """Simple rule-based entity extraction from text."""
-        assert text, "text cannot be empty"
-        assert isinstance(text, str), "text must be a string"
+        if not text:
+            raise ValueError("text cannot be empty")
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
 
         names: List[str] = []
 

@@ -102,7 +102,7 @@ class AuditLog:
                 # Auto-rotate if too many entries
                 self._check_rotation()
         except sqlite3.Error as exc:
-            logger.error("Failed to write audit log: %s", exc)
+            logger.exception("Failed to write audit log: %s", exc)
 
     def _check_rotation(self) -> None:
         """Delete old entries if table exceeds max size."""
@@ -123,7 +123,7 @@ class AuditLog:
                 self._conn.commit()
                 logger.info("Audit log rotated: deleted %d old entries", count - keep_count)
         except sqlite3.Error as exc:
-            logger.error("Audit log rotation failed: %s", exc)
+            logger.exception("Audit log rotation failed: %s", exc)
 
     def query(
         self,
@@ -183,7 +183,7 @@ class AuditLog:
                 for row in rows
             ]
         except sqlite3.Error as exc:
-            logger.error("Audit log query failed: %s", exc)
+            logger.exception("Audit log query failed: %s", exc)
             return []
 
     def stats(self) -> Dict[str, Any]:
@@ -220,7 +220,7 @@ class AuditLog:
                 "retention_days": AUDIT_RETENTION_DAYS,
             }
         except sqlite3.Error as exc:
-            logger.error("Audit log stats failed: %s", exc)
+            logger.exception("Audit log stats failed: %s", exc)
             return {"total_entries": 0, "error": str(exc)}
 
     def close(self) -> None:

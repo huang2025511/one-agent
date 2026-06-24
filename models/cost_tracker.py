@@ -109,7 +109,7 @@ class CostTracker:
                 )
                 self._conn.commit()
         except sqlite3.Error as exc:
-            logger.error("cost_tracker: failed to persist cost entry: %s", exc)
+            logger.exception("cost_tracker: failed to persist cost entry: %s", exc)
             raise  # propagate so caller can fall back to estimated cost
 
         # Check budget (fire-and-forget — never block the caller)
@@ -143,7 +143,7 @@ class CostTracker:
             ).fetchone()
             return round(row["total"], 8) if row else 0.0
         except sqlite3.Error as exc:
-            logger.error("cost_tracker query failed: %s", exc)
+            logger.exception("cost_tracker query failed: %s", exc)
             return 0.0
 
     def daily_cost(self) -> Dict[str, Any]:

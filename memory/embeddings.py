@@ -140,8 +140,10 @@ class EmbeddingStore(BaseSQLiteStore):
         Returns:
             list of floats (EMBEDDING_DIM,) or None if model unavailable
         """
-        assert text, "text cannot be empty"
-        assert isinstance(text, str), "text must be a string"
+        if not text:
+            raise ValueError("text cannot be empty")
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
 
         # Lazy-load the model on first use instead of in __init__.
         if not self._model_loaded:
@@ -163,11 +165,16 @@ class EmbeddingStore(BaseSQLiteStore):
             memory_id: Unique identifier for the memory
             vector: Embedding vector (EMBEDDING_DIM,)
         """
-        assert memory_id, "memory_id cannot be empty"
-        assert isinstance(memory_id, str), "memory_id must be a string"
-        assert vector is not None, "vector cannot be None"
-        assert isinstance(vector, list), "vector must be a list"
-        assert len(vector) == EMBEDDING_DIM, f"vector must have {EMBEDDING_DIM} dimensions"
+        if not memory_id:
+            raise ValueError("memory_id cannot be empty")
+        if not isinstance(memory_id, str):
+            raise ValueError("memory_id must be a string")
+        if vector is None:
+            raise ValueError("vector cannot be None")
+        if not isinstance(vector, list):
+            raise ValueError("vector must be a list")
+        if len(vector) != EMBEDDING_DIM:
+            raise ValueError(f"vector must have {EMBEDDING_DIM} dimensions")
 
         with self._write_lock:
             try:
@@ -268,8 +275,10 @@ class EmbeddingStore(BaseSQLiteStore):
         Args:
             memory_id: Unique identifier for the memory
         """
-        assert memory_id, "memory_id cannot be empty"
-        assert isinstance(memory_id, str), "memory_id must be a string"
+        if not memory_id:
+            raise ValueError("memory_id cannot be empty")
+        if not isinstance(memory_id, str):
+            raise ValueError("memory_id must be a string")
 
         with self._write_lock:
             try:

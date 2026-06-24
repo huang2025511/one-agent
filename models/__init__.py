@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from core.log_sanitizer import install_sensitive_info_filter
 from core.plugin import Plugin
 from models.cache import LLMCache
 from models.cost_tracker import CostTracker
@@ -30,7 +29,6 @@ from models.recommend import RecommendationMixin
 
 
 logger = logging.getLogger(__name__)
-install_sensitive_info_filter(logger)
 
 # Default timeout values in seconds
 DEFAULT_TIMEOUT = 60
