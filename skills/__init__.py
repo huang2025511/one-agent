@@ -162,6 +162,7 @@ class SkillManager(Plugin):
         self._marketplace_dir: Optional[str] = None
         self._mcp_servers: List[Dict[str, Any]] = []
         self._max_loaded_per_turn = 6
+        self._system_executor = None
 
     # -------------------------------------------------------- lifecycle
     async def setup(self, ctx) -> None:
@@ -309,13 +310,26 @@ class SkillManager(Plugin):
         return Skill(skill_id, title, description, schema, handler, directory=str(path.parent))
 
     # --------------------------------------------------------- builtin seeds
-    def _seed_builtins(self) -> None:
-        """Seed built-in skills that are always available.
+    async def _get_system_executor(self):
+        """Lazy-init shared SystemExecutor singleton."""
+        if self._system_executor is not None:
+            return self._system_executor
+        from executors.system import SystemExecutor
+        executor = SystemExecutor()
+        ctx = getattr(self, "_ctx_ref", None)
+        if ctx is not None:
+            await executor.setup(ctx)
+        else:
+            executor._enabled = True
+            from executors.system import PasswordManager
+            executor._pwd_manager = PasswordManager("", 60, 3, 5)
+            executor._timeout_seconds = 30
+            executor._workdir = "."
+            executor._max_output_bytes = 65536
+        self._system_executor = executor
+        return self._system_executor
 
-        These are pure-Python, so they need no subprocess.  They cover the
-        agent's most common operational needs: echo, math, timestamp,
-        file-cat.
-        """
+    def _seed_core_skills(self) -> None:
         import datetime
 
         async def echo_handler(args: Dict[str, Any]) -> str:
@@ -602,37 +616,11 @@ class SkillManager(Plugin):
             handler=save_note,
         ))
 
-        # ---------- 系统执行器（SystemExecutor）单例 ----------
-        # 在会话生命周期内共享一个实例，以便密码缓存生效
-        _system_executor = None
-        async def _get_system_executor():
-            nonlocal _system_executor
-            if _system_executor is not None:
-                return _system_executor
-            # Build and fully initialize BEFORE assigning to the shared
-            # variable. If we assign first and await setup() second, a
-            # concurrent coroutine sees the non-None value and returns
-            # a half-initialized executor (missing _pwd_manager etc.).
-            from executors.system import SystemExecutor
-            executor = SystemExecutor()
-            ctx = getattr(self, "_ctx_ref", None)
-            if ctx is not None:
-                await executor.setup(ctx)
-            else:
-                # Fallback: 手动初始化
-                executor._enabled = True
-                from executors.system import PasswordManager
-                executor._pwd_manager = PasswordManager("", 60, 3, 5)
-                executor._timeout_seconds = 30
-                executor._workdir = "."
-                executor._max_output_bytes = 65536
-            _system_executor = executor
-            return _system_executor
-
+    def _seed_system_skills(self) -> None:
         # ---------- 系统命令执行技能 ----------
         async def system_run_handler(args: Dict[str, Any]) -> str:
             """执行系统命令（带密码保护）。使用方式: /shell ls -la [--password xxx]"""
-            executor = await _get_system_executor()
+            executor = await self._get_system_executor()
             command = str(args.get("command", "")).strip()
             password = str(args.get("password", "")) if args.get("password") else ""
 
@@ -691,7 +679,7 @@ class SkillManager(Plugin):
         # ---------- 解锁会话技能 ----------
         async def system_unlock_handler(args: Dict[str, Any]) -> str:
             """输入密码解锁会话。使用方式: /unlock 密码"""
-            executor = await _get_system_executor()
+            executor = await self._get_system_executor()
             password = str(args.get("password", ""))
 
             if not password:
@@ -721,7 +709,7 @@ class SkillManager(Plugin):
         # ---------- 锁定会话技能 ----------
         async def system_lock_handler(args: Dict[str, Any]) -> str:
             """撤销密码缓存，立即锁定。使用方式: /lock"""
-            executor = await _get_system_executor()
+            executor = await self._get_system_executor()
             try:
                 executor.invalidate_password()
                 return "🔒 已锁定。再次执行危险命令需要重新输入密码。"
@@ -738,6 +726,7 @@ class SkillManager(Plugin):
             handler=system_lock_handler,
         ))
 
+    def _seed_lifecycle_skills(self) -> None:
         # ---------- 更新技能 ----------
         async def updater_handler(args: Dict[str, Any]) -> str:
             """更新 One-Agent 到最新版本。使用方式: /update 或 /更新"""
@@ -802,6 +791,7 @@ class SkillManager(Plugin):
             handler=quit_handler,
         ))
 
+    def _seed_settings_skill(self) -> None:
         # ---------- 设置管理技能 ----------
         async def settings_handler(args: Dict[str, Any]) -> str:
             """通过自然语言读取或修改配置。
@@ -822,6 +812,30 @@ class SkillManager(Plugin):
             result = _process_settings_command(input_text, config)
             return result
 
+        self.register(Skill(
+            id="settings", title="Settings Manager",
+            description="/settings 或 /设置：读取或修改 Agent 配置（模型、温度、网关开关等）",
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "settings",
+                    "description": "读取或修改 Agent 配置设置",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": "设置操作描述，如 '查看模型' 或 '把温度改为0.7'",
+                            },
+                        },
+                        "required": ["input"],
+                    },
+                },
+            },
+            handler=settings_handler,
+        ))
+
+    def _seed_web_search_skill(self) -> None:
         # ---------- 网页搜索技能 ----------
         async def web_search_handler(args: Dict[str, Any]) -> str:
             """搜索互联网获取最新信息。多源自动切换：DuckDuckGo → Bing → 自给。
@@ -946,29 +960,7 @@ class SkillManager(Plugin):
             handler=web_search_handler,
         ))
 
-        self.register(Skill(
-            id="settings", title="Settings Manager",
-            description="/settings 或 /设置：读取或修改 Agent 配置（模型、温度、网关开关等）",
-            schema={
-                "type": "function",
-                "function": {
-                    "name": "settings",
-                    "description": "读取或修改 Agent 配置设置",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "input": {
-                                "type": "string",
-                                "description": "设置操作描述，如 '查看模型' 或 '把温度改为0.7'",
-                            },
-                        },
-                        "required": ["input"],
-                    },
-                },
-            },
-            handler=settings_handler,
-        ))
-
+    def _seed_media_skills(self) -> None:
         # ---------- 语音转文字技能 ----------
         self.register(Skill(
             id="transcribe",
@@ -1031,6 +1023,7 @@ class SkillManager(Plugin):
             },
         ))
 
+    def _seed_doc_search_skill(self) -> None:
         # ---------- 文档搜索技能 (RAG) ----------
         self.register(Skill(
             id="document_search",
@@ -1074,6 +1067,7 @@ class SkillManager(Plugin):
             handler=make_doc_search_handler(get_doc_store()),
         ))
 
+    def _seed_python_skill(self) -> None:
         # ---------- Python 代码执行技能 ----------
         # 使用全局共享的 PythonExecutor 实例（由 one_agent.py 创建并通过 ctx 传递）
         from executors.python_runner import make_python_handler
@@ -1121,6 +1115,17 @@ class SkillManager(Plugin):
             },
             handler=make_python_handler(python_executor),
         ))
+
+    def _seed_builtins(self) -> None:
+        """Seed built-in skills that are always available."""
+        self._seed_core_skills()
+        self._seed_system_skills()
+        self._seed_lifecycle_skills()
+        self._seed_settings_skill()
+        self._seed_web_search_skill()
+        self._seed_media_skills()
+        self._seed_doc_search_skill()
+        self._seed_python_skill()
 
 
 def _schema(name: str, description: str, required: List[str]) -> Dict[str, Any]:

@@ -70,9 +70,16 @@ class EmbeddingStore(BaseSQLiteStore):
         """
         self._model = None
         self._model_loaded = False
-        # In-memory vector cache: {(memory_id, vector_list)}.
-        # Avoids reloading all vectors from SQLite on every search.
-        # Invalidated on store()/delete().
+        # In-memory vector cache as parallel arrays for fast cosine search.
+        # _cache_ids:    [memory_id, ...]
+        # _cache_vecs:   [vector_list, ...]
+        # _cache_norms:  [precomputed_norm, ...]  — avoids recomputing
+        #                L2 norm on every search (was the hot-path bottleneck).
+        # All three are invalidated together on store()/delete().
+        self._cache_ids: List[str] = []
+        self._cache_vecs: List[List[float]] = []
+        self._cache_norms: List[float] = []
+        # Legacy alias kept for backward-compat with code that checks _vector_cache
         self._vector_cache: Optional[List[Tuple[str, List[float]]]] = None
         super().__init__(db_path)
         # Model loading is deferred to first embed() call — loading
@@ -172,6 +179,9 @@ class EmbeddingStore(BaseSQLiteStore):
                 )
                 self._conn.commit()
                 # Invalidate cache so next search reloads
+                self._cache_ids = []
+                self._cache_vecs = []
+                self._cache_norms = []
                 self._vector_cache = None
             except Exception as e:
                 logger.warning("Failed to store embedding for %s: %s", memory_id, e)
@@ -179,8 +189,9 @@ class EmbeddingStore(BaseSQLiteStore):
     def search(self, query_vector: List[float], top_k: int = 10) -> List[Tuple[str, float]]:
         """Search for similar memories using cosine similarity.
 
-        Uses an in-memory cache of all vectors to avoid repeated SQLite
-        reads. The cache is invalidated on store()/delete().
+        Uses an in-memory cache of all vectors with precomputed L2 norms
+        to avoid repeated SQLite reads and redundant norm calculations.
+        The cache is invalidated on store()/delete().
 
         Args:
             query_vector: Query embedding vector
@@ -196,37 +207,60 @@ class EmbeddingStore(BaseSQLiteStore):
 
         try:
             # Load vectors into cache if not yet loaded.
-            # Capture the cache reference into a local variable so that a
-            # concurrent store()/delete() setting self._vector_cache = None
-            # cannot cause TypeError during iteration below (TOCTOU fix).
-            cache = self._vector_cache
-            if cache is None:
-                cursor = self._conn.execute(
-                    "SELECT memory_id, vector FROM embeddings"
-                )
-                cache = []
-                for row in cursor:
-                    memory_id = row["memory_id"]
-                    stored_vector = _blob_to_vector(row["vector"])
-                    if stored_vector:
-                        cache.append((memory_id, stored_vector))
-                self._vector_cache = cache
+            ids = self._cache_ids
+            if not ids and self._cache_vecs == []:
+                self._load_vector_cache()
+                ids = self._cache_ids
 
-            # Compute cosine similarity against cached vectors.
-            # Iterate over the local `cache` reference, NOT self._vector_cache,
-            # so we are immune to concurrent invalidation.
-            results = []
-            for memory_id, stored_vector in cache:
-                similarity = _cosine_similarity(query_vector, stored_vector)
-                results.append((memory_id, similarity))
+            if not ids:
+                return []
 
-            # Sort by similarity descending
+            # Precompute query norm once (was recomputed per-vector before).
+            query_norm = _norm(query_vector)
+            if query_norm == 0:
+                return []
+
+            vecs = self._cache_vecs
+            norms = self._cache_norms
+            results: List[Tuple[str, float]] = []
+            # Cosine = dot / (norm_a * norm_b). Norms are precomputed,
+            # so the inner loop only does the dot product.
+            for i in range(len(ids)):
+                stored_norm = norms[i]
+                if stored_norm == 0:
+                    continue
+                sim = _dot_product(query_vector, vecs[i]) / (query_norm * stored_norm)
+                results.append((ids[i], sim))
+
             results.sort(key=lambda x: x[1], reverse=True)
             return results[:top_k]
 
         except Exception as e:
             logger.warning("Embedding search failed: %s", e)
             return []
+
+    def _load_vector_cache(self) -> None:
+        """Load all vectors from SQLite into the parallel-array cache.
+
+        Called lazily on first ``search()``. Precomputes each vector's L2
+        norm so subsequent searches only need the dot product.
+        """
+        cursor = self._conn.execute("SELECT memory_id, vector FROM embeddings")
+        ids: List[str] = []
+        vecs: List[List[float]] = []
+        norms: List[float] = []
+        for row in cursor:
+            memory_id = row["memory_id"]
+            stored_vector = _blob_to_vector(row["vector"])
+            if stored_vector:
+                ids.append(memory_id)
+                vecs.append(stored_vector)
+                norms.append(_norm(stored_vector))
+        self._cache_ids = ids
+        self._cache_vecs = vecs
+        self._cache_norms = norms
+        # Maintain legacy alias for any code that inspects _vector_cache
+        self._vector_cache = list(zip(ids, vecs)) if ids else None
 
     def delete(self, memory_id: str):
         """Delete embedding for a memory item.
@@ -245,6 +279,9 @@ class EmbeddingStore(BaseSQLiteStore):
                 )
                 self._conn.commit()
                 # Invalidate cache so next search reloads
+                self._cache_ids = []
+                self._cache_vecs = []
+                self._cache_norms = []
                 self._vector_cache = None
             except Exception as e:
                 logger.warning("Failed to delete embedding for %s: %s", memory_id, e)

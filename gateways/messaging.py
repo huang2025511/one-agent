@@ -45,6 +45,32 @@ class BaseMessagingGateway(Plugin):
             self._replies[sid] = turn.result if turn.result is not None else f"[error: {turn.error}]"
             self._sessions[sid].set()
 
+    async def _wait_and_reply(self, msg_key: str, chat_id, send_fn, timeout: float = 120) -> None:
+        """Wait for a turn to complete, then send the reply.
+
+        Runs as a background task so the gateway's poll loop is not blocked
+        while waiting — previously every gateway awaited this inline,
+        serializing all message processing for that platform.
+        """
+        event = self._sessions.get(msg_key)
+        if event is None:
+            return
+        try:
+            await asyncio.wait_for(event.wait(), timeout)
+            reply = self._replies.get(msg_key, "[no reply]")
+        except asyncio.TimeoutError:
+            reply = "[timeout]"
+        except Exception:
+            logger.exception("gateway wait_and_reply error for %s", msg_key)
+            reply = "[error]"
+        try:
+            await send_fn(chat_id, reply)
+        except Exception:
+            logger.exception("gateway send error for %s", chat_id)
+        finally:
+            self._sessions.pop(msg_key, None)
+            self._replies.pop(msg_key, None)
+
     async def stop(self) -> None:
         """Common cleanup: cancel the polling task and close the HTTP client."""
         if self._task:
@@ -126,20 +152,11 @@ class TelegramGateway(BaseMessagingGateway):
                         "text": text,
                         "chat_id": chat_id,
                     })
-                try:
-                    await asyncio.wait_for(event.wait(), 120)
-                    await self._send(chat_id, self._replies.get(msg_key, "[no reply]"))
-                except asyncio.TimeoutError:
-                    try:
-                        await self._send(chat_id, "[timeout]")
-                    except Exception:
-                        pass
-                except Exception:
-                    logger.exception("telegram send error for chat %s", chat_id)
-                finally:
-                    # always clean up to prevent memory leak regardless of outcome
-                    self._sessions.pop(msg_key, None)
-                    self._replies.pop(msg_key, None)
+                # Spawn a background task to wait for the reply and send it,
+                # so the poll loop can continue processing other messages.
+                asyncio.create_task(
+                    self._wait_and_reply(msg_key, chat_id, self._send)
+                )
 
     async def _send(self, chat_id: int, text: str) -> None:
         if not self._client or not self._token:
@@ -407,15 +424,11 @@ class WeComGateway(BaseMessagingGateway):
                     "chat_id": user_id,
                 })
 
-            try:
-                await asyncio.wait_for(event.wait(), 120)
-                reply = gateway._replies.get(msg_key, "[no reply]")
-                await gateway._send_app_message(user_id, reply)
-            except asyncio.TimeoutError:
-                await gateway._send_app_message(user_id, "[timeout]")
-            finally:
-                gateway._sessions.pop(msg_key, None)
-                gateway._replies.pop(msg_key, None)
+            # Respond immediately so WeCom doesn't retry the callback.
+            # The reply is sent asynchronously via a background task.
+            asyncio.create_task(
+                gateway._wait_and_reply(msg_key, user_id, gateway._send_app_message)
+            )
 
             return Response(content="ok")
 
@@ -699,15 +712,10 @@ class DingTalkGateway(BaseMessagingGateway):
                                 "text": text,
                                 "chat_id": sender,
                             })
-                        try:
-                            await asyncio.wait_for(evt.wait(), 120)
-                            reply = self._replies.get(msg_key, "[no reply]")
-                            await self._send_message(sender, reply)
-                        except asyncio.TimeoutError:
-                            await self._send_message(sender, "[timeout]")
-                        finally:
-                            self._sessions.pop(msg_key, None)
-                            self._replies.pop(msg_key, None)
+                        # Non-blocking: spawn background task to wait + reply
+                        asyncio.create_task(
+                            self._wait_and_reply(msg_key, sender, self._send_message)
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -952,15 +960,10 @@ class FeishuGateway(BaseMessagingGateway):
                     "chat_id": chat_id,
                 })
 
-            try:
-                await asyncio.wait_for(evt.wait(), 120)
-                reply = gateway._replies.get(msg_key, "[no reply]")
-                await gateway._reply_message(message_id, reply)
-            except asyncio.TimeoutError:
-                await gateway._reply_message(message_id, "[timeout]")
-            finally:
-                gateway._sessions.pop(msg_key, None)
-                gateway._replies.pop(msg_key, None)
+            # Respond immediately; reply sent via background task
+            asyncio.create_task(
+                gateway._wait_and_reply(msg_key, message_id, gateway._reply_message)
+            )
 
             return {"ok": True}
 
@@ -1063,15 +1066,10 @@ class DiscordGateway(BaseMessagingGateway):
                                     "text": text,
                                     "chat_id": ch_id,
                                 })
-                            try:
-                                await asyncio.wait_for(evt.wait(), 120)
-                                reply = self._replies.get(msg_key, "[no reply]")
-                                await self._send_message(ch_id, reply)
-                            except asyncio.TimeoutError:
-                                await self._send_message(ch_id, "[timeout]")
-                            finally:
-                                self._sessions.pop(msg_key, None)
-                                self._replies.pop(msg_key, None)
+                            # Non-blocking: spawn background task to wait + reply
+                            asyncio.create_task(
+                                self._wait_and_reply(msg_key, ch_id, self._send_message)
+                            )
                         # 更新 last_message_id
                         if messages:
                             last_message_ids[ch_id] = messages[-1].get("id", last_message_ids.get(ch_id, ""))
@@ -1185,15 +1183,10 @@ class SlackGateway(BaseMessagingGateway):
                                 "text": text,
                                 "chat_id": ch_id,
                             })
-                        try:
-                            await asyncio.wait_for(evt.wait(), 120)
-                            reply = self._replies.get(msg_key, "[no reply]")
-                            await self._send_message(ch_id, reply)
-                        except asyncio.TimeoutError:
-                            await self._send_message(ch_id, "[timeout]")
-                        finally:
-                            self._sessions.pop(msg_key, None)
-                            self._replies.pop(msg_key, None)
+                        # Non-blocking: spawn background task to wait + reply
+                        asyncio.create_task(
+                            self._wait_and_reply(msg_key, ch_id, self._send_message)
+                        )
                     if messages:
                         last_ts[ch_id] = messages[-1].get("ts", last_ts.get(ch_id, ""))
             except Exception as exc:

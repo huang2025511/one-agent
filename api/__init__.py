@@ -153,118 +153,7 @@ class RESTAPIGateway(Plugin):
         if hasattr(cb, "__self__"):
             self._app_instance = cb.__self__
 
-    async def start(self) -> None:
-        if not self._enabled:
-            return
-        try:
-            from fastapi import (  # noqa: F401
-                Body,
-                FastAPI,
-                Header,
-                HTTPException,
-                Request,
-                UploadFile,
-            )
-            from fastapi.middleware.cors import CORSMiddleware
-            from fastapi.responses import JSONResponse
-        except ImportError:
-            logger.warning("fastapi not installed — REST API disabled")
-            return
-
-        app = FastAPI(
-            title="One-Agent API",
-            version="2.0.0",
-            description="REST API for One-Agent integration",
-        )
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=self._cors_origins,
-            allow_credentials=False,
-            allow_methods=["GET", "POST"],
-            allow_headers=["*"],
-        )
-
-        @app.middleware("http")
-        async def rate_limit_middleware(request, call_next):
-            # Get real client IP from X-Forwarded-For header
-            # Only trust X-Forwarded-For if request comes from a trusted proxy
-            client_ip = None
-            if request.client:
-                client_ip = request.client.host
-            elif "client" in request.scope:
-                # Fallback to scope client info
-                client_info = request.scope["client"]
-                if client_info and len(client_info) > 0:
-                    client_ip = client_info[0]
-
-            if not client_ip:
-                # All unknown clients share a single bucket — using a unique
-                # ID per request (e.g. md5(time.time())) would give every
-                # request its own empty bucket, making the rate limit a no-op
-                # and leaking memory into _rate_buckets indefinitely.
-                client_ip = "unknown"
-                logger.warning("Rate limit: unable to determine client IP, using shared 'unknown' bucket")
-
-            if client_ip in self._trusted_proxies:
-                # Request from trusted proxy - use X-Forwarded-For
-                forwarded_for = request.headers.get("X-Forwarded-For")
-                if forwarded_for:
-                    # X-Forwarded-For format: client, proxy1, proxy2
-                    # Take the first IP (original client)
-                    ip = forwarded_for.split(",")[0].strip()
-                else:
-                    ip = client_ip
-            else:
-                # Direct connection or untrusted proxy - use client IP directly
-                ip = client_ip
-
-            now = time.time()
-            bucket = self._rate_buckets.setdefault(ip, [])
-            # evict entries older than 60s
-            bucket[:] = [t for t in bucket if now - t < 60]
-            if len(bucket) >= self._rate_limit:
-                return JSONResponse({"error": {"code": 429, "message": _("rate_limit_exceeded"), "type": "rate_limit"}}, status_code=429)
-            bucket.append(now)
-            return await call_next(request)
-
-        # Reject chat requests with absurdly large bodies before FastAPI
-        # even tries to parse JSON — protects the server from accidental
-        # 100 MB /chat posts.
-        @app.middleware("http")
-        async def body_size_middleware(request, call_next):
-            if request.url.path in ("/api/chat", "/api/chat/stream"):
-                cl = request.headers.get("content-length")
-                try:
-                    if cl is not None and int(cl) > self._max_chat_bytes:
-                        return JSONResponse(
-                            {"error": {"code": 413, "message": _("request_body_too_large", size=cl, max=self._max_chat_bytes), "type": "request_too_large"}},
-                            status_code=413,
-                        )
-                except ValueError:
-                    pass
-            return await call_next(request)
-
-        _agent = self._agent_callback
-        _app_instance: Any = getattr(self, "_app_instance", None)
-        _ctx = self.ctx
-        _llm = _ctx.get_plugin("llm") if _ctx else None
-        _memory = _ctx.get_plugin("memory") if _ctx else None
-        _skills = _ctx.get_plugin("skills") if _ctx else None
-        _bus = _ctx.bus if _ctx else None
-
-        def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
-            if self._api_key and not hmac.compare_digest(x_api_key or "", self._api_key):
-                raise HTTPException(401, _("invalid_api_key"))
-
-        def _get_backup_mgr():
-            """Shared ConfigBackupManager factory for the config-backup endpoints."""
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            return ConfigBackupManager(cfg_path)
-
-        # ---------------------------------------------------------------- Health & Readiness
-        _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
-
+    def _register_health_routes(self, app, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin):
         @app.get("/health")
         async def health_check():
             """Basic health check - service is alive"""
@@ -416,7 +305,8 @@ class RESTAPIGateway(Plugin):
                 "components": components,
             }
 
-        # ── Dashboard ──────────────────────────────────────────────────
+    def _register_dashboard_config_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/dashboard")
         async def dashboard(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Serve the monitoring dashboard."""
@@ -502,8 +392,8 @@ class RESTAPIGateway(Plugin):
                 "timestamp": time.time()
             }
 
-
-        # ── Dashboard API endpoints ────────────────────────────────────
+    def _register_session_probe_routes(self, app, auth, _ctx, _agent):
+        from fastapi import Header, HTTPException
         @app.get("/api/sessions/list")
         async def sessions_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List recent sessions."""
@@ -552,6 +442,8 @@ class RESTAPIGateway(Plugin):
             """Kubernetes-style liveness probe."""
             return {"alive": True}
 
+    def _register_stats_metrics_routes(self, app, auth, _ctx, _llm, _memory, _bus, _skills, _memory_plugin):
+        from fastapi import JSONResponse
         @app.get("/api/stats")
         async def stats():
             """System statistics for dashboard."""
@@ -689,8 +581,8 @@ class RESTAPIGateway(Plugin):
 
             return "\n".join(lines) + "\n"
 
-
-        # ── Audit Log Endpoints ────────────────────────────────────────
+    def _register_audit_routes(self, app, auth):
+        from fastapi import Header
         @app.get("/api/audit")
         async def audit_query(
             action: Optional[str] = None,
@@ -713,6 +605,8 @@ class RESTAPIGateway(Plugin):
                 return {"error": {"code": 503, "message": "Audit log not initialized", "type": "service_unavailable"}}
             return self._audit_log.stats()
 
+    def _register_chat_routes(self, app, auth, _agent, _app_instance, _llm):
+        from fastapi import Header, HTTPException, Body, Request
         @app.post("/api/chat")
         async def chat(request: Request, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
@@ -838,6 +732,8 @@ class RESTAPIGateway(Plugin):
                 },
             )
 
+    def _register_memory_skills_routes(self, app, auth, _memory, _skills):
+        from fastapi import Header, HTTPException
         @app.get("/api/memory/search")
         async def memory_search(
             q: str,
@@ -880,7 +776,8 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("skills_not_available"))
             return {"skills": _skills.all_skill_ids()}
 
-        # ---------------------------------------------------------------- Marketplace endpoints
+    def _register_marketplace_routes(self, app, auth, _ctx, _skills, _llm):
+        from fastapi import Header, HTTPException
         @app.get("/api/marketplace")
         async def list_marketplace(query: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Discover available skill packages in the marketplace."""
@@ -995,7 +892,8 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("llm_not_available"))
             return _llm.clear_cache()
 
-        # ---------------------------------------------------------------- Self-improvement endpoints
+    def _register_improvement_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/improvements")
         async def get_improvements(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get self-improvement stats and patterns."""
@@ -1017,7 +915,8 @@ class RESTAPIGateway(Plugin):
             failures = improver.get_failures(limit=limit)
             return {"failures": failures, "limit": limit}
 
-        # ---------------------------------------------------------------- Cost tracking endpoints
+    def _register_cost_routes(self, app, auth, _llm):
+        from fastapi import Header, HTTPException
         @app.get("/api/costs/daily")
         async def daily_costs(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get daily cost breakdown."""
@@ -1082,7 +981,8 @@ class RESTAPIGateway(Plugin):
             tracker = _llm._cost_tracker
             return {"recent": tracker.get_recent(limit=limit)}
 
-        # ---------------------------------------------------------------- Session endpoints
+    def _register_sessions_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/sessions")
         async def list_sessions(
             limit: int = 50,
@@ -1124,7 +1024,8 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(404, _("session_not_found", session_id=session_id))
             return {"deleted": True, "session_id": session_id}
 
-        # ---------------------------------------------------------------- Settings
+    def _register_settings_routes(self, app, auth, _ctx, _get_backup_mgr):
+        from fastapi import Header, HTTPException
         @app.get("/api/settings")
         async def settings_get(key: Optional[str] = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """读取配置项。不传 key 则返回所有可配置项列表。"""
@@ -1189,7 +1090,8 @@ class RESTAPIGateway(Plugin):
                     return {"alias": alias, "path": path, "value": parsed, "saved": True}
             raise HTTPException(404, _("unknown_key", key=key))
 
-        # ---------------------------------------------------------------- Config Backup
+    def _register_config_backup_routes(self, app, auth, _get_backup_mgr):
+        from fastapi import Header, HTTPException
         @app.get("/api/config/backups")
         async def config_backups_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List all config backups."""
@@ -1245,7 +1147,8 @@ class RESTAPIGateway(Plugin):
                 return {"deleted": True, "filename": filename}
             raise HTTPException(404, _("backup_not_found", filename=filename))
 
-        # ---------------------------------------------------------------- Document RAG
+    def _register_document_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException, UploadFile
         @app.post("/api/documents/ingest")
         async def ingest_document(file: UploadFile = None, path: str = None,
                                   x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -1308,7 +1211,8 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(404, _("document_not_found", name=name))
             return {"deleted": True, "name": name}
 
-        # ---------------------------------------------------------------- Alerting
+    def _register_alerting_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/alerts/rules")
         async def alert_rules_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List all alert rules."""
@@ -1361,7 +1265,8 @@ class RESTAPIGateway(Plugin):
                 return {"alerts": []}
             return {"alerts": _alert_mgr.list_history(limit=limit)}
 
-        # ---------------------------------------------------------------- Approval (Human-in-the-Loop)
+    def _register_approval_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/approvals/pending")
         async def list_pending_approvals(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List pending approval requests."""
@@ -1395,7 +1300,8 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(404, _("approval_request_not_found", request_id=request_id))
             return {"approved": False, "request_id": request_id}
 
-        # ── MCP (Model Context Protocol) 端点 ──────────────────────────
+    def _register_mcp_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/mcp/tools")
         async def mcp_list_tools(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """列出所有可用的 MCP 工具"""
@@ -1453,6 +1359,168 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("mcp_client_not_available"))
             await _mcp_client.remove_server(server_name)
             return {"success": True, "server": server_name}
+
+    async def start(self) -> None:
+        if not self._enabled:
+            return
+        try:
+            from fastapi import (  # noqa: F401
+                Body,
+                FastAPI,
+                Header,
+                HTTPException,
+                Request,
+                UploadFile,
+            )
+            from fastapi.middleware.cors import CORSMiddleware
+            from fastapi.responses import JSONResponse
+        except ImportError:
+            logger.warning("fastapi not installed — REST API disabled")
+            return
+
+        app = FastAPI(
+            title="One-Agent API",
+            version="2.0.0",
+            description="REST API for One-Agent integration",
+        )
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=self._cors_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+        )
+
+        @app.middleware("http")
+        async def rate_limit_middleware(request, call_next):
+            # Get real client IP from X-Forwarded-For header
+            # Only trust X-Forwarded-For if request comes from a trusted proxy
+            client_ip = None
+            if request.client:
+                client_ip = request.client.host
+            elif "client" in request.scope:
+                # Fallback to scope client info
+                client_info = request.scope["client"]
+                if client_info and len(client_info) > 0:
+                    client_ip = client_info[0]
+
+            if not client_ip:
+                # All unknown clients share a single bucket — using a unique
+                # ID per request (e.g. md5(time.time())) would give every
+                # request its own empty bucket, making the rate limit a no-op
+                # and leaking memory into _rate_buckets indefinitely.
+                client_ip = "unknown"
+                logger.warning("Rate limit: unable to determine client IP, using shared 'unknown' bucket")
+
+            if client_ip in self._trusted_proxies:
+                # Request from trusted proxy - use X-Forwarded-For
+                forwarded_for = request.headers.get("X-Forwarded-For")
+                if forwarded_for:
+                    # X-Forwarded-For format: client, proxy1, proxy2
+                    # Take the first IP (original client)
+                    ip = forwarded_for.split(",")[0].strip()
+                else:
+                    ip = client_ip
+            else:
+                # Direct connection or untrusted proxy - use client IP directly
+                ip = client_ip
+
+            now = time.time()
+            bucket = self._rate_buckets.setdefault(ip, [])
+            # evict entries older than 60s
+            bucket[:] = [t for t in bucket if now - t < 60]
+            if len(bucket) >= self._rate_limit:
+                return JSONResponse({"error": {"code": 429, "message": _("rate_limit_exceeded"), "type": "rate_limit"}}, status_code=429)
+            bucket.append(now)
+            return await call_next(request)
+
+        # Reject chat requests with absurdly large bodies before FastAPI
+        # even tries to parse JSON — protects the server from accidental
+        # 100 MB /chat posts.
+        @app.middleware("http")
+        async def body_size_middleware(request, call_next):
+            if request.url.path in ("/api/chat", "/api/chat/stream"):
+                cl = request.headers.get("content-length")
+                try:
+                    if cl is not None and int(cl) > self._max_chat_bytes:
+                        return JSONResponse(
+                            {"error": {"code": 413, "message": _("request_body_too_large", size=cl, max=self._max_chat_bytes), "type": "request_too_large"}},
+                            status_code=413,
+                        )
+                except ValueError:
+                    pass
+            return await call_next(request)
+
+        _agent = self._agent_callback
+        _app_instance: Any = getattr(self, "_app_instance", None)
+        _ctx = self.ctx
+        _llm = _ctx.get_plugin("llm") if _ctx else None
+        _memory = _ctx.get_plugin("memory") if _ctx else None
+        _skills = _ctx.get_plugin("skills") if _ctx else None
+        _bus = _ctx.bus if _ctx else None
+
+        def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
+            if self._api_key and not hmac.compare_digest(x_api_key or "", self._api_key):
+                raise HTTPException(401, _("invalid_api_key"))
+
+        def _get_backup_mgr():
+            """Shared ConfigBackupManager factory for the config-backup endpoints."""
+            from config_backup import ConfigBackupManager
+            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            return ConfigBackupManager(cfg_path)
+
+        # ---------------------------------------------------------------- Health & Readiness
+        _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
+
+        self._register_health_routes(app, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin)
+
+        # ── Dashboard ────────────────────────────────────────────────────────────
+        self._register_dashboard_config_routes(app, auth, _ctx)
+
+        # ── Dashboard API endpoints ──────────────────────────────────────────────────
+        self._register_session_probe_routes(app, auth, _ctx, _agent)
+
+        # ---------------------------------------------------------------- Stats & Metrics
+        self._register_stats_metrics_routes(app, auth, _ctx, _llm, _memory, _bus, _skills, _memory_plugin)
+
+        # ── Audit Log Endpoints ────────────────────────────────────────────────────────
+        self._register_audit_routes(app, auth)
+
+        # ---------------------------------------------------------------- Chat
+        self._register_chat_routes(app, auth, _agent, _app_instance, _llm)
+
+        # ---------------------------------------------------------------- Memory & Skills
+        self._register_memory_skills_routes(app, auth, _memory, _skills)
+
+        # ---------------------------------------------------------------- Marketplace endpoints
+        self._register_marketplace_routes(app, auth, _ctx, _skills, _llm)
+
+        # ---------------------------------------------------------------- Self-improvement endpoints
+        self._register_improvement_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Cost tracking endpoints
+        self._register_cost_routes(app, auth, _llm)
+
+        # ---------------------------------------------------------------- Session endpoints
+        self._register_sessions_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Settings
+        self._register_settings_routes(app, auth, _ctx, _get_backup_mgr)
+
+        # ---------------------------------------------------------------- Config Backup
+        self._register_config_backup_routes(app, auth, _get_backup_mgr)
+
+        # ---------------------------------------------------------------- Document RAG
+        self._register_document_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Alerting
+        self._register_alerting_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Approval (Human-in-the-Loop)
+        self._register_approval_routes(app, auth, _ctx)
+
+        # ── MCP (Model Context Protocol) 端点 ───────────────────────────────────────────────────────────
+        self._register_mcp_routes(app, auth, _ctx)
 
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):
