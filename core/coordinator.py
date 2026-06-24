@@ -28,6 +28,8 @@ from skills import SkillManager
 from core.sentiment import get_sentiment_analyzer
 from core.suggestions import get_suggestion_engine
 from memory.user_profile import get_profile_store
+from core.metacognition import get_metacognition_engine
+from core.reasoning import get_step_reasoner
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,8 @@ class Coordinator(Plugin):
         self._sentiment: Optional[Any] = None
         self._suggestions: Optional[Any] = None
         self._profile: Optional[Any] = None
+        self._metacognition: Optional[Any] = None
+        self._reasoner: Optional[Any] = None
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -642,6 +646,9 @@ class Coordinator(Plugin):
             suggestion_text = self._suggestions.format_suggestions_for_display(suggestions)
             turn.result = turn.result + suggestion_text
 
+        # 3. Metacognition — analyze response quality
+        await self._analyze_response_quality(turn)
+
         self.publish("turn_completed", turn=turn)
         logger.info(
             "reply produced (%s mode, %d tokens, %.2fs)",
@@ -715,6 +722,9 @@ class Coordinator(Plugin):
                 # Guarantee at least one user message carries the input
                 if not any(m.get("role") == "user" for m in messages):
                     messages.append({"role": "user", "content": turn.input_text})
+
+        # Inject Chain-of-Thought reasoning for complex tasks
+        await self._maybe_inject_cot(messages, turn)
 
         return messages
 
@@ -1690,6 +1700,18 @@ class Coordinator(Plugin):
             self._profile = get_profile_store()
         return self._profile
 
+    def _get_metacognition(self) -> Any:
+        """Lazy-load metacognition engine."""
+        if self._metacognition is None:
+            self._metacognition = get_metacognition_engine()
+        return self._metacognition
+
+    def _get_reasoner(self) -> Any:
+        """Lazy-load step-by-step reasoner."""
+        if self._reasoner is None:
+            self._reasoner = get_step_reasoner()
+        return self._reasoner
+
     async def _record_intelligence(self, turn: TurnContext) -> None:
         """Record user preferences, sentiment, and patterns."""
         if not turn.input_text or not turn.result:
@@ -1789,3 +1811,78 @@ class Coordinator(Plugin):
                 if msg.get("role") == "user" and i > 0:
                     messages.insert(i, {"role": "system", "content": sentiment_text})
                     break
+
+    # --------------------------------------------------------- Metacognition
+
+    async def _analyze_response_quality(self, turn: TurnContext) -> None:
+        """Analyze response quality using metacognition engine."""
+        if not turn.result:
+            return
+
+        try:
+            metacog = self._get_metacognition()
+            skills_used = turn.meta.get("skills_used", [])
+
+            analysis = await asyncio.to_thread(
+                metacog.analyze_response,
+                turn.result,
+                [],  # sources_used
+                skills_used,
+                turn.input_text,
+            )
+            turn.meta["metacognition"] = analysis
+
+            # Add confidence disclaimer if needed (configurable)
+            if self.ctx and self.ctx.config:
+                show_disclaimer = self.ctx.config.get("agent", {}).get(
+                    "show_confidence_note", False
+                )
+            else:
+                show_disclaimer = False
+
+            if show_disclaimer:
+                note = metacog.format_confidence_note(analysis)
+                if note:
+                    turn.result = turn.result + note
+
+            logger.debug(
+                "metacognition: confidence=%.2f risk=%s",
+                analysis["confidence"],
+                analysis["hallucination_risk"],
+            )
+        except Exception as exc:
+            logger.debug("metacognition analysis failed: %s", exc)
+
+    # --------------------------------------------------------- Step-by-step Reasoning
+
+    async def _maybe_inject_cot(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
+        """Inject Chain-of-Thought reasoning prompt for complex tasks."""
+        try:
+            reasoner = self._get_reasoner()
+            task_types = reasoner.detect_task_type(turn.input_text)
+            complexity = getattr(turn, "estimated_complexity", 0.0)
+
+            if not reasoner.should_use_cot(complexity, task_types):
+                return
+
+            # Get available tool names
+            tool_names: List[str] = []
+            if self._skills is not None:
+                tool_names = list(self._skills.list_skills().keys())[:15]  # Limit to avoid too long prompt
+
+            cot_prompt = reasoner.generate_reasoning_prompt(
+                turn.input_text,
+                task_types,
+                tool_names,
+            )
+
+            # Inject CoT prompt before the last user message
+            if messages and messages[-1].get("role") == "user":
+                original_user_msg = messages[-1]["content"]
+                messages[-1]["content"] = cot_prompt + "\n\n" + original_user_msg
+
+            turn.meta["task_types"] = task_types
+            turn.meta["cot_enabled"] = True
+            logger.debug("CoT reasoning enabled for task types: %s", task_types)
+        except Exception as exc:
+            logger.debug("CoT injection failed: %s", exc)

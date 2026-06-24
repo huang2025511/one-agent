@@ -7,7 +7,7 @@ import logging
 import re
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base_store import BaseSQLiteStore
 
@@ -347,13 +347,270 @@ class KnowledgeGraph(BaseSQLiteStore):
 
         return self.add_entities_batch(names, etype="unknown", source=source)
 
+    # ===================================================== Graph Reasoning
+
+    def find_path(self, start: str, end: str, max_depth: int = 3) -> Optional[List[Dict[str, Any]]]:
+        """Find a path between two entities using BFS.
+
+        Returns a list of relations forming the path from start to end,
+        or None if no path exists within max_depth.
+
+        Example path:
+        [
+            {"from": "Python", "predicate": "is_a", "to": "编程语言"},
+            {"from": "编程语言", "predicate": "用于", "to": "软件开发"},
+        ]
+        """
+        if start == end:
+            return []
+
+        # BFS with path tracking
+        visited = {start}
+        # Queue items: (current_entity, path_so_far)
+        queue: List[Tuple[str, List[Dict[str, Any]]]] = [(start, [])]
+
+        for _ in range(max_depth):
+            next_queue = []
+            # Collect all entities at this level for batch query
+            level_entities = [item[0] for item in queue if item[0] not in {""}]
+            if not level_entities:
+                break
+
+            batch = self.query_entities_batch(level_entities)
+
+            for entity_name, path in queue:
+                entity = batch.get(entity_name)
+                if not entity:
+                    continue
+
+                for rel in entity.get("outgoing", []):
+                    neighbor = rel["object_name"]
+                    if neighbor in visited:
+                        continue
+
+                    new_path = path + [{
+                        "from": entity_name,
+                        "predicate": rel["predicate"],
+                        "to": neighbor,
+                        "weight": rel["weight"],
+                    }]
+
+                    if neighbor == end:
+                        return new_path
+
+                    visited.add(neighbor)
+                    next_queue.append((neighbor, new_path))
+
+            queue = next_queue
+            if not queue:
+                break
+
+        return None
+
+    def find_common_neighbors(self, entity_a: str, entity_b: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Find entities connected to both A and B.
+
+        Returns common neighbors with their connections to both entities,
+        sorted by combined weight.
+        """
+        entity_a_data = self.query_entity(entity_a)
+        entity_b_data = self.query_entity(entity_b)
+
+        if not entity_a_data or not entity_b_data:
+            return []
+
+        # Collect all neighbors of A with their relations
+        a_neighbors: Dict[str, List[Dict[str, Any]]] = {}
+        for rel in entity_a_data.get("outgoing", []):
+            name = rel["object_name"]
+            a_neighbors.setdefault(name, []).append({
+                "direction": "out",
+                "predicate": rel["predicate"],
+                "weight": rel["weight"],
+            })
+        for rel in entity_a_data.get("incoming", []):
+            name = rel["subject_name"]
+            a_neighbors.setdefault(name, []).append({
+                "direction": "in",
+                "predicate": rel["predicate"],
+                "weight": rel["weight"],
+            })
+
+        # Collect all neighbors of B
+        b_neighbors: Dict[str, List[Dict[str, Any]]] = {}
+        for rel in entity_b_data.get("outgoing", []):
+            name = rel["object_name"]
+            b_neighbors.setdefault(name, []).append({
+                "direction": "out",
+                "predicate": rel["predicate"],
+                "weight": rel["weight"],
+            })
+        for rel in entity_b_data.get("incoming", []):
+            name = rel["subject_name"]
+            b_neighbors.setdefault(name, []).append({
+                "direction": "in",
+                "predicate": rel["predicate"],
+                "weight": rel["weight"],
+            })
+
+        # Find intersection
+        common_names = set(a_neighbors.keys()) & set(b_neighbors.keys())
+
+        result = []
+        for name in common_names:
+            a_rels = a_neighbors[name]
+            b_rels = b_neighbors[name]
+            total_weight = sum(r["weight"] for r in a_rels) + sum(r["weight"] for r in b_rels)
+            result.append({
+                "name": name,
+                "relations_from_a": a_rels,
+                "relations_from_b": b_rels,
+                "combined_weight": total_weight,
+            })
+
+        # Sort by combined weight
+        result.sort(key=lambda x: x["combined_weight"], reverse=True)
+        return result[:limit]
+
+    def infer_relations(self, entity: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Infer likely relations for an entity using transitive reasoning.
+
+        Uses the pattern: A --[rel1]--> B --[rel2]--> C
+        to hypothesize: A --[likely]--> C
+
+        Returns inferred connections ranked by confidence.
+        """
+        entity_data = self.query_entity(entity)
+        if not entity_data:
+            return []
+
+        # Get 1-hop neighbors
+        direct_neighbors = {rel["object_name"] for rel in entity_data.get("outgoing", [])}
+
+        # Collect 2-hop connections
+        inferred: Dict[str, Dict[str, Any]] = {}
+
+        for rel_1 in entity_data.get("outgoing", []):
+            neighbor = rel_1["object_name"]
+            neighbor_data = self.query_entity(neighbor)
+            if not neighbor_data:
+                continue
+
+            for rel_2 in neighbor_data.get("outgoing", []):
+                target = rel_2["object_name"]
+                # Skip direct connections (we already know those)
+                if target in direct_neighbors or target == entity:
+                    continue
+
+                key = f"{entity}->{target}"
+                if key not in inferred:
+                    inferred[key] = {
+                        "target": target,
+                        "confidence": 0.0,
+                        "paths": [],
+                    }
+
+                # Confidence = product of weights along the path
+                path_confidence = rel_1["weight"] * rel_2["weight"] * 0.5  # decay
+                inferred[key]["confidence"] += path_confidence
+                inferred[key]["paths"].append({
+                    "via": neighbor,
+                    "predicate_1": rel_1["predicate"],
+                    "predicate_2": rel_2["predicate"],
+                    "path_weight": path_confidence,
+                })
+
+        # Sort by confidence
+        result = sorted(inferred.values(), key=lambda x: x["confidence"], reverse=True)
+        return result[:top_k]
+
+    def get_entity_clusters(self, min_size: int = 2) -> List[Dict[str, Any]]:
+        """Find densely connected entity clusters (community detection).
+
+        Uses a simple shared-neighbor clustering approach.
+        Returns clusters sorted by size.
+        """
+        # Get all entity names (sample for performance on large graphs)
+        cur = self._conn.execute("SELECT name FROM entities ORDER BY id DESC LIMIT 500")
+        all_entities = [row["name"] for row in cur.fetchall()]
+
+        if len(all_entities) < min_size:
+            return []
+
+        # Build adjacency sets
+        adjacency: Dict[str, set] = {}
+        batch = self.query_entities_batch(all_entities)
+
+        for name, entity in batch.items():
+            if not entity:
+                continue
+            neighbors = set()
+            for rel in entity.get("outgoing", []):
+                neighbors.add(rel["object_name"])
+            for rel in entity.get("incoming", []):
+                neighbors.add(rel["subject_name"])
+            adjacency[name] = neighbors
+
+        # Simple clustering: greedy group by shared neighbors
+        visited = set()
+        clusters: List[Dict[str, Any]] = []
+
+        for entity in all_entities:
+            if entity in visited:
+                continue
+
+            # Start a new cluster
+            cluster = {entity}
+            visited.add(entity)
+
+            # Grow cluster by adding entities with many shared neighbors
+            changed = True
+            while changed:
+                changed = False
+                best_candidate = None
+                best_score = 0
+
+                for candidate in all_entities:
+                    if candidate in visited:
+                        continue
+
+                    # Count shared neighbors with cluster
+                    candidate_neighbors = adjacency.get(candidate, set())
+                    shared = 0
+                    for member in cluster:
+                        shared += len(candidate_neighbors & adjacency.get(member, set()))
+
+                    if shared > best_score and shared >= min_size:
+                        best_score = shared
+                        best_candidate = candidate
+
+                if best_candidate:
+                    cluster.add(best_candidate)
+                    visited.add(best_candidate)
+                    changed = True
+
+            if len(cluster) >= min_size:
+                clusters.append({
+                    "entities": sorted(cluster),
+                    "size": len(cluster),
+                })
+
+        # Sort by size descending
+        clusters.sort(key=lambda x: x["size"], reverse=True)
+        return clusters
+
     def stats(self) -> Dict[str, Any]:
         """Get graph statistics."""
         entity_count = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         relation_count = self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
+
+        # Calculate average degree
+        avg_degree = (relation_count * 2 / entity_count) if entity_count > 0 else 0
+
         return {
             "entities": entity_count,
             "relations": relation_count,
+            "avg_degree": round(avg_degree, 2),
         }
 
 

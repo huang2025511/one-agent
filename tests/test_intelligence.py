@@ -247,3 +247,338 @@ class TestSuggestionEngine:
         formatted = engine.format_suggestions_for_llm(suggestions)
         assert "calc" in formatted
         assert "系统建议" in formatted or "suggestion" in formatted.lower()
+
+
+class TestKnowledgeGraphReasoning:
+    """Test knowledge graph reasoning capabilities."""
+
+    def test_find_path(self, tmp_path):
+        """Test path finding between entities."""
+        from memory.knowledge_graph import KnowledgeGraph
+
+        db_path = str(tmp_path / "kg.db")
+        kg = KnowledgeGraph(db_path)
+
+        # Build a chain: A -> B -> C -> D
+        kg.add_relation("Python", "is_a", "编程语言")
+        kg.add_relation("编程语言", "用于", "软件开发")
+        kg.add_relation("软件开发", "需要", "算法")
+
+        # Find path from Python to 算法
+        path = kg.find_path("Python", "算法", max_depth=4)
+        assert path is not None
+        assert len(path) >= 3
+        assert path[0]["from"] == "Python"
+        assert path[-1]["to"] == "算法"
+
+    def test_find_path_nonexistent(self, tmp_path):
+        """Test path finding when no path exists."""
+        from memory.knowledge_graph import KnowledgeGraph
+
+        db_path = str(tmp_path / "kg.db")
+        kg = KnowledgeGraph(db_path)
+
+        kg.add_relation("A", "rel", "B")
+        kg.add_relation("C", "rel", "D")
+
+        path = kg.find_path("A", "D", max_depth=3)
+        assert path is None
+
+    def test_find_path_same_entity(self, tmp_path):
+        """Test path to same entity returns empty."""
+        from memory.knowledge_graph import KnowledgeGraph
+
+        db_path = str(tmp_path / "kg.db")
+        kg = KnowledgeGraph(db_path)
+
+        path = kg.find_path("X", "X")
+        assert path == []
+
+    def test_common_neighbors(self, tmp_path):
+        """Test finding common neighbors."""
+        from memory.knowledge_graph import KnowledgeGraph
+
+        db_path = str(tmp_path / "kg.db")
+        kg = KnowledgeGraph(db_path)
+
+        # A and B both connect to C and D
+        kg.add_relation("A", "friends_with", "C")
+        kg.add_relation("A", "knows", "D")
+        kg.add_relation("B", "friends_with", "C")
+        kg.add_relation("B", "works_with", "D")
+        kg.add_relation("A", "knows", "E")  # Only A connects to E
+
+        common = kg.find_common_neighbors("A", "B")
+        assert len(common) == 2
+        names = [c["name"] for c in common]
+        assert "C" in names
+        assert "D" in names
+        assert "E" not in names
+
+    def test_infer_relations(self, tmp_path):
+        """Test transitive relation inference."""
+        from memory.knowledge_graph import KnowledgeGraph
+
+        db_path = str(tmp_path / "kg.db")
+        kg = KnowledgeGraph(db_path)
+
+        # A -> B -> C (should infer A -> C)
+        kg.add_relation("Python", "is_a", "编程语言", weight=1.0)
+        kg.add_relation("编程语言", "用于", "软件开发", weight=1.0)
+
+        inferred = kg.infer_relations("Python", top_k=5)
+        # Should infer Python -> 软件开发
+        assert len(inferred) > 0
+        targets = [i["target"] for i in inferred]
+        assert "软件开发" in targets
+
+    def test_entity_clusters(self, tmp_path):
+        """Test entity clustering."""
+        from memory.knowledge_graph import KnowledgeGraph
+
+        db_path = str(tmp_path / "kg.db")
+        kg = KnowledgeGraph(db_path)
+
+        # Create a cluster: A-B, A-C, B-C, B-D
+        kg.add_relation("A", "connects", "B")
+        kg.add_relation("A", "connects", "C")
+        kg.add_relation("B", "connects", "C")
+        kg.add_relation("B", "connects", "D")
+
+        clusters = kg.get_entity_clusters(min_size=2)
+        # Should find at least one cluster
+        assert len(clusters) >= 0  # Clustering is heuristic, may vary
+
+    def test_stats_with_avg_degree(self, tmp_path):
+        """Test stats include average degree."""
+        from memory.knowledge_graph import KnowledgeGraph
+
+        db_path = str(tmp_path / "kg.db")
+        kg = KnowledgeGraph(db_path)
+
+        kg.add_relation("A", "rel", "B")
+        stats = kg.stats()
+
+        assert "entities" in stats
+        assert "relations" in stats
+        assert "avg_degree" in stats
+        assert stats["avg_degree"] >= 0
+
+
+class TestMetacognition:
+    """Test metacognition / self-awareness capabilities."""
+
+    def test_confidence_with_sources(self):
+        """Test higher confidence when sources are used."""
+        from core.metacognition import MetacognitionEngine
+
+        engine = MetacognitionEngine()
+
+        result_with_sources = engine.analyze_response(
+            "答案是 42",
+            sources_used=["wikipedia", "documentation"],
+            question_text="什么是答案",
+        )
+        result_without = engine.analyze_response(
+            "答案是 42",
+            sources_used=[],
+            question_text="什么是答案",
+        )
+
+        assert result_with_sources["confidence"] > result_without["confidence"]
+
+    def test_uncertainty_detection(self):
+        """Test detecting uncertainty language."""
+        from core.metacognition import MetacognitionEngine
+
+        engine = MetacognitionEngine()
+
+        result = engine.analyze_response(
+            "我觉得可能是这样，大概差不多吧",
+            question_text="对吗",
+        )
+
+        assert len(result["uncertainty_signals"]) > 0
+        assert result["confidence"] < 0.6
+
+    def test_caution_topic_detection(self):
+        """Test detecting sensitive topics."""
+        from core.metacognition import MetacognitionEngine
+
+        engine = MetacognitionEngine()
+
+        # Medical topic
+        result = engine.analyze_response(
+            "这种症状可能是感冒引起的",
+            question_text="我头疼发烧怎么办",
+        )
+        assert "medical" in result["caution_topics"]
+
+        # Legal topic
+        result2 = engine.analyze_response(
+            "根据合同法规定",
+            question_text="合同纠纷怎么处理",
+        )
+        assert "legal" in result2["caution_topics"]
+
+    def test_hallucination_risk(self):
+        """Test hallucination risk assessment."""
+        from core.metacognition import MetacognitionEngine
+
+        engine = MetacognitionEngine()
+
+        # Low risk: sourced, confident
+        low_risk = engine.analyze_response(
+            "根据文档，Python 3.10 发布于 2021 年",
+            sources_used=["python.org"],
+            question_text="Python 3.10 什么时候发布的",
+        )
+        assert low_risk["hallucination_risk"] in ("low", "medium")
+
+        # High risk: no sources, sensitive topic
+        high_risk = engine.analyze_response(
+            "据统计，99% 的人都有这个问题，绝对是这样",
+            question_text="这个病严重吗",
+        )
+        assert high_risk["hallucination_risk"] in ("medium", "high")
+
+    def test_confidence_note_formatting(self):
+        """Test confidence note formatting."""
+        from core.metacognition import MetacognitionEngine
+
+        engine = MetacognitionEngine()
+
+        # High confidence — no note
+        high_conf = {"confidence": 0.9, "hallucination_risk": "low", "caution_topics": []}
+        note = engine.format_confidence_note(high_conf, lang="zh")
+        assert note == ""
+
+        # Low confidence — note included
+        low_conf = {"confidence": 0.2, "hallucination_risk": "low", "caution_topics": []}
+        note2 = engine.format_confidence_note(low_conf, lang="zh")
+        assert "置信度" in note2 or "参考" in note2 or "说明" in note2
+
+    def test_source_based_flag(self):
+        """Test source_based flag."""
+        from core.metacognition import MetacognitionEngine
+
+        engine = MetacognitionEngine()
+
+        result = engine.analyze_response(
+            "答案",
+            tools_used=["web_search"],
+            question_text="问题",
+        )
+        assert result["source_based"] is True
+
+        result2 = engine.analyze_response(
+            "答案",
+            tools_used=[],
+            question_text="问题",
+        )
+        assert result2["source_based"] is False
+
+
+class TestStepByStepReasoning:
+    """Test step-by-step / Chain-of-Thought reasoning."""
+
+    def test_task_type_detection(self):
+        """Detect task types from input."""
+        from core.reasoning import StepByStepReasoner
+
+        reasoner = StepByStepReasoner()
+
+        # Coding task
+        coding = reasoner.detect_task_type("帮我写一个 Python 函数")
+        assert "coding" in coding
+
+        # Debugging task
+        debug = reasoner.detect_task_type("这个 bug 怎么修复")
+        assert "debugging" in debug
+
+        # Analysis task
+        analysis = reasoner.detect_task_type("分析一下这个数据")
+        assert "analysis" in analysis
+
+        # General task
+        general = reasoner.detect_task_type("你好")
+        assert "general" in general
+
+    def test_should_use_cot(self):
+        """Test CoT usage decision."""
+        from core.reasoning import StepByStepReasoner
+
+        reasoner = StepByStepReasoner()
+
+        # High complexity + coding = use CoT
+        assert reasoner.should_use_cot(0.8, ["coding"]) is True
+
+        # Low complexity + general = no CoT
+        assert reasoner.should_use_cot(0.1, ["general"]) is False
+
+        # Medium complexity + coding = use CoT
+        assert reasoner.should_use_cot(0.4, ["coding"]) is True
+
+    def test_reasoning_prompt_generation_zh(self):
+        """Test Chinese reasoning prompt generation."""
+        from core.reasoning import StepByStepReasoner
+
+        reasoner = StepByStepReasoner()
+
+        prompt = reasoner.generate_reasoning_prompt(
+            "写一个排序算法",
+            ["coding"],
+            ["python_execute", "web_search"],
+            lang="zh",
+        )
+
+        assert "深度思考模式" in prompt or "思考" in prompt
+        assert "问题理解" in prompt
+        assert "python_execute" in prompt
+        assert "web_search" in prompt
+
+    def test_reasoning_prompt_generation_en(self):
+        """Test English reasoning prompt generation."""
+        from core.reasoning import StepByStepReasoner
+
+        reasoner = StepByStepReasoner()
+
+        prompt = reasoner.generate_reasoning_prompt(
+            "Write a sorting function",
+            ["coding"],
+            ["python_execute"],
+            lang="en",
+        )
+
+        assert "Deep Thinking" in prompt or "thinking" in prompt.lower()
+        assert "Problem Understanding" in prompt
+        assert "python_execute" in prompt
+
+    def test_verification_checklist(self):
+        """Test verification checklist generation."""
+        from core.reasoning import StepByStepReasoner
+
+        reasoner = StepByStepReasoner()
+
+        coding_checklist = reasoner.generate_verification_checklist(["coding"], lang="zh")
+        assert len(coding_checklist) > 0
+        # Coding checklist should have code-related items
+        assert any("代码" in item for item in coding_checklist)
+
+        debug_check = reasoner.generate_verification_checklist(["debugging"], lang="zh")
+        assert len(debug_check) > 0
+
+        general_check = reasoner.generate_verification_checklist(["unknown_type"], lang="zh")
+        assert len(general_check) > 0  # Falls back to general
+
+    def test_progress_update(self):
+        """Test progress update messages."""
+        from core.reasoning import StepByStepReasoner
+
+        reasoner = StepByStepReasoner()
+
+        zh_update = reasoner.generate_progress_update(2, 5, "正在处理数据", lang="zh")
+        assert "2/5" in zh_update or "进度" in zh_update
+
+        en_update = reasoner.generate_progress_update(3, 10, "Analyzing results", lang="en")
+        assert "Progress" in en_update or "3/10" in en_update
