@@ -1,0 +1,34 @@
+# ============================================================================
+# One-Agent 预发布环境配置
+#
+# 使用方式：ONE_AGENT_ENV=staging one-agent
+# ============================================================================
+
+agent:
+  log_level: INFO
+  language: zh
+
+# 预发布环境使用稳定配置
+llm:
+  primary_model: sensenova/deepseek-v4-flash
+  lightweight_model: sensenova/sensenova-6.7-flash-lite
+  timeout: 45
+  retries: 2
+
+router:
+  enabled: true
+  task_complexity_thresholds:
+    trivial: 0.2
+    simple: 0.5
+    complex: 0.8
+    expert: 1.0
+  self_evolution: false
+
+monitor:
+  metrics_enabled: true
+  tracing_enabled: true
+  health_check_interval: 60
+
+features:
+  self_evolution: false
+  experimental: false
