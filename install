@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
 # ============================================================
-# One-Agent 安装脚本 — 一键安装，零提问
+# One-Agent 一键安装脚本
 #
 # 用法:
 #   ./install                默认：完整安装，零交互
 #   ./install --quick        最小安装（仅核心依赖）
-#   ./install --interactive  交互式向导
 #   bash install en          English
 #
 # 国内用户自动使用清华镜像，也可手动指定:
 #   PIP_INDEX=https://mirrors.aliyun.com/pypi/simple ./install
+#
+# 安装完成后运行:
+#   one-agent setup          # 交互式配置向导
+#   one-agent                # 启动 agent
 # ============================================================
 set -e
 
-MODE="${1:-default}"
-LANG="${LANG:-zh_CN}"
+LANG_CODE="${LANG:-zh_CN}"
 USE_VENV=false
+QUICK=false
 
 # ----- 解析参数 -----
-INTERACTIVE=false
-QUICK=false
-case "$MODE" in
-    en) LANG="en_US" ; MODE="default" ;;
-    --interactive|-i) INTERACTIVE=true ; MODE="default" ;;
-    --quick|-q) QUICK=true ; MODE="default" ;;
-esac
+for arg in "$@"; do
+    case "$arg" in
+        en) LANG_CODE="en_US" ;;
+        --quick|-q) QUICK=true ;;
+    esac
+done
 
 # ----- 颜色 -----
 G='\033[0;32m' C='\033[0;36m' Y='\033[1;33m' R='\033[0m'
@@ -34,7 +36,7 @@ warn(){ echo -e "${Y}⚠${R} $1"; }
 
 cd "$(dirname "$0")"
 
-# ----- 检测 Python -----
+# ==================== 1. 检查 Python ====================
 info "检查 Python 环境..."
 if command -v python3 &>/dev/null; then PY=python3
 elif command -v python &>/dev/null; then PY=python
@@ -43,7 +45,7 @@ PY_VER=$($PY -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.
 if [[ "$PY_VER" < "3.10" ]]; then echo "需要 Python 3.10+，当前: $PY_VER"; exit 1; fi
 ok "Python $PY_VER"
 
-# ----- 国内镜像 -----
+# ==================== 2. pip 镜像 ====================
 if [[ -n "${PIP_INDEX:-}" ]]; then
     MIRROR="$PIP_INDEX"
 else
@@ -63,9 +65,8 @@ _pip() {
     fi
 }
 
-# ----- 自动检测 externally-managed 环境并创建 venv -----
+# ==================== 3. 虚拟环境 ====================
 _detect_need_venv() {
-    # 用 pip install --dry-run 探测，不实际安装
     local out
     out=$($PY -m pip install --dry-run --quiet pytz 2>&1 || true)
     if echo "$out" | grep -q "externally-managed\|--break-system-packages"; then
@@ -74,19 +75,11 @@ _detect_need_venv() {
     return 1
 }
 
-if $INTERACTIVE; then
-    echo -n "是否创建虚拟环境？[Y/n] "
-    read -r ans
-    if [[ -z "$ans" || "$ans" =~ ^[Yy] ]]; then USE_VENV=true; fi
-elif _detect_need_venv; then
+if _detect_need_venv; then
     warn "检测到 externally-managed 环境，自动创建虚拟环境..."
     USE_VENV=true
-fi
-
-if $USE_VENV; then
     if [[ ! -d venv ]]; then
         if ! $PY -m venv venv 2>/dev/null; then
-            # 尝试 --without-pip
             if ! $PY -m venv --without-pip venv 2>/dev/null; then
                 warn "无法创建虚拟环境，使用 --break-system-packages 模式"
                 USE_VENV=false
@@ -96,7 +89,6 @@ if $USE_VENV; then
     if $USE_VENV; then
         source venv/bin/activate
         PY=python
-        # 确保 venv 里有 pip
         if ! $PY -m pip --version &>/dev/null; then
             warn "venv 中缺少 pip，正在修复..."
             $PY -m ensurepip --upgrade 2>/dev/null || \
@@ -106,7 +98,7 @@ if $USE_VENV; then
     fi
 fi
 
-# 如果不用 venv 但系统是 externally-managed，使用 --break-system-packages
+# 不用 venv 但系统是 externally-managed
 if ! $USE_VENV && _detect_need_venv; then
     _pip() {
         if [[ -n "$MIRROR" ]]; then
@@ -117,7 +109,7 @@ if ! $USE_VENV && _detect_need_venv; then
     }
 fi
 
-# ----- 安装依赖 -----
+# ==================== 4. 安装依赖 ====================
 if $QUICK; then
     info "最小安装（仅核心依赖）..."
     _pip --upgrade pip setuptools wheel
@@ -133,7 +125,7 @@ else
 fi
 ok "依赖安装完成"
 
-# ----- 持久化镜像配置 -----
+# ==================== 5. pip 镜像持久化 ====================
 if [[ -n "$MIRROR" ]]; then
     mkdir -p ~/.config/pip
     cat > ~/.config/pip/pip.conf << EOF
@@ -144,311 +136,68 @@ EOF
     ok "pip 镜像已配置: $MIRROR"
 fi
 
-# ----- 注册 CLI 命令 (one-agent / one) -----
+# ==================== 6. 注册 CLI 命令 ====================
 info "注册 one-agent 命令..."
 if _pip install -e . 2>/dev/null; then
     ok "one-agent 命令已注册"
 else
     warn "pip 注册失败，创建 wrapper 脚本..."
     SCRIPT_DIR="$(pwd)"
-    # 如果用了 venv，wrapper 需要先激活 venv
     if $USE_VENV; then
-        for cmd in one-agent one; do
-            if [[ -w /usr/local/bin ]] || [[ "$(id -u)" == "0" ]]; then
-                cat > "/usr/local/bin/${cmd}" << EOF
-#!/usr/bin/env bash
-source "${SCRIPT_DIR}/venv/bin/activate"
-cd "${SCRIPT_DIR}" && exec python one_agent.py "\$@"
-EOF
-                chmod +x "/usr/local/bin/${cmd}"
-                ok "已创建: /usr/local/bin/${cmd}"
-            fi
-        done
+        WRAPPER_ACTIVATE="source \"${SCRIPT_DIR}/venv/bin/activate\""
+        WRAPPER_PY="python"
     else
-        for cmd in one-agent one; do
-            if [[ -w /usr/local/bin ]] || [[ "$(id -u)" == "0" ]]; then
-                cat > "/usr/local/bin/${cmd}" << EOF
-#!/usr/bin/env bash
-cd "${SCRIPT_DIR}" && exec $PY one_agent.py "\$@"
-EOF
-                chmod +x "/usr/local/bin/${cmd}"
-                ok "已创建: /usr/local/bin/${cmd}"
-            fi
-        done
+        WRAPPER_ACTIVATE=""
+        WRAPPER_PY="$PY"
     fi
+    for cmd in one-agent one; do
+        if [[ -w /usr/local/bin ]] || [[ "$(id -u)" == "0" ]]; then
+            cat > "/usr/local/bin/${cmd}" << EOF
+#!/usr/bin/env bash
+${WRAPPER_ACTIVATE}
+cd "${SCRIPT_DIR}" && exec ${WRAPPER_PY} one_agent.py "\$@"
+EOF
+            chmod +x "/usr/local/bin/${cmd}"
+            ok "已创建: /usr/local/bin/${cmd}"
+        fi
+    done
 fi
 
-# ----- 数据目录 -----
+# ==================== 7. 数据目录 ====================
 info "初始化数据目录..."
 mkdir -p data/skills/{builtin,user,community} data/memory/skills data/workspace data/logs data/marketplace data/scheduler
 ok "数据目录已就绪"
 
-# ----- 交互模式：额外配置 -----
-if $INTERACTIVE; then
-    echo -e "\n配置 LLM API Key（可选，回车跳过）"
-    
-    # 显示服务商列表
-    python3 scripts/fetch_models.py --list 2>/dev/null || {
-        echo "  1) OpenAI"
-        echo "  2) DeepSeek"
-        echo "  3) SenseNova"
-        echo "  4) DashScope"
-        echo "  5) 自定义"
-    }
-    
-    echo ""
-    echo -n "请选择服务商 [输入名称或编号]: "; read -r _ANS
-    
-    # 检查是否有已保存的自定义服务商
-    _CUSTOM_KEY=""
-    if [[ -f ~/.one-agent/custom_providers.json ]]; then
-        # 尝试匹配自定义服务商
-        _CUSTOM_KEY=$(python3 -c "
-import json, sys
-try:
-    with open('${HOME}/.one-agent/custom_providers.json') as f:
-        data = json.load(f)
-    for k, v in data.items():
-        name = v.get('name', '').lower()
-        if '${_ANS}'.lower() in name or '${_ANS}' == k:
-            print(k)
-            sys.exit(0)
-except: pass
-" 2>/dev/null)
-    fi
-    
-    # 根据输入确定服务商
-    _PROVIDER_KEY=""
-    _NEEDS_URL=""
-    
-    if [[ -n "$_CUSTOM_KEY" ]]; then
-        _PROVIDER_KEY="$_CUSTOM_KEY"
-    elif [[ "$_ANS" =~ ^[0-9]+$ ]] && [[ "$_ANS" -ge 1 ]] && [[ "$_ANS" -le 5 ]]; then
-        case "$_ANS" in
-            1) _PROVIDER_KEY="openai" ;;
-            2) _PROVIDER_KEY="deepseek" ;;
-            3) _PROVIDER_KEY="sensenova" ;;
-            4) _PROVIDER_KEY="dashscope" ;;
-            5) _PROVIDER_KEY="custom" ;;
-        esac
-    else
-        # 按名称匹配
-        case "${_ANS,,}" in
-            *openai*) _PROVIDER_KEY="openai" ;;
-            *deepseek*) _PROVIDER_KEY="deepseek" ;;
-            *sense*snova*|*商汤*) _PROVIDER_KEY="sensenova" ;;
-            *dashscope*|*阿里*|*千问*) _PROVIDER_KEY="dashscope" ;;
-            *anthropic*|*claude*) _PROVIDER_KEY="anthropic" ;;
-            *gemini*|*google*) _PROVIDER_KEY="google" ;;
-            *mistral*) _PROVIDER_KEY="mistral" ;;
-            *cohere*) _PROVIDER_KEY="cohere" ;;
-            *meta*|*llama*) _PROVIDER_KEY="meta" ;;
-            *silicon*|*硅基*) _PROVIDER_KEY="siliconflow" ;;
-            *zhipu*|*智谱*|*glm*) _PROVIDER_KEY="zhipuai" ;;
-            *baichuan*|*百川*) _PROVIDER_KEY="baichuan" ;;
-            *minimax*|*海螺*) _PROVIDER_KEY="minimax" ;;
-            *stepfun*|*阶跃*) _PROVIDER_KEY="stepfun" ;;
-            *moonshot*|*kimi*|*月暗*) _PROVIDER_KEY="moonshot" ;;
-            *spark*|*讯飞*) _PROVIDER_KEY="spark" ;;
-            *wenxin*|*文心*|*百度*) _PROVIDER_KEY="wenxin" ;;
-            *hunyuan*|*混元*|*腾讯*) _PROVIDER_KEY="hunyuan" ;;
-            *groq*) _PROVIDER_KEY="groq" ;;
-            *together*) _PROVIDER_KEY="together" ;;
-            *fireworks*) _PROVIDER_KEY="fireworks" ;;
-            *replicate*) _PROVIDER_KEY="replicate" ;;
-            *anyscale*) _PROVIDER_KEY="anyscale" ;;
-            *perplexity*) _PROVIDER_KEY="perplexity" ;;
-            *ollama*) _PROVIDER_KEY="ollama" ;;
-            *azure*) _PROVIDER_KEY="azure" ;;
-            *aws*|*bedrock*) _PROVIDER_KEY="aws-bedrock" ;;
-            *vertex*) _PROVIDER_KEY="vertex-ai" ;;
-            *) _PROVIDER_KEY="custom" ;;
-        esac
-    fi
-    
-    # 处理服务商配置
-    if [[ "$_PROVIDER_KEY" == "custom" ]]; then
-        echo -n "API 名称: "; read -r _CUSTOM_NAME
-        echo -n "API Base URL: "; read -r _API_URL
-        echo -n "API Key (可选): "; read -r _KEY
-        if [[ -z "$_CUSTOM_NAME" || -z "$_API_URL" ]]; then
-            warn "信息不完整，跳过"
-        else
-            # 保存自定义服务商
-            python3 scripts/fetch_models.py --add "$_CUSTOM_NAME" --url "$_API_URL" --key "$_KEY" 2>/dev/null
-            _CUSTOM_KEY=$(python3 -c "
-import json
-with open('${HOME}/.one-agent/custom_providers.json') as f:
-    data = json.load(f)
-for k, v in data.items():
-    if v.get('name') == '${_CUSTOM_NAME}':
-        print(k)
-        break
-" 2>/dev/null)
-            [[ -n "$_CUSTOM_KEY" ]] && _PROVIDER_KEY="$_CUSTOM_KEY"
-            echo "✓ 自定义服务商已保存，下次可直接选择"
-        fi
-    fi
-    
-    # 获取 API Key 和 URL
-    if [[ -n "$_PROVIDER_KEY" && "$_PROVIDER_KEY" != "ollama" ]]; then
-        echo -n "API Key: "; read -r _KEY
-    elif [[ "$_PROVIDER_KEY" == "ollama" ]]; then
-        echo -n "Ollama 地址 [http://localhost:11434]: "; read -r _KEY
-        [[ -z "$_KEY" ]] && _KEY="http://localhost:11434"
-    fi
-    
-    # 获取模型列表
-    if [[ -n "$_PROVIDER_KEY" ]]; then
-        echo -e "\n正在获取可用模型..."
-        
-        if [[ "$_PROVIDER_KEY" == "ollama" ]]; then
-            _MODELS_RAW=$(python3 scripts/fetch_models.py --provider ollama --url "$_KEY" 2>/dev/null || echo "")
-        else
-            _MODELS_RAW=$(python3 scripts/fetch_models.py --provider "$_PROVIDER_KEY" --key "$_KEY" 2>/dev/null || echo "")
-        fi
-        
-        # 显示模型列表
-        if [[ -n "$_MODELS_RAW" && ! "$_MODELS_RAW" =~ "Error" && -n "$_MODELS_RAW" ]]; then
-            IFS=$'\n' read -r -d '' -a _MODELS <<< "$_MODELS_RAW"
-            _MODEL_COUNT=${#_MODELS[@]}
-            
-            if [[ $_MODEL_COUNT -gt 0 ]]; then
-                echo -e "\n可用模型:"
-                for i in "${!_MODELS[@]}"; do
-                    _default=""
-                    [[ $i -eq 0 ]] && _default=" (默认)"
-                    echo "  $((i+1))) ${_MODELS[$i]}${_default}"
-                done
-                echo "  $((_MODEL_COUNT + 1))) 自定义输入"
-                echo -n "选择模型 [默认 1]: "; read -r _M
-                
-                if [[ -z "$_M" || "$_M" == "1" ]]; then
-                    _MODEL="${_MODELS[0]}"
-                elif [[ "$_M" -le "$_MODEL_COUNT" ]] 2>/dev/null; then
-                    _MODEL="${_MODELS[$((_M-1))]}"
-                else
-                    echo -n "输入模型名: "; read -r _MODEL
-                fi
-            fi
-        fi
-        
-        # 如果还没选择模型
-        if [[ -z "$_MODEL" ]]; then
-            echo "请手动输入模型名:"
-            echo -n "模型名: "; read -r _MODEL
-        fi
-        
-        # 保存配置
-        if [[ -n "$_KEY" && -n "$_PROVIDER_KEY" ]]; then
-            _ENV_VAR=""
-            case "$_PROVIDER_KEY" in
-                openai) _ENV_VAR="OPENAI_API_KEY" ;;
-                deepseek) _ENV_VAR="DEEPSEEK_API_KEY" ;;
-                sensenova) _ENV_VAR="SENSENOVA_API_KEY" ;;
-                dashscope) _ENV_VAR="DASHSCOPE_API_KEY" ;;
-                anthropic) _ENV_VAR="ANTHROPIC_API_KEY" ;;
-                google) _ENV_VAR="GEMINI_API_KEY" ;;
-                groq) _ENV_VAR="GROQ_API_KEY" ;;
-                together) _ENV_VAR="TOGETHER_API_KEY" ;;
-                *) _ENV_VAR="CUSTOM_API_KEY" ;;
-            esac
-            [[ -n "$_ENV_VAR" ]] && echo "${_ENV_VAR}=${_KEY}" >> .env
-        fi
-        
-        if [[ -n "$_MODEL" && -f config/default_config.yaml ]]; then
-            sed -i "s|primary_provider: .*|primary_provider: ${_PROVIDER_KEY}|" config/default_config.yaml
-            sed -i "s|primary_model: .*|primary_model: ${_PROVIDER_KEY}/${_MODEL}|" config/default_config.yaml
-            ok "模型: ${_PROVIDER_KEY}/${_MODEL}"
-        fi
-    fi
-
-    echo -e "\n设置系统命令执行密码（可选，回车跳过）"
-    echo -n "密码: "; read -r _PWD
-    if [[ -n "$_PWD" ]]; then
-        _HASH=$(python3 -c "import hashlib; print(hashlib.sha256('${_PWD}'.encode()).hexdigest())")
-        sed -i "s|system_executor_password: ''|system_executor_password: '${_HASH}'|" config/default_config.yaml 2>/dev/null || true
-        ok "密码已设置"
-    fi
-
-    # 网关配置
-    echo -e "\n配置网关（按空格选择，回车确认）"
-    echo "  可用网关:"
-    echo "    1) Web UI        - 网页界面"
-    echo "    2) Telegram      - 电报"
-    echo "    3) WeCom         - 企业微信"
-    echo "    4) DingTalk      - 钉钉"
-    echo "    5) Feishu        - 飞书"
-    echo "    6) Discord       - Discord"
-    echo "    7) Slack         - Slack"
-    echo "    8) WeChat        - 个人微信 (需要 itchat-uos)"
-    echo -n "选择网关 [默认 1]: "; read -r _GW
-    if [[ -z "$_GW" ]]; then
-        _GW="1"
-    fi
-
-    # 根据选择启用网关
-    if echo "$_GW" | grep -q "1"; then
-        sed -i "/^  web:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
-        ok "已启用: Web UI"
-    fi
-    if echo "$_GW" | grep -q "2"; then
-        sed -i "/^  telegram:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
-        echo -n "Telegram Bot Token（可选）: "; read -r _TG_TOKEN
-        [[ -n "$_TG_TOKEN" ]] && echo "TELEGRAM_BOT_TOKEN=${_TG_TOKEN}" >> .env
-        ok "已启用: Telegram"
-    fi
-    if echo "$_GW" | grep -q "3"; then
-        sed -i "/^  wecom:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
-        ok "已启用: 企业微信"
-    fi
-    if echo "$_GW" | grep -q "4"; then
-        sed -i "/^  dingtalk:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
-        ok "已启用: 钉钉"
-    fi
-    if echo "$_GW" | grep -q "5"; then
-        sed -i "/^  feishu:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
-        ok "已启用: 飞书"
-    fi
-    if echo "$_GW" | grep -q "6"; then
-        sed -i "/^  discord:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
-        ok "已启用: Discord"
-    fi
-    if echo "$_GW" | grep -q "7"; then
-        sed -i "/^  slack:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
-        ok "已启用: Slack"
-    fi
-    if echo "$_GW" | grep -q "8"; then
-        sed -i "/^  wechat_personal:$/,/^  [a-z_]*:$/ s/enabled: false/enabled: true/" config/default_config.yaml 2>/dev/null || true
-        _pip itchat-uos 2>/dev/null && ok "已启用: 个人微信 (已安装 itchat-uos)" || warn "需要安装 itchat-uos: pip install itchat-uos"
-    fi
+# ==================== 8. .env 模板 ====================
+if [[ ! -f .env && -f .env.example ]]; then
+    cp .env.example .env
+    info "已创建 .env 文件（可编辑添加 API Key）"
 fi
 
-# ----- 完成 -----
+# ==================== 完成 ====================
 echo ""
-echo -e "${G}╔════════════════════════════════╗${R}"
-echo -e "${G}║   ✅ One-Agent 安装完成！     ║${R}"
-echo -e "${G}╚════════════════════════════════╝${R}"
+echo -e "${G}╔════════════════════════════════════╗${R}"
+echo -e "${G}║   ✅ One-Agent 安装完成！         ║${R}"
+echo -e "${G}╚════════════════════════════════════╝${R}"
 echo ""
-if $USE_VENV; then
-    echo "  启动方式:"
-    echo "    one-agent            # 直接输入即可启动"
-    echo "    one                   # 简写别名"
-    echo ""
-    echo "  或者手动激活虚拟环境后启动:"
-    echo "    source venv/bin/activate"
-    echo "    one-agent"
-else
-    echo "  启动方式:"
-    echo "    one-agent            # 直接输入即可启动"
-    echo "    one                   # 简写别名"
-fi
+echo "  下一步："
 echo ""
-echo "  服务地址:"
+echo "    1. 配置 API Key（交互式向导）"
+echo "       one-agent setup"
+echo ""
+echo "    2. 健康检查"
+echo "       one-agent doctor"
+echo ""
+echo "    3. 启动"
+echo "       one-agent          # 交互模式"
+echo "       one-agent serve    # 后台服务"
+echo ""
+echo "  服务地址："
 echo "    Web UI:    http://127.0.0.1:18791"
 echo "    REST API:  http://127.0.0.1:18792"
 echo "    监控面板:  http://127.0.0.1:18793"
 echo ""
-echo "  验证安装: python tests/smoke.py"
-echo "  详细教程: cat TUTORIAL.md"
+echo "  配置文件："
+echo "    config/default_config.yaml"
+echo "    .env"
 echo ""
