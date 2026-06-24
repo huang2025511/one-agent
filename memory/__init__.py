@@ -287,6 +287,38 @@ class LongTermMemory:
             logger.error("get_by_id(%s) failed: %s", memory_id, exc)
         return None
 
+    def get_by_ids(self, memory_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Batch-fetch memory entries by rowid.
+
+        Returns a dict keyed by the string rowid. Replaces N+1 loops that
+        called ``get_by_id`` once per semantic-search hit.
+        """
+        if not memory_ids:
+            return {}
+        c = self._conn.cursor()
+        # SQLite parameter limits are high enough for typical top_k (5-10);
+        # chunk defensively to stay well below the 999-host-var ceiling.
+        results: Dict[str, Dict[str, Any]] = {}
+        try:
+            for i in range(0, len(memory_ids), 500):
+                chunk = memory_ids[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                c.execute(
+                    f"SELECT rowid, content, source, tags, timestamp FROM memory WHERE rowid IN ({placeholders})",
+                    chunk,
+                )
+                for row in c.fetchall():
+                    results[str(row[0])] = {
+                        "id": str(row[0]),
+                        "content": row[1],
+                        "source": row[2],
+                        "tags": row[3],
+                        "timestamp": row[4],
+                    }
+        except sqlite3.Error as exc:
+            logger.error("get_by_ids(%s) failed: %s", memory_ids, exc)
+        return results
+
     def close(self) -> None:
         """Close the SQLite connection (called from MemoryPlugin.stop)."""
         try:
@@ -472,14 +504,15 @@ class MemoryPlugin(Plugin):
                             seen_ids.add(memory_id)
                             merged_hits.append(hit)
 
-                    # Add semantic results
+                    # Add semantic results — batch-fetch to avoid N+1 queries
+                    new_ids = [mid for mid, _score in semantic_results if mid not in seen_ids]
+                    entries_map: Dict[str, Dict[str, Any]] = {}
+                    if new_ids:
+                        entries_map = await asyncio.to_thread(self._long.get_by_ids, new_ids)
                     for memory_id, score in semantic_results:
                         if memory_id not in seen_ids:
                             seen_ids.add(memory_id)
-                            # Fetch full memory content
-                            hit = await asyncio.to_thread(
-                                self._long.get_by_id, memory_id
-                            )
+                            hit = entries_map.get(str(memory_id))
                             if hit:
                                 hit["semantic_score"] = score
                                 merged_hits.append(hit)

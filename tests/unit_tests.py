@@ -2011,24 +2011,7 @@ def test_self_improver_apply():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 23. SubAgent delegation (_detect_complex_task in coordinator)
-# ══════════════════════════════════════════════════════════════════════════
-
-def test_sub_agent_detect_complex():
-    from core.coordinator import Coordinator
-    text = "请帮我详细比较 Python 和 Go 两种编程语言的性能差异，从并发处理模型、内存管理效率、编译速度等多个维度进行深入分析"
-    result = Coordinator._detect_complex_task(text)
-    _check("detect complex task returns True", result is True, f"len={len(text)}")
-
-
-def test_sub_agent_detect_simple():
-    from core.coordinator import Coordinator
-    result = Coordinator._detect_complex_task("你好")
-    _check("detect simple task returns False", result is False)
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 24. KnowledgeGraph (memory/knowledge_graph.py)
+# 23. KnowledgeGraph (memory/knowledge_graph.py)
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_kg_add_entity():

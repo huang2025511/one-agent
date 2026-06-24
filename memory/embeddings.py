@@ -69,12 +69,15 @@ class EmbeddingStore(BaseSQLiteStore):
             db_path: Path to SQLite database for vector storage
         """
         self._model = None
+        self._model_loaded = False
         # In-memory vector cache: {(memory_id, vector_list)}.
         # Avoids reloading all vectors from SQLite on every search.
         # Invalidated on store()/delete().
         self._vector_cache: Optional[List[Tuple[str, List[float]]]] = None
         super().__init__(db_path)
-        self._load_model()
+        # Model loading is deferred to first embed() call — loading
+        # sentence-transformers at construction time added seconds to
+        # startup even when memory/embedding search was never used.
 
     def _init_db(self):
         """Initialize SQLite database with vector storage schema."""
@@ -133,6 +136,10 @@ class EmbeddingStore(BaseSQLiteStore):
         assert text, "text cannot be empty"
         assert isinstance(text, str), "text must be a string"
 
+        # Lazy-load the model on first use instead of in __init__.
+        if not self._model_loaded:
+            self._model_loaded = True  # set first to avoid retry loop on failure
+            self._load_model()
         if self._model is None:
             return None
         try:

@@ -21,6 +21,7 @@ from core.events import Event
 from core.plugin import Plugin
 from core.tool_result import ToolResult
 from models import LLMProvider
+from router import DEFAULT_COMPLEX_THRESHOLD, DEFAULT_SIMPLE_THRESHOLD, DEFAULT_TRIVIAL_THRESHOLD
 from skills import SkillManager
 
 logger = logging.getLogger(__name__)
@@ -30,10 +31,12 @@ MAX_TOOL_ITERATIONS = 5
 DEFAULT_MAX_TOKENS = 2048
 MAX_SKILL_FAILURES = 3
 TURN_COMPLETION_TIMEOUT = 120.0
-# Complexity tier thresholds (determine execution strategy)
-EXPERT_COMPLEXITY_THRESHOLD = 0.8   # >= → multi-agent pattern
-COMPLEX_COMPLEXITY_THRESHOLD = 0.5  # >= → think + reflect
-SIMPLE_COMPLEXITY_THRESHOLD = 0.2  # >= → light self-verification
+# Complexity tier thresholds (determine execution strategy).
+# Imported from router to keep a single source of truth — router owns
+# task classification, coordinator consumes the same thresholds.
+EXPERT_COMPLEXITY_THRESHOLD = DEFAULT_COMPLEX_THRESHOLD     # >= → multi-agent pattern
+COMPLEX_COMPLEXITY_THRESHOLD = DEFAULT_SIMPLE_THRESHOLD     # >= → think + reflect
+SIMPLE_COMPLEXITY_THRESHOLD = DEFAULT_TRIVIAL_THRESHOLD     # >= → light self-verification
 # Smart boost feature flags by complexity tier
 # - trivial (<0.2): direct execution, no enhancements (max speed)
 # - simple (0.2-0.5): light self-verification only
@@ -190,13 +193,6 @@ class Coordinator(Plugin):
             logger.debug("context compression LLM call failed: %s", exc)
             return ""
 
-    @staticmethod
-    def _detect_complex_task(text: str) -> bool:
-        """Quick heuristic: tasks with comparison, research, or analysis keywords."""
-        keywords = ["比较", "对比", "分析", "研究", "评估", "调查", "分别", "各",
-                    "compare", "analyze", "research", "evaluate", "both", "each"]
-        return len(text) > 50 and any(k in text for k in keywords)
-
     # ------------------------------------------------------------ OS 模式处理
     async def _handle_os_mode(
         self, turn: TurnContext, cmd: str, args_text: str,
@@ -211,8 +207,7 @@ class Coordinator(Plugin):
         /os-off            — 关闭 OS 模式
         /os-mode           — 查看当前 OS 模式状态
         """
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
+        lang = "zh" if self._is_zh() else "en"
 
         # /os-mode — 查询状态
         if cmd == "_os_mode":
@@ -480,8 +475,8 @@ class Coordinator(Plugin):
             if detected_lang != current_lang:
                 set_language(detected_lang)
                 logger.info("Auto-detected language: %s from user input", detected_lang)
-                # Persist language preference to config
-                self._persist_language(detected_lang)
+                # Persist language preference to config (offload disk I/O)
+                await asyncio.to_thread(self._persist_language, detected_lang)
 
         # avoid double-processing — if something already published a reply,
         # skip this turn entirely
@@ -572,7 +567,7 @@ class Coordinator(Plugin):
         if turn.model is None:
             raise RuntimeError("Model must be set before execution")
 
-        messages = self._prepare_messages(turn)
+        messages = await self._prepare_messages(turn)
         tools = self._prepare_tools(turn)
 
         # Get complexity from router classification
@@ -625,8 +620,8 @@ class Coordinator(Plugin):
             # Post-execution reflection: learn from this turn (expert only)
             await self._post_reflect(turn)
 
-        # Auto-extract entities
-        self._extract_entities(turn)
+        # Auto-extract entities (offload SQLite writes to worker thread)
+        await asyncio.to_thread(self._extract_entities, turn)
 
         self.publish("turn_completed", turn=turn)
         logger.info(
@@ -654,7 +649,7 @@ class Coordinator(Plugin):
             return False
         return True
 
-    def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
+    async def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Prepare message list with memory snippets from long-term memory + KG.
 
         Memory is injected as a dedicated assistant-style "relevant memory" message
@@ -677,7 +672,7 @@ class Coordinator(Plugin):
             memory_plugin = getattr(self.ctx, "memory", None)
             if memory_plugin is not None:
                 try:
-                    retrieved = self._retrieve_memory_for(turn, memory_plugin)
+                    retrieved = await self._retrieve_memory_for(turn, memory_plugin)
                     if retrieved:
                         memory_snippets = retrieved
                         turn.meta["memory_snippets"] = retrieved
@@ -685,9 +680,7 @@ class Coordinator(Plugin):
                     logger.warning("active memory retrieval failed: %s", exc)
 
         if memory_snippets:
-            from i18n import get_language
-            lang = (get_language() or "zh").lower()
-            if lang.startswith("zh"):
+            if self._is_zh():
                 mem_header = "【相关记忆】（来自长期记忆/知识图谱/语义检索）\n以下内容是我从之前的对话和知识中记住的，最与当前问题相关的信息。\n如果与问题直接相关，请优先使用，不要重复问或重复查；如果不相关请忽略，不要编造。\n\n"
             else:
                 mem_header = "[Relevant Memory] (from long-term memory / knowledge graph / semantic retrieval)\nThe following lines are what I remembered from earlier that best relate to the current question.\nIf directly relevant, USE THEM first; if not, ignore — don't make things up.\n\n"
@@ -706,8 +699,13 @@ class Coordinator(Plugin):
 
         return messages
 
-    def _retrieve_memory_for(self, turn: TurnContext, memory_plugin) -> str:
-        """Query long-term memory + knowledge graph for relevant snippets."""
+    async def _retrieve_memory_for(self, turn: TurnContext, memory_plugin) -> str:
+        """Query long-term memory + knowledge graph for relevant snippets.
+
+        All SQLite/embedding operations are offloaded to a worker thread
+        via ``asyncio.to_thread`` so the event loop is not blocked during
+        FTS5 queries, SentenceTransformer inference, or vector scans.
+        """
         hits: List[str] = []
         query = turn.input_text or ""
         if not query.strip():
@@ -717,7 +715,7 @@ class Coordinator(Plugin):
         long_term = getattr(memory_plugin, "_long", None)
         if long_term is not None:
             try:
-                fts_hits = long_term.search(query, limit=5) or []
+                fts_hits = await asyncio.to_thread(long_term.search, query, 5) or []
                 for h in fts_hits:
                     content = h.get("content", "")
                     source = h.get("source", "memory")
@@ -726,16 +724,22 @@ class Coordinator(Plugin):
             except Exception as exc:
                 logger.debug("long-term memory search failed: %s", exc)
 
-        # 2) Embedding semantic search
+        # 2) Embedding semantic search — embed() loads the model on first call
+        # and runs CPU-bound inference, so it MUST be offloaded.
         embeddings = getattr(memory_plugin, "_embeddings", None)
         if embeddings is not None:
             try:
-                query_vec = embeddings.embed(query)
+                query_vec = await asyncio.to_thread(embeddings.embed, query)
                 if query_vec is not None:
-                    sem = embeddings.search(query_vec, top_k=5) or []
+                    sem = await asyncio.to_thread(embeddings.search, query_vec, 5) or []
                     seen_contents = {h.split("] ", 1)[1][:40] for h in hits}
+                    # Batch-fetch all semantic hits in one query (was N+1).
+                    sem_ids = [mid for mid, _score in sem]
+                    entries_map: Dict[str, Any] = {}
+                    if long_term and sem_ids:
+                        entries_map = await asyncio.to_thread(long_term.get_by_ids, sem_ids)
                     for memory_id, _score in sem:
-                        entry = long_term.get_by_id(memory_id) if long_term else None
+                        entry = entries_map.get(str(memory_id))
                         content = (entry or {}).get("content", "") if isinstance(entry, dict) else str(entry or "")
                         if content and content[:40] not in seen_contents:
                             seen_contents.add(content[:40])
@@ -747,7 +751,7 @@ class Coordinator(Plugin):
         kg = getattr(memory_plugin, "_kg", None)
         if kg is not None:
             try:
-                kg_hits = kg.search(query, limit=5) or []
+                kg_hits = await asyncio.to_thread(kg.search, query, 5) or []
                 for h in kg_hits:
                     if isinstance(h, dict):
                         content = h.get("content", h.get("label", ""))
@@ -761,9 +765,7 @@ class Coordinator(Plugin):
         if not hits:
             return ""
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
-        if lang.startswith("zh"):
+        if self._is_zh():
             header = "以下是从我的记忆系统中检索到的、与当前问题最相关的内容 — 请优先参考：\n"
         else:
             header = "Retrieved from memory — most relevant to current question:\n"
@@ -815,14 +817,11 @@ class Coordinator(Plugin):
         The thinking is NOT shown to the user directly — it drives execution.
         """
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
-
         # Build the thinking prompt.  We attach it as an additional user
         # message so the model has access to the full conversation history
         # (including memory) while planning.
         memory_snippets = turn.meta.get("memory_snippets") or ""
-        if lang.startswith("zh"):
+        if self._is_zh():
             plan_prompt = (
                 "【内部思考 — 不要输出给用户，只用于内部规划】\n\n"
                 "请按以下 7 步为当前用户的问题做一个结构化规划。每一步都必须写清楚，不能省略。\n\n"
@@ -871,14 +870,14 @@ class Coordinator(Plugin):
             # loop sees it — this is the key behavioral change. We also tag
             # it with a visible header so the LLM understands this is its
             # own plan.
-            header = "【我的执行计划】\n" if lang.startswith("zh") else "[My execution plan]\n"
+            header = "【我的执行计划】\n" if self._is_zh() else "[My execution plan]\n"
             plan_message = {"role": "assistant", "content": header + thinking_text}
             messages.append(plan_message)
             # Append a short user follow-up so conversation flow is preserved
             # and the model knows it should now execute the plan.
             prompt = (
                 "好。现在按照上面的计划一步一步执行。"
-                if lang.startswith("zh")
+                if self._is_zh()
                 else "Good. Now execute the plan step by step."
             )
             messages.append({"role": "user", "content": prompt})
@@ -898,15 +897,12 @@ class Coordinator(Plugin):
         so the subsequent tool loop can benefit from the improved plan.
         """
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
-
         plan_text = turn.meta.get("thinking", "")
         if not plan_text:
             logger.debug("reflect phase skipped: no thinking available")
             return
 
-        if lang.startswith("zh"):
+        if self._is_zh():
             reflect_prompt = (
                 "【内部反思 — 不要输出给用户】\n\n"
                 "你刚刚制定了一个执行计划。现在请站在更高的角度审视这个计划，找出潜在问题和改进空间。\n\n"
@@ -949,13 +945,13 @@ class Coordinator(Plugin):
 
         if reflect_text:
             turn.meta["reflection"] = reflect_text
-            header = "【我的反思与改进】\n" if lang.startswith("zh") else "[My reflection and improvements]\n"
+            header = "【我的反思与改进】\n" if self._is_zh() else "[My reflection and improvements]\n"
             reflect_message = {"role": "assistant", "content": header + reflect_text}
             messages.append(reflect_message)
             # Append a user prompt to acknowledge reflection and continue
             prompt = (
                 "好。根据你的反思，如果需要调整计划，请立即执行调整后的方案。"
-                if lang.startswith("zh")
+                if self._is_zh()
                 else "Good. Based on your reflection, execute with any adjustments needed."
             )
             messages.append({"role": "user", "content": prompt})
@@ -973,9 +969,6 @@ class Coordinator(Plugin):
         Returns True if delegation was successful (no need for further processing),
         False otherwise (fall back to normal flow).
         """
-
-        from i18n import get_language
-        _lang = (get_language() or "zh").lower()
 
         try:
             from core.sub_agent import DelegationManager

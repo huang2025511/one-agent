@@ -33,14 +33,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Import FastAPI types at module level for type annotation resolution
-# (needed because of `from __future__ import annotations`)
-try:
-    from fastapi import Body, Request  # noqa: F401
-except ImportError:
-    # Will be handled in start() method
-    pass
-
 from core.exceptions import InputValidationError
 from core.log_sanitizer import install_sensitive_info_filter
 from core.plugin import Plugin
@@ -74,14 +66,6 @@ def _mask_api_key(key: str) -> str:
     if not key or len(key) <= 8:
         return "***"
     return f"{key[:4]}...{key[-4:]}"
-
-
-def _check_auth(api_key: Optional[str], required_key: str) -> bool:
-    """Compare API keys using constant-time comparison to prevent timing attacks."""
-    if not required_key:
-        return True  # Auth disabled if no key configured
-    # Use hmac.compare_digest for constant-time comparison
-    return hmac.compare_digest(api_key or "", required_key)
 
 
 class RESTAPIGateway(Plugin):
@@ -124,8 +108,7 @@ class RESTAPIGateway(Plugin):
         self._api_key = cfg.get("api_key", "")
         self._rate_limit = int(cfg.get("rate_limit_per_minute", self._rate_limit))
         self._max_chat_bytes = int(cfg.get("max_chat_bytes", self._max_chat_bytes))
-        import os as _os
-        self._api_key = _os.environ.get("ONE_AGENT_API_KEY", self._api_key)
+        self._api_key = os.environ.get("ONE_AGENT_API_KEY", self._api_key)
         # CORS: restrict to configured origins in production.  Falls back
         # to a wildcard when no origins are configured (developer mode).
         self._cors_origins = cfg.get("cors_origins") or ["http://localhost", "http://127.0.0.1"]
@@ -154,8 +137,7 @@ class RESTAPIGateway(Plugin):
         # Environment variable takes precedence over config file, matching
         # the setup() behavior. Without this, reloading config would silently
         # disable auth when the API key was set via env var.
-        import os as _os
-        env_key = _os.environ.get("ONE_AGENT_API_KEY")
+        env_key = os.environ.get("ONE_AGENT_API_KEY")
         if env_key:
             self._api_key = env_key
         self._rate_limit = int(cfg.get("rate_limit_per_minute", self._rate_limit))
@@ -273,6 +255,12 @@ class RESTAPIGateway(Plugin):
         def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
             if self._api_key and not hmac.compare_digest(x_api_key or "", self._api_key):
                 raise HTTPException(401, _("invalid_api_key"))
+
+        def _get_backup_mgr():
+            """Shared ConfigBackupManager factory for the config-backup endpoints."""
+            from config_backup import ConfigBackupManager
+            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            return ConfigBackupManager(cfg_path)
 
         # ---------------------------------------------------------------- Health & Readiness
         _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
@@ -1194,11 +1182,7 @@ class RESTAPIGateway(Plugin):
                         raise HTTPException(400, _("cannot_parse_value", type=vtype.__name__))
                     if _ctx:
                         # Create backup before changing config
-                        import os
-
-                        from config_backup import ConfigBackupManager
-                        cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-                        backup_mgr = ConfigBackupManager(cfg_path)
+                        backup_mgr = _get_backup_mgr()
                         backup_mgr.create_backup(reason="pre-change")
                         _set_nested(_ctx.config, path, parsed)
                         _save_config(_ctx.config)
@@ -1210,22 +1194,14 @@ class RESTAPIGateway(Plugin):
         async def config_backups_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List all config backups."""
             auth(x_api_key)
-            import os
-
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             return {"backups": backup_mgr.list_backups()}
 
         @app.post("/api/config/backup")
         async def config_backup_create(body: dict = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Create a config backup."""
             auth(x_api_key)
-            import os
-
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             reason = (body or {}).get("reason", "manual")
             backup_name = backup_mgr.create_backup(reason=reason)
             if backup_name:
@@ -1236,11 +1212,7 @@ class RESTAPIGateway(Plugin):
         async def config_restore(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Restore config from a backup."""
             auth(x_api_key)
-            import os
-
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             backup_name = body.get("filename")  # None means most recent
             success = backup_mgr.restore_backup(backup_name)
             if success:
@@ -1254,11 +1226,7 @@ class RESTAPIGateway(Plugin):
             # Validate filename to prevent path traversal
             if not filename or '/' in filename or '\\' in filename or '..' in filename:
                 raise HTTPException(400, "invalid_filename")
-            import os
-
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             content = backup_mgr.get_backup_content(filename)
             if content is not None:
                 return {"filename": filename, "content": content}
@@ -1271,9 +1239,7 @@ class RESTAPIGateway(Plugin):
             # Validate filename to prevent path traversal
             if not filename or '/' in filename or '\\' in filename or '..' in filename:
                 raise HTTPException(400, "invalid_filename")
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             success = backup_mgr.delete_backup(filename)
             if success:
                 return {"deleted": True, "filename": filename}
@@ -1284,7 +1250,8 @@ class RESTAPIGateway(Plugin):
         async def ingest_document(file: UploadFile = None, path: str = None,
                                   x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
-            from skills import _doc_store
+            from skills import get_doc_store
+            _doc_store = get_doc_store()
 
             if file is not None:
                 import shutil
@@ -1320,23 +1287,23 @@ class RESTAPIGateway(Plugin):
         @app.get("/api/documents")
         async def list_documents(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
-            from skills import _doc_store
-            docs = _doc_store.list_documents()
+            from skills import get_doc_store
+            docs = get_doc_store().list_documents()
             return {"documents": docs}
 
         @app.get("/api/documents/search")
         async def search_documents(q: str, limit: int = 5,
                                    x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
-            from skills import _doc_store
-            results = _doc_store.search(q, limit=limit)
+            from skills import get_doc_store
+            results = get_doc_store().search(q, limit=limit)
             return {"query": q, "results": results, "limit": limit}
 
         @app.delete("/api/documents/{name}")
         async def delete_document(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
-            from skills import _doc_store
-            deleted = _doc_store.delete_document(name)
+            from skills import get_doc_store
+            deleted = get_doc_store().delete_document(name)
             if not deleted:
                 raise HTTPException(404, _("document_not_found", name=name))
             return {"deleted": True, "name": name}

@@ -1,8 +1,9 @@
 """Chat gateways — CLI, web UI, and messaging re-exports.
 
 CLIGateway and WebGateway live here directly.  Messaging gateways
-(Telegram, WeCom, DingTalk, Feishu, Discord, Slack) are imported from
-``gateways.messaging`` and re-exported for plugin discovery.
+(Telegram, WeCom, DingTalk, Feishu, Discord, Slack) are imported lazily
+via ``__getattr__`` so that ``import gateways`` does not pull in httpx
+and all six messaging modules unless a gateway is actually requested.
 """
 
 from __future__ import annotations
@@ -15,17 +16,32 @@ from pathlib import Path
 from typing import Optional
 
 from core.plugin import Plugin
-from gateways.messaging import (  # noqa: F401  # re-exported for plugin discovery
-    DingTalkGateway,
-    DiscordGateway,
-    FeishuGateway,
-    SlackGateway,
-    TelegramGateway,
-    WeComGateway,
-)
-from gateways.wechat_personal import WeChatPersonalGateway  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+# Lazy gateway class loader — only imports a messaging gateway module when
+# that specific class is requested via ``getattr(gateways, ClassName)``.
+# This keeps ``import gateways`` cheap for CLI-only runs.
+_GATEWAY_CLASS_MAP = {
+    "TelegramGateway": "gateways.messaging",
+    "WeComGateway": "gateways.messaging",
+    "DingTalkGateway": "gateways.messaging",
+    "FeishuGateway": "gateways.messaging",
+    "DiscordGateway": "gateways.messaging",
+    "SlackGateway": "gateways.messaging",
+    "WeChatPersonalGateway": "gateways.wechat_personal",
+}
+
+
+def __getattr__(name: str):
+    """Lazily import gateway classes on first attribute access."""
+    if name in _GATEWAY_CLASS_MAP:
+        import importlib
+        module = importlib.import_module(_GATEWAY_CLASS_MAP[name])
+        cls = getattr(module, name)
+        globals()[name] = cls  # cache for subsequent access
+        return cls
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---------- 自然语言意图匹配 ----------

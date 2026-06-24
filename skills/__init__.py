@@ -32,12 +32,26 @@ from .wechat_login import make_wechat_login_handler  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton — shared between skill handler and API
-_doc_store = DocumentStore()
+# Lazy singleton — opened on first use to avoid SQLite I/O at import time.
+_doc_store: Optional[DocumentStore] = None
+
+
+def get_doc_store() -> DocumentStore:
+    """Return the shared DocumentStore, creating it on first call.
+
+    Replaces the old module-level ``_doc_store = DocumentStore()`` which
+    opened a SQLite connection + ran schema migration on every ``import skills``.
+    """
+    global _doc_store
+    if _doc_store is None:
+        _doc_store = DocumentStore()
+    return _doc_store
+
 
 __all__ = [
     "Skill",
     "SkillManager",
+    "get_doc_store",
 ]
 
 
@@ -1057,7 +1071,7 @@ class SkillManager(Plugin):
                     },
                 },
             },
-            handler=make_doc_search_handler(_doc_store),
+            handler=make_doc_search_handler(get_doc_store()),
         ))
 
         # ---------- Python 代码执行技能 ----------
