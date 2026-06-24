@@ -71,6 +71,16 @@ class BaseMessagingGateway(Plugin):
             self._sessions.pop(msg_key, None)
             self._replies.pop(msg_key, None)
 
+    def _spawn(self, coro, **kwargs) -> asyncio.Task:
+        """Spawn a background task with error logging on failure."""
+        task = asyncio.create_task(coro(**kwargs))
+        msg_key = kwargs.get("msg_key", "")
+        task.add_done_callback(
+            lambda t: logger.exception("gateway background task failed for %s", msg_key)
+            if t.exception() else None
+        )
+        return task
+
     async def stop(self) -> None:
         """Common cleanup: cancel the polling task and close the HTTP client."""
         if self._task:
@@ -154,8 +164,11 @@ class TelegramGateway(BaseMessagingGateway):
                     })
                 # Spawn a background task to wait for the reply and send it,
                 # so the poll loop can continue processing other messages.
-                asyncio.create_task(
-                    self._wait_and_reply(msg_key, chat_id, self._send)
+                self._spawn(
+                    self._wait_and_reply,
+                    msg_key=msg_key,
+                    chat_id=chat_id,
+                    send_fn=self._send,
                 )
 
     async def _send(self, chat_id: int, text: str) -> None:
@@ -713,8 +726,11 @@ class DingTalkGateway(BaseMessagingGateway):
                                 "chat_id": sender,
                             })
                         # Non-blocking: spawn background task to wait + reply
-                        asyncio.create_task(
-                            self._wait_and_reply(msg_key, sender, self._send_message)
+                        self._spawn(
+                            self._wait_and_reply,
+                            msg_key=msg_key,
+                            chat_id=sender,
+                            send_fn=self._send_message,
                         )
             except asyncio.CancelledError:
                 break
@@ -1067,8 +1083,11 @@ class DiscordGateway(BaseMessagingGateway):
                                     "chat_id": ch_id,
                                 })
                             # Non-blocking: spawn background task to wait + reply
-                            asyncio.create_task(
-                                self._wait_and_reply(msg_key, ch_id, self._send_message)
+                            self._spawn(
+                                self._wait_and_reply,
+                                msg_key=msg_key,
+                                chat_id=ch_id,
+                                send_fn=self._send_message,
                             )
                         # 更新 last_message_id
                         if messages:

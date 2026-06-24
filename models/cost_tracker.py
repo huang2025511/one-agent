@@ -80,7 +80,7 @@ class CostTracker:
         (per-1K-token price), falling back to the default 0.0001 USD/token.
         """
         try:
-            from . import MODEL_COST
+            from models.tiers import MODEL_COST
         except ImportError:
             MODEL_COST: Dict[str, float] = {}  # type: ignore[no-redef]
 

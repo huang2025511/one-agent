@@ -22,7 +22,7 @@ from core.context import TurnContext
 from core.events import Event
 from core.plugin import Plugin
 from models import LLMProvider
-from models import MODEL_TIERS
+from models.tiers import MODEL_TIERS
 
 logger = logging.getLogger(__name__)
 

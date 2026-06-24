@@ -169,7 +169,7 @@ class RESTAPIGateway(Plugin):
             def _check_database():
                 """Check database connectivity."""
                 try:
-                    _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+                    _session_store = _cp("session_store")
                     if _session_store:
                         _session_store.get_session_count()
                         return True
@@ -398,7 +398,7 @@ class RESTAPIGateway(Plugin):
         async def sessions_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List recent sessions."""
             auth(x_api_key)
-            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            _session_store = _cp("session_store")
             if _session_store is None:
                 return {"sessions": []}
             sessions = _session_store.list_sessions(limit=20)
@@ -408,7 +408,7 @@ class RESTAPIGateway(Plugin):
         async def fork_session(session_id: str, body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Fork a session at a specific message index."""
             auth(x_api_key)
-            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            _session_store = _cp("session_store")
             if _session_store is None:
                 raise HTTPException(503, _("session_store_not_available"))
             fork_point = body.get("fork_point", 0)
@@ -422,7 +422,7 @@ class RESTAPIGateway(Plugin):
         async def session_tree(session_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get the fork tree of a session."""
             auth(x_api_key)
-            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            _session_store = _cp("session_store")
             if _session_store is None:
                 raise HTTPException(503, _("session_store_not_available"))
             tree = _session_store.get_session_tree(session_id)
@@ -449,7 +449,7 @@ class RESTAPIGateway(Plugin):
             """System statistics for dashboard."""
             if not auth(x_api_key):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
-            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            _session_store = _cp("session_store")
             _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
 
             # Get session statistics
@@ -782,7 +782,7 @@ class RESTAPIGateway(Plugin):
         async def list_marketplace(query: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Discover available skill packages in the marketplace."""
             auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            mp = _cp("marketplace")
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
             return {"packages": mp.discover(query)}
@@ -791,7 +791,7 @@ class RESTAPIGateway(Plugin):
         async def publish_skill(dirpath: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Publish a local skill directory to the marketplace."""
             auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            mp = _cp("marketplace")
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
 
@@ -837,7 +837,7 @@ class RESTAPIGateway(Plugin):
         async def install_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Install a skill package from the marketplace."""
             auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            mp = _cp("marketplace")
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
 
@@ -865,7 +865,7 @@ class RESTAPIGateway(Plugin):
         async def uninstall_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Uninstall a skill package from the target directory."""
             auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            mp = _cp("marketplace")
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
 
@@ -898,7 +898,7 @@ class RESTAPIGateway(Plugin):
         async def get_improvements(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get self-improvement stats and patterns."""
             auth(x_api_key)
-            improver = getattr(_ctx, "self_improver", None) if _ctx else None
+            improver = _cp("self_improver")
             if improver is None:
                 raise HTTPException(503, _("improvement_not_available"))
             stats = improver.get_stats()
@@ -909,7 +909,7 @@ class RESTAPIGateway(Plugin):
         async def get_failures(limit: int = 50, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get recent failure cases."""
             auth(x_api_key)
-            improver = getattr(_ctx, "self_improver", None) if _ctx else None
+            improver = _cp("self_improver")
             if improver is None:
                 raise HTTPException(503, _("improvement_not_available"))
             failures = improver.get_failures(limit=limit)
@@ -1217,7 +1217,7 @@ class RESTAPIGateway(Plugin):
         async def alert_rules_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List all alert rules."""
             auth(x_api_key)
-            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            _alert_mgr = _cp("_alert_manager")
             if _alert_mgr is None:
                 return {"rules": []}
             return {"rules": _alert_mgr.list_rules()}
@@ -1226,7 +1226,7 @@ class RESTAPIGateway(Plugin):
         async def alert_rule_create(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Create or update an alert rule."""
             auth(x_api_key)
-            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            _alert_mgr = _cp("_alert_manager")
             if _alert_mgr is None:
                 raise HTTPException(503, _("alert_manager_not_available"))
             from alerting import AlertRule
@@ -1250,7 +1250,7 @@ class RESTAPIGateway(Plugin):
         async def alert_rule_delete(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Delete an alert rule."""
             auth(x_api_key)
-            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            _alert_mgr = _cp("_alert_manager")
             if _alert_mgr is None:
                 raise HTTPException(503, _("alert_manager_not_available"))
             _alert_mgr.remove_rule(name)
@@ -1260,7 +1260,7 @@ class RESTAPIGateway(Plugin):
         async def alert_history(limit: int = 50, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get recent alert events."""
             auth(x_api_key)
-            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            _alert_mgr = _cp("_alert_manager")
             if _alert_mgr is None:
                 return {"alerts": []}
             return {"alerts": _alert_mgr.list_history(limit=limit)}
@@ -1271,7 +1271,7 @@ class RESTAPIGateway(Plugin):
         async def list_pending_approvals(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List pending approval requests."""
             auth(x_api_key)
-            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            _approval_mgr = _cp("approval_manager")
             if _approval_mgr is None:
                 return {"pending": []}
             return {"pending": _approval_mgr.get_pending()}
@@ -1280,7 +1280,7 @@ class RESTAPIGateway(Plugin):
         async def approve_request(request_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Approve a pending request."""
             auth(x_api_key)
-            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            _approval_mgr = _cp("approval_manager")
             if _approval_mgr is None:
                 raise HTTPException(503, _("approval_manager_not_available"))
             ok = _approval_mgr.approve(request_id)
@@ -1292,7 +1292,7 @@ class RESTAPIGateway(Plugin):
         async def deny_request(request_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Deny a pending request."""
             auth(x_api_key)
-            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            _approval_mgr = _cp("approval_manager")
             if _approval_mgr is None:
                 raise HTTPException(503, _("approval_manager_not_available"))
             ok = _approval_mgr.deny(request_id)
@@ -1306,7 +1306,7 @@ class RESTAPIGateway(Plugin):
         async def mcp_list_tools(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """列出所有可用的 MCP 工具"""
             auth(x_api_key)
-            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            _mcp_client = _cp("mcp_client")
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             tools = _mcp_client.list_tools()
@@ -1316,7 +1316,7 @@ class RESTAPIGateway(Plugin):
         async def mcp_call_tool(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """调用 MCP 工具"""
             auth(x_api_key)
-            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            _mcp_client = _cp("mcp_client")
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             server_name = body.get("server")
@@ -1337,7 +1337,7 @@ class RESTAPIGateway(Plugin):
         async def mcp_add_server(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """添加并连接 MCP 服务器"""
             auth(x_api_key)
-            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            _mcp_client = _cp("mcp_client")
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             name = body.get("name")
@@ -1354,7 +1354,7 @@ class RESTAPIGateway(Plugin):
         async def mcp_remove_server(server_name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """移除 MCP 服务器"""
             auth(x_api_key)
-            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            _mcp_client = _cp("mcp_client")
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             await _mcp_client.remove_server(server_name)
@@ -1458,6 +1458,10 @@ class RESTAPIGateway(Plugin):
         _memory = _ctx.get_plugin("memory") if _ctx else None
         _skills = _ctx.get_plugin("skills") if _ctx else None
         _bus = _ctx.bus if _ctx else None
+
+        def _cp(name):
+            """Get plugin from context."""
+            return getattr(_ctx, name, None) if _ctx else None
 
         def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
             if self._api_key and not hmac.compare_digest(x_api_key or "", self._api_key):
