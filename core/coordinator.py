@@ -30,6 +30,9 @@ from core.suggestions import get_suggestion_engine
 from memory.user_profile import get_profile_store
 from core.metacognition import get_metacognition_engine
 from core.reasoning import get_step_reasoner
+from core.style_adapter import StyleAdapter
+from core.failure_recovery import get_failure_recovery
+from memory.dialog_summary import get_dialog_summarizer
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +81,9 @@ class Coordinator(Plugin):
         self._profile: Optional[Any] = None
         self._metacognition: Optional[Any] = None
         self._reasoner: Optional[Any] = None
+        self._style_adapter: Optional[StyleAdapter] = None
+        self._failure_recovery: Optional[Any] = None
+        self._dialog_summarizer: Optional[Any] = None
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -1712,6 +1718,32 @@ class Coordinator(Plugin):
             self._reasoner = get_step_reasoner()
         return self._reasoner
 
+    def _get_style_adapter(self) -> StyleAdapter:
+        """Lazy-load style adapter."""
+        if self._style_adapter is None:
+            self._style_adapter = StyleAdapter()
+            # Try to load style from user profile
+            try:
+                profile = self._get_profile()
+                saved_style = profile.get_preference("response_style")
+                if saved_style:
+                    self._style_adapter.set_style(saved_style)
+            except Exception:
+                pass
+        return self._style_adapter
+
+    def _get_failure_recovery(self) -> Any:
+        """Lazy-load failure recovery manager."""
+        if self._failure_recovery is None:
+            self._failure_recovery = get_failure_recovery()
+        return self._failure_recovery
+
+    def _get_dialog_summarizer(self) -> Any:
+        """Lazy-load dialog summarizer."""
+        if self._dialog_summarizer is None:
+            self._dialog_summarizer = get_dialog_summarizer()
+        return self._dialog_summarizer
+
     async def _record_intelligence(self, turn: TurnContext) -> None:
         """Record user preferences, sentiment, and patterns."""
         if not turn.input_text or not turn.result:
@@ -1743,6 +1775,11 @@ class Coordinator(Plugin):
                 await asyncio.to_thread(
                     profile.set_preference, "language", turn.detected_lang
                 )
+
+            # 6. Track dialog summary turn counter
+            summarizer = self._get_dialog_summarizer()
+            turn_count = summarizer.increment_turn(turn.session_id)
+            turn.meta["turn_count"] = turn_count
 
         except Exception as exc:
             logger.debug("intelligence recording failed: %s", exc)
