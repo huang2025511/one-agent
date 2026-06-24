@@ -182,6 +182,12 @@ class MCPServer:
 
         except TimeoutError:
             raise
+        except ValueError:
+            # SSRF defense: _resolve_and_validate_ip raises ValueError for
+            # private IPs / DNS failures. This must propagate to the caller
+            # so security checks cannot be silently bypassed.
+            await self.close()
+            raise
         except Exception as e:
             await self.close()  # Fix Bug #15: Close client on any error
             logger.error("Failed to connect to MCP server '%s': %s", self.name, e)

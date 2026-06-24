@@ -190,6 +190,13 @@ class RESTAPIGateway(Plugin):
         self._host = cfg.get("host", self._host)
         self._port = int(cfg.get("port", self._port))
         self._api_key = cfg.get("api_key", self._api_key)
+        # Environment variable takes precedence over config file, matching
+        # the setup() behavior. Without this, reloading config would silently
+        # disable auth when the API key was set via env var.
+        import os as _os
+        env_key = _os.environ.get("ONE_AGENT_API_KEY")
+        if env_key:
+            self._api_key = env_key
         self._rate_limit = int(cfg.get("rate_limit_per_minute", self._rate_limit))
         self._max_chat_bytes = int(cfg.get("max_chat_bytes", self._max_chat_bytes))
         self._cors_origins = cfg.get("cors_origins") or self._cors_origins
@@ -599,11 +606,14 @@ class RESTAPIGateway(Plugin):
         @app.get("/api/stats")
         async def stats():
             """System statistics for dashboard."""
+            if not auth(x_api_key):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
             _session_store = getattr(_ctx, "session_store", None) if _ctx else None
             _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
 
             # Get session statistics
             sessions_data = {}
+            total_messages = 0  # initialize to avoid UnboundLocalError
             if _session_store:
                 try:
                     all_sessions = _session_store.list_sessions(limit=1000)
@@ -643,6 +653,8 @@ class RESTAPIGateway(Plugin):
 
         @app.get("/api/metrics")
         async def metrics():
+            if not auth(x_api_key):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
             return {
                 "bus": _bus.metrics() if _bus else {},
                 "llm": _llm.stats() if _llm else {},
@@ -656,6 +668,8 @@ class RESTAPIGateway(Plugin):
 
             Returns metrics in Prometheus text format for scraping.
             """
+            if not auth(x_api_key):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
             lines = []
 
             # System metrics
