@@ -24,6 +24,11 @@ from models import LLMProvider
 from router import DEFAULT_COMPLEX_THRESHOLD, DEFAULT_SIMPLE_THRESHOLD, DEFAULT_TRIVIAL_THRESHOLD
 from skills import SkillManager
 
+# Intelligent features
+from core.sentiment import get_sentiment_analyzer
+from core.suggestions import get_suggestion_engine
+from memory.user_profile import get_profile_store
+
 logger = logging.getLogger(__name__)
 
 # Coordinator configuration constants
@@ -65,6 +70,10 @@ class Coordinator(Plugin):
         # Track background turn-completion tasks so they aren't GC'd
         # mid-execution (Python's asyncio only holds a weak ref to tasks).
         self._pending_turn_tasks: set = set()
+        # Intelligent features (lazy-loaded)
+        self._sentiment: Optional[Any] = None
+        self._suggestions: Optional[Any] = None
+        self._profile: Optional[Any] = None
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -622,6 +631,16 @@ class Coordinator(Plugin):
 
         # Auto-extract entities (offload SQLite writes to worker thread)
         await asyncio.to_thread(self._extract_entities, turn)
+
+        # === Intelligent features integration ===
+        # 1. Record user preferences and patterns
+        await self._record_intelligence(turn)
+
+        # 2. Generate proactive suggestions (inject into result if enabled)
+        suggestions = await self._generate_suggestions(turn)
+        if suggestions and self._should_show_suggestions():
+            suggestion_text = self._suggestions.format_suggestions_for_display(suggestions)
+            turn.result = turn.result + suggestion_text
 
         self.publish("turn_completed", turn=turn)
         logger.info(
@@ -1650,3 +1669,123 @@ class Coordinator(Plugin):
             messages.append({"role": "user", "content": prompt})
             turn.meta["tool_chain_plan"] = plan
             logger.debug("tool chain plan created (%d chars)", len(plan))
+
+    # ======================================================== Intelligent Features
+
+    def _get_sentiment(self) -> Any:
+        """Lazy-load sentiment analyzer."""
+        if self._sentiment is None:
+            self._sentiment = get_sentiment_analyzer()
+        return self._sentiment
+
+    def _get_suggestions(self) -> Any:
+        """Lazy-load suggestion engine."""
+        if self._suggestions is None:
+            self._suggestions = get_suggestion_engine()
+        return self._suggestions
+
+    def _get_profile(self) -> Any:
+        """Lazy-load user profile store."""
+        if self._profile is None:
+            self._profile = get_profile_store()
+        return self._profile
+
+    async def _record_intelligence(self, turn: TurnContext) -> None:
+        """Record user preferences, sentiment, and patterns."""
+        if not turn.input_text or not turn.result:
+            return
+
+        try:
+            # 1. Analyze sentiment
+            sentiment = self._get_sentiment()
+            analysis = await asyncio.to_thread(sentiment.analyze, turn.input_text)
+            turn.meta["sentiment"] = analysis
+
+            # 2. Record skill usage (from tool_calls in meta)
+            profile = self._get_profile()
+            skills_used = turn.meta.get("skills_used", [])
+            for skill in skills_used:
+                success = "error" not in str(turn.result).lower()
+                await asyncio.to_thread(profile.record_skill_usage, skill, success)
+
+            # 3. Record time pattern
+            await asyncio.to_thread(profile.record_time_pattern)
+
+            # 4. Extract and record topics (simple keyword extraction)
+            topics = self._extract_topics(turn.input_text)
+            for topic in topics[:3]:
+                await asyncio.to_thread(profile.record_topic, topic)
+
+            # 5. Update language preference if detected
+            if hasattr(turn, "detected_lang"):
+                await asyncio.to_thread(
+                    profile.set_preference, "language", turn.detected_lang
+                )
+
+        except Exception as exc:
+            logger.debug("intelligence recording failed: %s", exc)
+
+    def _extract_topics(self, text: str) -> List[str]:
+        """Extract topic keywords from user input."""
+        # Simple keyword-based topic extraction
+        # In production, could use NLP/LLM for better extraction
+        topics = []
+
+        # Technical topics
+        tech_patterns = [
+            (r"代码|编程|python|javascript|java|rust", "编程"),
+            (r"搜索|查找|查询|search", "搜索"),
+            (r"文档|文件|file|document", "文档"),
+            (r"系统|shell|命令|command", "系统"),
+            (r"计算|数学|math|calc", "计算"),
+            (r"图片|图像|image|photo", "图片"),
+            (r"音频|语音|audio|voice", "音频"),
+            (r"笔记|记录|note|save", "笔记"),
+        ]
+
+        for pattern, topic in tech_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                topics.append(topic)
+
+        return topics
+
+    async def _generate_suggestions(self, turn: TurnContext) -> List[Dict[str, Any]]:
+        """Generate proactive suggestions based on context."""
+        try:
+            suggestions_engine = self._get_suggestions()
+            skills_used = turn.meta.get("skills_used", [])
+            suggestions = await asyncio.to_thread(
+                suggestions_engine.generate_suggestions,
+                turn.input_text,
+                turn.result,
+                skills_used,
+                {"complexity": getattr(turn, "estimated_complexity", 0.0)},
+            )
+            return suggestions
+        except Exception as exc:
+            logger.debug("suggestion generation failed: %s", exc)
+            return []
+
+    def _should_show_suggestions(self) -> bool:
+        """Check if suggestions should be displayed to user."""
+        # Check config for suggestion display preference
+        if self.ctx and self.ctx.config:
+            return self.ctx.config.get("agent", {}).get("show_suggestions", True)
+        return True  # Default: show suggestions
+
+    def _inject_sentiment_context(
+        self, messages: List[Dict[str, Any]], turn: TurnContext
+    ) -> None:
+        """Inject sentiment analysis into LLM context."""
+        sentiment_data = turn.meta.get("sentiment")
+        if not sentiment_data:
+            return
+
+        sentiment = self._get_sentiment()
+        sentiment_text = sentiment.format_for_llm(sentiment_data)
+        if sentiment_text:
+            # Inject as a system hint before user message
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "user" and i > 0:
+                    messages.insert(i, {"role": "system", "content": sentiment_text})
+                    break
