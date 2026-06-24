@@ -301,8 +301,7 @@ class MultimodalPlugin(Plugin):
         try:
             p = Path(audio_path).resolve()
             cwd = Path.cwd().resolve()
-            if not str(p).startswith(str(cwd)):
-                return {"text": "", "error": "access denied: path outside working directory"}
+            p.relative_to(cwd)  # raises ValueError if not within cwd
             # Validate file extension
             allowed_ext = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
             if p.suffix.lower() not in allowed_ext:
@@ -370,7 +369,9 @@ class MultimodalPlugin(Plugin):
         path = Path(image_path).resolve()
         # Security: validate path to prevent directory traversal
         cwd = Path.cwd().resolve()
-        if not str(path).startswith(str(cwd)):
+        try:
+            path.relative_to(cwd)  # raises ValueError if not within cwd
+        except ValueError:
             return {"error": "access denied: path outside working directory", "image_base64": "", "mime_type": "", "prompt": ""}
         allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
         if path.suffix.lower() not in allowed_ext:
@@ -432,8 +433,7 @@ def make_transcribe_handler():
         try:
             p = Path(path).resolve()
             cwd = Path.cwd().resolve()
-            if not str(p).startswith(str(cwd)):
-                return "access denied: path outside working directory"
+            p.relative_to(cwd)  # raises ValueError if not within cwd
             allowed_ext = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
             if p.suffix.lower() not in allowed_ext:
                 return f"invalid file type: {p.suffix}"
@@ -480,8 +480,7 @@ def make_image_handler():
         try:
             p = Path(path).resolve()
             cwd = Path.cwd().resolve()
-            if not str(p).startswith(str(cwd)):
-                return "access denied: path outside working directory"
+            p.relative_to(cwd)  # raises ValueError if not within cwd
             allowed_ext = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
             if p.suffix.lower() not in allowed_ext:
                 return f"invalid file type: {p.suffix}"

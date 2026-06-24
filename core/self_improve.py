@@ -71,14 +71,18 @@ class SelfImprover:
                        error_detail: str, turn_meta: Optional[dict] = None) -> None:
         """Record a failure for later analysis."""
         case = FailureCase(user_input, error_type, error_detail, turn_meta)
-        self._failures.append(case)
 
-        # Keep only last 100 in memory
-        if len(self._failures) > 100:
-            self._failures = self._failures[-100:]
-
-        # Persist
+        # Protect both the in-memory list and the DB write with the same lock.
+        # Previously _failures was mutated outside the lock, causing data races
+        # when record_failure_async ran concurrently from multiple threads.
         with self._write_lock:
+            self._failures.append(case)
+
+            # Keep only last 100 in memory
+            if len(self._failures) > 100:
+                self._failures = self._failures[-100:]
+
+            # Persist
             self._conn.execute(
                 "INSERT INTO failures (user_input, error_type, error_detail, turn_meta, created_at) VALUES (?, ?, ?, ?, ?)",
                 (user_input[:500], error_type, error_detail[:500],
@@ -90,34 +94,38 @@ class SelfImprover:
         """Analyze recent failures to find patterns."""
         patterns = []
 
-        # Pattern 1: Frequent tool errors
-        cur = self._conn.execute("""
-            SELECT error_type, COUNT(*) as cnt
-            FROM failures
-            WHERE created_at > CAST(strftime('%s','now') AS REAL) - 86400
-            GROUP BY error_type
-            ORDER BY cnt DESC
-        """)
-        for row in cur.fetchall():
-            if row["cnt"] >= 3:
-                patterns.append({
-                    "type": "frequent_error",
-                    "error_type": row["error_type"],
-                    "count": row["cnt"],
-                    "suggestion": f"检测到 {row['error_type']} 类型错误频繁（{row['cnt']}次/24h），建议检查相关技能或降级策略",
-                })
+        # All reads must hold the write lock too: sqlite3 connections with
+        # check_same_thread=False are not thread-safe for concurrent access,
+        # and a write (which holds the lock) may be interleaving with reads.
+        with self._write_lock:
+            # Pattern 1: Frequent tool errors
+            cur = self._conn.execute("""
+                SELECT error_type, COUNT(*) as cnt
+                FROM failures
+                WHERE created_at > CAST(strftime('%s','now') AS REAL) - 86400
+                GROUP BY error_type
+                ORDER BY cnt DESC
+            """)
+            for row in cur.fetchall():
+                if row["cnt"] >= 3:
+                    patterns.append({
+                        "type": "frequent_error",
+                        "error_type": row["error_type"],
+                        "count": row["cnt"],
+                        "suggestion": f"检测到 {row['error_type']} 类型错误频繁（{row['cnt']}次/24h），建议检查相关技能或降级策略",
+                    })
 
-        # Pattern 2: Empty results
-        cur = self._conn.execute(
-            "SELECT COUNT(*) as cnt FROM failures WHERE error_type = 'empty_result' AND created_at > CAST(strftime('%s','now') AS REAL) - 86400"
-        )
-        row = cur.fetchone()
-        if row and row["cnt"] >= 3:
-            patterns.append({
-                "type": "empty_results",
-                "count": row["cnt"],
-                "suggestion": "多次返回空结果，建议优化搜索策略或增加备选数据源",
-            })
+            # Pattern 2: Empty results
+            cur = self._conn.execute(
+                "SELECT COUNT(*) as cnt FROM failures WHERE error_type = 'empty_result' AND created_at > CAST(strftime('%s','now') AS REAL) - 86400"
+            )
+            row = cur.fetchone()
+            if row and row["cnt"] >= 3:
+                patterns.append({
+                    "type": "empty_results",
+                    "count": row["cnt"],
+                    "suggestion": "多次返回空结果，建议优化搜索策略或增加备选数据源",
+                })
 
         return patterns
 
@@ -149,18 +157,20 @@ class SelfImprover:
 
     def get_improvements(self) -> List[Dict[str, Any]]:
         """Get all applied improvements."""
-        cur = self._conn.execute(
-            "SELECT * FROM improvements ORDER BY created_at DESC LIMIT 20"
-        )
-        return [dict(r) for r in cur.fetchall()]
+        with self._write_lock:
+            cur = self._conn.execute(
+                "SELECT * FROM improvements ORDER BY created_at DESC LIMIT 20"
+            )
+            return [dict(r) for r in cur.fetchall()]
 
     def get_stats(self) -> Dict[str, Any]:
         """Get improvement statistics."""
-        total_failures = self._conn.execute("SELECT COUNT(*) FROM failures").fetchone()[0]
-        recent_failures = self._conn.execute(
-            "SELECT COUNT(*) FROM failures WHERE created_at > CAST(strftime('%s','now') AS REAL) - 86400"
-        ).fetchone()[0]
-        total_improvements = self._conn.execute("SELECT COUNT(*) FROM improvements").fetchone()[0]
+        with self._write_lock:
+            total_failures = self._conn.execute("SELECT COUNT(*) FROM failures").fetchone()[0]
+            recent_failures = self._conn.execute(
+                "SELECT COUNT(*) FROM failures WHERE created_at > CAST(strftime('%s','now') AS REAL) - 86400"
+            ).fetchone()[0]
+            total_improvements = self._conn.execute("SELECT COUNT(*) FROM improvements").fetchone()[0]
 
         return {
             "total_failures": total_failures,
@@ -171,11 +181,12 @@ class SelfImprover:
 
     def get_failures(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get recent failure cases."""
-        cur = self._conn.execute(
-            "SELECT * FROM failures ORDER BY created_at DESC LIMIT ?",
-            (limit,)
-        )
-        return [dict(r) for r in cur.fetchall()]
+        with self._write_lock:
+            cur = self._conn.execute(
+                "SELECT * FROM failures ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            return [dict(r) for r in cur.fetchall()]
 
     def close(self) -> None:
         """Close the database connection."""

@@ -1058,49 +1058,6 @@ class Coordinator(Plugin):
             turn.meta["context_compressed"] = True
             turn.meta["compressed_messages"] = len(early)
 
-    async def _try_delegation(self, turn: TurnContext, messages: List[Dict[str, Any]]) -> bool:
-        """Try delegation for complex tasks. Returns True if delegation was used."""
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-
-        if not (turn.meta.get("enable_delegation") or self._detect_complex_task(turn.input_text)):
-            return False
-
-        try:
-            from core.sub_agent import DelegationManager
-            delegator = DelegationManager(self._llm, self._skills)
-            result = await delegator.execute(turn.input_text, turn.model)
-
-            if result.get("parallel"):
-                turn.result = result["result"]
-                turn.meta["delegation_used"] = True
-                turn.meta["subtask_count"] = len(result["subtasks"])
-                turn.meta["delegation_total_tokens"] = result["total_tokens"]
-                turn.record_success(result["result"], result.get("total_tokens", 0))
-
-                # Auto-extract entities
-                if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
-                    full_text = f"{turn.input_text}\n{result['result']}"
-                    try:
-                        count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
-                        if count > 0:
-                            logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
-                    except Exception as exc:
-                        logger.debug("KG extraction failed: %s", exc)
-
-                self.publish("turn_completed", turn=turn)
-                logger.info("delegation completed (%d subtasks, %d tokens, %.2fs)",
-                            result.get("subtask_count", 0),
-                            result.get("total_tokens", 0),
-                            result.get("duration_ms", 0) / 1000)
-                return True
-        except Exception as exc:
-            logger.warning("delegation failed, falling back to normal flow: %s", exc)
-
-        return False
-
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
         """Execute tool-call loop until final reply."""
         if messages is None:

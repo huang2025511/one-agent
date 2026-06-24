@@ -201,10 +201,13 @@ class EventBus:
 
     # ---------------------------------------------------------------- public
     def subscribe(self, event_type: str, handler: Handler) -> None:
-        assert event_type, "event_type cannot be empty"
-        assert isinstance(event_type, str), "event_type must be a string"
-        assert handler is not None, "handler cannot be None"
-        assert callable(handler), "handler must be callable"
+        # Use explicit validation instead of assert — assert statements are
+        # stripped when Python runs with -O, which would silently disable
+        # these safety checks in production.
+        if not event_type or not isinstance(event_type, str):
+            raise ValueError("event_type must be a non-empty string")
+        if handler is None or not callable(handler):
+            raise ValueError("handler must be callable")
 
         self._subscribers.setdefault(event_type, []).append(handler)
         logger.info("subscribed %s to %s", handler, event_type)

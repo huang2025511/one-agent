@@ -190,27 +190,42 @@ def classify_command(command: str) -> Tuple[int, str]:
     # Check DANGEROUS first (most specific patterns).
     # Use re.search (not re.match) so patterns like ";", "&&", "$("
     # are detected anywhere in the command, not just at the start.
-    for pattern in _DANGEROUS_PATTERNS:
-        if re.search(pattern, stripped, re.IGNORECASE):
+    for pattern in _DANGEROUS_PATTERNS_COMPILED:
+        if pattern.search(stripped):
             return (3, f"dangerous operations: {stripped[:60]}")
 
     # Check MEDIUM
-    for cmd, pattern in _MEDIUM_PATTERNS:
-        if re.match(pattern, stripped, re.IGNORECASE):
+    for cmd, pattern in _MEDIUM_PATTERNS_COMPILED:
+        if pattern.match(stripped):
             return (2, f"system modification: {cmd}")
 
     # Check LOW
-    for cmd, pattern in _LOW_PATTERNS:
-        if re.match(pattern, stripped, re.IGNORECASE):
+    for cmd, pattern in _LOW_PATTERNS_COMPILED:
+        if pattern.match(stripped):
             return (1, f"file/system operation: {cmd}")
 
     # Check SAFE
-    for _cmd, pattern in _SAFE_PATTERNS:
-        if re.match(pattern, stripped, re.IGNORECASE):
+    for _cmd, pattern in _SAFE_PATTERNS_COMPILED:
+        if pattern.match(stripped):
             return (0, "safe operation")
 
     # Unknown command → treat as MEDIUM
     return (2, f"unknown command type: {stripped[:60]}")
+
+
+# Pre-compile all patterns at module load time (compiled once, reused forever).
+# This avoids re-compiling the same regex on every classify_command() call,
+# which is a hot path executed before every system command.
+_DANGEROUS_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in _DANGEROUS_PATTERNS]
+_MEDIUM_PATTERNS_COMPILED = [
+    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _MEDIUM_PATTERNS
+]
+_LOW_PATTERNS_COMPILED = [
+    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _LOW_PATTERNS
+]
+_SAFE_PATTERNS_COMPILED = [
+    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _SAFE_PATTERNS
+]
 
 
 # ============================================================

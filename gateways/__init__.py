@@ -221,12 +221,17 @@ class WebGateway(Plugin):
         app = FastAPI(title="One-Agent")
 
         # ---- Security middleware ----
-        # Per-IP sliding-window rate limit (mirrors RESTAPIGateway logic)
+        # Per-IP sliding-window rate limit (mirrors RESTAPIGateway logic).
+        # Uses a dict with periodic cleanup of stale IPs to prevent unbounded
+        # memory growth from spoofed/varied client IPs.
         _rate_window: dict = {}  # ip -> list[timestamps]
+        _rate_cleanup_counter = 0  # cleanup every N requests
+        _RATE_CLEANUP_INTERVAL = 200
         gw = self
 
         @app.middleware("http")
         async def security_middleware(request: Request, call_next):
+            nonlocal _rate_cleanup_counter
             # 1) Body size limit for chat endpoints
             cl = request.headers.get("content-length")
             if cl and request.url.path.startswith("/api/chat"):
@@ -248,6 +253,16 @@ class WebGateway(Plugin):
                 )
             window.append(now)
             _rate_window[client_ip] = window
+            # 3) Periodic cleanup of stale IPs to prevent memory leak
+            _rate_cleanup_counter += 1
+            if _rate_cleanup_counter >= _RATE_CLEANUP_INTERVAL:
+                _rate_cleanup_counter = 0
+                stale_ips = [
+                    ip for ip, ts in _rate_window.items()
+                    if not ts or now - ts[-1] > 120.0
+                ]
+                for ip in stale_ips:
+                    del _rate_window[ip]
             return await call_next(request)
 
         def _check_auth(request: Request) -> bool:

@@ -27,22 +27,27 @@ from models.cost_tracker import CostTracker
 from models.recommend import RecommendationMixin
 
 
+# Pre-compiled regex patterns for log sanitization (hot path — every log record).
+# Compiling once at module load avoids re-compiling on every _sanitize_log_message call.
+import re as _re
+_LOG_SANITIZE_PATTERNS = [
+    _re.compile(r"sk-[a-zA-Z0-9]{20,}"),                                    # OpenAI keys
+    _re.compile(r"Bearer [a-zA-Z0-9\-\.]+"),                                # Bearer tokens
+    _re.compile(r"sk-ant-[a-zA-Z0-9\-]+"),                                  # Anthropic keys
+    _re.compile(r"api[_-]?key[=:]\s*[\"']?[a-zA-Z0-9]{20,}[\"']?", _re.IGNORECASE),  # generic api_key
+    _re.compile(r"password[=:]\s*\S+", _re.IGNORECASE),                     # passwords
+]
+_LOG_SANITIZE_REPLACEMENTS = ["***", "Bearer ***", "***", "api_key=***", "password=***"]
+
+
 def _sanitize_log_message(msg: str) -> str:
     """Remove sensitive information from log messages.
 
     Filters out API keys, bearer tokens, passwords, and other secrets.
+    Uses pre-compiled patterns for performance (called on every log record).
     """
-    import re
-    # Remove OpenAI-style API keys (sk-...)
-    msg = re.sub(r"sk-[a-zA-Z0-9]{20,}", "***", msg)
-    # Remove Bearer tokens
-    msg = re.sub(r"Bearer [a-zA-Z0-9\-\.]+", "Bearer ***", msg)
-    # Remove Anthropic-style API keys (sk-ant-...)
-    msg = re.sub(r"sk-ant-[a-zA-Z0-9\-]+", "***", msg)
-    # Remove generic API key patterns
-    msg = re.sub(r"api[_-]?key[=:]\s*[\"']?[a-zA-Z0-9]{20,}[\"']?", "api_key=***", msg, flags=re.IGNORECASE)
-    # Remove passwords
-    msg = re.sub(r"password[=:]\s*\S+", "password=***", msg, flags=re.IGNORECASE)
+    for pattern, replacement in zip(_LOG_SANITIZE_PATTERNS, _LOG_SANITIZE_REPLACEMENTS):
+        msg = pattern.sub(replacement, msg)
     return msg
 
 

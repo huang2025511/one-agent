@@ -5,6 +5,7 @@ Usage: /update 或 /更新
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import sys
@@ -36,6 +37,22 @@ def _run_git(args: list, timeout: int = 10) -> subprocess.CompletedProcess:
         text=True,
         cwd=str(ROOT),
         timeout=timeout,
+    )
+
+
+async def _run_git_async(args: list, timeout: int = 10) -> subprocess.CompletedProcess:
+    """Async wrapper around _run_git — runs the blocking subprocess in a
+    thread to avoid freezing the asyncio event loop.
+
+    Use this from async contexts (e.g. skill handlers) instead of _run_git.
+    """
+    return await asyncio.to_thread(_run_git, args, timeout)
+
+
+async def _run_subprocess_async(cmd: list, timeout: int = 30) -> subprocess.CompletedProcess:
+    """Run a subprocess in a thread to avoid blocking the event loop."""
+    return await asyncio.to_thread(
+        subprocess.run, cmd, capture_output=True, text=True, timeout=timeout
     )
 
 

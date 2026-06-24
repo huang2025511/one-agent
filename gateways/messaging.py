@@ -23,28 +23,28 @@ from core.plugin import Plugin
 logger = logging.getLogger(__name__)
 
 
+# Pre-compiled regex patterns for log sanitization (hot path — every log record).
+import re as _re_gw
+_GW_LOG_SANITIZE_PATTERNS = [
+    (_re_gw.compile(r'https?://[^\s]*\?key=[a-zA-Z0-9\-]+'), 'https://***?key=***'),
+    (_re_gw.compile(r'https?://[^\s]*\?access_token=[a-zA-Z0-9\-_\.]+'), 'https://***?access_token=***'),
+    (_re_gw.compile(r'[?&]key=[a-zA-Z0-9\-_]+'), '?key=***'),
+    (_re_gw.compile(r'https?://[^\s]*webhook[^\s]*'), 'https://***webhook***'),
+    (_re_gw.compile(r'bot[_-]?token[=:]\s*["\']?[a-zA-Z0-9:]+["\']?', _re_gw.IGNORECASE), 'bot_token=***'),
+    (_re_gw.compile(r'Bearer [a-zA-Z0-9\-\.]+'), 'Bearer ***'),
+    (_re_gw.compile(r'password[=:]\s*\S+', _re_gw.IGNORECASE), 'password=***'),
+    (_re_gw.compile(r'[?&](secret|token|access_token|app_secret|client_secret)=[^\s&]+', _re_gw.IGNORECASE), '?***=***'),
+]
+
+
 def _sanitize_log_message(msg: str) -> str:
     """Remove sensitive information from log messages.
 
     Filters out webhook URLs, tokens, passwords, and other secrets.
+    Uses pre-compiled patterns for performance (called on every log record).
     """
-    import re
-    # Remove webhook URLs with key parameters (e.g. ?key=xxx)
-    msg = re.sub(r'https?://[^\s]*\?key=[a-zA-Z0-9\-]+', 'https://***?key=***', msg)
-    # Remove webhook URLs with access_token parameters
-    msg = re.sub(r'https?://[^\s]*\?access_token=[a-zA-Z0-9\-_\.]+', 'https://***?access_token=***', msg)
-    # Remove any URL with ?key= or &key= query parameters
-    msg = re.sub(r'[?&]key=[a-zA-Z0-9\-_]+', '?key=***', msg)
-    # Remove webhook URLs (contain /webhook/)
-    msg = re.sub(r'https?://[^\s]*webhook[^\s]*', 'https://***webhook***', msg)
-    # Remove bot tokens
-    msg = re.sub(r'bot[_-]?token[=:]\s*["\']?[a-zA-Z0-9:]+["\']?', 'bot_token=***', msg, flags=re.IGNORECASE)
-    # Remove Bearer tokens
-    msg = re.sub(r'Bearer [a-zA-Z0-9\-\.]+', 'Bearer ***', msg)
-    # Remove passwords
-    msg = re.sub(r'password[=:]\s*\S+', 'password=***', msg, flags=re.IGNORECASE)
-    # Remove secret/token query parameters in URLs
-    msg = re.sub(r'[?&](secret|token|access_token|app_secret|client_secret)=[^\s&]+', r'?***=***', msg, flags=re.IGNORECASE)
+    for pattern, replacement in _GW_LOG_SANITIZE_PATTERNS:
+        msg = pattern.sub(replacement, msg)
     return msg
 
 

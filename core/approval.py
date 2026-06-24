@@ -54,6 +54,9 @@ class ApprovalRequest:
 class ApprovalManager:
     """Manages pending approval requests."""
 
+    # Cap history to prevent unbounded memory growth in long-running sessions.
+    _MAX_HISTORY = 1000
+
     def __init__(self):
         self._pending: Dict[str, ApprovalRequest] = {}
         self._history: list = []
@@ -80,6 +83,9 @@ class ApprovalManager:
         if req:
             req.approve()
             self._history.append({"id": request_id, "approved": True, "time": time.time()})
+            # Trim history to prevent unbounded growth
+            if len(self._history) > self._MAX_HISTORY:
+                self._history = self._history[-self._MAX_HISTORY:]
             return True
         return False
 
@@ -89,6 +95,9 @@ class ApprovalManager:
         if req:
             req.deny()
             self._history.append({"id": request_id, "approved": False, "time": time.time()})
+            # Trim history to prevent unbounded growth
+            if len(self._history) > self._MAX_HISTORY:
+                self._history = self._history[-self._MAX_HISTORY:]
             return True
         return False
 
