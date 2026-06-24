@@ -59,8 +59,8 @@ def _detect_branch() -> str:
         result = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("failed to detect git branch, defaulting to 'main': %s", exc)
     return "main"
 
 
@@ -74,8 +74,8 @@ def _detect_remote() -> str:
                 return "origin"
             if remotes and remotes[0]:
                 return remotes[0]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("failed to detect git remote, defaulting to 'origin': %s", exc)
     return "origin"
 
 
@@ -280,8 +280,8 @@ async def _update_with_curl(branch: str, results: list) -> str:
                         if len(parts) > 1:
                             remote_url = parts[1]
                         break
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("failed to detect remote URL for version check: %s", exc)
 
         # 从 remote URL 提取 user/repo
         gh_prefix = "https://github.com/"
