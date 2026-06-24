@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from models.tiers import MODEL_TIERS
+from models import MODEL_TIERS
 
 logger = logging.getLogger(__name__)
 

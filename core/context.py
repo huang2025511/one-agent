@@ -65,11 +65,6 @@ class TurnContext:
             raise ValueError('meta must be a dict')
 
     # ----------------------------------------------------------- convenience
-    @property
-    def tool_results(self) -> list:
-        """List of ToolResult objects from this turn."""
-        return self.meta.get("tool_results", [])
-
     def record_success(self, answer: str, tokens_used: int) -> None:
         self.result = answer
         self.error = None  # Clear any stale error from a concurrent timeout
@@ -108,9 +103,6 @@ class AgentContext:
 
     # Python executor for code execution (set by OneAgentApp.start)
     python_executor: Any = None
-
-    def bump(self, name: str, by: int = 1) -> None:
-        self.counters[name] = self.counters.get(name, 0) + by
 
     def get_plugin(self, name: str):
         """Return the first plugin registered with the given name, or None."""

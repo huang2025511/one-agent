@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.events import Event
-from core.exceptions import InputValidationError, SkillExecutionError  # noqa: F401
+from core.exceptions import InputValidationError  # noqa: F401
 from core.plugin import Plugin
 from memory.knowledge_graph import make_graph_search_handler  # noqa: F401
 from multimodal import make_image_handler, make_transcribe_handler

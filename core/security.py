@@ -56,29 +56,3 @@ def is_path_within_any(path: PathLike, bases: Iterable[PathLike]) -> bool:
         except (ValueError, OSError):
             continue
     return False
-
-
-def validate_path_within(path: PathLike, base: PathLike) -> Path:
-    """Resolve ``path`` and verify it is inside ``base``.
-
-    Args:
-        path: The path to validate.
-        base: The directory that must contain ``path``.
-
-    Returns:
-        The resolved ``Path`` of ``path`` (symlinks followed).
-
-    Raises:
-        ValueError: If ``path`` is not inside ``base`` or cannot be
-            resolved.
-    """
-    try:
-        resolved = Path(path).resolve()
-        resolved.relative_to(Path(base).resolve())
-    except ValueError as exc:
-        raise ValueError(
-            f"path '{resolved}' is outside allowed directory '{base}'"
-        ) from exc
-    except OSError as exc:
-        raise ValueError(f"cannot resolve path '{path}': {exc}") from exc
-    return resolved

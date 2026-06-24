@@ -165,12 +165,6 @@ def set_thread_language(lang: str) -> None:
         _thread_local.lang = "en"
 
 
-def clear_thread_language() -> None:
-    """Clear the per-thread language override."""
-    if hasattr(_thread_local, 'lang'):
-        del _thread_local.lang
-
-
 def detect_language(text: str) -> str:
     """Detect language from input text.
 
@@ -261,30 +255,3 @@ def _(key: str, **kwargs) -> str:
             logger.warning("failed to format message '%s': %s", key, exc)
 
     return message
-
-
-def add_translation(lang: str, key: str, message: str) -> None:
-    """Add a custom translation.
-
-    Args:
-        lang: Language code
-        key: Message key
-        message: Translated message
-    """
-    with _lock:
-        if lang not in _translations:
-            _translations[lang] = {}
-        _translations[lang][key] = message
-
-
-def load_translations_from_dict(translations: Dict[str, Dict[str, str]]) -> None:
-    """Load translations from a dictionary.
-
-    Args:
-        translations: Dict of {lang: {key: message}}
-    """
-    with _lock:
-        for lang, messages in translations.items():
-            if lang not in _translations:
-                _translations[lang] = {}
-            _translations[lang].update(messages)

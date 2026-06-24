@@ -273,17 +273,3 @@ class MCPClient:
         for server in self.servers.values():
             await server.close()
         self.servers.clear()
-
-
-def mcp_tool_to_skill_schema(server: MCPServer, tool: Dict[str, Any]) -> Dict[str, Any]:
-    """将 MCP 工具转换为 One-Agent skill schema。"""
-    return {
-        "name": f"mcp_{server.name}_{tool['name']}",
-        "description": tool.get("description", f"MCP tool from {server.name}"),
-        "parameters": tool.get("inputSchema", {}),
-        "metadata": {
-            "source": "mcp",
-            "server": server.name,
-            "tool_name": tool["name"]
-        }
-    }

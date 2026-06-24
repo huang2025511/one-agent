@@ -100,7 +100,3 @@ class ApprovalManager:
                 self._history = self._history[-self._MAX_HISTORY:]
             return True
         return False
-
-    def set_callback(self, cb: Callable) -> None:
-        """Set callback for when approval is needed (e.g., WebSocket notification)."""
-        self._on_approval_needed = cb

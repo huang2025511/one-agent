@@ -32,6 +32,8 @@ class BaseMessagingGateway(Plugin):
         super().__init__()
         self._sessions: Dict[str, asyncio.Event] = {}
         self._replies: Dict[str, str] = {}
+        self._task: Optional[asyncio.Task] = None
+        self._client: Optional[httpx.AsyncClient] = None
 
     async def _on_done(self, event) -> None:
         """Common message completion handler."""
@@ -42,6 +44,18 @@ class BaseMessagingGateway(Plugin):
         if sid in self._sessions:
             self._replies[sid] = turn.result if turn.result is not None else f"[error: {turn.error}]"
             self._sessions[sid].set()
+
+    async def stop(self) -> None:
+        """Common cleanup: cancel the polling task and close the HTTP client."""
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        if self._client:
+            await self._client.aclose()
+        await super().stop()
 
 
 # ------------- Telegram ---------------------------------------------------
@@ -70,16 +84,6 @@ class TelegramGateway(BaseMessagingGateway):
         self.bus.subscribe("turn_completed", self._on_done)
         self._task = asyncio.create_task(self._loop())
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     async def _loop(self) -> None:
         if not self._client or not self._token:
@@ -218,16 +222,6 @@ class WeComGateway(BaseMessagingGateway):
             logger.info("wecom app mode enabled, callback on %s:%d",
                         self._callback_host, self._callback_port)
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     # ------------------------------------------------ webhook 模式（仅推送）
     async def send_webhook(self, text: str, mentioned_list: Optional[list] = None) -> Dict:
@@ -504,16 +498,6 @@ class DingTalkGateway(BaseMessagingGateway):
             self._task = asyncio.create_task(self._stream_loop())
             logger.info("dingtalk stream mode enabled")
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     # ------------------------------------------------ webhook 模式
     async def send_webhook(self, text: str, at_all: bool = False) -> Dict:
@@ -799,16 +783,6 @@ class FeishuGateway(BaseMessagingGateway):
             logger.info("feishu app mode enabled, callback on %s:%d",
                         self._callback_host, self._callback_port)
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     # ------------------------------------------------ webhook 模式
     async def send_webhook(self, text: str) -> Dict:
@@ -1028,16 +1002,6 @@ class DiscordGateway(BaseMessagingGateway):
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("discord gateway enabled")
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     async def _poll_loop(self) -> None:
         """通过 Discord REST API 轮询消息（简化实现，无需 WebSocket）。"""
@@ -1178,16 +1142,6 @@ class SlackGateway(BaseMessagingGateway):
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("slack gateway enabled")
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     async def _poll_loop(self) -> None:
         """通过 RTM-like 轮询获取消息（简化实现）。"""

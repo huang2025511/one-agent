@@ -204,32 +204,3 @@ class SelfImprover:
                 self._conn.close()
             except Exception:
                 pass
-
-    # -------------------------------------------------------- async wrappers
-
-    async def record_failure_async(
-        self, user_input: str, error_type: str,
-        error_detail: str, turn_meta: Optional[dict] = None
-    ) -> None:
-        """Async wrapper for record_failure"""
-        await asyncio.to_thread(self.record_failure, user_input, error_type, error_detail, turn_meta)
-
-    async def analyze_patterns_async(self) -> List[Dict[str, Any]]:
-        """Async wrapper for analyze_patterns"""
-        return await asyncio.to_thread(self.analyze_patterns)
-
-    async def apply_improvement_async(self, pattern: str, suggestion: str) -> None:
-        """Async wrapper for apply_improvement"""
-        await asyncio.to_thread(self.apply_improvement, pattern, suggestion)
-
-    async def get_improvements_async(self) -> List[Dict[str, Any]]:
-        """Async wrapper for get_improvements"""
-        return await asyncio.to_thread(self.get_improvements)
-
-    async def get_stats_async(self) -> Dict[str, Any]:
-        """Async wrapper for get_stats"""
-        return await asyncio.to_thread(self.get_stats)
-
-    async def get_failures_async(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Async wrapper for get_failures"""
-        return await asyncio.to_thread(self.get_failures, limit)

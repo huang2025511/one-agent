@@ -1,13 +1,12 @@
 """SQLite connection factory and shared DB helpers.
 
 Consolidates the ``sqlite3.connect`` + ``PRAGMA`` setup that was
-duplicated across ``core/audit_log.py``, ``core/offline_queue.py``,
-``core/self_improve.py``, ``models/cost_tracker.py``, and
-``skills/document_search.py``. Each of these modules previously
-hand-rolled the same boilerplate (``check_same_thread=False`` + WAL +
-``busy_timeout``), but with inconsistent PRAGMAs — some forgot WAL,
-some forgot ``busy_timeout``. The factory here applies the full
-production-safe set uniformly.
+duplicated across ``core/audit_log.py``, ``core/self_improve.py``,
+``models/cost_tracker.py``, and ``skills/document_search.py``. Each of
+these modules previously hand-rolled the same boilerplate
+(``check_same_thread=False`` + WAL + ``busy_timeout``), but with
+inconsistent PRAGMAs — some forgot WAL, some forgot ``busy_timeout``.
+The factory here applies the full production-safe set uniformly.
 
 ``memory/base_store.py``'s :class:`BaseSQLiteStore` remains the
 preferred base class for memory-module stores; this factory is for

@@ -18,21 +18,6 @@ class InputValidationError(OneAgentError):
     pass
 
 
-class SkillExecutionError(OneAgentError):
-    """Raised when a skill fails to execute."""
-    pass
-
-
-class MemoryOperationError(OneAgentError):
-    """Raised when a memory read/write operation fails."""
-    pass
-
-
 class SecurityError(OneAgentError):
     """Raised when a security policy blocks an operation."""
-    pass
-
-
-class ConfigurationError(OneAgentError):
-    """Raised when configuration is invalid or cannot be applied."""
     pass

@@ -53,11 +53,6 @@ async def _run_git_async(args: list, timeout: int = 10) -> subprocess.CompletedP
     )
 
 
-async def _run_subprocess_async(cmd: list, timeout: int = 30) -> subprocess.CompletedProcess:
-    """Run a subprocess in a thread to avoid blocking the event loop."""
-    return await run_subprocess_async(cmd, timeout=timeout)
-
-
 def _detect_branch() -> str:
     """自动检测当前分支。失败则返回 'main'。"""
     try:
@@ -95,7 +90,7 @@ def make_updater_handler():
 
         # 1. 检查 git 是否可用
         try:
-            result = await _run_subprocess_async(["git", "--version"], timeout=5)
+            result = await run_subprocess_async(["git", "--version"], timeout=5)
             if result.returncode != 0:
                 raise FileNotFoundError("git not found")
             results.append(f"✓ Git 版本: {result.stdout.strip()}")
@@ -227,7 +222,7 @@ def make_updater_handler():
                     results.append("📦 检测到依赖文件变化，正在更新...")
                     pip_cmd = sys.executable
                     try:
-                        r = await _run_subprocess_async(
+                        r = await run_subprocess_async(
                             [pip_cmd, "-m", "pip", "install", "-r",
                              str(ROOT / "requirements.txt")],
                             timeout=180,
@@ -333,7 +328,7 @@ async def _update_with_curl(branch: str, results: list) -> str:
             local_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
-                r = await _run_subprocess_async(
+                r = await run_subprocess_async(
                     ["curl", "-s", "-L", "-f", "-o", str(local_path), url],
                     timeout=30,
                 )

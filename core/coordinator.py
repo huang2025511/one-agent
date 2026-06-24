@@ -561,8 +561,6 @@ class Coordinator(Plugin):
         This is orthogonal to model tier selection — both work together:
         e.g., an expert task gets both the strongest model AND multi-agent execution.
         """
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
         if turn.input_text is None:
             raise RuntimeError("turn.input_text cannot be None")
 
@@ -664,8 +662,6 @@ class Coordinator(Plugin):
         see it. The router is responsible for putting the system prompt + history
         + user message into ``turn.messages``; we layer memory on top here.
         """
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
         if turn.input_text is None:
             raise RuntimeError("turn.input_text cannot be None")
 
@@ -779,8 +775,6 @@ class Coordinator(Plugin):
         When OS mode is enabled (via /os-on), system_run is automatically added
         to the tool list so the LLM can directly call it for system operations.
         """
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
 
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
@@ -820,10 +814,6 @@ class Coordinator(Plugin):
 
         The thinking is NOT shown to the user directly — it drives execution.
         """
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
 
         from i18n import get_language
         lang = (get_language() or "zh").lower()
@@ -907,10 +897,6 @@ class Coordinator(Plugin):
         The reflection is injected into the message flow as an assistant message,
         so the subsequent tool loop can benefit from the improved plan.
         """
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
 
         from i18n import get_language
         lang = (get_language() or "zh").lower()
@@ -987,10 +973,6 @@ class Coordinator(Plugin):
         Returns True if delegation was successful (no need for further processing),
         False otherwise (fall back to normal flow).
         """
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
 
         from i18n import get_language
         _lang = (get_language() or "zh").lower()
@@ -1029,10 +1011,6 @@ class Coordinator(Plugin):
 
     async def _compress_context(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Compress context if approaching token limit."""
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
 
         if not (self.ctx and self.ctx.config):
             return
@@ -1060,10 +1038,6 @@ class Coordinator(Plugin):
 
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
         """Execute tool-call loop until final reply."""
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
         if tools is None:
             raise RuntimeError("tools cannot be None")
 
@@ -1128,10 +1102,6 @@ class Coordinator(Plugin):
         iteration: int,
     ) -> None:
         """Execute tool calls and append results to messages."""
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
         if tool_calls is None:
             raise RuntimeError("tool_calls cannot be None")
         if failed_skills is None:
@@ -1189,9 +1159,6 @@ class Coordinator(Plugin):
 
     async def _handle_loop_exhaustion(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Handle when tool loop reaches max iterations."""
-        assert messages is not None, "messages cannot be None"
-        assert turn is not None, "turn cannot be None"
-
         messages.append({
             "role": "user",
             "content": (
@@ -1575,57 +1542,6 @@ class Coordinator(Plugin):
                 logger.debug(
                     "verify+polish applied (%d -> %d chars)", len(answer), len(result)
                 )
-
-    async def _final_polish(
-        self, messages: List[Dict[str, Any]], turn: TurnContext,
-    ) -> None:
-        """Polish the final answer for better structure, clarity, and readability.
-
-        Kept for backward compatibility / standalone use. The combined
-        _verify_and_polish is preferred for complex+ tasks.
-        """
-        if not turn.result:
-            return
-
-        zh = self._is_zh()
-        answer = turn.result or ""
-
-        # Skip very short answers (they don't need polishing)
-        if len(answer) < 200:
-            return
-
-        if zh:
-            polish_prompt = (
-                "【答案优化 — 不要改变核心内容，只优化表达】\n\n"
-                "请对以下回答进行优化，要求：\n"
-                "1. 结构清晰：使用合适的标题、分点、表格等组织内容\n"
-                "2. 语言精炼：去除冗余，表达更专业、清晰\n"
-                "3. 重点突出：关键信息放在显眼位置\n"
-                "4. 结尾总结：长答案加一个简短的要点总结\n\n"
-                f"用户的问题：{turn.input_text[:200]}\n\n"
-                f"原始回答：\n{answer[:2000]}\n\n"
-                "请输出优化后的完整回答。"
-            )
-        else:
-            polish_prompt = (
-                "[Answer polishing — don't change core content, only improve presentation]\n\n"
-                "Please polish the following answer:\n"
-                "1. Clear structure: use headings, bullet points, tables where appropriate\n"
-                "2. Concise language: remove redundancy, make it more professional and clear\n"
-                "3. Highlight key points: put important info in prominent positions\n"
-                "4. Summary: add a brief key-takeaways section for long answers\n\n"
-                f"User question: {turn.input_text[:200]}\n\n"
-                f"Original answer:\n{answer[:2000]}\n\n"
-                "Output the full polished answer."
-            )
-
-        polished = await self._llm_quick_call(
-            polish_prompt, turn, max_tokens=min(len(answer) + 500, 4000)
-        )
-        if polished and len(polished) > len(answer) // 2:
-            turn.result = polished
-            turn.meta["polished"] = True
-            logger.debug("final polish applied (%d -> %d chars)", len(answer), len(polished))
 
     async def _post_reflect(self, turn: TurnContext) -> None:
         """Post-execution reflection for expert-tier tasks.

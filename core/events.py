@@ -212,9 +212,6 @@ class EventBus:
         self._subscribers.setdefault(event_type, []).append(handler)
         logger.info("subscribed %s to %s", handler, event_type)
 
-    def subscribe_all(self, handler: Handler) -> None:
-        self._wildcards.append(handler)
-
     def unsubscribe(self, event_type: str, handler: Handler) -> None:
         """Remove a previously subscribed handler from an event type.
 
@@ -433,9 +430,6 @@ class EventBus:
             del self._tracker_timestamps[eid]
         if expired:
             logger.debug("cleaned up %d expired tracker entries", len(expired))
-
-    def get_tracked(self, event_id: str) -> Optional[Event]:
-        return self._tracker.get(event_id)
 
     def get_dlq(self, limit: int = 50) -> List[Event]:
         return list(reversed(self._dead_letter_queue))[:limit]

@@ -25,6 +25,33 @@ from core.log_sanitizer import install_sensitive_info_filter
 from core.plugin import Plugin
 from models.cache import LLMCache
 from models.cost_tracker import CostTracker
+# Model tier definitions — used by LLMProvider for complexity-based routing.
+# Defined before importing RecommendationMixin to avoid a circular import
+# (recommend.py does `from models import MODEL_TIERS`).
+MODEL_TIERS: Dict[str, List[str]] = {
+    "trivial": [
+        "openrouter/meta-llama/llama-3-8b-instruct",
+        "anthropic/claude-haiku-latest",
+        "deepseek/deepseek-chat",
+        "qwen/qwen-2.5-7b-instruct",
+    ],
+    "simple": [
+        "anthropic/claude-3.5-haiku-20241022",
+        "openai/gpt-4o-mini",
+        "google/gemini-2.0-flash",
+    ],
+    "complex": [
+        "anthropic/claude-3.5-sonnet-20241022",
+        "openai/gpt-4o",
+        "google/gemini-2.5-pro-exp-03-25",
+    ],
+    "expert": [
+        "anthropic/claude-4.5-sonnet-20250514",
+        "openai/o3",
+        "google/gemini-2.5-pro-preview-05-15",
+    ],
+}
+
 from models.recommend import RecommendationMixin
 
 
@@ -47,9 +74,6 @@ MAX_KEEPALIVE_CONNECTIONS = 10
 # Stats limits
 MAX_CALL_STATS_SIZE = 1000
 CALL_STATS_TRIM_SIZE = 500
-
-
-from models.tiers import MODEL_TIERS  # noqa: E402  # re-export for backward compatibility
 
 __all__ = [
     "LLMProvider",

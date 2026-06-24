@@ -250,39 +250,6 @@ class KnowledgeGraph(BaseSQLiteStore):
             "relations": relation_count,
         }
 
-    # -------------------------------------------------------- async wrappers
-
-    async def add_entity_async(self, name: str, etype: str = "unknown", source: str = "") -> int:
-        """Async wrapper for add_entity"""
-        return await asyncio.to_thread(self.add_entity, name, etype, source)
-
-    async def add_relation_async(
-        self, subject: str, predicate: str, obj: str,
-        weight: float = 1.0, source: str = ""
-    ) -> bool:
-        """Async wrapper for add_relation"""
-        return await asyncio.to_thread(self.add_relation, subject, predicate, obj, weight, source)
-
-    async def query_entity_async(self, name: str) -> Optional[Dict[str, Any]]:
-        """Async wrapper for query_entity"""
-        return await asyncio.to_thread(self.query_entity, name)
-
-    async def search_async(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Async wrapper for search"""
-        return await asyncio.to_thread(self.search, query, limit)
-
-    async def get_neighbors_async(self, name: str, depth: int = 1) -> List[Dict[str, Any]]:
-        """Async wrapper for get_neighbors"""
-        return await asyncio.to_thread(self.get_neighbors, name, depth)
-
-    async def extract_from_text_async(self, text: str, source: str = "") -> int:
-        """Async wrapper for extract_from_text"""
-        return await asyncio.to_thread(self.extract_from_text, text, source)
-
-    async def stats_async(self) -> Dict[str, Any]:
-        """Async wrapper for stats"""
-        return await asyncio.to_thread(self.stats)
-
 
 # ------------------------------------------------------------------ skill handler factory
 

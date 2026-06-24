@@ -142,28 +142,6 @@ class EmbeddingStore(BaseSQLiteStore):
             logger.warning("Embedding failed: %s", e)
             return None
 
-    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
-        """Generate embeddings for a batch of texts.
-
-        Args:
-            texts: List of input texts
-
-        Returns:
-            List of float lists (or None for failures)
-        """
-        assert texts is not None, "texts cannot be None"
-        assert isinstance(texts, list), "texts must be a list"
-        assert all(isinstance(t, str) for t in texts), "all texts must be strings"
-
-        if self._model is None:
-            return [None] * len(texts)
-        try:
-            embeddings = self._model.encode(texts, convert_to_numpy=True)
-            return [emb.tolist() for emb in embeddings]
-        except Exception as e:
-            logger.warning("Batch embedding failed: %s", e)
-            return [None] * len(texts)
-
     def store(self, memory_id: str, vector: List[float]):
         """Store embedding vector for a memory item.
 

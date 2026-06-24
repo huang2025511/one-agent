@@ -406,40 +406,6 @@ class ModelCatalog:
         lines.append(f"Rate-limit:   ~{rpm} req/min  /  ~{tpm:,} tok/min (heuristic)")
         return "\n".join(lines)
 
-    # ---------------------------------------------------------- picker
-    async def pick(self, prompt: str = "Pick a model:",
-                   candidates: Optional[List[ModelInfo]] = None) -> Optional[ModelInfo]:
-        """Interactive CLI picker.  Returns the chosen ModelInfo or None."""
-        items = candidates if candidates is not None else self.all()
-        if not items:
-            print("[no models available]")
-            return None
-        print(f"\n{prompt}")
-        for i, m in enumerate(items, 1):
-            ctx = f" ctx={m.context_length:,}" if m.context_length else ""
-            free = " [FREE]" if m.is_free else ""
-            tier = f" [{m.tier}]" if m.tier else ""
-            feats = f" ({','.join(m.features[:3])})" if m.features else ""
-            print(f"  {i:2d}. {m.id}{free}{ctx}{tier}{feats}")
-        print()
-        try:
-            raw = input("  number (or 'q' to cancel): ").strip()
-        except EOFError:
-            return None
-        if raw.lower() in ("q", "quit", "exit", ""):
-            return None
-        try:
-            idx = int(raw) - 1
-        except ValueError:
-            print(f"[invalid: {raw!r}]")
-            return None
-        if not (0 <= idx < len(items)):
-            print(f"[out of range: {raw!r}]")
-            return None
-        chosen = items[idx]
-        print(f"  → picked: {chosen.id} (tier={chosen.tier or '?'})")
-        return chosen
-
     # ---------------------------------------------------------- recommend
     def recommend(self) -> Dict[str, Optional[ModelInfo]]:
         """Pick the best model for each common use-case.
