@@ -138,8 +138,8 @@ async def test_knowledge_graph_mock():
     kg = KnowledgeGraph()
 
     # Add entities
-    kg.add_entity("Alice", "person", {"age": 30})
-    kg.add_entity("Bob", "person", {"age": 25})
+    kg.add_entity("Alice", "person")
+    kg.add_entity("Bob", "person")
 
     # Add relations
     kg.add_relation("Alice", "knows", "Bob")
