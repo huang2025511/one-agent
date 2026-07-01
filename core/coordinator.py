@@ -1130,7 +1130,7 @@ class Coordinator(Plugin):
 
         try:
             query = turn.input_text.strip()
-            result = await web_search_skill.execute({"input": query}, {})
+            result = await web_search_skill.run({"input": query})
             if not result or "error" in str(result).lower() or "无法" in str(result):
                 logger.debug("auto-search failed or no results")
                 return False
