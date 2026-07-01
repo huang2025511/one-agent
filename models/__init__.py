@@ -18,7 +18,7 @@ import re
 import sqlite3
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 
@@ -193,7 +193,13 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._retry_count = llm_cfg.get("retries", 3)
 
         # Fallback chain configuration
-        self._fallback_chain = llm_cfg.get("fallback_chain", []) or []
+        raw_fallback = llm_cfg.get("fallback_chain", []) or []
+        self._fallback_chain: List[Dict[str, str]] = []
+        for fb in raw_fallback:
+            if isinstance(fb, str):
+                self._fallback_chain.append({"model": fb})
+            elif isinstance(fb, dict) and fb.get("model"):
+                self._fallback_chain.append(dict(fb))
         if self._fallback_chain:
             logger.info("LLM fallback chain configured: %s", self._fallback_chain)
 
@@ -349,11 +355,21 @@ class LLMProvider(RecommendationMixin, Plugin):
 
     # ---------------------------------------------------------- public API
     def _has_usable_key(self, provider: str) -> bool:
-        """True if ``provider`` has a non-empty, unexpanded key configured."""
-        v = self._api_keys.get(provider) or self._api_keys.get("openrouter")
-        if not v or not v.strip() or "${" in v:
-            return False
-        return True
+        """True if ``provider`` has a non-empty, unexpanded key configured.
+
+        Also returns True if the provider routes through OpenRouter (i.e. no
+        dedicated base URL) and OpenRouter itself has a usable key.
+        """
+        v = self._api_keys.get(provider)
+        if v and v.strip() and "${" not in v:
+            return True
+        base = self._provider_base_urls.get(provider)
+        openrouter_base = self._provider_base_urls.get("openrouter")
+        if base and openrouter_base and base.rstrip("/") == openrouter_base.rstrip("/"):
+            or_v = self._api_keys.get("openrouter")
+            if or_v and or_v.strip() and "${" not in or_v:
+                return True
+        return False
 
     def set_api_key(self, provider: str, key: str) -> Dict[str, Any]:
         """Add or update an API key.  Triggers a background reclassify so
@@ -1099,15 +1115,16 @@ class LLMProvider(RecommendationMixin, Plugin):
 
         # --- Fallback chain: try alternative providers if primary fails ---
         if not _skip_fallback and self._fallback_chain:
-            for fallback_model in self._fallback_chain:
-                if fallback_model == model:
-                    continue  # Skip if it's the same model
+            for fb in self._fallback_chain:
+                fb_model = fb.get("model")
+                if not fb_model or fb_model == model:
+                    continue
 
-                logger.info("Trying fallback provider: %s", fallback_model)
+                logger.info("Trying fallback model: %s", fb_model)
                 try:
                     result = await self.chat_completion(
                         messages=messages,
-                        model=fallback_model,
+                        model=fb_model,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         tools=tools,
@@ -1115,11 +1132,11 @@ class LLMProvider(RecommendationMixin, Plugin):
                         _skip_fallback=True,  # Prevent recursive fallback
                     )
                     if not result.get("failed"):
-                        result["fallback_used"] = fallback_model
-                        logger.info("Fallback succeeded with %s", fallback_model)
+                        result["fallback_used"] = fb_model
+                        logger.info("Fallback succeeded with %s", fb_model)
                         return result
                 except Exception as exc:
-                    logger.warning("Fallback %s failed: %s", fallback_model, exc)
+                    logger.warning("Fallback %s failed: %s", fb_model, exc)
                     continue
 
         return {

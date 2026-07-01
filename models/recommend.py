@@ -14,10 +14,29 @@ class RecommendationMixin:
     """Mixin for LLMProvider providing tier-based model recommendation."""
 
     def model_for_tier(self, tier: str) -> str:
-        for model in MODEL_TIERS.get(tier, []):
+        """Return the best available model for the given tier.
+
+        Skips providers without a usable API key (expanded, non-empty,
+        not a ${VAR} placeholder).  Prioritises models from the default
+        model's provider so users get the provider they configured.
+        Falls back to _default_model if nothing matches.
+        """
+        default_provider = (
+            self._default_model.split("/", 1)[0]
+            if "/" in self._default_model
+            else None
+        )
+        candidates = MODEL_TIERS.get(tier, [])
+        if default_provider:
+            for model in candidates:
+                provider = model.split("/", 1)[0]
+                if provider == default_provider and self._has_usable_key(provider):
+                    return model
+            if self._has_usable_key(default_provider):
+                return self._default_model
+        for model in candidates:
             provider = model.split("/", 1)[0]
-            # Accept a direct provider key OR an openrouter key (openrouter routes to anthropic/...)
-            if self._api_keys.get(provider) or self._api_keys.get("openrouter"):
+            if self._has_usable_key(provider):
                 return model
         return self._default_model
 
