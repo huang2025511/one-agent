@@ -24,50 +24,11 @@ import httpx
 from core.plugin import Plugin
 from models.cache import LLMCache
 from models.cost_tracker import CostTracker
+from models.tiers import MODEL_TIERS, MODEL_COST
 from models.recommend import RecommendationMixin
 
 
-def _sanitize_log_message(msg: str) -> str:
-    """Remove sensitive information from log messages.
-
-    Filters out API keys, bearer tokens, passwords, and other secrets.
-    """
-    import re
-    # Remove OpenAI-style API keys (sk-...)
-    msg = re.sub(r"sk-[a-zA-Z0-9]{20,}", "***", msg)
-    # Remove Bearer tokens
-    msg = re.sub(r"Bearer [a-zA-Z0-9\-\.]+", "Bearer ***", msg)
-    # Remove Anthropic-style API keys (sk-ant-...)
-    msg = re.sub(r"sk-ant-[a-zA-Z0-9\-]+", "***", msg)
-    # Remove generic API key patterns
-    msg = re.sub(r"api[_-]?key[=:]\s*[\"']?[a-zA-Z0-9]{20,}[\"']?", "api_key=***", msg, flags=re.IGNORECASE)
-    # Remove passwords
-    msg = re.sub(r"password[=:]\s*\S+", "password=***", msg, flags=re.IGNORECASE)
-    return msg
-
-
-class _SensitiveInfoFilter(logging.Filter):
-    """Automatically filter sensitive information from log messages."""
-    def filter(self, record):
-        if isinstance(record.msg, str):
-            record.msg = _sanitize_log_message(record.msg)
-        # Only sanitize string args, preserve numeric types for % formatting
-        if record.args:
-            if isinstance(record.args, tuple):
-                record.args = tuple(
-                    _sanitize_log_message(arg) if isinstance(arg, str) else arg
-                    for arg in record.args
-                )
-            elif isinstance(record.args, dict):
-                record.args = {
-                    k: _sanitize_log_message(v) if isinstance(v, str) else v
-                    for k, v in record.args.items()
-                }
-        return True
-
-
 logger = logging.getLogger(__name__)
-logger.addFilter(_SensitiveInfoFilter())
 
 # Default timeout values in seconds
 DEFAULT_TIMEOUT = 60
@@ -86,54 +47,11 @@ MAX_KEEPALIVE_CONNECTIONS = 10
 MAX_CALL_STATS_SIZE = 1000
 CALL_STATS_TRIM_SIZE = 500
 
-
-from models.tiers import MODEL_TIERS  # noqa: E402  # re-export for backward compatibility
-
 __all__ = [
     "LLMProvider",
     "MODEL_TIERS",
     "MODEL_COST",
 ]
-
-# Rough per-token cost (USD per 1K tokens) for statistics
-MODEL_COST: Dict[str, float] = {
-    # Anthropic
-    "anthropic/claude-3.5-sonnet-20241022": 0.003,
-    "anthropic/claude-3.5-haiku-20241022":  0.0008,
-    "anthropic/claude-haiku-latest":         0.0008,
-    "anthropic/claude-4.5-sonnet-20250514":  0.003,
-    # OpenAI
-    "openai/gpt-4o":                0.005,
-    "openai/gpt-4o-mini":           0.00015,
-    "openai/gpt-4-turbo":           0.01,
-    "openai/o3":                    0.015,
-    "openai/o1":                    0.015,
-    # Google
-    "google/gemini-2.5-pro-exp-03-25":  0.00125,
-    "google/gemini-2.0-flash":          0.0001,
-    "google/gemini-2.5-pro-preview-05-15": 0.00125,
-    # DeepSeek
-    "deepseek/deepseek-chat":  0.00014,
-    "deepseek/deepseek-reasoner": 0.00055,
-    # Qwen / DashScope (Tongyi)
-    "qwen/qwen-max":                  0.002,
-    "qwen/qwen-plus":                 0.0008,
-    "qwen/qwen-2.5-72b-instruct":     0.0004,
-    "qwen/qwen-2.5-7b-instruct":      0.0001,
-    # SenseNova (商汤)
-    "sensenova/deepseek-v4-flash":    0.0001,
-    "sensenova/sensenova-6.7-flash-lite": 0.0001,
-    # Zhipu GLM (智谱)
-    "glm/glm-4":                      0.001,
-    "glm/glm-4-plus":                 0.001,
-    # Moonshot / Kimi
-    "kimi/kimi-k2-0711-preview":      0.0006,
-    "kimi/moonshot-v1-128k":          0.001,
-    # Yi (零一万物)
-    "yi/yi-large":                    0.0008,
-    # OpenRouter passthrough
-    "openrouter/meta-llama/llama-3-8b-instruct": 0.0002,
-}
 
 # HTTP status codes that are safe to retry.
 _RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
@@ -749,6 +667,39 @@ class LLMProvider(RecommendationMixin, Plugin):
             return provider, bare
         return "openai", model
 
+    def _record_cost(
+        self,
+        model: str,
+        tokens_used: int,
+        tokens_prompt: int = 0,
+        tokens_completion: int = 0,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Accumulate cost totals and persist to the cost tracker.
+
+        Consolidates the 6 duplicated cost-tracking blocks that previously
+        appeared in chat_completion / chat_completion_stream. The SQLite
+        write is best-effort and never raises to the caller.
+        """
+        cost = MODEL_COST.get(model, 0.001) * (tokens_used / 1000)
+        self._cost_total += cost
+        if result is not None:
+            result["estimated_cost_usd"] = round(cost, 6)
+            result["total_cost_usd"] = round(self._cost_total, 6)
+        if self._cost_tracker:
+            try:
+                provider_name, bare = self._parse_model(model)
+                cost_tracked = self._cost_tracker.record(
+                    provider=provider_name,
+                    model=bare,
+                    tokens_prompt=tokens_prompt,
+                    tokens_completion=tokens_completion,
+                )
+                if result is not None:
+                    result["cost_usd"] = cost_tracked
+            except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
+                logger.error("cost_tracker record failed: %s", exc, exc_info=True)
+
     def _find_cheapest_free_model(self) -> str:
         """Return the cheapest free model available, falling back to the default."""
         # Look through trivial-tier models for one with zero or negligible cost
@@ -915,24 +866,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                 circuit_breaker.record_success()
 
                 # Record cost
-                cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
-                self._cost_total += cost
-                result["estimated_cost_usd"] = round(cost, 6)
-                result["total_cost_usd"] = round(self._cost_total, 6)
-
-                # Persist to cost tracker (best-effort, never blocks the caller)
-                if self._cost_tracker:
-                    try:
-                        provider_name, bare = self._parse_model(model)
-                        cost_tracked = self._cost_tracker.record(
-                            provider=provider_name,
-                            model=bare,
-                            tokens_prompt=result.get("tokens_prompt", 0),
-                            tokens_completion=result.get("tokens_completion", 0),
-                        )
-                        result["cost_usd"] = cost_tracked
-                    except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
-                        logger.error("cost_tracker record failed: %s", exc, exc_info=True)
+                self._record_cost(
+                    model,
+                    result.get("tokens_used", 0),
+                    tokens_prompt=result.get("tokens_prompt", 0),
+                    tokens_completion=result.get("tokens_completion", 0),
+                    result=result,
+                )
 
                 # Store in cache (tools included in key; stateful tools should use use_cache=False)
                 if use_cache and self._cache is not None:
@@ -969,21 +909,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                                 messages=messages, temperature=temperature,
                                 max_tokens=max_tokens, tools=None, provider=provider,
                             )
-                            cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
-                            self._cost_total += cost
-                            result["estimated_cost_usd"] = round(cost, 6)
-                            result["total_cost_usd"] = round(self._cost_total, 6)
-                            if self._cost_tracker:
-                                try:
-                                    provider_name, bare = self._parse_model(model)
-                                    cost_tracked = self._cost_tracker.record(
-                                        provider=provider_name, model=bare,
-                                        tokens_prompt=result.get("tokens_prompt", 0),
-                                        tokens_completion=result.get("tokens_completion", 0),
-                                    )
-                                    result["cost_usd"] = cost_tracked
-                                except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
-                                    logger.error("cost_tracker record failed in retry: %s", exc, exc_info=True)
+                            self._record_cost(
+                                model,
+                                result.get("tokens_used", 0),
+                                tokens_prompt=result.get("tokens_prompt", 0),
+                                tokens_completion=result.get("tokens_completion", 0),
+                                result=result,
+                            )
                             if use_cache and self._cache is not None:
                                 self._cache.set(messages, model, [], result, temperature)
                             return result
@@ -1020,21 +952,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                                         messages=minimal_msgs, temperature=temperature,
                                         max_tokens=max_tokens, tools=None, provider=provider,
                                     )
-                                    cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
-                                    self._cost_total += cost
-                                    result["estimated_cost_usd"] = round(cost, 6)
-                                    result["total_cost_usd"] = round(self._cost_total, 6)
-                                    if self._cost_tracker:
-                                        try:
-                                            provider_name, bare = self._parse_model(model)
-                                            cost_tracked = self._cost_tracker.record(
-                                                provider=provider_name, model=bare,
-                                                tokens_prompt=result.get("tokens_prompt", 0),
-                                                tokens_completion=result.get("tokens_completion", 0),
-                                            )
-                                            result["cost_usd"] = cost_tracked
-                                        except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
-                                            logger.error("cost_tracker record failed in last resort: %s", exc, exc_info=True)
+                                    self._record_cost(
+                                        model,
+                                        result.get("tokens_used", 0),
+                                        tokens_prompt=result.get("tokens_prompt", 0),
+                                        tokens_completion=result.get("tokens_completion", 0),
+                                        result=result,
+                                    )
                                     logger.info("last resort succeeded")
                                     return result
                                 except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as last_exc:
@@ -1066,21 +990,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                                     messages=messages, temperature=temperature,
                                     max_tokens=max_tokens, tools=tools, provider=provider,
                                 )
-                                cost = MODEL_COST.get(model, 0.001) * (result.get("tokens_used", 0) / 1000)
-                                self._cost_total += cost
-                                result["estimated_cost_usd"] = round(cost, 6)
-                                result["total_cost_usd"] = round(self._cost_total, 6)
-                                if self._cost_tracker:
-                                    try:
-                                        provider_name, bare = self._parse_model(model)
-                                        cost_tracked = self._cost_tracker.record(
-                                            provider=provider_name, model=bare,
-                                            tokens_prompt=result.get("tokens_prompt", 0),
-                                            tokens_completion=result.get("tokens_completion", 0),
-                                        )
-                                        result["cost_usd"] = cost_tracked
-                                    except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
-                                        logger.error("cost_tracker record failed in fallback: %s", exc, exc_info=True)
+                                self._record_cost(
+                                    model,
+                                    result.get("tokens_used", 0),
+                                    tokens_prompt=result.get("tokens_prompt", 0),
+                                    tokens_completion=result.get("tokens_completion", 0),
+                                    result=result,
+                                )
                                 if use_cache and self._cache is not None:
                                     self._cache.set(messages, model, tools or [], result, temperature)
                                 return result
@@ -1264,18 +1180,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                             circuit_breaker.record_success()
                             self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
                             # Record cost (mirror non-streaming path)
-                            cost = MODEL_COST.get(model, 0.001) * (tokens_used / 1000)
-                            self._cost_total += cost
-                            if self._cost_tracker:
-                                try:
-                                    provider_name, bare = self._parse_model(model)
-                                    self._cost_tracker.record(
-                                        provider=provider_name, model=bare,
-                                        tokens_prompt=usage.get("input_tokens", 0),
-                                        tokens_completion=tokens_used,
-                                    )
-                                except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
-                                    logger.error("stream cost_tracker record failed: %s", exc)
+                            self._record_cost(
+                                model,
+                                tokens_used,
+                                tokens_prompt=usage.get("input_tokens", 0),
+                                tokens_completion=tokens_used,
+                            )
                             yield {"delta": "", "done": True, "tokens_used": tokens_used}
                             return
                     # Stream ended without a message_delta event — yield a
@@ -1345,18 +1255,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                             circuit_breaker.record_success()
                             self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
                             # Record cost (mirror non-streaming path)
-                            cost = MODEL_COST.get(model, 0.001) * (tokens_used / 1000)
-                            self._cost_total += cost
-                            if self._cost_tracker:
-                                try:
-                                    provider_name, bare = self._parse_model(model)
-                                    self._cost_tracker.record(
-                                        provider=provider_name, model=bare,
-                                        tokens_prompt=usage.get("prompt_tokens", 0),
-                                        tokens_completion=usage.get("completion_tokens", 0),
-                                    )
-                                except (ValueError, KeyError, OSError, sqlite3.Error) as exc:
-                                    logger.error("stream cost_tracker record failed: %s", exc)
+                            self._record_cost(
+                                model,
+                                tokens_used,
+                                tokens_prompt=usage.get("prompt_tokens", 0),
+                                tokens_completion=usage.get("completion_tokens", 0),
+                            )
                             yield {"delta": "", "done": True, "tokens_used": tokens_used}
                             return
                     # Stream ended without a usage chunk — yield final done.

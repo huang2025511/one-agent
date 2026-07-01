@@ -255,7 +255,10 @@ class PythonExecutor(BaseExecutor):
         except asyncio.TimeoutError:
             # Kill the entire process group (subprocess + any children)
             self._kill_process_group(proc)
-            await proc.wait()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("python_executor: process did not exit after kill (pid=%s)", proc.pid)
             duration_ms = (time.time() - start) * 1000
             return {
                 "success": False,
@@ -266,7 +269,10 @@ class PythonExecutor(BaseExecutor):
             }
         except Exception as exc:
             self._kill_process_group(proc)
-            await proc.wait()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("python_executor: process did not exit after kill (pid=%s)", proc.pid)
             duration_ms = (time.time() - start) * 1000
             return {
                 "success": False,
@@ -275,6 +281,16 @@ class PythonExecutor(BaseExecutor):
                 "result": None,
                 "duration_ms": duration_ms,
             }
+        finally:
+            # Ensure subprocess is cleaned up if the parent task is
+            # cancelled (asyncio.CancelledError is a BaseException and is
+            # not caught by the ``except Exception`` clauses above).
+            if proc.returncode is None:
+                self._kill_process_group(proc)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("python_executor: process did not exit after kill (pid=%s)", proc.pid)
 
         duration_ms = (time.time() - start) * 1000
         output = stdout_bytes.decode("utf-8", errors="replace")

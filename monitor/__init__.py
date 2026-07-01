@@ -21,6 +21,30 @@ from core.plugin import Plugin
 logger = logging.getLogger(__name__)
 
 
+def _tail_file(path: str, max_lines: int = 50, max_bytes: int = 65536) -> str:
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, 2)
+            size = f.tell()
+            if size == 0:
+                return ""
+            chunk_size = 1024
+            data = b''
+            pos = size
+            while pos > 0 and len(data) < max_bytes:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                data = f.read(read_size) + data
+                if data.count(b'\n') >= max_lines + 1:
+                    break
+            text = data.decode('utf-8', errors='ignore')
+            lines = text.splitlines()
+            return '\n'.join(lines[-max_lines:])
+    except (OSError, IOError):
+        return ""
+
+
 class MonitoringPlugin(Plugin):
     """Web-based monitoring dashboard plugin."""
 
@@ -201,17 +225,11 @@ class MonitoringPlugin(Plugin):
             dlq = _bus.get_dlq(20) if _bus else []
             skills = _skills.all_skill_ids() if _skills else []
 
-            # Read last 50 log lines
             log_lines = []
             log_path = Path(_ctx.config.get("agent", {}).get("data_dir", "./data")) / "logs" / "one_agent.log"
-            # Read last N log lines with size cap (avoid OOM on huge logs)
-            MAX_LOG_READ = 256 * 1024  # 256 KB max
-            if log_path.exists():
-                raw = log_path.read_text(encoding="utf-8", errors="ignore")
-                if len(raw) > MAX_LOG_READ:
-                    raw = raw[-MAX_LOG_READ:]
-                lines = raw.splitlines()
-                log_lines = lines[-50:]
+            if await asyncio.to_thread(log_path.exists):
+                raw = await asyncio.to_thread(_tail_file, str(log_path), max_lines=50)
+                log_lines = raw.splitlines()
 
             return {
                 "bus": bus_m,
@@ -258,21 +276,16 @@ class MonitoringPlugin(Plugin):
         @app.get("/api/logs")
         async def logs(tail: int = 50):
             log_path = Path(_ctx.config.get("agent", {}).get("data_dir", "./data")) / "logs" / "one_agent.log"
-            if not log_path.exists():
+            if not await asyncio.to_thread(log_path.exists):
                 return {"lines": []}
-            MAX_LOG_READ = 256 * 1024
-            raw = log_path.read_text(encoding="utf-8", errors="ignore")
-            if len(raw) > MAX_LOG_READ:
-                raw = raw[-MAX_LOG_READ:]
-            lines = raw.splitlines()
-            return {"lines": lines[-tail:]}
+            raw = await asyncio.to_thread(_tail_file, str(log_path), max_lines=tail)
+            return {"lines": raw.splitlines()}
 
         self._app = app
         try:
             import uvicorn
             config = uvicorn.Config(app, host="127.0.0.1", port=self._port, log_level="warning")
             server = uvicorn.Server(config)
-            self._server = server
             self._task = asyncio.create_task(server.serve())
             logger.info("monitoring dashboard on http://127.0.0.1:%d", self._port)
         except Exception as exc:
@@ -299,14 +312,11 @@ class MonitoringPlugin(Plugin):
             self.record_token_usage(int(tokens))
 
     async def stop(self) -> None:
-        # 优雅关闭 uvicorn：设置 should_exit 让其自行完成 in-flight 请求
-        server = getattr(self, "_server", None)
-        if server is not None:
-            server.should_exit = True
         if self._task:
+            self._task.cancel()
             try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                await self._task
+            except asyncio.CancelledError:
                 pass
         await super().stop()
 

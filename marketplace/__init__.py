@@ -33,7 +33,7 @@ class SkillPackage:
     """Represents a skill package."""
     
     def __init__(self, name: str, version: str = "1.0.0", description: str = "",
-                 author: str = "", path: str = "") -> None:
+                 author: str = "", path: str = ""):
         self.name = name
         self.version = version
         self.description = description
@@ -42,13 +42,6 @@ class SkillPackage:
         self.sha256 = ""
         self.installed_at: Optional[float] = None
         self.tags: List[str] = []
-        # 评分相关字段
-        self.rating: float = 0.0
-        self.rating_count: int = 0
-        # 依赖管理：依赖的其他技能包名称列表
-        self.dependencies: List[str] = []
-        # 评论系统
-        self.comments: List[Dict[str, Any]] = []
     
     @classmethod
     def from_directory(cls, dirpath: str) -> Optional["SkillPackage"]:
@@ -69,10 +62,6 @@ class SkillPackage:
             author=meta.get("author", ""),
             path=str(path),
         )
-        # 解析依赖列表（逗号分隔）
-        deps_str = meta.get("dependencies", "")
-        if deps_str:
-            pkg.dependencies = [d.strip() for d in deps_str.split(",") if d.strip()]
         return pkg
     
     @staticmethod
@@ -109,24 +98,20 @@ class SkillPackage:
             "author": self.author,
             "sha256": self.sha256,
             "tags": self.tags,
-            "rating": self.rating,
-            "rating_count": self.rating_count,
-            "dependencies": self.dependencies,
-            "comments": self.comments,
         }
 
 
 class Marketplace:
     """Skill marketplace for discovering and installing skill packages."""
     
-    def __init__(self, registry_dir: str = "data/marketplace") -> None:
+    def __init__(self, registry_dir: str = "data/marketplace"):
         self._registry_dir = Path(registry_dir)
         self._registry_dir.mkdir(parents=True, exist_ok=True)
         self._registry_file = self._registry_dir / "registry.json"
         self._packages: Dict[str, SkillPackage] = {}
         self._load_registry()
     
-    def _load_registry(self) -> None:
+    def _load_registry(self):
         if self._registry_file.exists():
             try:
                 data = json.loads(self._registry_file.read_text())
@@ -139,18 +124,11 @@ class Marketplace:
                     )
                     pkg.sha256 = entry.get("sha256", "")
                     pkg.tags = entry.get("tags", [])
-                    # 恢复评分相关字段
-                    pkg.rating = entry.get("rating", 0.0)
-                    pkg.rating_count = entry.get("rating_count", 0)
-                    # 恢复依赖和评论字段
-                    pkg.dependencies = entry.get("dependencies", [])
-                    pkg.comments = entry.get("comments", [])
                     self._packages[pkg.name] = pkg
             except Exception as exc:
                 logger.warning("Failed to load marketplace registry: %s", exc)
     
-    def _save_registry(self) -> None:
-        # to_dict() 已包含 rating 和 rating_count，会一并持久化
+    def _save_registry(self):
         data = {
             "updated_at": time.time(),
             "packages": [p.to_dict() for p in self._packages.values()],
@@ -214,125 +192,6 @@ class Marketplace:
         if not path.exists():
             return []
         return [d.name for d in path.iterdir() if d.is_dir() and (d / "SKILL.md").exists()]
-
-    def rate_package(self, name: str, rating: float) -> bool:
-        """为指定技能包打分。
-
-        - rating 取值范围 1.0-5.0，超出范围返回 False
-        - 包不存在返回 False
-        - 使用加权平均更新评分，并持久化到 registry
-        - 成功返回 True
-        """
-        # 校验评分范围
-        if rating < 1.0 or rating > 5.0:
-            return False
-        # 校验包是否存在
-        if name not in self._packages:
-            return False
-        pkg = self._packages[name]
-        # 加权平均：新评分 = (旧评分 * 旧次数 + 本次评分) / (旧次数 + 1)
-        pkg.rating = (pkg.rating * pkg.rating_count + rating) / (pkg.rating_count + 1)
-        pkg.rating_count += 1
-        # 持久化到 registry
-        self._save_registry()
-        logger.info("Rated skill %s: %.2f (count=%d)", name, pkg.rating, pkg.rating_count)
-        return True
-
-    def get_top_rated(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """按评分降序返回前 N 个技能包。"""
-        packages = list(self._packages.values())
-        # 按 rating 降序排序
-        packages.sort(key=lambda p: p.rating, reverse=True)
-        return [p.to_dict() for p in packages[:limit]]
-
-    def check_dependencies(self, name: str, target_dir: str = "skills") -> Dict[str, Any]:
-        """检查技能包的依赖是否已安装。
-
-        Returns:
-            {"satisfied": bool, "missing": [...], "dependencies": [...]}
-        """
-        if name not in self._packages:
-            return {"satisfied": False, "missing": [], "dependencies": [], "error": "package not found"}
-        pkg = self._packages[name]
-        installed = set(self.list_installed(target_dir))
-        missing = [dep for dep in pkg.dependencies if dep not in installed and dep not in self._packages]
-        return {
-            "satisfied": len(missing) == 0,
-            "missing": missing,
-            "dependencies": pkg.dependencies,
-        }
-
-    def install_with_deps(self, name: str, target_dir: str) -> Dict[str, Any]:
-        """安装技能包及其所有依赖（递归安装）。
-
-        Returns:
-            {"installed": [...], "skipped": [...], "failed": [...]}
-        """
-        installed_list: List[str] = []
-        skipped_list: List[str] = []
-        failed_list: List[str] = []
-
-        def _do_install(pkg_name: str, visited: set) -> None:
-            if pkg_name in visited:
-                return
-            visited.add(pkg_name)
-            if pkg_name not in self._packages:
-                failed_list.append(pkg_name)
-                return
-            # 先安装依赖
-            pkg_obj = self._packages[pkg_name]
-            for dep in pkg_obj.dependencies:
-                _do_install(dep, visited)
-            # 检查是否已安装
-            already = set(self.list_installed(target_dir))
-            if pkg_name in already:
-                skipped_list.append(pkg_name)
-                return
-            if self.install(pkg_name, target_dir):
-                installed_list.append(pkg_name)
-            else:
-                failed_list.append(pkg_name)
-
-        _do_install(name, set())
-        return {"installed": installed_list, "skipped": skipped_list, "failed": failed_list}
-
-    def add_comment(self, name: str, author: str, content: str, rating: Optional[float] = None) -> bool:
-        """为技能包添加评论。
-
-        Args:
-            name: 技能包名称
-            author: 评论者
-            content: 评论内容
-            rating: 可选评分（1.0-5.0），提供时同时更新包评分
-
-        Returns:
-            成功返回 True，包不存在返回 False
-        """
-        if name not in self._packages:
-            return False
-        if not content.strip():
-            return False
-        pkg = self._packages[name]
-        comment = {
-            "author": author,
-            "content": content.strip(),
-            "rating": rating,
-            "timestamp": time.time(),
-        }
-        pkg.comments.append(comment)
-        # 如果提供了评分，同时更新包评分
-        if rating is not None and 1.0 <= rating <= 5.0:
-            pkg.rating = (pkg.rating * pkg.rating_count + rating) / (pkg.rating_count + 1)
-            pkg.rating_count += 1
-        self._save_registry()
-        logger.info("Comment added to skill %s by %s", name, author)
-        return True
-
-    def get_comments(self, name: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """获取技能包的评论列表。"""
-        if name not in self._packages:
-            return []
-        return self._packages[name].comments[-limit:]
 
 
 # ============================================================

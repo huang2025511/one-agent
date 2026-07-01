@@ -7,11 +7,35 @@ import logging
 import re
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base_store import BaseSQLiteStore
 
 logger = logging.getLogger(__name__)
+
+STOPWORDS = {"一个", "这个", "那个", "我们", "他们", "什么", "可以", "就是", "没有",
+             "因为", "所以", "但是", "如果", "已经", "还是", "不过", "虽然"}
+
+
+class _UnionFind:
+    """Disjoint-set (union-find) for connected-component clustering."""
+
+    def __init__(self, items):
+        self._parent = {item: item for item in items}
+
+    def find(self, x):
+        root = x
+        while self._parent[root] != root:
+            root = self._parent[root]
+        # Path compression
+        while self._parent[x] != root:
+            self._parent[x], x = root, self._parent[x]
+        return root
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self._parent[ra] = rb
 
 
 class KnowledgeGraph(BaseSQLiteStore):
@@ -90,6 +114,66 @@ class KnowledgeGraph(BaseSQLiteStore):
             self._conn.commit()
             return cur.lastrowid
 
+    def add_entities_batch(self, names: List[str], etype: str = "unknown", source: str = "") -> int:
+        """Add or update multiple entities in a single transaction. Returns count added."""
+        if not names:
+            return 0
+        # Deduplicate while preserving order
+        seen = set()
+        unique_names = []
+        for name in names:
+            name = name.strip()
+            if not name or len(name) > 200:
+                continue
+            # Normalize whitespace
+            name = re.sub(r'\s+', ' ', name)
+            if name in seen:
+                continue
+            seen.add(name)
+            unique_names.append(name)
+
+        if not unique_names:
+            return 0
+
+        now = time.time()
+        # Validate all names up front (regex + HTML check) before any DB work.
+        valid_names = []
+        for name in unique_names:
+            if not re.match(r'^[\w\s\-\.]+$', name):
+                continue
+            if re.search(r'<[^>]*>', name):
+                continue
+            valid_names.append(name)
+
+        if not valid_names:
+            return 0
+
+        with self._write_lock:
+            # Fetch existing names in a single query so we can count how
+            # many inserts the upsert will perform (N+1 -> 2 queries total).
+            placeholders = ",".join("?" * len(valid_names))
+            existing = {
+                row["name"]
+                for row in self._conn.execute(
+                    f"SELECT name FROM entities WHERE name IN ({placeholders})",
+                    valid_names,
+                ).fetchall()
+            }
+            added = len(valid_names) - len(existing)
+
+            # Single UPSERT for all names via executemany. On conflict(name)
+            # only type and updated_at are refreshed (matching the original
+            # UPDATE behaviour — source/created_at are left untouched).
+            self._conn.executemany(
+                "INSERT INTO entities (name, type, source, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET "
+                "type = excluded.type, updated_at = excluded.updated_at",
+                [(name, etype, source, now, now) for name in valid_names],
+            )
+            self._conn.commit()
+        return added
+
     def add_relation(self, subject: str, predicate: str, obj: str,
                     weight: float = 1.0, source: str = "") -> bool:
         """Add a relationship between two entities with transaction support."""
@@ -104,11 +188,15 @@ class KnowledgeGraph(BaseSQLiteStore):
         if not isinstance(weight, (int, float)) or weight < 0:
             raise ValueError("Weight must be a non-negative number")
 
-        subj_id = self.add_entity(subject, source=source)
-        obj_id = self.add_entity(obj, source=source)
-
         with self._write_lock:
             try:
+                # Create subject/object entities inside the same critical
+                # section as the relation insert. add_entity re-acquires
+                # _write_lock (RLock, reentrant) so this is safe and keeps
+                # the whole operation atomic w.r.t. other writers.
+                subj_id = self.add_entity(subject, source=source)
+                obj_id = self.add_entity(obj, source=source)
+
                 with self._conn:  # automatic transaction
                     # Check if relation already exists
                     cur = self._conn.execute(
@@ -165,11 +253,64 @@ class KnowledgeGraph(BaseSQLiteStore):
             "incoming": incoming,
         }
 
+    def query_entities_batch(self, names: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Batch-fetch entity info + relations for multiple entities. Returns {name: entity_dict or None}."""
+        if not names:
+            return {}
+        placeholders = ",".join("?" * len(names))
+        cur = self._conn.execute(f"SELECT * FROM entities WHERE name IN ({placeholders})", names)
+        entities = {row["name"]: dict(row) for row in cur.fetchall()}
+
+        # Batch-fetch all outgoing + incoming relations
+        all_ids = [e["id"] for e in entities.values()]
+        if not all_ids:
+            return {}
+
+        id_placeholders = ",".join("?" * len(all_ids))
+
+        out_cur = self._conn.execute(f"""
+            SELECT r.*, e.name as object_name, e.type as object_type
+            FROM relations r
+            JOIN entities e ON e.id = r.object_id
+            WHERE r.subject_id IN ({id_placeholders})
+            ORDER BY r.weight DESC
+        """, all_ids)
+
+        in_cur = self._conn.execute(f"""
+            SELECT r.*, e.name as subject_name, e.type as subject_type
+            FROM relations r
+            JOIN entities e ON e.id = r.subject_id
+            WHERE r.object_id IN ({id_placeholders})
+            ORDER BY r.weight DESC
+        """, all_ids)
+
+        # Build outgoing/incoming maps
+        outgoing: Dict[int, List] = {i: [] for i in all_ids}
+        incoming: Dict[int, List] = {i: [] for i in all_ids}
+        for row in out_cur.fetchall():
+            outgoing[row["subject_id"]].append({"object_name": row["object_name"], "object_type": row["object_type"], "predicate": row["predicate"], "weight": row["weight"]})
+        for row in in_cur.fetchall():
+            incoming[row["object_id"]].append({"subject_name": row["subject_name"], "subject_type": row["subject_type"], "predicate": row["predicate"], "weight": row["weight"]})
+
+        result = {}
+        for name, entity in entities.items():
+            result[name] = {
+                "name": entity["name"],
+                "type": entity["type"],
+                "outgoing": outgoing.get(entity["id"], []),
+                "incoming": incoming.get(entity["id"], []),
+            }
+
+        return result
+
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Search entities by name (LIKE)."""
-        assert query, "query cannot be empty"
-        assert isinstance(query, str), "query must be a string"
-        assert limit > 0, "limit must be positive"
+        if not query:
+            raise ValueError("query cannot be empty")
+        if not isinstance(query, str):
+            raise ValueError("query must be a string")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
 
         # Escape LIKE wildcards to prevent unexpected matches
         escaped_query = query.replace('%', '\\%').replace('_', '\\_')
@@ -180,11 +321,24 @@ class KnowledgeGraph(BaseSQLiteStore):
         )
         return [dict(r) for r in cur.fetchall()]
 
-    def get_neighbors(self, name: str, depth: int = 1) -> List[Dict[str, Any]]:
-        """Get all entities within N hops of the given entity."""
-        assert name, "name cannot be empty"
-        assert isinstance(name, str), "name must be a string"
-        assert depth > 0, "depth must be positive"
+    def get_neighbors(self, name: str, depth: int = 1, direction: str = "both") -> List[Dict[str, Any]]:
+        """Get all entities within N hops of the given entity.
+
+        Args:
+            name: Starting entity name.
+            depth: Maximum hop distance.
+            direction: "out" to follow outgoing edges only, "in" for
+                incoming edges only, "both" (default) to traverse the
+                graph as undirected.
+        """
+        if not name:
+            raise ValueError("name cannot be empty")
+        if not isinstance(name, str):
+            raise ValueError("name must be a string")
+        if depth <= 0:
+            raise ValueError("depth must be positive")
+        if direction not in ("out", "in", "both"):
+            raise ValueError("direction must be one of 'out', 'in', 'both'")
 
         entity = self.query_entity(name)
         if not entity:
@@ -196,19 +350,34 @@ class KnowledgeGraph(BaseSQLiteStore):
 
         for _ in range(depth):
             next_level = []
+            # Batch-fetch all current-level nodes at once
+            batch_nodes = self.query_entities_batch(current)
             for node_name in current:
-                node = self.query_entity(node_name)
+                node = batch_nodes.get(node_name)
                 if not node:
                     continue
-                for rel in node.get("outgoing", []):
-                    neighbor = rel["object_name"]
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        next_level.append(neighbor)
-                        result.append({
-                            "name": neighbor,
-                            "relation": f"{node_name} --[{rel['predicate']}]--> {neighbor}",
-                        })
+                # Outgoing edges: node --[predicate]--> neighbor
+                if direction in ("out", "both"):
+                    for rel in node.get("outgoing", []):
+                        neighbor = rel["object_name"]
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            next_level.append(neighbor)
+                            result.append({
+                                "name": neighbor,
+                                "relation": f"{node_name} --[{rel['predicate']}]--> {neighbor}",
+                            })
+                # Incoming edges: neighbor --[predicate]--> node
+                if direction in ("in", "both"):
+                    for rel in node.get("incoming", []):
+                        neighbor = rel["subject_name"]
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            next_level.append(neighbor)
+                            result.append({
+                                "name": neighbor,
+                                "relation": f"{neighbor} --[{rel['predicate']}]--> {node_name}",
+                            })
             current = next_level
             if not current:
                 break
@@ -217,71 +386,273 @@ class KnowledgeGraph(BaseSQLiteStore):
 
     def extract_from_text(self, text: str, source: str = "") -> int:
         """Simple rule-based entity extraction from text."""
-        assert text, "text cannot be empty"
-        assert isinstance(text, str), "text must be a string"
+        if not text:
+            raise ValueError("text cannot be empty")
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
 
-        count = 0
+        names: List[str] = []
 
         # Extract proper nouns (capitalized words, Chinese names)
         # English: capitalized sequences
         for match in re.finditer(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text):
             name = match.group()
             if len(name) > 3:
-                self.add_entity(name, etype="unknown", source=source)
-                count += 1
+                names.append(name)
 
         # Chinese: 2-4 character sequences that look like names/terms
         for match in re.finditer(r'[\u4e00-\u9fff]{2,4}', text):
             name = match.group()
-            # Skip common words
-            if name not in ("一个", "这个", "那个", "我们", "他们", "什么", "可以", "就是", "没有",
-                          "因为", "所以", "但是", "如果", "已经", "还是", "不过", "虽然"):
-                self.add_entity(name, etype="unknown", source=source)
-                count += 1
+            if name not in STOPWORDS:
+                names.append(name)
 
-        return count
+        return self.add_entities_batch(names, etype="unknown", source=source)
+
+    # ===================================================== Graph Reasoning
+
+    def find_path(self, start: str, end: str, max_depth: int = 3) -> Optional[List[Dict[str, Any]]]:
+        """Find a path between two entities using BFS.
+
+        Returns a list of relations forming the path from start to end,
+        or None if no path exists within max_depth.
+
+        Example path:
+        [
+            {"from": "Python", "predicate": "is_a", "to": "编程语言"},
+            {"from": "编程语言", "predicate": "用于", "to": "软件开发"},
+        ]
+        """
+        if start == end:
+            return []
+
+        # BFS with path tracking
+        visited = {start}
+        # Queue items: (current_entity, path_so_far)
+        queue: List[Tuple[str, List[Dict[str, Any]]]] = [(start, [])]
+
+        for _ in range(max_depth):
+            next_queue = []
+            # Collect all entities at this level for batch query
+            level_entities = [item[0] for item in queue]
+            if not level_entities:
+                break
+
+            batch = self.query_entities_batch(level_entities)
+
+            for entity_name, path in queue:
+                entity = batch.get(entity_name)
+                if not entity:
+                    continue
+
+                for rel in entity.get("outgoing", []):
+                    neighbor = rel["object_name"]
+                    if neighbor in visited:
+                        continue
+
+                    new_path = path + [{
+                        "from": entity_name,
+                        "predicate": rel["predicate"],
+                        "to": neighbor,
+                        "weight": rel["weight"],
+                    }]
+
+                    if neighbor == end:
+                        return new_path
+
+                    visited.add(neighbor)
+                    next_queue.append((neighbor, new_path))
+
+            queue = next_queue
+            if not queue:
+                break
+
+        return None
+
+    def find_common_neighbors(self, entity_a: str, entity_b: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Find entities connected to both A and B.
+
+        Returns common neighbors with their connections to both entities,
+        sorted by combined weight.
+        """
+        entity_a_data = self.query_entity(entity_a)
+        entity_b_data = self.query_entity(entity_b)
+
+        if not entity_a_data or not entity_b_data:
+            return []
+
+        # Collect all neighbors of A with their relations
+        a_neighbors: Dict[str, List[Dict[str, Any]]] = {}
+        for rel in entity_a_data.get("outgoing", []):
+            name = rel["object_name"]
+            a_neighbors.setdefault(name, []).append({
+                "direction": "out",
+                "predicate": rel["predicate"],
+                "weight": rel["weight"],
+            })
+        for rel in entity_a_data.get("incoming", []):
+            name = rel["subject_name"]
+            a_neighbors.setdefault(name, []).append({
+                "direction": "in",
+                "predicate": rel["predicate"],
+                "weight": rel["weight"],
+            })
+
+        # Collect all neighbors of B
+        b_neighbors: Dict[str, List[Dict[str, Any]]] = {}
+        for rel in entity_b_data.get("outgoing", []):
+            name = rel["object_name"]
+            b_neighbors.setdefault(name, []).append({
+                "direction": "out",
+                "predicate": rel["predicate"],
+                "weight": rel["weight"],
+            })
+        for rel in entity_b_data.get("incoming", []):
+            name = rel["subject_name"]
+            b_neighbors.setdefault(name, []).append({
+                "direction": "in",
+                "predicate": rel["predicate"],
+                "weight": rel["weight"],
+            })
+
+        # Find intersection
+        common_names = set(a_neighbors.keys()) & set(b_neighbors.keys())
+
+        result = []
+        for name in common_names:
+            a_rels = a_neighbors[name]
+            b_rels = b_neighbors[name]
+            total_weight = sum(r["weight"] for r in a_rels) + sum(r["weight"] for r in b_rels)
+            result.append({
+                "name": name,
+                "relations_from_a": a_rels,
+                "relations_from_b": b_rels,
+                "combined_weight": total_weight,
+            })
+
+        # Sort by combined weight
+        result.sort(key=lambda x: x["combined_weight"], reverse=True)
+        return result[:limit]
+
+    def infer_relations(self, entity: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """Infer likely relations for an entity using transitive reasoning.
+
+        Uses the pattern: A --[rel1]--> B --[rel2]--> C
+        to hypothesize: A --[likely]--> C
+
+        Returns inferred connections ranked by confidence.
+        """
+        entity_data = self.query_entity(entity)
+        if not entity_data:
+            return []
+
+        # Get 1-hop neighbors
+        direct_neighbors = {rel["object_name"] for rel in entity_data.get("outgoing", [])}
+
+        # Fetch all 1-hop neighbors in a single batch query instead of one
+        # query per neighbor (N+1 -> 2 queries).
+        neighbor_names = [rel["object_name"] for rel in entity_data.get("outgoing", [])]
+        neighbor_batch = (
+            self.query_entities_batch(neighbor_names) if neighbor_names else {}
+        )
+
+        # Collect 2-hop connections
+        inferred: Dict[str, Dict[str, Any]] = {}
+
+        for rel_1 in entity_data.get("outgoing", []):
+            neighbor = rel_1["object_name"]
+            neighbor_data = neighbor_batch.get(neighbor)
+            if not neighbor_data:
+                continue
+
+            for rel_2 in neighbor_data.get("outgoing", []):
+                target = rel_2["object_name"]
+                # Skip direct connections (we already know those)
+                if target in direct_neighbors or target == entity:
+                    continue
+
+                key = f"{entity}->{target}"
+                if key not in inferred:
+                    inferred[key] = {
+                        "target": target,
+                        "confidence": 0.0,
+                        "paths": [],
+                    }
+
+                # Confidence = product of weights along the path
+                path_confidence = rel_1["weight"] * rel_2["weight"] * 0.5  # decay
+                inferred[key]["confidence"] += path_confidence
+                inferred[key]["paths"].append({
+                    "via": neighbor,
+                    "predicate_1": rel_1["predicate"],
+                    "predicate_2": rel_2["predicate"],
+                    "path_weight": path_confidence,
+                })
+
+        # Sort by confidence
+        result = sorted(inferred.values(), key=lambda x: x["confidence"], reverse=True)
+        return result[:top_k]
+
+    def get_entity_clusters(self, min_size: int = 2) -> List[Dict[str, Any]]:
+        """Find connected components of entities (community detection).
+
+        Uses union-find over the relation graph (both directions) to compute
+        connected components, which is O(N α(N)) instead of the previous
+        O(N²) shared-neighbor greedy merge.
+        Returns clusters sorted by size.
+        """
+        # Get all entity names (sample for performance on large graphs)
+        cur = self._conn.execute("SELECT name FROM entities ORDER BY id DESC LIMIT 500")
+        all_entities = [row["name"] for row in cur.fetchall()]
+        entity_set = set(all_entities)
+
+        if len(all_entities) < min_size:
+            return []
+
+        # Union endpoints of every relation among the sampled entities.
+        uf = _UnionFind(all_entities)
+        batch = self.query_entities_batch(all_entities)
+        for name, entity in batch.items():
+            if not entity:
+                continue
+            for rel in entity.get("outgoing", []):
+                neighbor = rel["object_name"]
+                if neighbor in entity_set:
+                    uf.union(name, neighbor)
+            for rel in entity.get("incoming", []):
+                neighbor = rel["subject_name"]
+                if neighbor in entity_set:
+                    uf.union(name, neighbor)
+
+        # Group entities by their root component.
+        components: Dict[str, List[str]] = {}
+        for name in all_entities:
+            components.setdefault(uf.find(name), []).append(name)
+
+        clusters: List[Dict[str, Any]] = []
+        for members in components.values():
+            if len(members) >= min_size:
+                clusters.append({
+                    "entities": sorted(members),
+                    "size": len(members),
+                })
+
+        # Sort by size descending
+        clusters.sort(key=lambda x: x["size"], reverse=True)
+        return clusters
 
     def stats(self) -> Dict[str, Any]:
         """Get graph statistics."""
         entity_count = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         relation_count = self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
+
+        # Calculate average degree
+        avg_degree = (relation_count * 2 / entity_count) if entity_count > 0 else 0
+
         return {
             "entities": entity_count,
             "relations": relation_count,
+            "avg_degree": round(avg_degree, 2),
         }
-
-    # -------------------------------------------------------- async wrappers
-
-    async def add_entity_async(self, name: str, etype: str = "unknown", source: str = "") -> int:
-        """Async wrapper for add_entity"""
-        return await asyncio.to_thread(self.add_entity, name, etype, source)
-
-    async def add_relation_async(
-        self, subject: str, predicate: str, obj: str,
-        weight: float = 1.0, source: str = ""
-    ) -> bool:
-        """Async wrapper for add_relation"""
-        return await asyncio.to_thread(self.add_relation, subject, predicate, obj, weight, source)
-
-    async def query_entity_async(self, name: str) -> Optional[Dict[str, Any]]:
-        """Async wrapper for query_entity"""
-        return await asyncio.to_thread(self.query_entity, name)
-
-    async def search_async(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Async wrapper for search"""
-        return await asyncio.to_thread(self.search, query, limit)
-
-    async def get_neighbors_async(self, name: str, depth: int = 1) -> List[Dict[str, Any]]:
-        """Async wrapper for get_neighbors"""
-        return await asyncio.to_thread(self.get_neighbors, name, depth)
-
-    async def extract_from_text_async(self, text: str, source: str = "") -> int:
-        """Async wrapper for extract_from_text"""
-        return await asyncio.to_thread(self.extract_from_text, text, source)
-
-    async def stats_async(self) -> Dict[str, Any]:
-        """Async wrapper for stats"""
-        return await asyncio.to_thread(self.stats)
 
 
 # ------------------------------------------------------------------ skill handler factory

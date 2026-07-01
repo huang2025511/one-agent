@@ -23,47 +23,6 @@ from core.plugin import Plugin
 logger = logging.getLogger(__name__)
 
 
-def _sanitize_log_message(msg: str) -> str:
-    """Remove sensitive information from log messages.
-
-    Filters out webhook URLs, tokens, passwords, and other secrets.
-    """
-    import re
-    # Remove webhook URLs with key parameters (e.g. ?key=xxx)
-    msg = re.sub(r'https?://[^\s]*\?key=[a-zA-Z0-9\-]+', 'https://***?key=***', msg)
-    # Remove webhook URLs with access_token parameters
-    msg = re.sub(r'https?://[^\s]*\?access_token=[a-zA-Z0-9\-_\.]+', 'https://***?access_token=***', msg)
-    # Remove any URL with ?key= or &key= query parameters
-    msg = re.sub(r'[?&]key=[a-zA-Z0-9\-_]+', '?key=***', msg)
-    # Remove webhook URLs (contain /webhook/)
-    msg = re.sub(r'https?://[^\s]*webhook[^\s]*', 'https://***webhook***', msg)
-    # Remove bot tokens
-    msg = re.sub(r'bot[_-]?token[=:]\s*["\']?[a-zA-Z0-9:]+["\']?', 'bot_token=***', msg, flags=re.IGNORECASE)
-    # Remove Bearer tokens
-    msg = re.sub(r'Bearer [a-zA-Z0-9\-\.]+', 'Bearer ***', msg)
-    # Remove passwords
-    msg = re.sub(r'password[=:]\s*\S+', 'password=***', msg, flags=re.IGNORECASE)
-    # Remove secret/token query parameters in URLs
-    msg = re.sub(r'[?&](secret|token|access_token|app_secret|client_secret)=[^\s&]+', r'?***=***', msg, flags=re.IGNORECASE)
-    return msg
-
-
-class _SensitiveInfoFilter(logging.Filter):
-    """Automatically filter sensitive information from log messages."""
-    def filter(self, record):
-        if isinstance(record.msg, str):
-            record.msg = _sanitize_log_message(record.msg)
-        if record.args:
-            if isinstance(record.args, tuple):
-                record.args = tuple(_sanitize_log_message(str(arg)) for arg in record.args)
-            elif isinstance(record.args, dict):
-                record.args = {k: _sanitize_log_message(str(v)) for k, v in record.args.items()}
-        return True
-
-
-logger.addFilter(_SensitiveInfoFilter())
-
-
 class BaseMessagingGateway(Plugin):
     """Base class for all messaging gateways with common message handling logic."""
 
@@ -71,6 +30,8 @@ class BaseMessagingGateway(Plugin):
         super().__init__()
         self._sessions: Dict[str, asyncio.Event] = {}
         self._replies: Dict[str, str] = {}
+        self._task: Optional[asyncio.Task] = None
+        self._client: Optional[httpx.AsyncClient] = None
 
     async def _on_done(self, event) -> None:
         """Common message completion handler."""
@@ -81,6 +42,54 @@ class BaseMessagingGateway(Plugin):
         if sid in self._sessions:
             self._replies[sid] = turn.result if turn.result is not None else f"[error: {turn.error}]"
             self._sessions[sid].set()
+
+    async def _wait_and_reply(self, msg_key: str, chat_id, send_fn, timeout: float = 120) -> None:
+        """Wait for a turn to complete, then send the reply.
+
+        Runs as a background task so the gateway's poll loop is not blocked
+        while waiting — previously every gateway awaited this inline,
+        serializing all message processing for that platform.
+        """
+        event = self._sessions.get(msg_key)
+        if event is None:
+            return
+        try:
+            await asyncio.wait_for(event.wait(), timeout)
+            reply = self._replies.get(msg_key, "[no reply]")
+        except asyncio.TimeoutError:
+            reply = "[timeout]"
+        except Exception:
+            logger.exception("gateway wait_and_reply error for %s", msg_key)
+            reply = "[error]"
+        try:
+            await send_fn(chat_id, reply)
+        except Exception:
+            logger.exception("gateway send error for %s", chat_id)
+        finally:
+            self._sessions.pop(msg_key, None)
+            self._replies.pop(msg_key, None)
+
+    def _spawn(self, coro, **kwargs) -> asyncio.Task:
+        """Spawn a background task with error logging on failure."""
+        task = asyncio.create_task(coro(**kwargs))
+        msg_key = kwargs.get("msg_key", "")
+        task.add_done_callback(
+            lambda t: logger.exception("gateway background task failed for %s", msg_key)
+            if t.exception() else None
+        )
+        return task
+
+    async def stop(self) -> None:
+        """Common cleanup: cancel the polling task and close the HTTP client."""
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        if self._client:
+            await self._client.aclose()
+        await super().stop()
 
 
 # ------------- Telegram ---------------------------------------------------
@@ -94,8 +103,6 @@ class TelegramGateway(BaseMessagingGateway):
         self._token: Optional[str] = None
         self._allowed_users = []
         self._base = "https://api.telegram.org"
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -109,16 +116,6 @@ class TelegramGateway(BaseMessagingGateway):
         self.bus.subscribe("turn_completed", self._on_done)
         self._task = asyncio.create_task(self._loop())
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     async def _loop(self) -> None:
         if not self._client or not self._token:
@@ -161,20 +158,14 @@ class TelegramGateway(BaseMessagingGateway):
                         "text": text,
                         "chat_id": chat_id,
                     })
-                try:
-                    await asyncio.wait_for(event.wait(), 120)
-                    await self._send(chat_id, self._replies.get(msg_key, "[no reply]"))
-                except asyncio.TimeoutError:
-                    try:
-                        await self._send(chat_id, "[timeout]")
-                    except Exception:
-                        pass
-                except Exception:
-                    logger.exception("telegram send error for chat %s", chat_id)
-                finally:
-                    # always clean up to prevent memory leak regardless of outcome
-                    self._sessions.pop(msg_key, None)
-                    self._replies.pop(msg_key, None)
+                # Spawn a background task to wait for the reply and send it,
+                # so the poll loop can continue processing other messages.
+                self._spawn(
+                    self._wait_and_reply,
+                    msg_key=msg_key,
+                    chat_id=chat_id,
+                    send_fn=self._send,
+                )
 
     async def _send(self, chat_id: int, text: str) -> None:
         if not self._client or not self._token:
@@ -212,8 +203,6 @@ class WeComGateway(BaseMessagingGateway):
         self._access_token: str = ""
         self._token_expires_at: float = 0
         # common
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
         self._callback_host: str = "0.0.0.0"
         self._callback_port: int = 18794
 
@@ -257,16 +246,6 @@ class WeComGateway(BaseMessagingGateway):
             logger.info("wecom app mode enabled, callback on %s:%d",
                         self._callback_host, self._callback_port)
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     # ------------------------------------------------ webhook 模式（仅推送）
     async def send_webhook(self, text: str, mentioned_list: Optional[list] = None) -> Dict:
@@ -330,7 +309,7 @@ class WeComGateway(BaseMessagingGateway):
             self._token_expires_at = time.time() + data.get("expires_in", 7200) - 300
             return self._access_token
         except Exception as exc:
-            logger.error("wecom gettoken error: %s", exc)
+            logger.exception("wecom gettoken error: %s", exc)
             return ""
 
     async def _send_app_message(self, user_id: str, text: str) -> bool:
@@ -452,15 +431,11 @@ class WeComGateway(BaseMessagingGateway):
                     "chat_id": user_id,
                 })
 
-            try:
-                await asyncio.wait_for(event.wait(), 120)
-                reply = gateway._replies.get(msg_key, "[no reply]")
-                await gateway._send_app_message(user_id, reply)
-            except asyncio.TimeoutError:
-                await gateway._send_app_message(user_id, "[timeout]")
-            finally:
-                gateway._sessions.pop(msg_key, None)
-                gateway._replies.pop(msg_key, None)
+            # Respond immediately so WeCom doesn't retry the callback.
+            # The reply is sent asynchronously via a background task.
+            asyncio.create_task(
+                gateway._wait_and_reply(msg_key, user_id, gateway._send_app_message)
+            )
 
             return Response(content="ok")
 
@@ -511,9 +486,6 @@ class DingTalkGateway(BaseMessagingGateway):
         self._client_secret: str = ""
         self._access_token: str = ""
         self._token_expires_at: float = 0
-        # common
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -543,16 +515,6 @@ class DingTalkGateway(BaseMessagingGateway):
             self._task = asyncio.create_task(self._stream_loop())
             logger.info("dingtalk stream mode enabled")
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     # ------------------------------------------------ webhook 模式
     async def send_webhook(self, text: str, at_all: bool = False) -> Dict:
@@ -618,7 +580,7 @@ class DingTalkGateway(BaseMessagingGateway):
             self._token_expires_at = time.time() + data.get("expireIn", 7200) - 300
             return self._access_token
         except Exception as exc:
-            logger.error("dingtalk gettoken error: %s", exc)
+            logger.exception("dingtalk gettoken error: %s", exc)
             return ""
 
     async def _send_message(self, conversation_id: str, text: str) -> bool:
@@ -754,15 +716,13 @@ class DingTalkGateway(BaseMessagingGateway):
                                 "text": text,
                                 "chat_id": sender,
                             })
-                        try:
-                            await asyncio.wait_for(evt.wait(), 120)
-                            reply = self._replies.get(msg_key, "[no reply]")
-                            await self._send_message(sender, reply)
-                        except asyncio.TimeoutError:
-                            await self._send_message(sender, "[timeout]")
-                        finally:
-                            self._sessions.pop(msg_key, None)
-                            self._replies.pop(msg_key, None)
+                        # Non-blocking: spawn background task to wait + reply
+                        self._spawn(
+                            self._wait_and_reply,
+                            msg_key=msg_key,
+                            chat_id=sender,
+                            send_fn=self._send_message,
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -794,8 +754,6 @@ class FeishuGateway(BaseMessagingGateway):
         self._tenant_access_token: str = ""
         self._token_expires_at: float = 0
         # common
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
         self._callback_host: str = "0.0.0.0"
         self._callback_port: int = 18795
 
@@ -838,16 +796,6 @@ class FeishuGateway(BaseMessagingGateway):
             logger.info("feishu app mode enabled, callback on %s:%d",
                         self._callback_host, self._callback_port)
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     # ------------------------------------------------ webhook 模式
     async def send_webhook(self, text: str) -> Dict:
@@ -905,7 +853,7 @@ class FeishuGateway(BaseMessagingGateway):
             self._token_expires_at = time.time() + data.get("expire", 7200) - 300
             return self._tenant_access_token
         except Exception as exc:
-            logger.error("feishu gettoken error: %s", exc)
+            logger.exception("feishu gettoken error: %s", exc)
             return ""
 
     async def _reply_message(self, message_id: str, text: str) -> bool:
@@ -1017,15 +965,10 @@ class FeishuGateway(BaseMessagingGateway):
                     "chat_id": chat_id,
                 })
 
-            try:
-                await asyncio.wait_for(evt.wait(), 120)
-                reply = gateway._replies.get(msg_key, "[no reply]")
-                await gateway._reply_message(message_id, reply)
-            except asyncio.TimeoutError:
-                await gateway._reply_message(message_id, "[timeout]")
-            finally:
-                gateway._sessions.pop(msg_key, None)
-                gateway._replies.pop(msg_key, None)
+            # Respond immediately; reply sent via background task
+            asyncio.create_task(
+                gateway._wait_and_reply(msg_key, message_id, gateway._reply_message)
+            )
 
             return {"ok": True}
 
@@ -1048,8 +991,6 @@ class DiscordGateway(BaseMessagingGateway):
         self._token: str = ""
         self._allowed_channels: list = []
         self._base = "https://discord.com/api/v10"
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -1067,16 +1008,6 @@ class DiscordGateway(BaseMessagingGateway):
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("discord gateway enabled")
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     async def _poll_loop(self) -> None:
         """通过 Discord REST API 轮询消息（简化实现，无需 WebSocket）。"""
@@ -1138,15 +1069,13 @@ class DiscordGateway(BaseMessagingGateway):
                                     "text": text,
                                     "chat_id": ch_id,
                                 })
-                            try:
-                                await asyncio.wait_for(evt.wait(), 120)
-                                reply = self._replies.get(msg_key, "[no reply]")
-                                await self._send_message(ch_id, reply)
-                            except asyncio.TimeoutError:
-                                await self._send_message(ch_id, "[timeout]")
-                            finally:
-                                self._sessions.pop(msg_key, None)
-                                self._replies.pop(msg_key, None)
+                            # Non-blocking: spawn background task to wait + reply
+                            self._spawn(
+                                self._wait_and_reply,
+                                msg_key=msg_key,
+                                chat_id=ch_id,
+                                send_fn=self._send_message,
+                            )
                         # 更新 last_message_id
                         if messages:
                             last_message_ids[ch_id] = messages[-1].get("id", last_message_ids.get(ch_id, ""))
@@ -1181,8 +1110,6 @@ class SlackGateway(BaseMessagingGateway):
         self._app_token: str = ""      # xapp-... (Socket Mode)
         self._allowed_channels: list = []
         self._base = "https://slack.com/api"
-        self._client: Optional[httpx.AsyncClient] = None
-        self._task: Optional[asyncio.Task] = None
         self._bot_user_id: str = ""
 
     async def setup(self, ctx) -> None:
@@ -1217,16 +1144,6 @@ class SlackGateway(BaseMessagingGateway):
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("slack gateway enabled")
 
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._client:
-            await self._client.aclose()
-        await super().stop()
 
     async def _poll_loop(self) -> None:
         """通过 RTM-like 轮询获取消息（简化实现）。"""
@@ -1270,15 +1187,10 @@ class SlackGateway(BaseMessagingGateway):
                                 "text": text,
                                 "chat_id": ch_id,
                             })
-                        try:
-                            await asyncio.wait_for(evt.wait(), 120)
-                            reply = self._replies.get(msg_key, "[no reply]")
-                            await self._send_message(ch_id, reply)
-                        except asyncio.TimeoutError:
-                            await self._send_message(ch_id, "[timeout]")
-                        finally:
-                            self._sessions.pop(msg_key, None)
-                            self._replies.pop(msg_key, None)
+                        # Non-blocking: spawn background task to wait + reply
+                        asyncio.create_task(
+                            self._wait_and_reply(msg_key, ch_id, self._send_message)
+                        )
                     if messages:
                         last_ts[ch_id] = messages[-1].get("ts", last_ts.get(ch_id, ""))
             except Exception as exc:

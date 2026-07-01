@@ -19,6 +19,12 @@ from typing import List, Optional, Tuple
 
 from .base_store import BaseSQLiteStore
 
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
 logger = logging.getLogger(__name__)
 
 # Embedding model configuration
@@ -69,12 +75,25 @@ class EmbeddingStore(BaseSQLiteStore):
             db_path: Path to SQLite database for vector storage
         """
         self._model = None
-        # In-memory vector cache: {(memory_id, vector_list)}.
-        # Avoids reloading all vectors from SQLite on every search.
-        # Invalidated on store()/delete().
+        self._model_loaded = False
+        self._model_not_installed = False
+        self._model_load_attempts = 0
+        # In-memory vector cache as parallel arrays for fast cosine search.
+        # _cache_ids:    [memory_id, ...]
+        # _cache_vecs:   [vector_list, ...]
+        # _cache_norms:  [precomputed_norm, ...]  — avoids recomputing
+        #                L2 norm on every search (was the hot-path bottleneck).
+        # All three are invalidated together on store()/delete().
+        self._cache_ids: List[str] = []
+        self._cache_vecs: List[List[float]] = []
+        self._cache_norms: List[float] = []
+        self._cache_loaded: bool = False
+        # Legacy alias kept for backward-compat with code that checks _vector_cache
         self._vector_cache: Optional[List[Tuple[str, List[float]]]] = None
         super().__init__(db_path)
-        self._load_model()
+        # Model loading is deferred to first embed() call — loading
+        # sentence-transformers at construction time added seconds to
+        # startup even when memory/embedding search was never used.
 
     def _init_db(self):
         """Initialize SQLite database with vector storage schema."""
@@ -117,9 +136,38 @@ class EmbeddingStore(BaseSQLiteStore):
                 "Run: pip install sentence-transformers"
             )
             self._model = None
+            self._model_not_installed = True
         except Exception as e:
             logger.warning("Failed to load embedding model: %s", e)
             self._model = None
+
+    def _try_load_model(self) -> None:
+        """Attempt to load the embedding model with bounded retries.
+
+        Distinguishes "not installed" (permanently unavailable, no retry)
+        from transient failures (retry up to 3 times before giving up).
+        ``_model_loaded`` is only set True once the model is available or
+        after retries are exhausted, so a transient failure on the first
+        call does not permanently disable semantic search.
+        """
+        if self._model_not_installed:
+            self._model_loaded = True
+            return
+        self._model_load_attempts += 1
+        self._load_model()
+        if self._model is not None:
+            self._model_loaded = True
+            return
+        if self._model_not_installed:
+            self._model_loaded = True
+            return
+        if self._model_load_attempts >= 3:
+            self._model_loaded = True
+            logger.warning(
+                "Embedding model failed to load after %d attempts; "
+                "disabling semantic search for this session.",
+                self._model_load_attempts,
+            )
 
     def embed(self, text: str) -> Optional[List[float]]:
         """Generate embedding vector for text.
@@ -130,9 +178,16 @@ class EmbeddingStore(BaseSQLiteStore):
         Returns:
             list of floats (EMBEDDING_DIM,) or None if model unavailable
         """
-        assert text, "text cannot be empty"
-        assert isinstance(text, str), "text must be a string"
+        if not text:
+            raise ValueError("text cannot be empty")
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
 
+        # Lazy-load the model on first use instead of in __init__.
+        # _model_loaded is only set True on success or after we give up
+        # retrying, so a transient load failure is retried on later calls.
+        if not self._model_loaded:
+            self._try_load_model()
         if self._model is None:
             return None
         try:
@@ -142,28 +197,6 @@ class EmbeddingStore(BaseSQLiteStore):
             logger.warning("Embedding failed: %s", e)
             return None
 
-    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
-        """Generate embeddings for a batch of texts.
-
-        Args:
-            texts: List of input texts
-
-        Returns:
-            List of float lists (or None for failures)
-        """
-        assert texts is not None, "texts cannot be None"
-        assert isinstance(texts, list), "texts must be a list"
-        assert all(isinstance(t, str) for t in texts), "all texts must be strings"
-
-        if self._model is None:
-            return [None] * len(texts)
-        try:
-            embeddings = self._model.encode(texts, convert_to_numpy=True)
-            return [emb.tolist() for emb in embeddings]
-        except Exception as e:
-            logger.warning("Batch embedding failed: %s", e)
-            return [None] * len(texts)
-
     def store(self, memory_id: str, vector: List[float]):
         """Store embedding vector for a memory item.
 
@@ -171,11 +204,16 @@ class EmbeddingStore(BaseSQLiteStore):
             memory_id: Unique identifier for the memory
             vector: Embedding vector (EMBEDDING_DIM,)
         """
-        assert memory_id, "memory_id cannot be empty"
-        assert isinstance(memory_id, str), "memory_id must be a string"
-        assert vector is not None, "vector cannot be None"
-        assert isinstance(vector, list), "vector must be a list"
-        assert len(vector) == EMBEDDING_DIM, f"vector must have {EMBEDDING_DIM} dimensions"
+        if not memory_id:
+            raise ValueError("memory_id cannot be empty")
+        if not isinstance(memory_id, str):
+            raise ValueError("memory_id must be a string")
+        if vector is None:
+            raise ValueError("vector cannot be None")
+        if not isinstance(vector, list):
+            raise ValueError("vector must be a list")
+        if len(vector) != EMBEDDING_DIM:
+            raise ValueError(f"vector must have {EMBEDDING_DIM} dimensions")
 
         with self._write_lock:
             try:
@@ -186,16 +224,52 @@ class EmbeddingStore(BaseSQLiteStore):
                     (memory_id, vector_blob, time.time()),
                 )
                 self._conn.commit()
-                # Invalidate cache so next search reloads
-                self._vector_cache = None
+                # Incrementally update the cache instead of invalidating it
+                # entirely. Lists are rebuilt as NEW objects (never mutated
+                # in place) so a concurrent search() that already snapshotted
+                # the old references keeps a consistent view. INSERT OR
+                # REPLACE may update an existing memory_id, so handle both
+                # the append and the in-cache update cases.
+                if self._cache_loaded:
+                    cached_vec = list(vector)
+                    cached_norm = _norm(cached_vec)
+                    try:
+                        idx = self._cache_ids.index(memory_id)
+                    except ValueError:
+                        idx = -1
+                    if idx >= 0:
+                        self._cache_ids = [
+                            *self._cache_ids[:idx], memory_id,
+                            *self._cache_ids[idx + 1:],
+                        ]
+                        self._cache_vecs = [
+                            *self._cache_vecs[:idx], cached_vec,
+                            *self._cache_vecs[idx + 1:],
+                        ]
+                        self._cache_norms = [
+                            *self._cache_norms[:idx], cached_norm,
+                            *self._cache_norms[idx + 1:],
+                        ]
+                    else:
+                        self._cache_ids = [*self._cache_ids, memory_id]
+                        self._cache_vecs = [*self._cache_vecs, cached_vec]
+                        self._cache_norms = [*self._cache_norms, cached_norm]
+                    if self._vector_cache is not None:
+                        self._vector_cache = [
+                            (mid, cached_vec) if mid == memory_id else (mid, vec)
+                            for mid, vec in self._vector_cache
+                        ] if idx >= 0 else [
+                            *self._vector_cache, (memory_id, cached_vec)
+                        ]
             except Exception as e:
                 logger.warning("Failed to store embedding for %s: %s", memory_id, e)
 
     def search(self, query_vector: List[float], top_k: int = 10) -> List[Tuple[str, float]]:
         """Search for similar memories using cosine similarity.
 
-        Uses an in-memory cache of all vectors to avoid repeated SQLite
-        reads. The cache is invalidated on store()/delete().
+        Uses an in-memory cache of all vectors with precomputed L2 norms
+        to avoid repeated SQLite reads and redundant norm calculations.
+        The cache is invalidated on store()/delete().
 
         Args:
             query_vector: Query embedding vector
@@ -210,32 +284,49 @@ class EmbeddingStore(BaseSQLiteStore):
             return []
 
         try:
-            # Load vectors into cache if not yet loaded.
-            # Capture the cache reference into a local variable so that a
-            # concurrent store()/delete() setting self._vector_cache = None
-            # cannot cause TypeError during iteration below (TOCTOU fix).
-            cache = self._vector_cache
-            if cache is None:
-                cursor = self._conn.execute(
-                    "SELECT memory_id, vector FROM embeddings"
-                )
-                cache = []
-                for row in cursor:
-                    memory_id = row["memory_id"]
-                    stored_vector = _blob_to_vector(row["vector"])
-                    if stored_vector:
-                        cache.append((memory_id, stored_vector))
-                self._vector_cache = cache
+            # Snapshot the cache references under the write lock so a
+            # concurrent store()/delete() cannot swap the underlying lists
+            # between our reads (which would otherwise cause an IndexError
+            # when vecs[i] is accessed after the lists were cleared). After
+            # the snapshot we compute without holding the lock; store/delete
+            # never mutate the old lists in place, only replace references.
+            with self._write_lock:
+                if not self._cache_loaded:
+                    self._load_vector_cache()
+                ids = self._cache_ids
+                vecs = self._cache_vecs
+                norms = self._cache_norms
 
-            # Compute cosine similarity against cached vectors.
-            # Iterate over the local `cache` reference, NOT self._vector_cache,
-            # so we are immune to concurrent invalidation.
-            results = []
-            for memory_id, stored_vector in cache:
-                similarity = _cosine_similarity(query_vector, stored_vector)
-                results.append((memory_id, similarity))
+            if not ids:
+                return []
 
-            # Sort by similarity descending
+            # Precompute query norm once (was recomputed per-vector before).
+            query_norm = _norm(query_vector)
+            if query_norm == 0:
+                return []
+
+            results: List[Tuple[str, float]] = []
+            n = len(ids)
+            # Cosine = dot / (norm_a * norm_b). Norms are precomputed,
+            # so the inner loop only does the dot product.
+            if _HAS_NUMPY and n > 0:
+                matrix = np.asarray(vecs, dtype=np.float64)        # (N, D)
+                q = np.asarray(query_vector, dtype=np.float64)      # (D,)
+                dots = matrix.dot(q)                                # (N,)
+                norms_arr = np.asarray(norms, dtype=np.float64)    # (N,)
+                denom = query_norm * norms_arr
+                # Avoid divide-by-zero; entries with zero norm yield sim 0.
+                sims = np.where(denom > 0, dots / denom, 0.0)
+                for i in range(n):
+                    results.append((ids[i], float(sims[i])))
+            else:
+                for i in range(n):
+                    stored_norm = norms[i]
+                    if stored_norm == 0:
+                        continue
+                    sim = _dot_product(query_vector, vecs[i]) / (query_norm * stored_norm)
+                    results.append((ids[i], sim))
+
             results.sort(key=lambda x: x[1], reverse=True)
             return results[:top_k]
 
@@ -243,14 +334,40 @@ class EmbeddingStore(BaseSQLiteStore):
             logger.warning("Embedding search failed: %s", e)
             return []
 
+    def _load_vector_cache(self) -> None:
+        """Load all vectors from SQLite into the parallel-array cache.
+
+        Called lazily on first ``search()``. Precomputes each vector's L2
+        norm so subsequent searches only need the dot product.
+        """
+        cursor = self._conn.execute("SELECT memory_id, vector FROM embeddings")
+        ids: List[str] = []
+        vecs: List[List[float]] = []
+        norms: List[float] = []
+        for row in cursor:
+            memory_id = row["memory_id"]
+            stored_vector = _blob_to_vector(row["vector"])
+            if stored_vector:
+                ids.append(memory_id)
+                vecs.append(stored_vector)
+                norms.append(_norm(stored_vector))
+        self._cache_ids = ids
+        self._cache_vecs = vecs
+        self._cache_norms = norms
+        self._cache_loaded = True
+        # Maintain legacy alias for any code that inspects _vector_cache
+        self._vector_cache = list(zip(ids, vecs)) if ids else None
+
     def delete(self, memory_id: str):
         """Delete embedding for a memory item.
 
         Args:
             memory_id: Unique identifier for the memory
         """
-        assert memory_id, "memory_id cannot be empty"
-        assert isinstance(memory_id, str), "memory_id must be a string"
+        if not memory_id:
+            raise ValueError("memory_id cannot be empty")
+        if not isinstance(memory_id, str):
+            raise ValueError("memory_id must be a string")
 
         with self._write_lock:
             try:
@@ -259,8 +376,32 @@ class EmbeddingStore(BaseSQLiteStore):
                     (memory_id,),
                 )
                 self._conn.commit()
-                # Invalidate cache so next search reloads
-                self._vector_cache = None
+                # Remove only the affected entry from the cache instead of
+                # invalidating the whole cache (avoids a full reload + norm
+                # recomputation on the next search). Lists are rebuilt as
+                # new objects so a concurrent search() keeps a consistent
+                # view of the old snapshot.
+                if self._cache_loaded:
+                    try:
+                        idx = self._cache_ids.index(memory_id)
+                    except ValueError:
+                        idx = -1
+                    if idx >= 0:
+                        self._cache_ids = [
+                            *self._cache_ids[:idx], *self._cache_ids[idx + 1:],
+                        ]
+                        self._cache_vecs = [
+                            *self._cache_vecs[:idx], *self._cache_vecs[idx + 1:],
+                        ]
+                        self._cache_norms = [
+                            *self._cache_norms[:idx], *self._cache_norms[idx + 1:],
+                        ]
+                        if self._vector_cache is not None:
+                            self._vector_cache = [
+                                (mid, vec)
+                                for mid, vec in self._vector_cache
+                                if mid != memory_id
+                            ]
             except Exception as e:
                 logger.warning("Failed to delete embedding for %s: %s", memory_id, e)
 

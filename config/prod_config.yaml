@@ -1,0 +1,46 @@
+# ============================================================================
+# One-Agent 生产环境配置
+#
+# 使用方式：ONE_AGENT_ENV=prod one-agent
+# ============================================================================
+
+agent:
+  log_level: WARNING         # 生产环境只记录警告和错误
+  language: zh
+
+# 生产环境使用最优配置
+llm:
+  primary_model: sensenova/deepseek-v4-flash
+  lightweight_model: sensenova/sensenova-6.7-flash-lite
+  timeout: 30
+  retries: 1                 # 生产环境快速失败
+
+router:
+  enabled: true
+  task_complexity_thresholds:
+    trivial: 0.2
+    simple: 0.5
+    complex: 0.8
+    expert: 1.0
+  context_compression: true   # 生产环境启用上下文压缩
+  self_evolution: false
+
+# 生产环境严格成本控制
+llm:
+  cost_tracking:
+    daily_budget: 10.0       # 生产环境更严格的日预算
+    monthly_budget: 100.0
+
+monitor:
+  metrics_enabled: true
+  tracing_enabled: true
+  health_check_interval: 120  # 较少的健康检查频率
+
+features:
+  self_evolution: false
+  experimental: false
+
+# 生产环境安全设置
+security:
+  audit_logging: true
+  input_sanitization: true

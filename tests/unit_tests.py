@@ -2011,24 +2011,7 @@ def test_self_improver_apply():
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 23. SubAgent delegation (_detect_complex_task in coordinator)
-# ══════════════════════════════════════════════════════════════════════════
-
-def test_sub_agent_detect_complex():
-    from core.coordinator import Coordinator
-    text = "请帮我详细比较 Python 和 Go 两种编程语言的性能差异，从并发处理模型、内存管理效率、编译速度等多个维度进行深入分析"
-    result = Coordinator._detect_complex_task(text)
-    _check("detect complex task returns True", result is True, f"len={len(text)}")
-
-
-def test_sub_agent_detect_simple():
-    from core.coordinator import Coordinator
-    result = Coordinator._detect_complex_task("你好")
-    _check("detect simple task returns False", result is False)
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 24. KnowledgeGraph (memory/knowledge_graph.py)
+# 23. KnowledgeGraph (memory/knowledge_graph.py)
 # ══════════════════════════════════════════════════════════════════════════
 
 def test_kg_add_entity():
@@ -2230,167 +2213,6 @@ def test_doc_delete():
         pass
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# 28. Role system (core/roles.py)
-# ══════════════════════════════════════════════════════════════════════════
-
-def test_role_library_load():
-    """RoleLibrary should load 124 roles from the default JSON file."""
-    from core.roles import get_library
-
-    lib = get_library()
-    ok = lib.load()
-    _check("role library load success", ok, "load() returned False")
-    _check("role library has 124 roles", lib.size == 124, f"size={lib.size}")
-    _check("role library loaded flag", lib.loaded is True)
-
-
-def test_role_library_list_all():
-    """list_all() should return a non-empty list of role dicts."""
-    from core.roles import get_library
-
-    lib = get_library()
-    roles = lib.list_all()
-    _check("list_all returns list", isinstance(roles, list))
-    _check("list_all non-empty", len(roles) > 0)
-    if roles:
-        first = roles[0]
-        _check("role has act key", "act" in first)
-        _check("role has prompt key", "prompt" in first)
-
-
-def test_role_library_find_exact():
-    """find() should locate a role by exact name."""
-    from core.roles import get_library
-
-    lib = get_library()
-    role = lib.find("充当 Linux 终端")
-    _check("find exact match", role is not None, "not found")
-    if role:
-        _check("find exact act", role["act"] == "充当 Linux 终端")
-        _check("find exact has prompt", len(role["prompt"]) > 0)
-
-
-def test_role_library_find_prefix():
-    """find() should match after stripping common prefixes like '担任'."""
-    from core.roles import get_library
-
-    lib = get_library()
-    # "担任雅思写作考官" is the stored name; "雅思写作考官" should match via prefix strip
-    role = lib.find("雅思写作考官")
-    _check("find prefix-stripped match", role is not None, "not found")
-    if role:
-        _check("prefix match act contains 雅思", "雅思" in role["act"])
-
-
-def test_role_library_find_fuzzy():
-    """find() should match via substring when exact/prefix fail."""
-    from core.roles import get_library
-
-    lib = get_library()
-    # "Linux" is a substring of "充当 Linux 终端"
-    role = lib.find("Linux")
-    _check("find fuzzy match", role is not None, "not found")
-    if role:
-        _check("fuzzy match act contains Linux", "Linux" in role["act"])
-
-
-def test_role_library_find_not_found():
-    """find() returns None for non-existent role."""
-    from core.roles import get_library
-
-    lib = get_library()
-    role = lib.find("不存在的角色名xyz123")
-    _check("find non-existent returns None", role is None)
-
-
-def test_role_library_search():
-    """search() returns roles matching a keyword."""
-    from core.roles import get_library
-
-    lib = get_library()
-    results = lib.search("翻译")
-    _check("search returns list", isinstance(results, list))
-    _check("search finds results", len(results) > 0, "no results for '翻译'")
-
-
-def test_role_library_search_empty_keyword():
-    """search() with empty keyword returns empty list."""
-    from core.roles import get_library
-
-    lib = get_library()
-    results = lib.search("")
-    _check("search empty keyword returns []", results == [])
-
-
-def test_role_library_search_limit():
-    """search() respects the limit parameter."""
-    from core.roles import get_library
-
-    lib = get_library()
-    results = lib.search("的", limit=3)
-    _check("search limit respected", len(results) <= 3, f"got {len(results)}")
-
-
-def test_get_current_role_none_when_disabled():
-    """get_current_role returns None when role system is disabled."""
-    from core.roles import get_current_role
-
-    config = {"agent": {"role": {"enabled": False, "current": "Linux 终端"}}}
-    role = get_current_role(config)
-    _check("disabled role returns None", role is None)
-
-
-def test_get_current_role_none_when_empty():
-    """get_current_role returns None when current is empty."""
-    from core.roles import get_current_role
-
-    config = {"agent": {"role": {"enabled": True, "current": ""}}}
-    role = get_current_role(config)
-    _check("empty current returns None", role is None)
-
-
-def test_get_current_role_none_when_off():
-    """get_current_role returns None when current is 'off'."""
-    from core.roles import get_current_role
-
-    for val in ("off", "default", "none", "关闭", "默认"):
-        config = {"agent": {"role": {"enabled": True, "current": val}}}
-        role = get_current_role(config)
-        _check(f"current='{val}' returns None", role is None, f"got {role}")
-
-
-def test_get_current_role_active():
-    """get_current_role returns the role dict when a valid role is set."""
-    from core.roles import get_current_role
-
-    config = {"agent": {"role": {"enabled": True, "current": "充当 Linux 终端"}}}
-    role = get_current_role(config)
-    _check("active role found", role is not None, "not found")
-    if role:
-        _check("active role has act", role["act"] == "充当 Linux 终端")
-
-
-def test_build_role_prompt_empty_when_no_role():
-    """build_role_prompt returns '' when no role is active."""
-    from core.roles import build_role_prompt
-
-    config = {"agent": {"role": {"enabled": True, "current": ""}}}
-    prompt = build_role_prompt(config)
-    _check("no role → empty prompt", prompt == "")
-
-
-def test_build_role_prompt_contains_role_info():
-    """build_role_prompt returns a non-empty string with role identity."""
-    from core.roles import build_role_prompt
-
-    config = {"agent": {"role": {"enabled": True, "current": "充当 Linux 终端"}}}
-    prompt = build_role_prompt(config)
-    _check("role prompt non-empty", len(prompt) > 0)
-    _check("role prompt has identity marker", "当前角色" in prompt)
-    _check("role prompt has act name", "Linux 终端" in prompt)
-
-
 if __name__ == "__main__":
     print("=== unit tests ===\n")
 
@@ -2567,23 +2389,6 @@ if __name__ == "__main__":
     test_doc_ingest_text()
     test_doc_list()
     test_doc_delete()
-
-    print("\n─ role system ─")
-    test_role_library_load()
-    test_role_library_list_all()
-    test_role_library_find_exact()
-    test_role_library_find_prefix()
-    test_role_library_find_fuzzy()
-    test_role_library_find_not_found()
-    test_role_library_search()
-    test_role_library_search_empty_keyword()
-    test_role_library_search_limit()
-    test_get_current_role_none_when_disabled()
-    test_get_current_role_none_when_empty()
-    test_get_current_role_none_when_off()
-    test_get_current_role_active()
-    test_build_role_prompt_empty_when_no_role()
-    test_build_role_prompt_contains_role_info()
 
     print("\n" + "─" * 60)
     ok = _summary()

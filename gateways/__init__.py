@@ -1,8 +1,9 @@
 """Chat gateways — CLI, web UI, and messaging re-exports.
 
 CLIGateway and WebGateway live here directly.  Messaging gateways
-(Telegram, WeCom, DingTalk, Feishu, Discord, Slack) are imported from
-``gateways.messaging`` and re-exported for plugin discovery.
+(Telegram, WeCom, DingTalk, Feishu, Discord, Slack) are imported lazily
+via ``__getattr__`` so that ``import gateways`` does not pull in httpx
+and all six messaging modules unless a gateway is actually requested.
 """
 
 from __future__ import annotations
@@ -15,17 +16,32 @@ from pathlib import Path
 from typing import Optional
 
 from core.plugin import Plugin
-from gateways.messaging import (  # noqa: F401  # re-exported for plugin discovery
-    DingTalkGateway,
-    DiscordGateway,
-    FeishuGateway,
-    SlackGateway,
-    TelegramGateway,
-    WeComGateway,
-)
-from gateways.wechat_personal import WeChatPersonalGateway  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+# Lazy gateway class loader — only imports a messaging gateway module when
+# that specific class is requested via ``getattr(gateways, ClassName)``.
+# This keeps ``import gateways`` cheap for CLI-only runs.
+_GATEWAY_CLASS_MAP = {
+    "TelegramGateway": "gateways.messaging",
+    "WeComGateway": "gateways.messaging",
+    "DingTalkGateway": "gateways.messaging",
+    "FeishuGateway": "gateways.messaging",
+    "DiscordGateway": "gateways.messaging",
+    "SlackGateway": "gateways.messaging",
+    "WeChatPersonalGateway": "gateways.wechat_personal",
+}
+
+
+def __getattr__(name: str):
+    """Lazily import gateway classes on first attribute access."""
+    if name in _GATEWAY_CLASS_MAP:
+        import importlib
+        module = importlib.import_module(_GATEWAY_CLASS_MAP[name])
+        cls = getattr(module, name)
+        globals()[name] = cls  # cache for subsequent access
+        return cls
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---------- 自然语言意图匹配 ----------
@@ -74,55 +90,6 @@ class CLIGateway(Plugin):
         self.bus.subscribe("turn_completed", self._on_done)
         # Subscribe to approval events for human-in-the-loop
         self.bus.subscribe("approval_needed", self._on_approval_needed)
-
-    async def run_loop(self, send_to_agent) -> None:
-        """Run the interactive REPL.  ``send_to_agent(text)`` should be an
-        async function that triggers the agent pipeline."""
-        from i18n import _, auto_detect_and_switch
-
-        # Auto-detect language on first interaction
-        print("One-Agent — 自然语言即可操作，输入 '帮助' 查看功能。")
-        first_message = True
-
-        while True:
-            try:
-                line = input(self._prompt)
-            except EOFError:
-                print()
-                return
-            except KeyboardInterrupt:
-                print("\n(interrupted)")
-                return
-            line = line.strip()
-            if not line:
-                continue
-
-            # Auto-detect language on first user message
-            if first_message:
-                auto_detect_and_switch(line)
-                first_message = False
-
-            intent = _match_cli_intent(line)
-            if intent == "exit":
-                return
-            if intent == "help":
-                print(_("cli_help_content"))
-                continue
-            if intent == "status":
-                print(f"session {self._session_id} up {int(time.monotonic())}s")
-                continue
-            if intent == "clear":
-                print("\033c", end="")
-                continue
-            self._reply_available = asyncio.Event()
-            self._last_reply = ""
-            await send_to_agent(line, source="cli", session_id=self._session_id)
-            try:
-                await asyncio.wait_for(self._reply_available.wait(), timeout=120)
-            except asyncio.TimeoutError:
-                print(_("timeout"))
-                continue
-            print(self._last_reply)
 
     async def _on_done(self, event) -> None:
         turn = event.get("turn")
@@ -221,12 +188,17 @@ class WebGateway(Plugin):
         app = FastAPI(title="One-Agent")
 
         # ---- Security middleware ----
-        # Per-IP sliding-window rate limit (mirrors RESTAPIGateway logic)
+        # Per-IP sliding-window rate limit (mirrors RESTAPIGateway logic).
+        # Uses a dict with periodic cleanup of stale IPs to prevent unbounded
+        # memory growth from spoofed/varied client IPs.
         _rate_window: dict = {}  # ip -> list[timestamps]
+        _rate_cleanup_counter = 0  # cleanup every N requests
+        _RATE_CLEANUP_INTERVAL = 200
         gw = self
 
         @app.middleware("http")
         async def security_middleware(request: Request, call_next):
+            nonlocal _rate_cleanup_counter
             # 1) Body size limit for chat endpoints
             cl = request.headers.get("content-length")
             if cl and request.url.path.startswith("/api/chat"):
@@ -248,6 +220,16 @@ class WebGateway(Plugin):
                 )
             window.append(now)
             _rate_window[client_ip] = window
+            # 3) Periodic cleanup of stale IPs to prevent memory leak
+            _rate_cleanup_counter += 1
+            if _rate_cleanup_counter >= _RATE_CLEANUP_INTERVAL:
+                _rate_cleanup_counter = 0
+                stale_ips = [
+                    ip for ip, ts in _rate_window.items()
+                    if not ts or now - ts[-1] > 120.0
+                ]
+                for ip in stale_ips:
+                    del _rate_window[ip]
             return await call_next(request)
 
         def _check_auth(request: Request) -> bool:
@@ -342,18 +324,14 @@ class WebGateway(Plugin):
 
         config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning")
         server = uvicorn.Server(config)
-        self._server = server
         self._task = asyncio.create_task(server.serve())
         logger.info("web ui on http://%s:%d", self._host, self._port)
 
     async def stop(self) -> None:
-        # 优雅关闭 uvicorn：设置 should_exit 让其自行完成 in-flight 请求
-        server = getattr(self, "_server", None)
-        if server is not None:
-            server.should_exit = True
         if self._task:
+            self._task.cancel()
             try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                await self._task
+            except asyncio.CancelledError:
                 pass
         await super().stop()

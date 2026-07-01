@@ -21,7 +21,18 @@ from core.events import Event
 from core.plugin import Plugin
 from core.tool_result import ToolResult
 from models import LLMProvider
+from router import DEFAULT_COMPLEX_THRESHOLD, DEFAULT_SIMPLE_THRESHOLD, DEFAULT_TRIVIAL_THRESHOLD
 from skills import SkillManager
+
+# Intelligent features
+from core.sentiment import get_sentiment_analyzer
+from core.suggestions import get_suggestion_engine
+from memory.user_profile import get_profile_store
+from core.metacognition import get_metacognition_engine
+from core.reasoning import get_step_reasoner
+from core.style_adapter import StyleAdapter
+from core.failure_recovery import get_failure_recovery
+from memory.dialog_summary import get_dialog_summarizer
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +41,22 @@ MAX_TOOL_ITERATIONS = 5
 DEFAULT_MAX_TOKENS = 2048
 MAX_SKILL_FAILURES = 3
 TURN_COMPLETION_TIMEOUT = 120.0
-# Complexity tier thresholds (determine execution strategy)
-EXPERT_COMPLEXITY_THRESHOLD = 0.8   # >= → multi-agent pattern
-COMPLEX_COMPLEXITY_THRESHOLD = 0.5  # >= → think + reflect
+# Complexity tier thresholds (determine execution strategy).
+# Imported from router to keep a single source of truth — router owns
+# task classification, coordinator consumes the same thresholds.
+EXPERT_COMPLEXITY_THRESHOLD = DEFAULT_COMPLEX_THRESHOLD     # >= → multi-agent pattern
+COMPLEX_COMPLEXITY_THRESHOLD = DEFAULT_SIMPLE_THRESHOLD     # >= → think + reflect
+SIMPLE_COMPLEXITY_THRESHOLD = DEFAULT_TRIVIAL_THRESHOLD     # >= → light self-verification
+# Smart boost feature flags by complexity tier
+# - trivial (<0.2): direct execution, no enhancements (max speed)
+# - simple (0.2-0.5): light self-verification only
+# - complex (0.5-0.8): full pre-thinking + reflection + self-verification + final polish + clarification
+# - expert (>=0.8): everything + post-execution review + tool chain planning
+SELF_VERIFY_MIN_COMPLEXITY = 0.2     # simple and above
+CLARIFICATION_MIN_COMPLEXITY = 0.5      # complex and above
+FINAL_POLISH_MIN_COMPLEXITY = 0.5     # complex and above
+POST_REFLECT_MIN_COMPLEXITY = 0.8       # expert only
+TOOL_CHAIN_PLANNING_MIN_COMPLEXITY = 0.8  # expert only
 
 
 class Coordinator(Plugin):
@@ -47,10 +71,26 @@ class Coordinator(Plugin):
         self._skills: Optional[SkillManager] = None
         self._max_tool_iterations = MAX_TOOL_ITERATIONS
         self._max_tokens = DEFAULT_MAX_TOKENS
-        self._os_mode_enabled: bool = False  # OS 操作权限模式（会话级）
+        self._os_mode_sessions: set = set()  # OS 操作权限模式（会话级，按 session_id 跟踪）
         # Track background turn-completion tasks so they aren't GC'd
         # mid-execution (Python's asyncio only holds a weak ref to tasks).
         self._pending_turn_tasks: set = set()
+        # Reference to the currently executing turn task, so a timed-out
+        # completion waiter can cancel it instead of letting it run on.
+        self._current_turn_task: Optional[asyncio.Task] = None
+        # Per-turn cached language detection (set once per _run_turn) to
+        # avoid re-importing i18n and re-calling get_language() on every
+        # _is_zh() call (8+ times per turn).
+        self._cached_lang: Optional[str] = None
+        # Intelligent features (lazy-loaded)
+        self._sentiment: Optional[Any] = None
+        self._suggestions: Optional[Any] = None
+        self._profile: Optional[Any] = None
+        self._metacognition: Optional[Any] = None
+        self._reasoner: Optional[Any] = None
+        self._style_adapter: Optional[StyleAdapter] = None
+        self._failure_recovery: Optional[Any] = None
+        self._dialog_summarizer: Optional[Any] = None
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -179,13 +219,6 @@ class Coordinator(Plugin):
             logger.debug("context compression LLM call failed: %s", exc)
             return ""
 
-    @staticmethod
-    def _detect_complex_task(text: str) -> bool:
-        """Quick heuristic: tasks with comparison, research, or analysis keywords."""
-        keywords = ["比较", "对比", "分析", "研究", "评估", "调查", "分别", "各",
-                    "compare", "analyze", "research", "evaluate", "both", "each"]
-        return len(text) > 50 and any(k in text for k in keywords)
-
     # ------------------------------------------------------------ OS 模式处理
     async def _handle_os_mode(
         self, turn: TurnContext, cmd: str, args_text: str,
@@ -200,12 +233,11 @@ class Coordinator(Plugin):
         /os-off            — 关闭 OS 模式
         /os-mode           — 查看当前 OS 模式状态
         """
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
+        lang = "zh" if self._is_zh() else "en"
 
         # /os-mode — 查询状态
         if cmd == "_os_mode":
-            if self._os_mode_enabled:
+            if turn.session_id in self._os_mode_sessions:
                 status = "已开启" if lang.startswith("zh") else "ENABLED"
                 msg = (
                     f"OS 模式: {status}\n"
@@ -224,7 +256,7 @@ class Coordinator(Plugin):
 
         # /os-off — 关闭 OS 模式
         if cmd in ("_os_off", "disable-os", "关闭os", "关闭系统权限"):
-            self._os_mode_enabled = False
+            self._os_mode_sessions.discard(turn.session_id)
             turn.meta["os_mode"] = False
             # 使 SystemExecutor 的密码缓存失效
             await self._invalidate_os_cache()
@@ -253,7 +285,7 @@ class Coordinator(Plugin):
         # 验证密码并开启 OS 模式
         success = await self._enable_os_mode(turn, password)
         if success:
-            self._os_mode_enabled = True
+            self._os_mode_sessions.add(turn.session_id)
             turn.meta["os_mode"] = True
             msg = (
                 "✅ OS 模式已开启！\n\n"
@@ -291,7 +323,11 @@ class Coordinator(Plugin):
         try:
             # 通过 system_unlock 技能验证密码（会缓存授权）
             result = await self._skills.dispatch("system_unlock", {"password": password})
-            ok = "成功" in str(result) or "success" in str(result).lower() or "✅" in str(result)
+            if isinstance(result, ToolResult):
+                ok = result.status == "success"
+            else:
+                # 兼容字符串返回
+                ok = "成功" in str(result) or "success" in str(result).lower()
             if ok:
                 logger.info("OS mode enabled for session %s", turn.session_id)
             return ok
@@ -309,179 +345,6 @@ class Coordinator(Plugin):
                 await self._skills.dispatch("system_lock", {})
         except Exception as exc:
             logger.warning("system_lock handler failed: %s", exc)
-
-    # ------------------------------------------------------------ 角色系统
-    async def _handle_role_command(self, turn: TurnContext, args_text: str) -> None:
-        """Handle /role command — 角色系统管理。
-
-        用法：
-            /role              — 查看当前角色
-            /role list         — 列出所有可用角色
-            /role off          — 关闭角色（恢复默认 One-Agent 身份）
-            /role <角色名>      — 切换到指定角色
-            /role search <关键词> — 搜索角色
-        """
-        from core.roles import get_library
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
-        is_zh = lang.startswith("zh")
-
-        args = args_text.strip()
-        library = get_library()
-
-        # 确保角色库已加载
-        if not library.loaded:
-            role_cfg = {}
-            if self.ctx is not None and self.ctx.config is not None:
-                role_cfg = self.ctx.config.get("agent", {}).get("role", {}) or {}
-            lib_path = role_cfg.get("library", "data/roles/prompts-zh.json")
-            library.load(lib_path)
-
-        # /role（无参数）— 查看当前角色
-        if not args:
-            current = self._get_current_role_name()
-            if current:
-                role = library.find(current)
-                if role:
-                    prompt_preview = role["prompt"][:200] + ("..." if len(role["prompt"]) > 200 else "")
-                    turn.result = (
-                        f"🎭 当前角色：{role['act']}\n\n"
-                        f"提示词预览：\n{prompt_preview}\n\n"
-                        f"用 /role list 查看所有角色，/role off 关闭角色"
-                        if is_zh
-                        else f"🎭 Current role: {role['act']}\n\n"
-                        f"Prompt preview:\n{prompt_preview}\n\n"
-                        f"Use /role list to see all roles, /role off to disable"
-                    )
-                else:
-                    turn.result = (
-                        f"⚠️ 当前角色「{current}」在角色库中未找到，可能已被移除。\n"
-                        f"用 /role list 查看可用角色，或 /role off 关闭角色"
-                        if is_zh
-                        else f"⚠️ Current role '{current}' not found in library.\n"
-                        f"Use /role list to see available roles, or /role off to disable"
-                    )
-            else:
-                size = library.size
-                turn.result = (
-                    f"🎭 角色系统\n"
-                    f"当前状态：未启用角色（使用默认 One-Agent 身份）\n"
-                    f"角色库：{size} 个角色可用\n\n"
-                    f"用法：\n"
-                    f"  /role list         — 列出所有角色\n"
-                    f"  /role <角色名>      — 切换到指定角色\n"
-                    f"  /role search <关键词> — 搜索角色\n"
-                    f"  /role off          — 关闭角色"
-                    if is_zh
-                    else f"🎭 Role System\n"
-                    f"Status: No role active (default One-Agent identity)\n"
-                    f"Library: {size} roles available\n\n"
-                    f"Usage:\n"
-                    f"  /role list         — list all roles\n"
-                    f"  /role <name>       — switch to a role\n"
-                    f"  /role search <kw>  — search roles\n"
-                    f"  /role off          — disable role"
-                )
-            return
-
-        # /role list — 列出所有角色
-        low = args.lower()
-        if low in ("list", "ls", "列表", "所有", "all"):
-            roles = library.list_all()
-            if not roles:
-                turn.result = "角色库为空或未加载" if is_zh else "Role library is empty or not loaded"
-                return
-            lines = [f"📋 角色库（共 {len(roles)} 个角色）：" if is_zh else f"📋 Role Library ({len(roles)} roles):"]
-            for i, r in enumerate(roles, 1):
-                lines.append(f"  {i:3d}. {r['act']}")
-            lines.append("")
-            lines.append("用法：/role <角色名> 切换角色" if is_zh else "Usage: /role <name> to switch")
-            turn.result = "\n".join(lines)
-            return
-
-        # /role off — 关闭角色
-        if low in ("off", "default", "none", "关闭", "默认", "取消"):
-            self._set_current_role("")
-            turn.result = (
-                "✅ 已关闭角色，恢复默认 One-Agent 身份"
-                if is_zh
-                else "✅ Role disabled, restored to default One-Agent identity"
-            )
-            return
-
-        # /role search <关键词>
-        if low.startswith("search ") or low.startswith("搜索 ") or low.startswith("查找 "):
-            keyword = args.split(maxsplit=1)[1] if len(args.split(maxsplit=1)) > 1 else ""
-            if not keyword:
-                turn.result = "用法：/role search <关键词>" if is_zh else "Usage: /role search <keyword>"
-                return
-            results = library.search(keyword, limit=20)
-            if not results:
-                turn.result = f"未找到匹配「{keyword}」的角色" if is_zh else f"No roles matching '{keyword}'"
-                return
-            lines = [f"🔍 搜索「{keyword}」找到 {len(results)} 个角色：" if is_zh else f"🔍 Found {len(results)} roles for '{keyword}':"]
-            for i, r in enumerate(results, 1):
-                lines.append(f"  {i}. {r['act']}")
-            turn.result = "\n".join(lines)
-            return
-
-        # /role <角色名> — 切换到指定角色
-        role = library.find(args)
-        if role is None:
-            # 模糊搜索建议
-            suggestions = library.search(args, limit=5)
-            if suggestions:
-                sug_text = "\n".join(f"  • {r['act']}" for r in suggestions)
-                turn.result = (
-                    f"❌ 未找到角色「{args}」\n\n"
-                    f"你是否想找：\n{sug_text}\n\n"
-                    f"用 /role list 查看所有角色"
-                    if is_zh
-                    else f"❌ Role '{args}' not found\n\nDid you mean:\n{sug_text}\n\nUse /role list to see all roles"
-                )
-            else:
-                turn.result = (
-                    f"❌ 未找到角色「{args}」\n用 /role list 查看所有角色"
-                    if is_zh
-                    else f"❌ Role '{args}' not found\nUse /role list to see all roles"
-                )
-            return
-
-        self._set_current_role(role["act"])
-        prompt_preview = role["prompt"][:150] + ("..." if len(role["prompt"]) > 150 else "")
-        turn.result = (
-            f"✅ 已切换到角色：{role['act']}\n\n"
-            f"提示词预览：\n{prompt_preview}\n\n"
-            f"现在开始，Agent 将以「{role['act']}」的身份回答问题。\n"
-            f"用 /role off 可恢复默认身份"
-            if is_zh
-            else f"✅ Switched to role: {role['act']}\n\n"
-            f"Prompt preview:\n{prompt_preview}\n\n"
-            f"From now on, Agent will respond as '{role['act']}'.\n"
-            f"Use /role off to restore default identity"
-        )
-
-    def _get_current_role_name(self) -> str:
-        """从配置中读取当前角色名。"""
-        if self.ctx is None or self.ctx.config is None:
-            return ""
-        role_cfg = self.ctx.config.get("agent", {}).get("role", {}) or {}
-        if not role_cfg.get("enabled", True):
-            return ""
-        return role_cfg.get("current", "").strip()
-
-    def _set_current_role(self, role_name: str) -> None:
-        """设置当前角色名并持久化到配置文件。"""
-        if self.ctx is None or self.ctx.config is None:
-            return
-        try:
-            config = self.ctx.config
-            config.setdefault("agent", {}).setdefault("role", {})["current"] = role_name
-            from skills import _save_config
-            _save_config(config)
-            logger.info("role switched to: %s", role_name or "(default)")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("failed to persist role: %s", exc)
 
     # ------------------------------------------------------------ slash commands
     # Mapping from slash command names (both EN and CN) to skill IDs
@@ -533,8 +396,6 @@ class Coordinator(Plugin):
         "os-mode": "_os_mode", "osmode": "_os_mode", "os": "_os_mode",
         "enable-os": "_os_on", "disable-os": "_os_off",
         "开启os": "_os_on", "关闭os": "_os_off", "开启系统权限": "_os_on", "关闭系统权限": "_os_off",
-        # ---------- 角色系统 ----------
-        "role": "_role", "角色": "_role", "人设": "_role", "persona": "_role",
     }
 
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
@@ -573,12 +434,6 @@ class Coordinator(Plugin):
         # ---- OS mode commands (handled directly, not via skill dispatch) ----
         if skill_id in ("_os_on", "_os_off", "_os_mode"):
             await self._handle_os_mode(turn, skill_id, args_text)
-            self.publish("turn_completed", turn=turn)
-            return True
-
-        # ---- Role commands (handled directly) ----
-        if skill_id == "_role":
-            await self._handle_role_command(turn, args_text)
             self.publish("turn_completed", turn=turn)
             return True
 
@@ -623,9 +478,6 @@ class Coordinator(Plugin):
 
         try:
             result = await self._skills.dispatch(skill_id, args)
-            # 如果 settings 技能返回 "__SKIP__"，表示不是设置命令，继续正常对话
-            if result == "__SKIP__":
-                return False
             turn.result = str(result)
         except Exception as exc:
             logger.exception("slash command dispatch failed: %s", exc)
@@ -653,28 +505,11 @@ class Coordinator(Plugin):
             if detected_lang != current_lang:
                 set_language(detected_lang)
                 logger.info("Auto-detected language: %s from user input", detected_lang)
-                # Persist language preference to config
+                # Persist language preference to config synchronously: the shared
+                # config dict must not be mutated from a worker thread (race with
+                # event-loop reads). Dict ops are fast; the brief file write is
+                # acceptable and far cheaper than a thread hop.
                 self._persist_language(detected_lang)
-
-        # 模式匹配：检测"服务商名 + API key"格式，直接调用 add_provider
-        # 不依赖 LLM 工具调用（某些模型如 sensenova 不支持 tools）
-        if turn.input_text and self._skills is not None:
-            _api_key_m = __import__("re").search(
-                r"(?:key[:：]?\s*)?(nvapi-\S+|sk-\S+|ak-\S+)",
-                turn.input_text
-            )
-            if _api_key_m:
-                try:
-                    logger.info("检测到 API key，调用 add_provider 技能")
-                    _result = await self._skills.dispatch(
-                        "add_provider", {"input": turn.input_text}
-                    )
-                    if _result and str(_result) != "__SKIP__":
-                        turn.record_success(str(_result), 0)
-                        self.publish("turn_completed", turn=turn)
-                        return
-                except Exception as exc:
-                    logger.warning("add_provider dispatch failed: %s", exc)
 
         # avoid double-processing — if something already published a reply,
         # skip this turn entirely
@@ -738,6 +573,10 @@ class Coordinator(Plugin):
             # Mark the turn so _on_routed skips it if it hasn't started yet.
             if turn.result is None and turn.error is None:
                 turn.record_failure("turn completion timeout")
+            # Cancel the running turn task so it stops consuming resources
+            # after the gateway has already given up waiting.
+            if self._current_turn_task is not None and not self._current_turn_task.done():
+                self._current_turn_task.cancel()
         finally:
             self.bus.unsubscribe("turn_completed", _on_turn_completed)
 
@@ -746,15 +585,20 @@ class Coordinator(Plugin):
         """Execute a single turn with tiered execution strategy based on complexity.
 
         Tiered execution strategy (independent from model selection):
-        - trivial/simple (< 0.5): direct execution, no thinking/reflection
-        - complex (0.5–0.8): think + reflect before executing
-        - expert (≥ 0.8): multi-agent pattern (planner + executor)
+        - trivial (< 0.2): direct execution, no thinking (max speed)
+        - simple (0.2-0.5): direct execution + light self-verification
+        - complex (0.5-0.8): clarification check + think + reflect + self-verify + final polish
+        - expert (>= 0.8): everything + multi-agent + post-reflection + tool chain planning
 
         This is orthogonal to model tier selection — both work together:
         e.g., an expert task gets both the strongest model AND multi-agent execution.
         """
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
+        # Track the running turn task so a timed-out completion waiter can
+        # cancel it instead of letting it consume resources after the gateway
+        # has already given up.
+        self._current_turn_task = asyncio.current_task()
+        # Reset the per-turn language cache so _is_zh() re-detects once.
+        self._cached_lang = None
         if turn.input_text is None:
             raise RuntimeError("turn.input_text cannot be None")
 
@@ -766,51 +610,102 @@ class Coordinator(Plugin):
         if turn.model is None:
             raise RuntimeError("Model must be set before execution")
 
-        messages = self._prepare_messages(turn)
+        messages = await self._prepare_messages(turn)
         tools = self._prepare_tools(turn)
 
         # Get complexity from router classification
         complexity = getattr(turn, "estimated_complexity", 0.0)
         logger.debug("turn complexity: %.2f", complexity)
 
-        # Expert level: multi-agent pattern
-        if complexity >= EXPERT_COMPLEXITY_THRESHOLD:
-            if await self._multi_agent_phase(messages, turn):
-                return  # multi-agent handled it, skip normal flow
+        # --- Step 1: Clarification check (complex and above) ---
+        # Short, unambiguous requests skip this even at complex tier
+        if complexity >= CLARIFICATION_MIN_COMPLEXITY and self._needs_clarification_check(turn):
+            if await self._try_clarification(messages, turn):
+                # User needs to provide clarification — turn is done for now
+                self.publish("turn_completed", turn=turn)
+                return
 
-        # Complex level: think + reflect
+        # --- Step 2: Pre-execution thinking by tier ---
+        multi_agent_done = False
+        if complexity >= EXPERT_COMPLEXITY_THRESHOLD:
+            # Expert level: tool chain planning + multi-agent pattern
+            if complexity >= TOOL_CHAIN_PLANNING_MIN_COMPLEXITY:
+                await self._plan_tool_chain(messages, turn, tools)
+            # multi-agent publishes turn_completed itself on success
+            multi_agent_done = await self._multi_agent_phase(messages, turn)
         elif complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
+            # Complex level: think + reflect
             await self._think_phase(messages, turn)
             await self._reflect_phase(messages, turn)
+        # else: simple/trivial — skip thinking entirely for speed
 
-        # Simple/trivial: skip thinking entirely for speed
-        else:
-            # Still do context compression for long conversations
-            await self._compress_context(messages, turn)
-            # Direct tool loop without thinking overhead
-            await self._tool_loop(messages, turn, tools)
-            self._extract_entities(turn)
-            self._learn_user_preferences(turn)
-            self.publish("turn_completed", turn=turn)
-            logger.info("reply produced (simple mode, %d tokens, %.2fs)",
-                        turn.tokens_used, turn.duration_seconds or 0)
+        # If multi-agent handled the turn, it already published turn_completed.
+        # Skip the rest to avoid double-publishing and wasted work.
+        if multi_agent_done:
             return
 
-        # Context compression (for complex/expert after thinking phases)
+        # Context compression (always, but cheap when not needed)
         await self._compress_context(messages, turn)
 
-        # Tool-call loop (for complex level that didn't use multi-agent)
+        # --- Step 3: Tool-call loop ---
         await self._tool_loop(messages, turn, tools)
 
-        # Auto-extract entities
-        self._extract_entities(turn)
-        self._learn_user_preferences(turn)
+        # --- Step 4: Post-execution quality improvements by tier ---
+        # For complex+: combine self-verification and final polish into one
+        # LLM call when possible (saves one round-trip).
+        if complexity >= FINAL_POLISH_MIN_COMPLEXITY and turn.result and not turn.error:
+            await self._verify_and_polish(messages, turn, complexity)
+        elif complexity >= SELF_VERIFY_MIN_COMPLEXITY and turn.result and not turn.error:
+            # simple tier: light self-verification only
+            await self._self_verify(messages, turn, complexity)
+
+        if complexity >= POST_REFLECT_MIN_COMPLEXITY and turn.result:
+            # Post-execution reflection: learn from this turn (expert only)
+            await self._post_reflect(turn)
+
+        # Auto-extract entities (offload SQLite writes to worker thread)
+        await asyncio.to_thread(self._extract_entities, turn)
+
+        # === Intelligent features integration ===
+        # 1. Record user preferences and patterns
+        await self._record_intelligence(turn)
+
+        # 2. Generate proactive suggestions (inject into result if enabled)
+        suggestions = await self._generate_suggestions(turn)
+        if suggestions and self._should_show_suggestions():
+            suggestion_text = self._suggestions.format_suggestions_for_display(suggestions)
+            turn.result = turn.result + suggestion_text
+
+        # 3. Metacognition — analyze response quality
+        await self._analyze_response_quality(turn)
 
         self.publish("turn_completed", turn=turn)
-        logger.info("reply produced (complex mode, %d tokens, %.2fs)",
-                    turn.tokens_used, turn.duration_seconds or 0)
+        logger.info(
+            "reply produced (%s mode, %d tokens, %.2fs)",
+            "expert" if complexity >= EXPERT_COMPLEXITY_THRESHOLD
+            else "complex" if complexity >= COMPLEX_COMPLEXITY_THRESHOLD
+            else "simple" if complexity >= SIMPLE_COMPLEXITY_THRESHOLD
+            else "trivial",
+            turn.tokens_used,
+            turn.duration_seconds or 0,
+        )
 
-    def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
+    def _needs_clarification_check(self, turn: TurnContext) -> bool:
+        """Heuristic: should we even bother asking the LLM if input is ambiguous?
+
+        Short, specific questions (e.g. "现在几点", "1+1=") don't need the
+        clarification check even at complex tier — it would just waste a call.
+        """
+        text = (turn.input_text or "").strip()
+        # Very short inputs are usually clear commands or questions
+        if len(text) < 15:
+            return False
+        # Inputs with code blocks, URLs, or file paths are usually concrete tasks
+        if any(marker in text for marker in ("```", "http", "/workspace", ".py", ".js")):
+            return False
+        return True
+
+    async def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Prepare message list with memory snippets from long-term memory + KG.
 
         Memory is injected as a dedicated assistant-style "relevant memory" message
@@ -818,8 +713,6 @@ class Coordinator(Plugin):
         see it. The router is responsible for putting the system prompt + history
         + user message into ``turn.messages``; we layer memory on top here.
         """
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
         if turn.input_text is None:
             raise RuntimeError("turn.input_text cannot be None")
 
@@ -835,7 +728,7 @@ class Coordinator(Plugin):
             memory_plugin = getattr(self.ctx, "memory", None)
             if memory_plugin is not None:
                 try:
-                    retrieved = self._retrieve_memory_for(turn, memory_plugin)
+                    retrieved = await self._retrieve_memory_for(turn, memory_plugin)
                     if retrieved:
                         memory_snippets = retrieved
                         turn.meta["memory_snippets"] = retrieved
@@ -843,9 +736,7 @@ class Coordinator(Plugin):
                     logger.warning("active memory retrieval failed: %s", exc)
 
         if memory_snippets:
-            from i18n import get_language
-            lang = (get_language() or "zh").lower()
-            if lang.startswith("zh"):
+            if self._is_zh():
                 mem_header = "【相关记忆】（来自长期记忆/知识图谱/语义检索）\n以下内容是我从之前的对话和知识中记住的，最与当前问题相关的信息。\n如果与问题直接相关，请优先使用，不要重复问或重复查；如果不相关请忽略，不要编造。\n\n"
             else:
                 mem_header = "[Relevant Memory] (from long-term memory / knowledge graph / semantic retrieval)\nThe following lines are what I remembered from earlier that best relate to the current question.\nIf directly relevant, USE THEM first; if not, ignore — don't make things up.\n\n"
@@ -862,105 +753,140 @@ class Coordinator(Plugin):
                 if not any(m.get("role") == "user" for m in messages):
                     messages.append({"role": "user", "content": turn.input_text})
 
+        # Inject Chain-of-Thought reasoning for complex tasks
+        await self._maybe_inject_cot(messages, turn)
+
         return messages
 
-    def _retrieve_memory_for(self, turn: TurnContext, memory_plugin) -> str:
-        """Query long-term memory + knowledge graph for relevant snippets."""
-        hits: List[str] = []
+    async def _retrieve_memory_for(self, turn: TurnContext, memory_plugin) -> str:
+        """Query long-term memory + knowledge graph for relevant snippets.
+
+        All SQLite/embedding operations are offloaded to a worker thread
+        via ``asyncio.to_thread`` so the event loop is not blocked during
+        FTS5 queries, SentenceTransformer inference, or vector scans.
+
+        The three retrieval sources (FTS5, embeddings, knowledge graph) are
+        independent and run concurrently via ``asyncio.gather``.
+        """
         query = turn.input_text or ""
         if not query.strip():
             return ""
 
-        # 1) Long-term FTS5 / hybrid search
-        long_term = getattr(memory_plugin, "_long", None)
-        if long_term is not None:
-            try:
-                fts_hits = long_term.search(query, limit=5) or []
-                for h in fts_hits:
-                    content = h.get("content", "")
-                    source = h.get("source", "memory")
-                    if content and len(content) > 5:
-                        hits.append(f"- [记忆/{source}] {content[:300]}")
-            except Exception as exc:
-                logger.debug("long-term memory search failed: %s", exc)
+        fts_results, embedding_results, kg_results = await asyncio.gather(
+            self._fts_memory_search(memory_plugin, query),
+            self._embedding_memory_search(memory_plugin, query),
+            self._kg_memory_search(memory_plugin, query),
+            return_exceptions=True,
+        )
 
-        # 2) Embedding semantic search
-        embeddings = getattr(memory_plugin, "_embeddings", None)
-        if embeddings is not None:
-            try:
-                query_vec = embeddings.embed(query)
-                if query_vec is not None:
-                    sem = embeddings.search(query_vec, top_k=5) or []
-                    seen_contents = {h.split("] ", 1)[1][:40] for h in hits}
-                    for memory_id, _score in sem:
-                        entry = long_term.get_by_id(memory_id) if long_term else None
-                        content = (entry or {}).get("content", "") if isinstance(entry, dict) else str(entry or "")
-                        if content and content[:40] not in seen_contents:
-                            seen_contents.add(content[:40])
-                            hits.append(f"- [语义记忆] {content[:300]}")
-            except Exception as exc:
-                logger.debug("embedding memory search failed: %s", exc)
+        hits: List[str] = []
+        if isinstance(fts_results, list):
+            hits.extend(fts_results)
 
-        # 3) Knowledge Graph — entities related to keywords in query
-        kg = getattr(memory_plugin, "_kg", None)
-        if kg is not None:
-            try:
-                kg_hits = kg.search(query, limit=5) or []
-                for h in kg_hits:
-                    if isinstance(h, dict):
-                        content = h.get("content", h.get("label", ""))
-                    else:
-                        content = str(h)
-                    if content:
-                        hits.append(f"- [知识图谱] {content[:300]}")
-            except Exception as exc:
-                logger.debug("KG memory search failed: %s", exc)
+        # Embedding results are deduplicated against FTS hits (by content prefix)
+        # to avoid showing the same memory twice under different sources.
+        if isinstance(embedding_results, list):
+            seen_contents = {h.split("] ", 1)[1][:40] for h in hits}
+            for content_hit in embedding_results:
+                content_key = content_hit.split("] ", 1)[1][:40] if "] " in content_hit else content_hit[:40]
+                if content_key not in seen_contents:
+                    seen_contents.add(content_key)
+                    hits.append(content_hit)
+
+        if isinstance(kg_results, list):
+            hits.extend(kg_results)
 
         if not hits:
             return ""
 
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
-        if lang.startswith("zh"):
+        if self._is_zh():
             header = "以下是从我的记忆系统中检索到的、与当前问题最相关的内容 — 请优先参考：\n"
         else:
             header = "Retrieved from memory — most relevant to current question:\n"
         return header + "\n".join(hits[:5])
+
+    async def _fts_memory_search(self, memory_plugin, query: str) -> List[str]:
+        """FTS5 / hybrid long-term memory search. Returns formatted hit strings."""
+        hits: List[str] = []
+        long_term = getattr(memory_plugin, "_long", None)
+        if long_term is None:
+            return hits
+        try:
+            fts_hits = await asyncio.to_thread(long_term.search, query, 5) or []
+            for h in fts_hits:
+                content = h.get("content", "")
+                source = h.get("source", "memory")
+                if content and len(content) > 5:
+                    hits.append(f"- [记忆/{source}] {content[:300]}")
+        except Exception as exc:
+            logger.debug("long-term memory search failed: %s", exc)
+        return hits
+
+    async def _embedding_memory_search(self, memory_plugin, query: str) -> List[str]:
+        """Embedding semantic search. Returns formatted hit strings (no cross-source dedup)."""
+        hits: List[str] = []
+        embeddings = getattr(memory_plugin, "_embeddings", None)
+        if embeddings is None:
+            return hits
+        long_term = getattr(memory_plugin, "_long", None)
+        try:
+            # embed() loads the model on first call and runs CPU-bound
+            # inference, so it MUST be offloaded to a worker thread.
+            query_vec = await asyncio.to_thread(embeddings.embed, query)
+            if query_vec is None:
+                return hits
+            sem = await asyncio.to_thread(embeddings.search, query_vec, 5) or []
+            # Batch-fetch all semantic hits in one query (was N+1).
+            sem_ids = [mid for mid, _score in sem]
+            entries_map: Dict[str, Any] = {}
+            if long_term and sem_ids:
+                entries_map = await asyncio.to_thread(long_term.get_by_ids, sem_ids)
+            for memory_id, _score in sem:
+                entry = entries_map.get(str(memory_id))
+                content = (entry or {}).get("content", "") if isinstance(entry, dict) else str(entry or "")
+                if content:
+                    hits.append(f"- [语义记忆] {content[:300]}")
+        except Exception as exc:
+            logger.debug("embedding memory search failed: %s", exc)
+        return hits
+
+    async def _kg_memory_search(self, memory_plugin, query: str) -> List[str]:
+        """Knowledge graph entity search. Returns formatted hit strings."""
+        hits: List[str] = []
+        kg = getattr(memory_plugin, "_kg", None)
+        if kg is None:
+            return hits
+        try:
+            kg_hits = await asyncio.to_thread(kg.search, query, 5) or []
+            for h in kg_hits:
+                if isinstance(h, dict):
+                    content = h.get("content", h.get("label", ""))
+                else:
+                    content = str(h)
+                if content:
+                    hits.append(f"- [知识图谱] {content[:300]}")
+        except Exception as exc:
+            logger.debug("KG memory search failed: %s", exc)
+        return hits
 
     def _prepare_tools(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Pick relevant skills and prepare tool schemas.
 
         When OS mode is enabled (via /os-on), system_run is automatically added
         to the tool list so the LLM can directly call it for system operations.
-
-        Proxy skills (lazy-loaded modules) participate in keyword matching
-        alongside core skills, so the LLM can discover and auto-load optional
-        modules when the user's query is relevant.
         """
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
 
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
-            # 提高 limit 到 8，让代理技能（可选模块）也有机会被选中
-            chosen = self._skills.pick_relevant(turn.input_text, limit=8)
+            chosen = self._skills.pick_relevant(turn.input_text, limit=4)
             web_search = self._skills.get("web_search")
             if web_search and web_search not in chosen:
                 chosen.insert(0, web_search)
             # OS mode: auto-add system_run so the LLM can call it directly
-            if self._os_mode_enabled:
+            if turn.session_id in self._os_mode_sessions:
                 system_run = self._skills.get("system_run")
                 if system_run and system_run not in chosen:
                     chosen.append(system_run)
-            # 检测用户尝试添加服务商（包含 API key 模式），强制添加 add_provider 技能
-            _text = turn.input_text.lower()
-            _has_api_key = bool(__import__("re").search(
-                r"(?:key[:：]?\s*)?(?:nvapi-|sk-|ak-|api[_-]?key)", _text
-            ))
-            if _has_api_key:
-                add_provider = self._skills.get("add_provider")
-                if add_provider and add_provider not in chosen:
-                    chosen.insert(0, add_provider)
             turn.skills = [s.id for s in chosen]
             tools = [s.schema for s in chosen]
         else:
@@ -988,19 +914,12 @@ class Coordinator(Plugin):
 
         The thinking is NOT shown to the user directly — it drives execution.
         """
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
-
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
 
         # Build the thinking prompt.  We attach it as an additional user
         # message so the model has access to the full conversation history
         # (including memory) while planning.
         memory_snippets = turn.meta.get("memory_snippets") or ""
-        if lang.startswith("zh"):
+        if self._is_zh():
             plan_prompt = (
                 "【内部思考 — 不要输出给用户，只用于内部规划】\n\n"
                 "请按以下 7 步为当前用户的问题做一个结构化规划。每一步都必须写清楚，不能省略。\n\n"
@@ -1049,14 +968,14 @@ class Coordinator(Plugin):
             # loop sees it — this is the key behavioral change. We also tag
             # it with a visible header so the LLM understands this is its
             # own plan.
-            header = "【我的执行计划】\n" if lang.startswith("zh") else "[My execution plan]\n"
+            header = "【我的执行计划】\n" if self._is_zh() else "[My execution plan]\n"
             plan_message = {"role": "assistant", "content": header + thinking_text}
             messages.append(plan_message)
             # Append a short user follow-up so conversation flow is preserved
             # and the model knows it should now execute the plan.
             prompt = (
                 "好。现在按照上面的计划一步一步执行。"
-                if lang.startswith("zh")
+                if self._is_zh()
                 else "Good. Now execute the plan step by step."
             )
             messages.append({"role": "user", "content": prompt})
@@ -1075,20 +994,13 @@ class Coordinator(Plugin):
         The reflection is injected into the message flow as an assistant message,
         so the subsequent tool loop can benefit from the improved plan.
         """
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
-
-        from i18n import get_language
-        lang = (get_language() or "zh").lower()
 
         plan_text = turn.meta.get("thinking", "")
         if not plan_text:
             logger.debug("reflect phase skipped: no thinking available")
             return
 
-        if lang.startswith("zh"):
+        if self._is_zh():
             reflect_prompt = (
                 "【内部反思 — 不要输出给用户】\n\n"
                 "你刚刚制定了一个执行计划。现在请站在更高的角度审视这个计划，找出潜在问题和改进空间。\n\n"
@@ -1131,13 +1043,13 @@ class Coordinator(Plugin):
 
         if reflect_text:
             turn.meta["reflection"] = reflect_text
-            header = "【我的反思与改进】\n" if lang.startswith("zh") else "[My reflection and improvements]\n"
+            header = "【我的反思与改进】\n" if self._is_zh() else "[My reflection and improvements]\n"
             reflect_message = {"role": "assistant", "content": header + reflect_text}
             messages.append(reflect_message)
             # Append a user prompt to acknowledge reflection and continue
             prompt = (
                 "好。根据你的反思，如果需要调整计划，请立即执行调整后的方案。"
-                if lang.startswith("zh")
+                if self._is_zh()
                 else "Good. Based on your reflection, execute with any adjustments needed."
             )
             messages.append({"role": "user", "content": prompt})
@@ -1155,13 +1067,6 @@ class Coordinator(Plugin):
         Returns True if delegation was successful (no need for further processing),
         False otherwise (fall back to normal flow).
         """
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
-
-        from i18n import get_language
-        _lang = (get_language() or "zh").lower()
 
         try:
             from core.sub_agent import DelegationManager
@@ -1197,10 +1102,6 @@ class Coordinator(Plugin):
 
     async def _compress_context(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Compress context if approaching token limit."""
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
 
         if not (self.ctx and self.ctx.config):
             return
@@ -1226,115 +1127,8 @@ class Coordinator(Plugin):
             turn.meta["context_compressed"] = True
             turn.meta["compressed_messages"] = len(early)
 
-    async def _try_delegation(self, turn: TurnContext, messages: List[Dict[str, Any]]) -> bool:
-        """Try delegation for complex tasks. Returns True if delegation was used."""
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-
-        if not (turn.meta.get("enable_delegation") or self._detect_complex_task(turn.input_text)):
-            return False
-
-        try:
-            from core.sub_agent import DelegationManager
-            delegator = DelegationManager(self._llm, self._skills)
-            result = await delegator.execute(turn.input_text, turn.model)
-
-            if result.get("parallel"):
-                turn.result = result["result"]
-                turn.meta["delegation_used"] = True
-                turn.meta["subtask_count"] = len(result["subtasks"])
-                turn.meta["delegation_total_tokens"] = result["total_tokens"]
-                turn.record_success(result["result"], result.get("total_tokens", 0))
-
-                # Auto-extract entities
-                if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
-                    full_text = f"{turn.input_text}\n{result['result']}"
-                    try:
-                        count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
-                        if count > 0:
-                            logger.debug("Extracted %d entities from turn %s", count, turn.session_id)
-                    except Exception as exc:
-                        logger.debug("KG extraction failed: %s", exc)
-
-                self.publish("turn_completed", turn=turn)
-                logger.info("delegation completed (%d subtasks, %d tokens, %.2fs)",
-                            result.get("subtask_count", 0),
-                            result.get("total_tokens", 0),
-                            result.get("duration_ms", 0) / 1000)
-                return True
-        except Exception as exc:
-            logger.warning("delegation failed, falling back to normal flow: %s", exc)
-
-        return False
-
-    def _parse_text_tool_calls(self, text: str, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """工具降级：从 LLM 文本回复中解析工具调用意图。
-
-        当模型不支持 function calling 时，LLM 可能在文本中表达工具调用意图。
-        支持以下格式：
-        1. ```json {"tool": "web_search", "args": {...}} ```
-        2. ```tool_call:web_search({"query": "..."})```
-        3. <tool_call>{"name": "web_search", "arguments": {...}}</tool_call>
-        """
-        if not text or not tools:
-            return []
-
-        import json
-        import re
-
-        # 构建可用工具名集合
-        tool_names = set()
-        for t in tools:
-            name = t.get("function", {}).get("name") or t.get("name")
-            if name:
-                tool_names.add(name)
-
-        parsed_calls: List[Dict[str, Any]] = []
-
-        # 格式1: ```json {"tool": "...", "args": {...}} ```
-        for match in re.finditer(r"```(?:json)?\s*(\{[^`]+?\})\s*```", text, re.DOTALL):
-            try:
-                data = json.loads(match.group(1))
-                name = data.get("tool") or data.get("name") or data.get("function")
-                args = data.get("args") or data.get("arguments") or data.get("parameters") or {}
-                if name and name in tool_names:
-                    parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
-            except (json.JSONDecodeError, KeyError, TypeError):
-                continue
-
-        # 格式2: <tool_call>...</tool_call>
-        if not parsed_calls:
-            for match in re.finditer(r"<tool_call>\s*(\{[^<]+?\})\s*</tool_call>", text, re.DOTALL):
-                try:
-                    data = json.loads(match.group(1))
-                    name = data.get("name") or data.get("tool")
-                    args = data.get("arguments") or data.get("args") or {}
-                    if name and name in tool_names:
-                        parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    continue
-
-        # 格式3: tool_name({"key": "value"}) 行内调用
-        if not parsed_calls:
-            for name in tool_names:
-                pattern = rf"{re.escape(name)}\s*\(\s*(\{{[^)]+\}})\s*\)"
-                for match in re.finditer(pattern, text):
-                    try:
-                        args = json.loads(match.group(1))
-                        parsed_calls.append({"id": f"text_call_{len(parsed_calls)}", "name": name, "args": args})
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-
-        return parsed_calls[:3]  # 最多解析 3 个调用，防止滥用
-
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
         """Execute tool-call loop until final reply."""
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
         if tools is None:
             raise RuntimeError("tools cannot be None")
 
@@ -1351,18 +1145,6 @@ class Coordinator(Plugin):
             )
             total_tokens += int(resp.get("tokens_used") or 0)
             tool_calls = resp.get("tool_calls") or []
-
-            # --- 工具降级方案 ---
-            # 当模型不支持 tools（如 sensenova）时，tool_calls 为空
-            # 但 LLM 可能在文本中表达了工具调用意图
-            # 检测文本中的 JSON 工具调用格式并解析
-            # 支持多轮（ReAct 循环）：每轮都可以解析文本工具调用
-            if not tool_calls and tools:
-                text = resp.get("text", "") or ""
-                parsed_calls = self._parse_text_tool_calls(text, tools)
-                if parsed_calls:
-                    tool_calls = parsed_calls
-                    # 不 break，继续执行工具调用
 
             if not tool_calls:
                 final_text = resp.get("text", "") or ""
@@ -1411,10 +1193,6 @@ class Coordinator(Plugin):
         iteration: int,
     ) -> None:
         """Execute tool calls and append results to messages."""
-        if messages is None:
-            raise RuntimeError("messages cannot be None")
-        if turn is None:
-            raise RuntimeError("turn cannot be None")
         if tool_calls is None:
             raise RuntimeError("tool_calls cannot be None")
         if failed_skills is None:
@@ -1472,9 +1250,6 @@ class Coordinator(Plugin):
 
     async def _handle_loop_exhaustion(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Handle when tool loop reaches max iterations."""
-        assert messages is not None, "messages cannot be None"
-        assert turn is not None, "turn cannot be None"
-
         messages.append({
             "role": "user",
             "content": (
@@ -1539,55 +1314,687 @@ class Coordinator(Plugin):
         except Exception as exc:
             logger.debug("KG extraction failed: %s", exc)
 
-    def _learn_user_preferences(self, turn: TurnContext) -> None:
-        """从对话中自动提取用户偏好并保存到记忆。
+    # ------------------------------------------------------- smart boost
 
-        检测用户输入中的偏好信号：
-        - "我喜欢/不喜欢/偏好/讨厌..."
-        - "用 xxx 不要 yyy"
-        - "以后都用 xxx"
-        - "记住我喜欢 xxx"
+    def _lightweight_model(self, turn: TurnContext) -> str:
+        """Pick the lightweight model for auxiliary calls when available.
+
+        Auxiliary calls (clarification, self-check, polish, reflection, tool
+        chain planning) don't need the full power of the primary model — using
+        a cheaper/faster model here cuts cost and latency significantly.
         """
-        if not self.ctx or not hasattr(self.ctx, 'memory'):
-            return
+        if self.ctx and self.ctx.config:
+            lw = self.ctx.config.get("llm", {}).get("lightweight_model")
+            if lw:
+                return lw
+        return turn.model
 
-        text = turn.input_text or ""
-        if not text.strip():
-            return
+    async def _llm_quick_call(
+        self, prompt: str, turn: TurnContext, max_tokens: int = 200,
+        use_lightweight: bool = True,
+    ) -> Optional[str]:
+        """One-shot LLM call for auxiliary tasks (no tools, no history).
 
-        import re
-
-        preferences: List[str] = []
-
-        # 模式1: "我喜欢/偏好/讨厌..."
-        for match in re.finditer(r"(?:我喜欢|我偏好|我讨厌|我不喜欢|我爱|我习惯)(.+?)[。，.!？\n]", text):
-            pref = match.group(1).strip()
-            if 2 <= len(pref) <= 50:
-                sentiment = "喜欢" if "喜欢" in match.group(0) or "偏好" in match.group(0) or "爱" in match.group(0) else "不喜欢"
-                preferences.append(f"用户{sentiment}：{pref}")
-
-        # 模式2: "以后都用 xxx" / "记住..."
-        for match in re.finditer(r"(?:以后都?用|记住|默认用|总是用)(.+?)[。，.!？\n]", text):
-            pref = match.group(1).strip()
-            if 2 <= len(pref) <= 50:
-                preferences.append(f"用户偏好：{pref}")
-
-        # 模式3: "用 xxx 不要 yyy"
-        for match in re.finditer(r"用\s*(\S+?)\s*(?:不要|别|不)\s*(\S+)", text):
-            preferences.append(f"用户偏好：用{match.group(1)}，不用{match.group(2)}")
-
-        if not preferences:
-            return
-
-        # 保存到记忆
+        Centralizes the try/except + token accounting that was duplicated
+        across 5 smart-boost methods. Returns the text reply or None on failure.
+        """
+        if self._llm is None:
+            return None
+        model = self._lightweight_model(turn) if use_lightweight else turn.model
         try:
-            memory = self.ctx.memory
-            for pref in preferences:
-                # 使用 memory.add 如果可用，否则用 remember
-                if hasattr(memory, 'add'):
-                    memory.add(text=pref, metadata={"type": "preference", "session": turn.session_id})
-                elif hasattr(memory, 'remember'):
-                    memory.remember(text=pref, metadata={"type": "preference"})
-            logger.debug("Learned %d user preferences from turn %s", len(preferences), turn.session_id)
+            resp = await self._llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=model,
+                max_tokens=max_tokens,
+                tools=None,
+            )
+            text = (resp.get("text") or "").strip()
+            # Account for tokens used by auxiliary calls
+            tokens = int(resp.get("tokens_used") or 0)
+            if tokens:
+                turn.tokens_used = (turn.tokens_used or 0) + tokens
+            return text
         except Exception as exc:
-            logger.debug("Preference learning failed: %s", exc)
+            logger.debug("auxiliary LLM call failed: %s", exc)
+            return None
+
+    def _is_zh(self) -> bool:
+        """Cached language check (zh vs en) for prompt selection.
+
+        The language is detected once per turn (``_run_turn`` resets
+        ``_cached_lang``) and reused across the 8+ calls made during a turn,
+        avoiding repeated ``from i18n import get_language`` and function
+        calls on the hot path.
+        """
+        if self._cached_lang is not None:
+            return self._cached_lang.startswith("zh")
+        try:
+            from i18n import get_language
+            lang = get_language() or "zh"
+        except Exception:
+            lang = "en"
+        self._cached_lang = lang
+        return lang.lower().startswith("zh")
+
+    async def _try_clarification(
+        self, messages: List[Dict[str, Any]], turn: TurnContext,
+    ) -> bool:
+        """Check if the user's request is ambiguous and ask for clarification.
+
+        Only triggered for complex+ tasks. Returns True if clarification was
+        asked (i.e. turn.result is set and the caller should stop early).
+        Returns False if the task is clear enough to proceed normally.
+        """
+        if messages is None or turn is None:
+            return False
+
+        user_text = turn.input_text or ""
+        zh = self._is_zh()
+
+        # Quick heuristic: very short or ambiguous inputs likely need clarification
+        ambiguous_keywords = (
+            ["那个", "这个", "它", "帮我弄", "搞一下", "处理一下", "你看着办", "随便", "差不多"]
+            if zh else
+            ["do it", "fix it", "handle it", "that thing", "whatever"]
+        )
+        has_ambiguous_kw = any(kw in user_text.lower() for kw in ambiguous_keywords)
+        # Only do LLM-based check for medium-length inputs that might be ambiguous
+        if not has_ambiguous_kw and len(user_text) >= 15 and len(user_text) < 50:
+            return False
+
+        # Use a lightweight LLM call to judge ambiguity and generate questions
+        if zh:
+            check_prompt = (
+                f"请判断以下用户请求是否存在明显的歧义或信息不足，"
+                f"导致你无法准确执行。\n\n"
+                f"用户请求：\"{user_text[:500]}\"\n\n"
+                f"如果有歧义，请提出 1-3 个最关键的澄清问题，"
+                f"用编号列表形式输出。\n"
+                f"如果没有歧义或信息足够，请只回答『没问题』三个字。"
+            )
+        else:
+            check_prompt = (
+                f"Determine if the following user request has significant ambiguity "
+                f"or missing information that prevents you from executing it accurately.\n\n"
+                f"User request: \"{user_text[:500]}\"\n\n"
+                f"If ambiguous, ask 1-3 key clarification questions as a numbered list.\n"
+                f"If clear enough, reply with only the word 'CLEAR'."
+            )
+
+        reply = await self._llm_quick_call(check_prompt, turn, max_tokens=200)
+        if not reply:
+            return False
+
+        is_clear = (
+            reply.startswith("没问题") or
+            reply.upper().startswith("CLEAR") or
+            len(reply) < 10
+        )
+        if is_clear:
+            return False
+
+        # Model has clarification questions — present them to the user
+        intro = (
+            "在开始之前，我需要确认几个问题，以确保给你最准确的结果：\n\n"
+            if zh else
+            "Before I start, I need to clarify a few things to give you the best result:\n\n"
+        )
+        turn.record_success(intro + reply, 0)  # tokens already accounted in _llm_quick_call
+        turn.meta["clarification_asked"] = True
+        logger.info("clarification asked for ambiguous request (%d chars)", len(reply))
+        return True
+
+    async def _self_verify(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, complexity: float,
+    ) -> None:
+        """Verify that the answer actually addresses the user's question.
+
+        For simple tasks: quick check (did I answer the question?)
+        For complex+: deeper verification (facts, logic, completeness)
+
+        If issues are found, we inject a correction hint and do one more
+        tool-loop iteration to fix it.
+        """
+        if not turn.result:
+            return
+
+        zh = self._is_zh()
+        answer = turn.result or ""
+        question = turn.input_text or ""
+
+        # Lightweight check for simple tasks: did we actually answer?
+        is_deep = complexity >= COMPLEX_COMPLEXITY_THRESHOLD
+
+        if zh:
+            if is_deep:
+                verify_prompt = (
+                    "【内部自检 — 不要输出给用户】\n\n"
+                    "请检查以下回答是否正确、完整地回应了用户的问题。"
+                    "从三个维度评分（每项0-10分）：\n"
+                    "1. 相关性：回答是否紧扣问题，没有答非所问\n"
+                    "2. 准确性：事实是否正确，逻辑是否自洽\n"
+                    "3. 完整性：是否覆盖了问题的所有方面\n\n"
+                    f"用户问题：{question[:300]}\n\n"
+                    f"当前回答：{answer[:800]}\n\n"
+                    "如果三项都>=8分，只回答『通过』。\n"
+                    "如果有问题，用一句话指出最严重的问题是什么，以及如何改进。"
+                )
+            else:
+                verify_prompt = (
+                    "【快速自检】这个回答是否直接回答了用户的问题？"
+                    "用『是』或『否』回答，不要解释。\n\n"
+                    f"问题：{question[:200]}\n"
+                    f"回答：{answer[:500]}"
+                )
+        else:
+            if is_deep:
+                verify_prompt = (
+                    "[Internal self-check — DO NOT show to user]\n\n"
+                    "Check if the following answer correctly and completely addresses "
+                    "the user's question. Rate 3 dimensions (0-10 each):\n"
+                    "1. Relevance: does it answer the question, not something else?\n"
+                    "2. Accuracy: are facts correct and logic consistent?\n"
+                    "3. Completeness: does it cover all aspects of the question?\n\n"
+                    f"User question: {question[:300]}\n\n"
+                    f"Current answer: {answer[:800]}\n\n"
+                    "If all three >= 8, reply with only 'PASS'.\n"
+                    "If there are issues, state the most serious problem in one sentence "
+                    "and how to fix it."
+                )
+            else:
+                verify_prompt = (
+                    "[Quick self-check] Does this answer directly address the user's question? "
+                    "Reply with only YES or NO, no explanation.\n\n"
+                    f"Question: {question[:200]}\n"
+                    f"Answer: {answer[:500]}"
+                )
+
+        result = await self._llm_quick_call(verify_prompt, turn, max_tokens=150)
+        if not result:
+            return
+
+        passed = (
+            result.startswith("通过") or
+            result.upper().startswith("PASS") or
+            result.startswith("是") or
+            result.upper().startswith("YES")
+        )
+
+        if passed:
+            turn.meta["self_verify"] = "passed"
+            logger.debug("self-verification passed")
+            return
+
+        # Self-verification found issues — inject correction and do one more iteration
+        turn.meta["self_verify"] = "corrected"
+        turn.meta["self_verify_issue"] = result
+        logger.info("self-verification found issues, correcting: %s", result[:100])
+
+        correction_msg = (
+            f"[自检发现问题：{result}]\n\n"
+            "请根据以上反馈修正你的答案，使其更准确、更完整。"
+            "如果需要，可以继续调用工具。"
+            if zh else
+            f"[Self-check found issue: {result}]\n\n"
+            "Please revise your answer based on this feedback to make it more "
+            "accurate and complete. You may continue using tools if needed."
+        )
+
+        messages.append({"role": "user", "content": correction_msg})
+
+        # Run one more tool-loop iteration to fix the answer
+        tools = self._prepare_tools(turn)
+        prev_result = turn.result
+        await self._tool_loop(messages, turn, tools)
+
+        # If the correction didn't produce a better result, keep the original
+        if not turn.result or len(turn.result) < len(prev_result or "") // 2:
+            turn.result = prev_result
+
+    async def _verify_and_polish(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, complexity: float,
+    ) -> None:
+        """Combined self-verification + final polish in ONE LLM call.
+
+        For complex+ tasks this saves a round-trip vs running _self_verify
+        then _final_polish separately. The model is asked to:
+          1. Check the answer for issues (relevance/accuracy/completeness)
+          2. If OK, output the polished version directly
+          3. If issues found, output the corrected + polished version
+
+        If the answer is very short, skip polishing (only verify).
+        """
+        if not turn.result:
+            return
+
+        zh = self._is_zh()
+        answer = turn.result or ""
+        question = turn.input_text or ""
+
+        # Short answers: only verify, skip polish (saves tokens)
+        skip_polish = len(answer) < 200
+
+        if zh:
+            if skip_polish:
+                prompt = (
+                    "【内部自检 — 不要输出给用户】\n\n"
+                    "请检查以下回答是否正确回答了用户的问题。"
+                    "如果正确，只回答『通过』。如果有问题，用一句话指出并给出修正后的答案。\n\n"
+                    f"用户问题：{question[:300]}\n\n"
+                    f"当前回答：{answer[:800]}"
+                )
+            else:
+                prompt = (
+                    "【自检并优化 — 内部使用】\n\n"
+                    "请对以下回答执行两步操作：\n"
+                    "1. 自检：回答是否正确、完整地回应了用户问题？\n"
+                    "2. 优化：在保持核心内容不变的前提下，优化结构（分点/表格）、"
+                    "精炼语言、突出重点、长答案加要点总结。\n\n"
+                    f"用户问题：{question[:300]}\n\n"
+                    f"原始回答：\n{answer[:2000]}\n\n"
+                    "请直接输出优化后的完整回答。如果原回答有明显错误，请在优化时一并修正。"
+                )
+        else:
+            if skip_polish:
+                prompt = (
+                    "[Internal self-check — DO NOT show to user]\n\n"
+                    "Check if the following answer correctly addresses the user's question. "
+                    "If correct, reply with only 'PASS'. If there are issues, state the problem "
+                    "in one sentence and provide the corrected answer.\n\n"
+                    f"User question: {question[:300]}\n\n"
+                    f"Current answer: {answer[:800]}"
+                )
+            else:
+                prompt = (
+                    "[Self-check and polish — internal use]\n\n"
+                    "Perform two steps on the following answer:\n"
+                    "1. Self-check: does it correctly and completely address the question?\n"
+                    "2. Polish: keeping core content unchanged, improve structure "
+                    "(headings/bullets/tables), tighten language, highlight key points, "
+                    "add a brief summary for long answers.\n\n"
+                    f"User question: {question[:300]}\n\n"
+                    f"Original answer:\n{answer[:2000]}\n\n"
+                    "Output the full polished answer directly. Fix any obvious errors while polishing."
+                )
+
+        max_tok = 150 if skip_polish else min(len(answer) + 500, 4000)
+        result = await self._llm_quick_call(prompt, turn, max_tokens=max_tok)
+        if not result:
+            return
+
+        if skip_polish:
+            # Verify-only path
+            passed = (
+                result.startswith("通过") or
+                result.upper().startswith("PASS") or
+                result.startswith("是") or
+                result.upper().startswith("YES")
+            )
+            if passed:
+                turn.meta["self_verify"] = "passed"
+            else:
+                turn.meta["self_verify"] = "corrected"
+                turn.meta["self_verify_issue"] = result
+                logger.info("self-verification found issues: %s", result[:100])
+        else:
+            # Combined verify+polish path
+            if result and len(result) > len(answer) // 2:
+                turn.result = result
+                turn.meta["polished"] = True
+                turn.meta["self_verify"] = "passed"
+                logger.debug(
+                    "verify+polish applied (%d -> %d chars)", len(answer), len(result)
+                )
+
+    async def _post_reflect(self, turn: TurnContext) -> None:
+        """Post-execution reflection for expert-tier tasks.
+
+        After completing a complex task, review what went well and what could
+        be improved. The insights are stored in turn.meta for the self-improvement
+        system to learn from.
+
+        This is a meta-cognitive step that helps the agent get better over time.
+        """
+        if turn is None:
+            return
+
+        zh = self._is_zh()
+        answer = turn.result or ""
+        question = turn.input_text or ""
+        tokens_used = turn.tokens_used or 0
+        duration = turn.duration_seconds or 0
+
+        if zh:
+            reflect_prompt = (
+                "【执行后复盘 — 内部使用，不要输出给用户】\n\n"
+                "请对刚刚完成的任务进行复盘：\n\n"
+                f"任务：{question[:300]}\n"
+                f"回答长度：{len(answer)} 字\n"
+                f"消耗 token：{tokens_used}\n"
+                f"用时：{duration:.1f} 秒\n\n"
+                "请回答以下问题（简短回答）：\n"
+                "1. 执行过程中最有效的一步是什么？\n"
+                "2. 最大的弯路或浪费在哪里？\n"
+                "3. 如果重做一次，你会怎么改进？\n"
+                "4. 这个回答的质量打几分（0-10）？为什么？"
+            )
+        else:
+            reflect_prompt = (
+                "[Post-execution review — internal use only, do not show to user]\n\n"
+                "Review the task you just completed:\n\n"
+                f"Task: {question[:300]}\n"
+                f"Answer length: {len(answer)} chars\n"
+                f"Tokens used: {tokens_used}\n"
+                f"Duration: {duration:.1f}s\n\n"
+                "Answer these questions briefly:\n"
+                "1. What was the most effective step in execution?\n"
+                "2. What was the biggest detour or waste?\n"
+                "3. If you did it again, how would you improve?\n"
+                "4. Rate the answer quality (0-10) and why?"
+            )
+
+        reflection = await self._llm_quick_call(reflect_prompt, turn, max_tokens=300)
+        if reflection:
+            turn.meta["post_reflection"] = reflection
+            logger.debug("post-reflection completed (%d chars)", len(reflection))
+
+    async def _plan_tool_chain(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]],
+    ) -> None:
+        """Plan a tool execution chain for expert-tier tasks.
+
+        Instead of the model discovering tools one by one in the loop,
+        we pre-plan the optimal tool sequence. This reduces wasted tool
+        calls and makes execution more strategic.
+
+        The plan is injected into messages as guidance for the tool loop.
+        """
+        if not tools:
+            return
+
+        zh = self._is_zh()
+        tool_names = [
+            t.get("function", {}).get("name", "") for t in tools
+            if isinstance(t, dict)
+        ]
+        tool_list = ", ".join(tool_names[:15])
+
+        if zh:
+            plan_prompt = (
+                "【工具链规划 — 内部使用】\n\n"
+                f"可用工具：{tool_list}\n\n"
+                f"用户任务：{turn.input_text[:300]}\n\n"
+                "请规划一个最优的工具调用顺序：\n"
+                "1. 哪些工具应该被调用？\n"
+                "2. 调用顺序是什么？哪些可以并行？\n"
+                "3. 每个工具的预期输入输出是什么？\n"
+                "4. 如果某个工具失败了，替代方案是什么？\n\n"
+                "用编号列表输出规划结果。"
+            )
+        else:
+            plan_prompt = (
+                "[Tool chain planning — internal use]\n\n"
+                f"Available tools: {tool_list}\n\n"
+                f"User task: {turn.input_text[:300]}\n\n"
+                "Plan the optimal tool call sequence:\n"
+                "1. Which tools should be called?\n"
+                "2. In what order? Which can run in parallel?\n"
+                "3. What's the expected input/output for each tool?\n"
+                "4. What's the fallback if a tool fails?\n\n"
+                "Output as a numbered list."
+            )
+
+        plan = await self._llm_quick_call(
+            plan_prompt, turn, max_tokens=400,
+            # Tool chain planning benefits from the full model
+            use_lightweight=False,
+        )
+        if plan:
+            header = "【工具链执行规划】\n" if zh else "[Tool chain plan]\n"
+            messages.append({"role": "assistant", "content": header + plan})
+            prompt = (
+                "好。按照这个规划执行工具调用。"
+                if zh else
+                "Good. Execute tool calls following this plan."
+            )
+            messages.append({"role": "user", "content": prompt})
+            turn.meta["tool_chain_plan"] = plan
+            logger.debug("tool chain plan created (%d chars)", len(plan))
+
+    # ======================================================== Intelligent Features
+
+    def _get_sentiment(self) -> Any:
+        """Lazy-load sentiment analyzer."""
+        if self._sentiment is None:
+            self._sentiment = get_sentiment_analyzer()
+        return self._sentiment
+
+    def _get_suggestions(self) -> Any:
+        """Lazy-load suggestion engine."""
+        if self._suggestions is None:
+            self._suggestions = get_suggestion_engine()
+        return self._suggestions
+
+    def _get_profile(self) -> Any:
+        """Lazy-load user profile store."""
+        if self._profile is None:
+            self._profile = get_profile_store()
+        return self._profile
+
+    def _get_metacognition(self) -> Any:
+        """Lazy-load metacognition engine."""
+        if self._metacognition is None:
+            self._metacognition = get_metacognition_engine()
+        return self._metacognition
+
+    def _get_reasoner(self) -> Any:
+        """Lazy-load step-by-step reasoner."""
+        if self._reasoner is None:
+            self._reasoner = get_step_reasoner()
+        return self._reasoner
+
+    def _get_style_adapter(self) -> StyleAdapter:
+        """Lazy-load style adapter."""
+        if self._style_adapter is None:
+            self._style_adapter = StyleAdapter()
+            # Try to load style from user profile
+            try:
+                profile = self._get_profile()
+                saved_style = profile.get_preference("response_style")
+                if saved_style:
+                    self._style_adapter.set_style(saved_style)
+            except Exception:
+                pass
+        return self._style_adapter
+
+    def _get_failure_recovery(self) -> Any:
+        """Lazy-load failure recovery manager."""
+        if self._failure_recovery is None:
+            self._failure_recovery = get_failure_recovery()
+        return self._failure_recovery
+
+    def _get_dialog_summarizer(self) -> Any:
+        """Lazy-load dialog summarizer."""
+        if self._dialog_summarizer is None:
+            self._dialog_summarizer = get_dialog_summarizer()
+        return self._dialog_summarizer
+
+    async def _record_intelligence(self, turn: TurnContext) -> None:
+        """Record user preferences, sentiment, and patterns."""
+        if not turn.input_text or not turn.result:
+            return
+
+        try:
+            # 1. Analyze sentiment
+            sentiment = self._get_sentiment()
+            analysis = await asyncio.to_thread(sentiment.analyze, turn.input_text)
+            turn.meta["sentiment"] = analysis
+
+            # 2. Record skill usage (from tool_calls in meta)
+            profile = self._get_profile()
+            skills_used = turn.meta.get("skills_used", [])
+            for skill in skills_used:
+                success = "error" not in str(turn.result).lower()
+                await asyncio.to_thread(profile.record_skill_usage, skill, success)
+
+            # 3. Record time pattern
+            await asyncio.to_thread(profile.record_time_pattern)
+
+            # 4. Extract and record topics (simple keyword extraction)
+            topics = self._extract_topics(turn.input_text)
+            for topic in topics[:3]:
+                await asyncio.to_thread(profile.record_topic, topic)
+
+            # 5. Update language preference if detected
+            if hasattr(turn, "detected_lang"):
+                await asyncio.to_thread(
+                    profile.set_preference, "language", turn.detected_lang
+                )
+
+            # 6. Track dialog summary turn counter
+            summarizer = self._get_dialog_summarizer()
+            turn_count = summarizer.increment_turn(turn.session_id)
+            turn.meta["turn_count"] = turn_count
+
+        except Exception as exc:
+            logger.debug("intelligence recording failed: %s", exc)
+
+    def _extract_topics(self, text: str) -> List[str]:
+        """Extract topic keywords from user input."""
+        # Simple keyword-based topic extraction
+        # In production, could use NLP/LLM for better extraction
+        topics = []
+
+        # Technical topics
+        tech_patterns = [
+            (r"代码|编程|python|javascript|java|rust", "编程"),
+            (r"搜索|查找|查询|search", "搜索"),
+            (r"文档|文件|file|document", "文档"),
+            (r"系统|shell|命令|command", "系统"),
+            (r"计算|数学|math|calc", "计算"),
+            (r"图片|图像|image|photo", "图片"),
+            (r"音频|语音|audio|voice", "音频"),
+            (r"笔记|记录|note|save", "笔记"),
+        ]
+
+        for pattern, topic in tech_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                topics.append(topic)
+
+        return topics
+
+    async def _generate_suggestions(self, turn: TurnContext) -> List[Dict[str, Any]]:
+        """Generate proactive suggestions based on context."""
+        try:
+            suggestions_engine = self._get_suggestions()
+            skills_used = turn.meta.get("skills_used", [])
+            suggestions = await asyncio.to_thread(
+                suggestions_engine.generate_suggestions,
+                turn.input_text,
+                turn.result,
+                skills_used,
+                {"complexity": getattr(turn, "estimated_complexity", 0.0)},
+            )
+            return suggestions
+        except Exception as exc:
+            logger.debug("suggestion generation failed: %s", exc)
+            return []
+
+    def _should_show_suggestions(self) -> bool:
+        """Check if suggestions should be displayed to user."""
+        # Check config for suggestion display preference
+        if self.ctx and self.ctx.config:
+            return self.ctx.config.get("agent", {}).get("show_suggestions", True)
+        return True  # Default: show suggestions
+
+    def _inject_sentiment_context(
+        self, messages: List[Dict[str, Any]], turn: TurnContext
+    ) -> None:
+        """Inject sentiment analysis into LLM context."""
+        sentiment_data = turn.meta.get("sentiment")
+        if not sentiment_data:
+            return
+
+        sentiment = self._get_sentiment()
+        sentiment_text = sentiment.format_for_llm(sentiment_data)
+        if sentiment_text:
+            # Inject as a system hint before user message
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "user" and i > 0:
+                    messages.insert(i, {"role": "system", "content": sentiment_text})
+                    break
+
+    # --------------------------------------------------------- Metacognition
+
+    async def _analyze_response_quality(self, turn: TurnContext) -> None:
+        """Analyze response quality using metacognition engine."""
+        if not turn.result:
+            return
+
+        try:
+            metacog = self._get_metacognition()
+            skills_used = turn.meta.get("skills_used", [])
+
+            analysis = await asyncio.to_thread(
+                metacog.analyze_response,
+                turn.result,
+                [],  # sources_used
+                skills_used,
+                turn.input_text,
+            )
+            turn.meta["metacognition"] = analysis
+
+            # Add confidence disclaimer if needed (configurable)
+            if self.ctx and self.ctx.config:
+                show_disclaimer = self.ctx.config.get("agent", {}).get(
+                    "show_confidence_note", False
+                )
+            else:
+                show_disclaimer = False
+
+            if show_disclaimer:
+                note = metacog.format_confidence_note(analysis)
+                if note:
+                    turn.result = turn.result + note
+
+            logger.debug(
+                "metacognition: confidence=%.2f risk=%s",
+                analysis["confidence"],
+                analysis["hallucination_risk"],
+            )
+        except Exception as exc:
+            logger.debug("metacognition analysis failed: %s", exc)
+
+    # --------------------------------------------------------- Step-by-step Reasoning
+
+    async def _maybe_inject_cot(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
+        """Inject Chain-of-Thought reasoning prompt for complex tasks."""
+        try:
+            reasoner = self._get_reasoner()
+            task_types = reasoner.detect_task_type(turn.input_text)
+            complexity = getattr(turn, "estimated_complexity", 0.0)
+
+            if not reasoner.should_use_cot(complexity, task_types):
+                return
+
+            # Get available tool names
+            tool_names: List[str] = []
+            if self._skills is not None:
+                tool_names = list(self._skills.list_skills().keys())[:15]  # Limit to avoid too long prompt
+
+            cot_prompt = reasoner.generate_reasoning_prompt(
+                turn.input_text,
+                task_types,
+                tool_names,
+            )
+
+            # Inject CoT prompt before the last user message
+            if messages and messages[-1].get("role") == "user":
+                original_user_msg = messages[-1]["content"]
+                messages[-1]["content"] = cot_prompt + "\n\n" + original_user_msg
+
+            turn.meta["task_types"] = task_types
+            turn.meta["cot_enabled"] = True
+            logger.debug("CoT reasoning enabled for task types: %s", task_types)
+        except Exception as exc:
+            logger.debug("CoT injection failed: %s", exc)

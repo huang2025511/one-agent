@@ -47,6 +47,7 @@ import os
 import re
 import shlex
 import signal
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -190,27 +191,42 @@ def classify_command(command: str) -> Tuple[int, str]:
     # Check DANGEROUS first (most specific patterns).
     # Use re.search (not re.match) so patterns like ";", "&&", "$("
     # are detected anywhere in the command, not just at the start.
-    for pattern in _DANGEROUS_PATTERNS:
-        if re.search(pattern, stripped, re.IGNORECASE):
+    for pattern in _DANGEROUS_PATTERNS_COMPILED:
+        if pattern.search(stripped):
             return (3, f"dangerous operations: {stripped[:60]}")
 
     # Check MEDIUM
-    for cmd, pattern in _MEDIUM_PATTERNS:
-        if re.match(pattern, stripped, re.IGNORECASE):
+    for cmd, pattern in _MEDIUM_PATTERNS_COMPILED:
+        if pattern.match(stripped):
             return (2, f"system modification: {cmd}")
 
     # Check LOW
-    for cmd, pattern in _LOW_PATTERNS:
-        if re.match(pattern, stripped, re.IGNORECASE):
+    for cmd, pattern in _LOW_PATTERNS_COMPILED:
+        if pattern.match(stripped):
             return (1, f"file/system operation: {cmd}")
 
     # Check SAFE
-    for _cmd, pattern in _SAFE_PATTERNS:
-        if re.match(pattern, stripped, re.IGNORECASE):
+    for _cmd, pattern in _SAFE_PATTERNS_COMPILED:
+        if pattern.match(stripped):
             return (0, "safe operation")
 
     # Unknown command → treat as MEDIUM
     return (2, f"unknown command type: {stripped[:60]}")
+
+
+# Pre-compile all patterns at module load time (compiled once, reused forever).
+# This avoids re-compiling the same regex on every classify_command() call,
+# which is a hot path executed before every system command.
+_DANGEROUS_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in _DANGEROUS_PATTERNS]
+_MEDIUM_PATTERNS_COMPILED = [
+    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _MEDIUM_PATTERNS
+]
+_LOW_PATTERNS_COMPILED = [
+    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _LOW_PATTERNS
+]
+_SAFE_PATTERNS_COMPILED = [
+    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _SAFE_PATTERNS
+]
 
 
 # ============================================================
@@ -234,6 +250,7 @@ class PasswordManager:
         self._cached_level: int = 0                  # what level was approved
         self._failed_count: int = 0
         self._lockout_until: float = 0
+        self._lock: threading.Lock = threading.Lock()
 
     def is_configured(self) -> bool:
         """Return True if a password hash is actually set."""
@@ -256,41 +273,49 @@ class PasswordManager:
             return _verify_pbkdf2(password, stored)
         # Legacy SHA-256 (unsalted) — still accepted so existing configs keep working.
         trial = hashlib.sha256(password.encode()).hexdigest()
-        return hmac.compare_digest(trial, stored)
+        if hmac.compare_digest(trial, stored):
+            logger.warning("Password uses deprecated unsalted SHA-256. Please re-set password to upgrade to PBKDF2.")
+            return True
+        return False
 
     def can_attempt(self) -> bool:
         """True if we are not in lockout."""
-        if self._lockout_until > 0 and time.monotonic() < self._lockout_until:
-            remaining = int(self._lockout_until - time.monotonic())
-            logger.warning("password lockout active (%ds remaining)", remaining)
-            return False
-        return True
+        with self._lock:
+            if self._lockout_until > 0 and time.monotonic() < self._lockout_until:
+                remaining = int(self._lockout_until - time.monotonic())
+                logger.warning("password lockout active (%ds remaining)", remaining)
+                return False
+            return True
 
     def record_failure(self) -> None:
-        self._failed_count += 1
-        if self._failed_count >= self._max_attempts:
-            self._lockout_until = time.monotonic() + self._lockout_minutes
-            self._failed_count = 0
-            logger.warning(
-                "password lockout triggered (%d failures, %d min)",
-                self._max_attempts, int(self._lockout_minutes / 60),
-            )
+        with self._lock:
+            self._failed_count += 1
+            if self._failed_count >= self._max_attempts:
+                self._lockout_until = time.monotonic() + self._lockout_minutes
+                self._failed_count = 0
+                logger.warning(
+                    "password lockout triggered (%d failures, %d min)",
+                    self._max_attempts, int(self._lockout_minutes / 60),
+                )
 
     def record_success(self, level: int) -> None:
-        self._failed_count = 0
-        self._lockout_until = 0
-        self._cache_expires_at = time.monotonic() + self._cache_minutes
-        self._cached_level = level
+        with self._lock:
+            self._failed_count = 0
+            self._lockout_until = 0
+            self._cache_expires_at = time.monotonic() + self._cache_minutes
+            self._cached_level = level
 
     def is_cached(self, required_level: int) -> bool:
         """True if password was recently verified for at least this level."""
-        if time.monotonic() < self._cache_expires_at:
-            return self._cached_level >= required_level
-        return False
+        with self._lock:
+            if time.monotonic() < self._cache_expires_at:
+                return self._cached_level >= required_level
+            return False
 
     def invalidate_cache(self) -> None:
-        self._cache_expires_at = 0
-        self._cached_level = 0
+        with self._lock:
+            self._cache_expires_at = 0
+            self._cached_level = 0
 
 
 # ============================================================
@@ -459,6 +484,18 @@ class SystemExecutor(BaseExecutor):
         return (False, True)
 
     # ------------------------------------------------------------ execution
+    @staticmethod
+    def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+        """Kill the subprocess and its entire process group."""
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, AttributeError, OSError):
+            # Fallback: kill just the process
+            try:
+                proc.kill()
+            except (ProcessLookupError, RuntimeError):
+                pass
+
     async def _execute(
         self, command: str, workdir: str, risk_level: int,
     ) -> Dict[str, Any]:
@@ -487,23 +524,23 @@ class SystemExecutor(BaseExecutor):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workdir or ".",
-                preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+                start_new_session=True,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=self._timeout_seconds,
                 )
             except asyncio.TimeoutError:
-                # Kill the entire process group (os.setsid created one)
+                # Kill the entire process group (start_new_session created one)
                 # so child processes don't become orphans.
+                self._kill_process_group(proc)
                 try:
-                    if hasattr(os, "killpg"):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    else:
-                        proc.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-                await proc.wait()
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "system_executor: process did not exit after kill (pid=%s)",
+                        proc.pid,
+                    )
                 return {
                     "ok": False,
                     "error": f"command timed out after {self._timeout_seconds}s",
@@ -538,7 +575,7 @@ class SystemExecutor(BaseExecutor):
         if self._pwd_manager is None:
             return False
         if self._pwd_manager.verify(plaintext):
-            self._pwd_manager.record_success(2)  # verify gives medium access
+            self._pwd_manager.record_success(3)  # cache DANGEROUS level (highest)
             return True
         self._pwd_manager.record_failure()
         return False

@@ -11,18 +11,22 @@ The SkillManager exposes them uniformly as tools consumable by the LLM.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
+import operator
 import os
 import re
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from pydantic import BaseModel
+import httpx
 
 from core.events import Event
-from core.exceptions import InputValidationError, SkillExecutionError  # noqa: F401
+from core.exceptions import InputValidationError  # noqa: F401
 from core.plugin import Plugin
 from memory.knowledge_graph import make_graph_search_handler  # noqa: F401
 from multimodal import make_image_handler, make_transcribe_handler
@@ -34,12 +38,56 @@ from .wechat_login import make_wechat_login_handler  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-# Module-level singleton — shared between skill handler and API
-_doc_store = DocumentStore()
+_DDG_RESULT_PATTERN = re.compile(
+    r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<span[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</span>',
+    re.DOTALL | re.IGNORECASE,
+)
+_DDG_LINK_PATTERN = re.compile(
+    r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', re.DOTALL,
+)
+_BING_ALGO_PATTERN = re.compile(
+    r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Cross-platform file-locking primitives (detected once at module load to
+# avoid re-importing fcntl/msvcrt and re-probing the platform on every call).
+_PLATFORM_IS_WINDOWS = sys.platform == "win32"
+if _PLATFORM_IS_WINDOWS:
+    try:
+        import msvcrt  # noqa: F401
+        _HAS_MSVCRT = True
+    except ImportError:
+        _HAS_MSVCRT = False
+    _HAS_FCNTL = False
+else:
+    try:
+        import fcntl  # noqa: F401
+        _HAS_FCNTL = True
+    except ImportError:
+        _HAS_FCNTL = False
+    _HAS_MSVCRT = False
+
+# Lazy singleton — opened on first use to avoid SQLite I/O at import time.
+_doc_store: Optional[DocumentStore] = None
+
+
+def get_doc_store() -> DocumentStore:
+    """Return the shared DocumentStore, creating it on first call.
+
+    Replaces the old module-level ``_doc_store = DocumentStore()`` which
+    opened a SQLite connection + ran schema migration on every ``import skills``.
+    """
+    global _doc_store
+    if _doc_store is None:
+        _doc_store = DocumentStore()
+    return _doc_store
+
 
 __all__ = [
     "Skill",
     "SkillManager",
+    "get_doc_store",
 ]
 
 
@@ -73,8 +121,6 @@ class Skill:
         self.last_used: Optional[float] = None
 
     async def run(self, args: Dict[str, Any]) -> str:
-        self.uses += 1
-        self.last_used = time.time()
         try:
             # Validate args before execution
             self._validate_args(args)
@@ -150,6 +196,12 @@ class SkillManager(Plugin):
         self._marketplace_dir: Optional[str] = None
         self._mcp_servers: List[Dict[str, Any]] = []
         self._max_loaded_per_turn = 6
+        self._system_executor = None
+        self._sys_exec_lock = asyncio.Lock()
+        self._skill_lock = threading.Lock()
+        self._http_client: Optional[httpx.AsyncClient] = httpx.AsyncClient(
+            timeout=30.0, follow_redirects=True
+        )
 
     # -------------------------------------------------------- lifecycle
     async def setup(self, ctx) -> None:
@@ -172,10 +224,19 @@ class SkillManager(Plugin):
         self._max_loaded_per_turn = cfg.get("max_skills_per_turn", self._max_loaded_per_turn)
         # 保存 ctx 引用供 settings 技能使用
         self._ctx_ref = ctx
-        # 保存 llm 引用供 add_provider 等技能使用
-        self._llm_ref = getattr(ctx, "_llm", None)
         self.bus.subscribe("cron", self._on_cron)
         logger.info("skills loaded: %d", len(self._skills))
+
+    async def stop(self) -> None:
+        # Close the shared httpx client created in __init__ so connections
+        # are returned to the pool / sockets are closed on shutdown.
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception as exc:
+                logger.warning("failed to close shared http client: %s", exc)
+            self._http_client = None
+        await super().stop()
 
     # ---------------------------------------------------------- public
     def all_skill_ids(self) -> List[str]:
@@ -184,26 +245,16 @@ class SkillManager(Plugin):
     def get(self, id: str) -> Optional[Skill]:
         return self._skills.get(id)
 
-    def pick_relevant(self, text: str, limit: int = 8) -> List[Skill]:
+    def pick_relevant(self, text: str, limit: int = 4) -> List[Skill]:
         """Simple keyword relevance — pick N skills whose title/description
         contain words from the user query.  This avoids loading the entire
         skill catalog into the LLM context.
-
-        Supports both English (\\w{3,}) and Chinese (2+ chars) keyword matching.
         """
-        # 英文关键词：3字符以上的单词
-        query_words = set(w.lower() for w in re.findall(r"[a-zA-Z]{3,}", text))
-        # 中文关键词：提取2-4字的中文片段（滑动窗口）
-        chinese_chars = re.findall(r"[\u4e00-\u9fa5]+", text)
-        for segment in chinese_chars:
-            # 对每个中文连续片段，提取2字和3字子串
-            for length in (2, 3, 4):
-                for i in range(len(segment) - length + 1):
-                    query_words.add(segment[i:i + length])
+        query_words = set(w.lower() for w in re.findall(r"\w{3,}", text))
         scored: List[tuple] = []
         for skill in self._skills.values():
             hay = f"{skill.title} {skill.description}".lower()
-            hits = sum(1 for w in query_words if w.lower() in hay)
+            hits = sum(1 for w in query_words if w in hay)
             if hits > 0:
                 scored.append((hits, skill.title, skill))
         scored.sort(reverse=True)
@@ -213,6 +264,9 @@ class SkillManager(Plugin):
         skill = self._skills.get(skill_id)
         if skill is None:
             return f"[unknown skill: {skill_id}]"
+        with self._skill_lock:
+            skill.uses += 1
+            skill.last_used = time.time()
         return await skill.run(args)
 
     async def _on_cron(self, event: Event) -> None:
@@ -234,18 +288,23 @@ class SkillManager(Plugin):
         root = Path(directory)
         if not root.exists():
             return
+        # Build into a fresh dict and swap the reference atomically so that
+        # concurrent readers (dispatch/get/pick_relevant) never observe a
+        # partially-mutated self._skills mapping mid-scan.
+        new_skills = dict(self._skills)
         for path in sorted(root.rglob("*.md")):
             try:
                 body = path.read_text(encoding="utf-8")
                 skill = self._parse_markdown_skill(path, body)
                 if skill is not None:
-                    self._skills[skill.id] = skill
+                    new_skills[skill.id] = skill
             except (OSError, UnicodeDecodeError) as exc:
                 logger.error("failed to load %s: %s", path, exc, exc_info=True)
                 continue
             except Exception as exc:
                 logger.error("failed to load %s with unexpected error: %s", path, exc, exc_info=True)
                 continue
+        self._skills = new_skills
 
     def _parse_markdown_skill(self, path: Path, body: str) -> Optional[Skill]:
         # Expect a YAML front-matter block at the top:
@@ -281,6 +340,40 @@ class SkillManager(Plugin):
             },
         }
 
+        # Security: skills shipped from community/marketplace directories are
+        # untrusted. A malicious .md could declare an arbitrary shell command
+        # and gain RCE, so restrict the leading command to a safe whitelist.
+        if command:
+            norm_path = os.path.normpath(os.path.abspath(str(path)))
+            untrusted_roots = []
+            if self._community_dir:
+                untrusted_roots.append(
+                    os.path.normpath(os.path.abspath(self._community_dir))
+                )
+            if self._marketplace_dir:
+                untrusted_roots.append(
+                    os.path.normpath(os.path.abspath(self._marketplace_dir))
+                )
+            is_untrusted = any(
+                norm_path == root or norm_path.startswith(root + os.sep)
+                for root in untrusted_roots
+            )
+            if is_untrusted:
+                allowed_commands = (
+                    "ls", "cat", "head", "tail", "echo", "grep", "find", "wc",
+                    "date", "whoami", "uname", "pwd", "df", "du",
+                    "python", "pip", "git",
+                )
+                tokens = str(command).replace("{input}", "").split()
+                first_token = os.path.basename(tokens[0]) if tokens else ""
+                if first_token not in allowed_commands:
+                    logger.warning(
+                        "refusing to load skill %s from untrusted directory %s: "
+                        "command %r not in safe whitelist",
+                        skill_id, str(path), str(command),
+                    )
+                    return None
+
         async def handler(args: Dict[str, Any]) -> str:
             input_text = args.get("input", "")
             if command:
@@ -309,13 +402,33 @@ class SkillManager(Plugin):
         return Skill(skill_id, title, description, schema, handler, directory=str(path.parent))
 
     # --------------------------------------------------------- builtin seeds
-    def _seed_builtins(self) -> None:
-        """Seed built-in skills that are always available.
+    async def _get_system_executor(self):
+        """Lazy-init shared SystemExecutor singleton.
 
-        These are pure-Python, so they need no subprocess.  They cover the
-        agent's most common operational needs: echo, math, timestamp,
-        file-cat.
+        Uses an asyncio.Lock with double-checked locking so two concurrent
+        callers don't each construct (and setup) their own SystemExecutor.
         """
+        if self._system_executor is not None:
+            return self._system_executor
+        async with self._sys_exec_lock:
+            if self._system_executor is not None:  # double-check after acquiring
+                return self._system_executor
+            from executors.system import SystemExecutor
+            executor = SystemExecutor()
+            ctx = getattr(self, "_ctx_ref", None)
+            if ctx is not None:
+                await executor.setup(ctx)
+            else:
+                executor._enabled = True
+                from executors.system import PasswordManager
+                executor._pwd_manager = PasswordManager("", 60, 3, 5)
+                executor._timeout_seconds = 30
+                executor._workdir = "."
+                executor._max_output_bytes = 65536
+            self._system_executor = executor
+            return self._system_executor
+
+    def _seed_core_skills(self) -> None:
         import datetime
 
         async def echo_handler(args: Dict[str, Any]) -> str:
@@ -352,7 +465,6 @@ class SkillManager(Plugin):
                 ("🔢 /calc /计算", "执行数学计算，如 /calc 2+2"),
                 ("📝 /note /笔记", "保存笔记到文件"),
                 ("⏰ /time /时间", "显示当前时间"),
-                ("🎭 /role /角色", "角色系统（/role list 列出，/role <名> 切换，/role off 关闭）"),
                 ("🚪 /quit /退出", "退出程序"),
             ]
             lines = ["可用命令列表：", ""]
@@ -381,13 +493,6 @@ class SkillManager(Plugin):
                     llm = cfg.get("llm", {})
                     lines.append(f"  🧠 主模型: {llm.get('primary_provider', '?')}/{llm.get('primary_model', '?')}")
                     lines.append(f"  🪶 轻量模型: {llm.get('lightweight_model', '?')}")
-                    # 当前角色
-                    role_cfg = cfg.get("agent", {}).get("role", {}) or {}
-                    current_role = role_cfg.get("current", "").strip()
-                    if current_role:
-                        lines.append(f"  🎭 当前角色: {current_role}")
-                    else:
-                        lines.append("  🎭 当前角色: 默认（One-Agent）")
             except Exception:
                 pass
             lines.append(f"  🧰 已加载技能: {len(self._skills)}")
@@ -462,21 +567,38 @@ class SkillManager(Plugin):
                 sid = args.get("session_id", "default")
                 if not self._ctx_ref:
                     return "❌ 无法访问会话存储"
-                from memory.session_store import SessionStore
-                store = SessionStore(self._ctx_ref.config.get("agent", {}).get("data_dir", "./data") + "/memory/sessions.db")
-                session = store.get_session(sid)
-                if not session:
-                    return "📜 当前会话暂无历史记录"
-                messages = session.get("messages", []) if isinstance(session, dict) else []
-                if not messages:
-                    return "📜 当前会话暂无历史记录"
-                lines = [f"📜 最近 {len(messages)} 条对话 (session: {sid})：", ""]
-                for msg in messages[-10:]:
-                    role = msg.get("role", "?")
-                    content = msg.get("content", "")[:80]
-                    icon = "👤" if role == "user" else "🤖"
-                    lines.append(f"  {icon} [{role}] {content}")
-                return "\n".join(lines)
+                # 复用 ctx 上的共享 SessionStore，避免每次 /history 都打开新的
+                # SQLite 连接并泄漏资源。仅在 ctx 未提供时才临时创建并 close。
+                store = None
+                created = False
+                if hasattr(self._ctx_ref, 'session_store') and self._ctx_ref.session_store is not None:
+                    store = self._ctx_ref.session_store
+                else:
+                    from memory.session_store import SessionStore
+                    data_dir = self._ctx_ref.config.get("agent", {}).get("data_dir", "./data")
+                    db_path = os.path.join(data_dir, "memory", "sessions.db")
+                    store = SessionStore(db_path)
+                    created = True
+                try:
+                    session = store.get_session(sid)
+                    if not session:
+                        return "📜 当前会话暂无历史记录"
+                    messages = session.get("messages", []) if isinstance(session, dict) else []
+                    if not messages:
+                        return "📜 当前会话暂无历史记录"
+                    lines = [f"📜 最近 {len(messages)} 条对话 (session: {sid})：", ""]
+                    for msg in messages[-10:]:
+                        role = msg.get("role", "?")
+                        content = msg.get("content", "")[:80]
+                        icon = "👤" if role == "user" else "🤖"
+                        lines.append(f"  {icon} [{role}] {content}")
+                    return "\n".join(lines)
+                finally:
+                    if created:
+                        try:
+                            store.close()
+                        except Exception:
+                            pass
             except Exception as exc:
                 return f"❌ 获取历史失败: {exc}"
         self.register(Skill(
@@ -492,10 +614,27 @@ class SkillManager(Plugin):
                 sid = args.get("session_id", "default")
                 if not self._ctx_ref:
                     return "❌ 无法访问会话存储"
-                from memory.session_store import SessionStore
-                store = SessionStore(self._ctx_ref.config.get("agent", {}).get("data_dir", "./data") + "/memory/sessions.db")
-                store.delete_session(sid)
-                return "✅ 已清空当前对话历史"
+                # 复用 ctx 上的共享 SessionStore，避免每次 /clear 都打开新的
+                # SQLite 连接并泄漏资源。仅在 ctx 未提供时才临时创建并 close。
+                store = None
+                created = False
+                if hasattr(self._ctx_ref, 'session_store') and self._ctx_ref.session_store is not None:
+                    store = self._ctx_ref.session_store
+                else:
+                    from memory.session_store import SessionStore
+                    data_dir = self._ctx_ref.config.get("agent", {}).get("data_dir", "./data")
+                    db_path = os.path.join(data_dir, "memory", "sessions.db")
+                    store = SessionStore(db_path)
+                    created = True
+                try:
+                    store.delete_session(sid)
+                    return "✅ 已清空当前对话历史"
+                finally:
+                    if created:
+                        try:
+                            store.close()
+                        except Exception:
+                            pass
             except Exception as exc:
                 return f"❌ 清空失败: {exc}"
         self.register(Skill(
@@ -533,8 +672,6 @@ class SkillManager(Plugin):
         ))
 
         async def calc_handler(args: Dict[str, Any]) -> str:
-            import ast
-            import operator
             expr = str(args.get("input", "")).strip()
             if not re.fullmatch(r"[0-9+\-*/(). ]+", expr):
                 return "[invalid math expression]"
@@ -547,6 +684,8 @@ class SkillManager(Plugin):
             def _eval(node):
                 if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
                     return node.value
+                if isinstance(node, ast.Num):  # py<3.8 compat
+                    return node.n
                 if isinstance(node, ast.BinOp):
                     return _ops[type(node.op)](_eval(node.left), _eval(node.right))
                 if isinstance(node, ast.UnaryOp):
@@ -566,30 +705,19 @@ class SkillManager(Plugin):
         ))
 
         async def save_note(args: Dict[str, Any]) -> str:
-            # 跨平台文件锁：fcntl (Unix) 或 msvcrt (Windows)
-            try:
-                import fcntl
-                _has_fcntl = True
-                _has_msvcrt = False
-            except ImportError:
-                _has_fcntl = False
-                try:
-                    import msvcrt
-                    _has_msvcrt = True
-                except ImportError:
-                    _has_msvcrt = False
+            # 跨平台文件锁：fcntl (Unix) 或 msvcrt (Windows)，平台检测在模块加载时完成
             text = str(args.get("input", ""))
             target = Path(self._builtin_dir or "./data/skills/builtin") / "user_notes.log"
             target.parent.mkdir(parents=True, exist_ok=True)
             ts = datetime.datetime.now().isoformat(timespec="seconds")
             with open(target, "a", encoding="utf-8") as f:
-                if _has_fcntl:
+                if _HAS_FCNTL:
                     try:
                         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                         f.write(f"[{ts}] {text}\n")
                     finally:
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                elif _has_msvcrt:
+                elif _HAS_MSVCRT:
                     try:
                         msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
                         f.write(f"[{ts}] {text}\n")
@@ -608,39 +736,14 @@ class SkillManager(Plugin):
             handler=save_note,
         ))
 
-        # ---------- 系统执行器（SystemExecutor）单例 ----------
-        # 在会话生命周期内共享一个实例，以便密码缓存生效
-        _system_executor = None
-        async def _get_system_executor():
-            nonlocal _system_executor
-            if _system_executor is not None:
-                return _system_executor
-            # Build and fully initialize BEFORE assigning to the shared
-            # variable. If we assign first and await setup() second, a
-            # concurrent coroutine sees the non-None value and returns
-            # a half-initialized executor (missing _pwd_manager etc.).
-            from executors.system import SystemExecutor
-            executor = SystemExecutor()
-            ctx = getattr(self, "_ctx_ref", None)
-            if ctx is not None:
-                await executor.setup(ctx)
-            else:
-                # Fallback: 手动初始化
-                executor._enabled = True
-                from executors.system import PasswordManager
-                executor._pwd_manager = PasswordManager("", 60, 3, 5)
-                executor._timeout_seconds = 30
-                executor._workdir = "."
-                executor._max_output_bytes = 65536
-            _system_executor = executor
-            return _system_executor
-
+    def _seed_system_skills(self) -> None:
         # ---------- 系统命令执行技能 ----------
         async def system_run_handler(args: Dict[str, Any]) -> str:
             """执行系统命令（带密码保护）。使用方式: /shell ls -la [--password xxx]"""
-            executor = await _get_system_executor()
+            executor = await self._get_system_executor()
             command = str(args.get("command", "")).strip()
             password = str(args.get("password", "")) if args.get("password") else ""
+            working_dir = str(args.get("working_dir", "")) if args.get("working_dir") else ""
 
             if not command:
                 return "用法: /shell <命令> [--password <密码>]\n示例:\n  /shell ls -la\n  /shell ls -la --password mypass123"
@@ -649,6 +752,7 @@ class SkillManager(Plugin):
                 result = await executor.dispatch("system.run", {
                     "command": command,
                     "password": password,
+                    "working_dir": working_dir,
                 })
             except Exception as exc:
                 return f"执行错误: {exc}"
@@ -689,6 +793,7 @@ class SkillManager(Plugin):
                 "properties": {
                     "command": {"type": "string", "description": "要执行的系统命令"},
                     "password": {"type": "string", "description": "密码(可选，用于解锁会话)"},
+                    "working_dir": {"type": "string", "description": "命令执行的工作目录(可选)"},
                 },
             },
             handler=system_run_handler,
@@ -697,7 +802,7 @@ class SkillManager(Plugin):
         # ---------- 解锁会话技能 ----------
         async def system_unlock_handler(args: Dict[str, Any]) -> str:
             """输入密码解锁会话。使用方式: /unlock 密码"""
-            executor = await _get_system_executor()
+            executor = await self._get_system_executor()
             password = str(args.get("password", ""))
 
             if not password:
@@ -727,7 +832,7 @@ class SkillManager(Plugin):
         # ---------- 锁定会话技能 ----------
         async def system_lock_handler(args: Dict[str, Any]) -> str:
             """撤销密码缓存，立即锁定。使用方式: /lock"""
-            executor = await _get_system_executor()
+            executor = await self._get_system_executor()
             try:
                 executor.invalidate_password()
                 return "🔒 已锁定。再次执行危险命令需要重新输入密码。"
@@ -744,6 +849,7 @@ class SkillManager(Plugin):
             handler=system_lock_handler,
         ))
 
+    def _seed_lifecycle_skills(self) -> None:
         # ---------- 更新技能 ----------
         async def updater_handler(args: Dict[str, Any]) -> str:
             """更新 One-Agent 到最新版本。使用方式: /update 或 /更新"""
@@ -787,18 +893,16 @@ class SkillManager(Plugin):
         async def quit_handler(args: Dict[str, Any]) -> str:
             """退出 One-Agent。
 
-            通过设置 ctx._quit_event 让主循环正常退出，
-            从而触发 main() 的 finally 块执行 app.stop() 优雅清理。
-            不使用 sys.exit/os._exit，避免跳过异步清理。
+            Use sys.exit(0) (raises SystemExit) instead of os._exit(0) so the
+            main loop's finally block runs app.stop() — flushing logs,
+            closing httpx clients, committing SQLite, and stopping plugins.
+            os._exit skips all cleanup (atexit, finally, asyncio shutdown).
             """
+            import sys
             results = ["正在退出...", "再见！下次见 👋"]
-            # 设置退出标志，让 _interactive 主循环检测后正常 return
-            quit_event = getattr(self._ctx_ref, "_quit_event", None) if self._ctx_ref else None
-            if quit_event is None and self._ctx_ref:
-                self._ctx_ref._quit_event = asyncio.Event()
-                quit_event = self._ctx_ref._quit_event
-            if quit_event is not None:
-                quit_event.set()
+            # Defer the exit slightly so the reply can be surfaced first.
+            loop = asyncio.get_running_loop()
+            loop.call_later(0.1, sys.exit, 0)
             return "\n".join(results)
         self.register(Skill(
             id="quit", title="退出",
@@ -810,6 +914,7 @@ class SkillManager(Plugin):
             handler=quit_handler,
         ))
 
+    def _seed_settings_skill(self) -> None:
         # ---------- 设置管理技能 ----------
         async def settings_handler(args: Dict[str, Any]) -> str:
             """通过自然语言读取或修改配置。
@@ -828,224 +933,32 @@ class SkillManager(Plugin):
             config = ctx_ref.config if ctx_ref else {}
 
             result = _process_settings_command(input_text, config)
-            if result is None:
-                # 不是设置命令，返回特殊标记让 coordinator 继续正常对话
-                return "__SKIP__"
             return result
 
-        # ---------- 智能添加服务商技能 ----------
-        async def add_provider_handler(args: Dict[str, Any]) -> str:
-            """智能添加服务商：解析"服务商+key"，自动配置API key、拉取模型、分配到4层。
-
-            支持的输入格式：
-            - "英伟达 nvapi-xxxxx"
-            - "nvidia key-xxxxx"
-            - "openai sk-xxxxx"
-            - "添加服务商 英伟达 key=nvapi-xxx"
-            """
-            input_text = str(args.get("input", "")).strip()
-            if not input_text:
-                return "请提供服务商名称和 API key，例如：'英伟达 nvapi-xxxx' 或 'openai sk-xxxx'"
-
-            # 1. 解析服务商名、API key、可选 base URL
-            provider_name = None
-            api_key = None
-            base_url = None
-
-            # 去掉前缀"添加服务商"/"新增服务商"等
-            import re as _re_parse
-            clean = _re_parse.sub(r"^(?:添加|新增|注册|设置|配置)\s*(?:服务商|provider)?\s*", "", input_text, flags=_re_parse.IGNORECASE)
-
-            # 尝试提取 base URL（http(s)://...）
-            url_m = _re_parse.search(r"(https?://\S+)", clean)
-            if url_m:
-                base_url = url_m.group(1).rstrip(",，;；")
-                clean = clean.replace(url_m.group(1), "").strip()
-
-            # 尝试提取 API key（nvapi-/sk-/ak-/key=xxx/key:xxx 等格式）
-            key_m = _re_parse.search(r"(?:key\s*[=：:]\s*)?((?:nvapi-|sk-|ak-)[a-zA-Z0-9_\-]+)", clean, _re_parse.IGNORECASE)
-            if key_m:
-                api_key = key_m.group(1)
-                clean = clean.replace(key_m.group(0), "").strip()
-            else:
-                # 尝试 key=xxx 格式
-                key_m2 = _re_parse.search(r"key\s*[=：:]\s*([a-zA-Z0-9_\-]+)", clean, _re_parse.IGNORECASE)
-                if key_m2:
-                    api_key = key_m2.group(1)
-                    clean = clean.replace(key_m2.group(0), "").strip()
-
-            # 剩下的第一个词就是 provider 名称
-            parts = clean.split()
-            if parts:
-                provider_name = _re_parse.sub(r"^[，,。.：:：]+|[，,。.：:：]+$", "", parts[0])
-
-            # 如果还没解析到，回退到原始分割
-            if not provider_name or not api_key:
-                orig_parts = input_text.split()
-                if len(orig_parts) >= 2 and not provider_name:
-                    provider_name = orig_parts[0].strip()
-                if len(orig_parts) >= 2 and not api_key:
-                    # 找最长的 token 作为 key
-                    for p in orig_parts[1:]:
-                        if _re_parse.search(r"(?:nvapi-|sk-|ak-)", p, _re_parse.IGNORECASE) or len(p) > 20:
-                            api_key = p.strip()
-                            break
-                    if not api_key:
-                        api_key = orig_parts[-1].strip()
-
-            if not provider_name or not api_key:
-                return ("无法解析服务商和 key。请用以下格式发送：\n"
-                        "  英伟达 nvapi-xxxxx\n"
-                        "  openai sk-xxxxx\n"
-                        "  添加服务商 英伟达 key=nvapi-xxxxx\n"
-                        "  自定义服务商 https://api.example.com/v1 key=xxxx")
-
-            # 2. 解析 provider 名称（支持中文别名）
-            try:
-                from models.resolver import _PROVIDER_ALIASES, KNOWN_PROVIDERS, lookup
-            except ImportError:
-                return "❌ resolver 模块不可用"
-
-            # 先尝试直接映射（中文别名 → canonical）
-            canonical = _PROVIDER_ALIASES.get(provider_name) or _PROVIDER_ALIASES.get(provider_name.lower())
-            if canonical and canonical in KNOWN_PROVIDERS:
-                resolved_provider = canonical
-            elif lookup(provider_name):
-                resolved_provider = provider_name.lower()
-            else:
-                # 尝试大小写不敏感匹配
-                provider_lower = provider_name.lower()
-                resolved_provider = None
-                for alias, canon in _PROVIDER_ALIASES.items():
-                    if alias.lower() == provider_lower:
-                        resolved_provider = canon
-                        break
-                if not resolved_provider:
-                    # 未知 provider：如果用户提供了 base URL，直接注册
-                    if base_url:
-                        # 将自定义 provider 加入 KNOWN_PROVIDERS
-                        from models import resolver as _resolver_mod
-                        _resolver_mod.KNOWN_PROVIDERS[provider_name.lower()] = base_url
-                        resolved_provider = provider_name.lower()
-                        logger.info("add_provider: registered custom provider '%s' → %s", resolved_provider, base_url)
-                    else:
-                        # 未知 provider 且无 base URL：列出本地已知服务商，询问用户
-                        known_list = ", ".join(sorted(
-                            v for v in _PROVIDER_ALIASES.values()
-                        ))
-                        return (
-                            f"❓ 未在本地注册表中找到服务商「{provider_name}」。\n\n"
-                            f"📋 本地已知的服务商：\n{known_list}\n\n"
-                            f"🔍 如果「{provider_name}」是一个 OpenAI 兼容的服务商，\n"
-                            f"   你可以回复「搜索 {provider_name}」让我到网上查找其 API 地址，\n"
-                            f"   或者直接告诉我它的 base URL，例如：\n"
-                            f"   「{provider_name} https://api.example.com/v1 key=xxxx」"
-                        )
-
-            # 3. 获取 llm 实例
-            llm = getattr(self, "_llm_ref", None)
-            if llm is None:
-                return "❌ 无法访问 LLM provider，请重启程序后再试"
-
-            # 4. 设置 API key
-            key_clean = api_key.strip()
-            if key_clean.startswith("${") and key_clean.endswith("}"):
-                return f"❌ 环境变量引用 ${{{key_clean[2:-1]}}} 不支持直接添加，请提供真实的 API key"
-
-            set_result = llm.set_api_key(resolved_provider, key_clean)
-            if not set_result.get("ok"):
-                return f"❌ 设置 API key 失败: {set_result.get('error', 'unknown')}"
-
-            # 5. 保存到配置文件
-            ctx_ref = getattr(self, "_ctx_ref", None)
-            config = ctx_ref.config if ctx_ref else {}
-            if isinstance(config, type(None)):
-                config = {}
-            if "llm" not in config:
-                config["llm"] = {}
-            if "api_keys" not in config["llm"]:
-                config["llm"]["api_keys"] = {}
-            config["llm"]["api_keys"][resolved_provider] = key_clean
-            _save_config(ctx_ref.config if ctx_ref else {})
-
-            # 6. 拉取模型列表（但不立即集成），让用户先选择
-            results = [f"✅ 服务商「{resolved_provider}」API key 已配置（{len(key_clean)} 字符）", ""]
-            results.append("📡 正在拉取可用模型列表...")
-
-            try:
-                models = await llm.list_models(provider=resolved_provider)
-                if not models:
-                    results.append("⚠️ 未拉取到任何模型，API key 可能无效或网络问题")
-                    results.append("API key 已保存，可稍后重试")
-                    return "\n".join(results)
-
-                # 分类显示：免费 vs 收费
-                free_models = [m for m in models if m.get("is_free")]
-                paid_models = [m for m in models if not m.get("is_free")]
-
-                results.append(f"✅ 拉取成功！共 {len(models)} 个模型"
-                               f"（免费 {len(free_models)} 个，收费 {len(paid_models)} 个）")
-                results.append("")
-
-                # 显示免费模型（优先推荐）
-                if free_models:
-                    results.append(f"🆓 免费模型（推荐，共 {len(free_models)} 个）：")
-                    for i, m in enumerate(free_models[:15], 1):
-                        ctx_len = m.get("context_length", 0)
-                        ctx_str = f" ctx={ctx_len:,}" if ctx_len else ""
-                        feats = m.get("features", [])
-                        feat_str = f" ({','.join(feats[:3])})" if feats else ""
-                        results.append(f"  {i:2d}. {m['id']}{ctx_str}{feat_str}")
-                    if len(free_models) > 15:
-                        results.append(f"  ... 还有 {len(free_models) - 15} 个免费模型")
-                    results.append("")
-
-                # 显示收费模型（简要）
-                if paid_models:
-                    results.append(f"💰 收费模型（共 {len(paid_models)} 个，前 5 个）：")
-                    for i, m in enumerate(paid_models[:5], 1):
-                        results.append(f"  {i}. {m['id']}")
-                    results.append("")
-
-                # 保存待确认状态，等用户选择后再集成
-                if ctx_ref:
-                    ctx_ref._pending_provider = {
-                        "provider": resolved_provider,
-                        "models": models,
-                        "free_models": free_models,
-                    }
-
-                results.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                results.append("📋 请选择要集成的模型：")
-                results.append("  • 输入「全部」→ 集成所有模型（自动分层）")
-                if free_models:
-                    results.append("  • 输入「免费」→ 只集成免费模型")
-                    results.append("  • 输入「选择 1,3,5」→ 只集成指定编号的模型")
-                results.append("  • 输入「取消」→ 放弃集成（key 已保存）")
-                results.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-            except Exception as exc:
-                logger.warning("add_provider list_models failed: %s", exc)
-                results.append(f"⚠️ 模型拉取失败: {exc}")
-                results.append("API key 已保存，但需要重启才能拉取模型")
-
-            return "\n".join(results)
         self.register(Skill(
-            id="add_provider", title="添加服务商",
-            description="发送'英伟达 nvapi-xxxx'或'openai sk-xxxx'，自动配置API key并拉取模型",
+            id="settings", title="Settings Manager",
+            description="/settings 或 /设置：读取或修改 Agent 配置（模型、温度、网关开关等）",
             schema={
-                "type": "object",
-                "properties": {
-                    "input": {
-                        "type": "string",
-                        "description": "服务商名称和 API key，格式：'服务商 key' 或 '添加服务商 服务商 key=xxx'"
-                    }
+                "type": "function",
+                "function": {
+                    "name": "settings",
+                    "description": "读取或修改 Agent 配置设置",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {
+                                "type": "string",
+                                "description": "设置操作描述，如 '查看模型' 或 '把温度改为0.7'",
+                            },
+                        },
+                        "required": ["input"],
+                    },
                 },
-                "required": ["input"]
             },
-            handler=add_provider_handler,
+            handler=settings_handler,
         ))
 
+    def _seed_web_search_skill(self) -> None:
         # ---------- 网页搜索技能 ----------
         async def web_search_handler(args: Dict[str, Any]) -> str:
             """搜索互联网获取最新信息。多源自动切换：DuckDuckGo → Bing → 自给。
@@ -1058,8 +971,6 @@ class SkillManager(Plugin):
 
             import re as _re
             from urllib.parse import quote as _url_quote
-
-            import httpx as _httpx
 
             headers = {
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -1074,36 +985,28 @@ class SkillManager(Plugin):
                 """DuckDuckGo Lite — clean HTML, no JS."""
                 nonlocal results
                 try:
-                    async with _httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
-                        resp = await client.post(
-                            "https://lite.duckduckgo.com/lite/",
-                            data={"q": query, "kl": "cn-zh"},
-                            headers=headers,
-                        )
-                        if resp.status_code != 200:
-                            return False
-                        html = resp.text
-                    pattern = _re.compile(
-                        r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>.*?<span[^>]*class="[^"]*snippet[^"]*"[^>]*>(.*?)</span>',
-                        _re.DOTALL | _re.IGNORECASE,
+                    resp = await self._http_client.post(
+                        "https://lite.duckduckgo.com/lite/",
+                        data={"q": query, "kl": "cn-zh"},
+                        headers=headers,
                     )
-                    for m in pattern.finditer(html):
+                    if resp.status_code != 200:
+                        return False
+                    html = resp.text
+                    for m in _DDG_RESULT_PATTERN.finditer(html):
                         url_r = m.group(1)
                         title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
                         snippet = _re.sub(r"<[^>]+>", "", m.group(3)).strip()
                         if title and snippet:
                             results.append(f"{title}\n  {snippet}\n  {url_r}")
                     if not results:
-                        link_pattern = _re.compile(
-                            r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', _re.DOTALL,
-                        )
-                        for m in link_pattern.finditer(html):
+                        for m in _DDG_LINK_PATTERN.finditer(html):
                             url_r = m.group(1)
                             title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
                             if title and "duckduckgo" not in url_r.lower():
                                 results.append(f"{title}\n  {url_r}")
                     return bool(results)
-                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException):
+                except (httpx.HTTPStatusError, httpx.RequestError, httpx.TimeoutException):
                     return False
 
             async def _try_bing() -> bool:
@@ -1111,17 +1014,12 @@ class SkillManager(Plugin):
                 nonlocal results
                 try:
                     bing_url = f"https://www.bing.com/search?q={_url_quote(query)}&setlang=zh-cn"
-                    async with _httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
-                        resp = await client.get(bing_url, headers=headers)
-                        if resp.status_code != 200:
-                            return False
-                        html = resp.text
+                    resp = await self._http_client.get(bing_url, headers=headers)
+                    if resp.status_code != 200:
+                        return False
+                    html = resp.text
                     # Bing: results are in <li class="b_algo"> blocks
-                    algo_pattern = _re.compile(
-                        r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>',
-                        _re.DOTALL | _re.IGNORECASE,
-                    )
-                    for block in algo_pattern.finditer(html):
+                    for block in _BING_ALGO_PATTERN.finditer(html):
                         block_html = block.group(1)
                         link_m = _re.search(r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', block_html, _re.DOTALL)
                         snippet_m = _re.search(r'<p[^>]*>(.*?)</p>', block_html, _re.DOTALL)
@@ -1132,7 +1030,7 @@ class SkillManager(Plugin):
                             if title and "bing.com" not in url_r.lower():
                                 results.append(f"{title}\n  {snippet}\n  {url_r}")
                     return bool(results)
-                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException):
+                except (httpx.HTTPStatusError, httpx.RequestError, httpx.TimeoutException):
                     return False
 
             # Try sources in order
@@ -1170,29 +1068,7 @@ class SkillManager(Plugin):
             handler=web_search_handler,
         ))
 
-        self.register(Skill(
-            id="settings", title="Settings Manager",
-            description="/settings 或 /设置：读取或修改 Agent 配置（模型、温度、网关开关等）",
-            schema={
-                "type": "function",
-                "function": {
-                    "name": "settings",
-                    "description": "读取或修改 Agent 配置设置",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "input": {
-                                "type": "string",
-                                "description": "设置操作描述，如 '查看模型' 或 '把温度改为0.7'",
-                            },
-                        },
-                        "required": ["input"],
-                    },
-                },
-            },
-            handler=settings_handler,
-        ))
-
+    def _seed_media_skills(self) -> None:
         # ---------- 语音转文字技能 ----------
         self.register(Skill(
             id="transcribe",
@@ -1255,6 +1131,7 @@ class SkillManager(Plugin):
             },
         ))
 
+    def _seed_doc_search_skill(self) -> None:
         # ---------- 文档搜索技能 (RAG) ----------
         self.register(Skill(
             id="document_search",
@@ -1295,9 +1172,10 @@ class SkillManager(Plugin):
                     },
                 },
             },
-            handler=make_doc_search_handler(_doc_store),
+            handler=make_doc_search_handler(get_doc_store()),
         ))
 
+    def _seed_python_skill(self) -> None:
         # ---------- Python 代码执行技能 ----------
         # 使用全局共享的 PythonExecutor 实例（由 one_agent.py 创建并通过 ctx 传递）
         from executors.python_runner import make_python_handler
@@ -1346,6 +1224,17 @@ class SkillManager(Plugin):
             handler=make_python_handler(python_executor),
         ))
 
+    def _seed_builtins(self) -> None:
+        """Seed built-in skills that are always available."""
+        self._seed_core_skills()
+        self._seed_system_skills()
+        self._seed_lifecycle_skills()
+        self._seed_settings_skill()
+        self._seed_web_search_skill()
+        self._seed_media_skills()
+        self._seed_doc_search_skill()
+        self._seed_python_skill()
+
 
 def _schema(name: str, description: str, required: List[str]) -> Dict[str, Any]:
     return {
@@ -1387,11 +1276,6 @@ _SETTING_ALIASES: Dict[str, tuple] = {
     "时区": ("agent.timezone", str),
     "timezone": ("agent.timezone", str),
     "数据目录": ("agent.data_dir", str),
-    # 角色系统
-    "角色": ("agent.role.current", str),
-    "role": ("agent.role.current", str),
-    "人设": ("agent.role.current", str),
-    "persona": ("agent.role.current", str),
     # 网关开关
     "web": ("gateways.web.enabled", bool),
     "telegram": ("gateways.telegram.enabled", bool),
@@ -1462,35 +1346,18 @@ def _get_nested(d: dict, path: str, default=None):
     return current
 
 
-def _set_nested(obj, path: str, value) -> None:
-    """按点分隔路径设置嵌套值，支持 dict 和 Pydantic BaseModel。"""
+def _set_nested(d: dict, path: str, value) -> None:
+    """按点分隔路径设置嵌套字典值。"""
     keys = path.split(".")
     if not keys:
         raise ValueError("Path cannot be empty")
-    current = obj
+    current = d
     for k in keys[:-1]:
-        # 支持 dict 和 Pydantic 对象
-        if isinstance(current, dict):
-            if k not in current or not isinstance(current[k], (dict, BaseModel)):
-                current[k] = {}
-            current = current[k]
-        else:
-            # Pydantic BaseModel
-            if hasattr(current, k):
-                next_val = getattr(current, k)
-                if not isinstance(next_val, (dict, BaseModel)):
-                    setattr(current, k, {})
-                    next_val = {}
-                current = next_val
-            else:
-                setattr(current, k, {})
-                current = getattr(current, k)
-    # 设置最终值
-    final_key = keys[-1]
-    if isinstance(current, dict):
-        current[final_key] = value
-    else:
-        setattr(current, final_key, value)
+        if k not in current or not isinstance(current[k], dict):
+            current[k] = {}
+        current = current[k]
+    if keys[-1]:
+        current[keys[-1]] = value
 
 
 def _parse_bool_value(text: str) -> Optional[bool]:
@@ -1527,10 +1394,6 @@ def _process_settings_command(input_text: str, config: dict) -> str:
 
     lower = input_text.lower()
 
-    # 如果输入包含 API key 模式，跳过设置命令，让 add_provider 处理
-    if re.search(r"(?:key[:：]?\s*)?(?:nvapi-|sk-|ak-|api[_-]?key)", lower):
-        return "__SKIP__"
-
     # ---- 列出所有设置 ----
     if re.search(r"列出|所有|全部|list|all|show.?all", lower):
         lines = ["当前配置：\n"]
@@ -1559,13 +1422,6 @@ def _process_settings_command(input_text: str, config: dict) -> str:
         r"改成|改为|设置|设为|切换|修改|换成|调整|set|change|turn.?on|turn.?off|enable|disable|开启|关闭|启用|禁用|打开",
     ]
     is_write = any(re.search(p, lower) for p in write_patterns)
-
-    # 检测疑问句：如果是疑问句，不触发设置命令
-    is_question = bool(re.search(r"吗[？?]?|呢[？?]?|怎么|如何|能不能|可以吗|是否|能不能|能否", lower))
-
-    if is_question and not re.search(r"改为|改成|设为|切换成|换成|调整成", lower):
-        # 疑问句但没有明确的修改意图，返回 None 让 coordinator 处理
-        return None
 
     if not is_read and not is_write:
         # 尝试推断：如果包含值，则是写操作；否则是读操作
@@ -1599,9 +1455,8 @@ def _process_settings_command(input_text: str, config: dict) -> str:
                 break
 
     if matched_path is None:
-        # 未识别的设置项：交给 LLM 处理，而不是直接报错
-        # 这样用户说"启用微信网关"等复杂命令时，LLM 可以理解并执行
-        return "__SKIP__"
+        chinese_aliases = [a for a in _SETTING_ALIASES if any('\u4e00' <= c <= '\u9fff' for c in a)]
+        return f"未识别的设置项。可设置的选项：{', '.join(chinese_aliases)}"
 
     # 敏感项写入检查
     if is_write and any(sk in matched_path for sk in _SENSITIVE_KEYS):
@@ -1645,14 +1500,6 @@ def _process_settings_command(input_text: str, config: dict) -> str:
                 value_text = m.group(1).strip()
                 break
 
-    # 过滤无意义的值（疑问词、标点等）
-    if value_text:
-        # 去掉末尾标点
-        value_text = value_text.rstrip("？?！!。.")
-        # 如果只剩疑问词或太短，视为无效
-        if value_text.lower() in {"吗", "么", "呢", "啊", "呀", "吧", "？", "?", ""} or len(value_text) < 2:
-            value_text = ""
-
     if not value_text:
         return f"请指定 {matched_alias} 的新值。例如：'把{matched_alias}改为xxx'"
 
@@ -1669,17 +1516,11 @@ def _process_settings_command(input_text: str, config: dict) -> str:
     return f"已将 {matched_alias} 修改为 {new_value}"
 
 
-def _save_config(config) -> None:
-    """将配置写回 YAML 文件（原子写入，带文件锁）。支持 dict 和 Pydantic BaseModel。"""
+def _save_config(config: dict) -> None:
+    """将配置写回 YAML 文件（原子写入，带文件锁）。"""
     import tempfile
 
     import yaml
-    # 如果是 Pydantic 对象，转为 dict
-    if isinstance(config, BaseModel):
-        config_dict = config.model_dump(mode="python")
-    else:
-        config_dict = config
-
     config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
     lock_path = config_path + ".lock"
 
@@ -1719,7 +1560,7 @@ def _save_config(config) -> None:
                 dir=dir_name,
                 delete=False,
             ) as f:
-                yaml.dump(config_dict, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 temp_path = f.name
             # Atomic rename
             os.replace(temp_path, config_path)

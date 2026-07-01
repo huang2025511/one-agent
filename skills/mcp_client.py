@@ -81,13 +81,16 @@ class MCPServer:
         if parsed.port:
             self._original_host = f"{self._original_host}:{parsed.port}"
 
-    def _resolve_and_validate_ip(self) -> str:
+    async def _resolve_and_validate_ip(self) -> str:
         """Resolve hostname NOW and validate against private-IP blocklist.
 
         Returns the validated IP string. Raises ValueError if resolution
         fails or resolves to a private/internal address. Called immediately
         before building the httpx request so the validated IP is the one
         actually used for the connection (no TOCTOU gap).
+
+        DNS resolution runs in a thread with a timeout to avoid blocking
+        the asyncio event loop on slow/hanging DNS.
         """
         hostname = self._parsed.hostname
         # If hostname is already an IP literal, validate directly.
@@ -102,8 +105,18 @@ class MCPServer:
             return hostname
 
         try:
-            addr_infos = socket.getaddrinfo(
-                hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            # Run blocking DNS resolution in a thread with timeout.
+            # socket.getaddrinfo can block for 30s+ on network issues,
+            # which would freeze the entire event loop.
+            addr_infos = await asyncio.wait_for(
+                asyncio.to_thread(
+                    socket.getaddrinfo,
+                    hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM,
+                ),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            raise ValueError(f"DNS resolution timed out for '{hostname}' (5s)")
         except socket.gaierror as exc:
             # Fail-closed: DNS resolution failure must NOT silently pass,
             # otherwise an attacker could make the first resolution fail and
@@ -124,7 +137,7 @@ class MCPServer:
             # SSRF defense: resolve + validate IP at the moment of connection
             # and pin the httpx client to that IP via a custom transport so
             # the connection cannot be redirected to a different (private) IP.
-            pinned_ip = self._resolve_and_validate_ip()
+            pinned_ip = await self._resolve_and_validate_ip()
             transport = httpx.AsyncHTTPTransport()
             # Build a base_url that uses the pinned IP but preserves port/path.
             scheme = self._parsed.scheme
@@ -168,6 +181,12 @@ class MCPServer:
             return True
 
         except TimeoutError:
+            raise
+        except ValueError:
+            # SSRF defense: _resolve_and_validate_ip raises ValueError for
+            # private IPs / DNS failures. This must propagate to the caller
+            # so security checks cannot be silently bypassed.
+            await self.close()
             raise
         except Exception as e:
             await self.close()  # Fix Bug #15: Close client on any error
@@ -254,17 +273,3 @@ class MCPClient:
         for server in self.servers.values():
             await server.close()
         self.servers.clear()
-
-
-def mcp_tool_to_skill_schema(server: MCPServer, tool: Dict[str, Any]) -> Dict[str, Any]:
-    """将 MCP 工具转换为 One-Agent skill schema。"""
-    return {
-        "name": f"mcp_{server.name}_{tool['name']}",
-        "description": tool.get("description", f"MCP tool from {server.name}"),
-        "parameters": tool.get("inputSchema", {}),
-        "metadata": {
-            "source": "mcp",
-            "server": server.name,
-            "tool_name": tool["name"]
-        }
-    }

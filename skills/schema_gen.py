@@ -201,31 +201,3 @@ def auto_tool_schema(func: Callable) -> Dict[str, Any]:
     }
 
     return schema
-
-
-def batch_auto_schemas(*funcs: Callable) -> List[Dict[str, Any]]:
-    """批量生成多个函数的 tool schemas。
-
-    Args:
-        *funcs: 一个或多个函数
-
-    Returns:
-        schema 列表
-    """
-    return [auto_tool_schema(f) for f in funcs]
-
-
-# 便捷装饰器
-def tool_schema(func: Callable) -> Callable:
-    """装饰器版本：在函数上附加 __schema__ 属性。
-
-    使用：
-        @tool_schema
-        async def my_tool(arg: str) -> str:
-            '''Description'''
-            pass
-
-        # 访问 schema: my_tool.__schema__
-    """
-    func.__schema__ = auto_tool_schema(func)
-    return func

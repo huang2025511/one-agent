@@ -75,6 +75,12 @@ class BaseSQLiteStore:
 
         Uses exponential backoff: 10ms, 20ms, 40ms (capped at 100ms).
 
+        .. note::
+            This method uses synchronous ``time.sleep`` for backoff, which
+            blocks the event loop. It is intended to be invoked from a
+            synchronous context (e.g. wrapped in ``asyncio.to_thread``)
+            rather than called directly from an async coroutine.
+
         Args:
             sql: SQL statement to execute
             params: Query parameters
@@ -110,6 +116,8 @@ class BaseSQLiteStore:
                         "database locked (attempt %d/%d), retrying in %.0fms: %s",
                         attempt + 1, SQLITE_RETRY_ATTEMPTS, delay * 1000, exc
                     )
+                    # NOTE: blocks the event loop — only call this method
+                    # from a sync context such as asyncio.to_thread().
                     time.sleep(delay)
                     continue
                 # Non-lock error or final attempt
@@ -119,14 +127,40 @@ class BaseSQLiteStore:
         if last_error:
             raise last_error
 
+    def _execute_write(
+        self,
+        sql: str,
+        params: Tuple[Any, ...] = (),
+        commit: bool = True,
+    ) -> Optional[sqlite3.Row]:
+        """Execute a write statement with lock-conflict retry.
+
+        Wraps :meth:`_execute_with_retry` so subclasses get retry-on-locked
+        behavior without duplicating the retry boilerplate. The write lock
+        is acquired so writes are serialized across threads.
+
+        Args:
+            sql: SQL statement (INSERT/UPDATE/DELETE)
+            params: Query parameters
+            commit: Reserved for symmetry; the underlying retry logic
+                commits DML statements automatically, so callers that
+                wrap multiple writes in an explicit ``with self._conn:``
+                transaction should use ``_execute_with_retry`` directly.
+
+        Returns:
+            Last row for SELECT queries, None for DML statements
+        """
+        with self._write_lock:
+            return self._execute_with_retry(sql, params, operation="execute")
+
     def close(self) -> None:
         """Close the database connection."""
         try:
             if self._conn:
                 self._conn.close()
                 self._conn = None
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("close error: %s", e)
 
     def __del__(self):
         """Ensure connection is closed on garbage collection."""

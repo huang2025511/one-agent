@@ -41,118 +41,108 @@ def save_custom_provider(name: str, base_url: str, api_key: str = None) -> None:
         json.dump(providers, f, indent=2)
 
 
+def _fetch_models_generic(
+    url: str,
+    api_key: str = None,
+    headers: Dict[str, str] = None,
+    model_key: str = "data",
+    id_field: str = "id",
+    name_prefix: str = "",
+) -> List[str]:
+    """Generic model fetcher for OpenAI-compatible /v1/models endpoints.
+
+    Args:
+        url: API endpoint URL.
+        api_key: API key for Authorization header (None = no auth).
+        headers: Extra headers (merged with Authorization if api_key set).
+        model_key: JSON key containing the model list ("data" or "models").
+        id_field: Field to extract from each model entry ("id" or "name").
+        name_prefix: Strip this prefix from the extracted name (e.g. "models/" for Gemini).
+
+    Returns:
+        Sorted list of model names, or ["Error: ..."] on failure.
+    """
+    hdrs = dict(headers or {})
+    if api_key:
+        hdrs.setdefault("Authorization", f"Bearer {api_key}")
+    try:
+        req = urllib.request.Request(url, headers=hdrs)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            models = []
+            for m in data.get(model_key, []):
+                name = m[id_field]
+                if name_prefix and name.startswith(name_prefix):
+                    name = name[len(name_prefix):]
+                models.append(name)
+            return sorted(models)
+    except Exception as e:
+        return [f"Error: {e}"]
+
+
 def fetch_openai_models(api_key: str = None, base_url: str = None) -> List[str]:
     """Fetch available models from OpenAI-compatible API."""
     url = base_url or "https://api.openai.com/v1/models"
-    headers = {}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            models = [m["id"] for m in data.get("data", [])]
-            # Filter and sort chat models
-            chat_models = sorted([
-                m for m in models
-                if any(x in m.lower() for x in ["gpt-", "claude", "gemini", "llama", "mistral", "qwen", "deepseek", "command", "mixtral"])
-            ], key=lambda x: (
-                0 if "gpt-4o" in x.lower() else
-                1 if "gpt-4" in x.lower() else
-                2 if "claude" in x.lower() else
-                3 if "gemini" in x.lower() else
-                4
-            ))
-            return chat_models if chat_models else sorted(models[:10])
-    except Exception as e:
-        return [f"Error: {e}"]
+    models = _fetch_models_generic(url, api_key=api_key)
+    if models and not models[0].startswith("Error:"):
+        chat_models = sorted([
+            m for m in models
+            if any(x in m.lower() for x in ["gpt-", "claude", "gemini", "llama", "mistral", "qwen", "deepseek", "command", "mixtral"])
+        ], key=lambda x: (
+            0 if "gpt-4o" in x.lower() else
+            1 if "gpt-4" in x.lower() else
+            2 if "claude" in x.lower() else
+            3 if "gemini" in x.lower() else
+            4
+        ))
+        return chat_models if chat_models else sorted(models[:10])
+    return models
 
 
 def fetch_deepseek_models(api_key: str) -> List[str]:
     """Fetch available models from DeepSeek."""
-    try:
-        req = urllib.request.Request(
-            "https://api.deepseek.com/v1/models",
-            headers={"Authorization": f"Bearer {api_key}"}
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            models = [m["id"] for m in data.get("data", [])]
-            return sorted(models)
-    except Exception as e:
-        return [f"Error: {e}"]
+    return _fetch_models_generic("https://api.deepseek.com/v1/models", api_key=api_key)
 
 
 def fetch_sensenova_models(api_key: str) -> List[str]:
     """Fetch available models from SenseNova (商汤科技)."""
-    try:
-        req = urllib.request.Request(
-            "https://token.sensenova.cn/v1/models",
-            headers={"Authorization": f"Bearer {api_key}"}
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            models = [m["id"] for m in data.get("data", [])]
-            return sorted(models)
-    except Exception as e:
-        return [f"Error: {e}"]
+    return _fetch_models_generic("https://token.sensenova.cn/v1/models", api_key=api_key)
 
 
 def fetch_dashscope_models(api_key: str) -> List[str]:
     """Fetch available models from DashScope (阿里云通义千问)."""
-    try:
-        req = urllib.request.Request(
-            "https://dashscope.aliyuncs.com/api/v1/models",
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"}
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            models = [m["id"] for m in data.get("data", [])]
-            return sorted(models)
-    except Exception as e:
-        return [f"Error: {e}"]
+    return _fetch_models_generic(
+        "https://dashscope.aliyuncs.com/api/v1/models",
+        api_key=api_key,
+        headers={"Accept": "application/json"},
+    )
 
 
 def fetch_anthropic_models(api_key: str) -> List[str]:
     """Fetch available models from Anthropic (Claude)."""
-    try:
-        req = urllib.request.Request(
-            "https://api.anthropic.com/v1/models",
-            headers={"x-api-key": api_key}
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            models = [m["id"] for m in data.get("data", [])]
-            return sorted(models)
-    except Exception as e:
-        return [f"Error: {e}"]
+    return _fetch_models_generic(
+        "https://api.anthropic.com/v1/models",
+        headers={"x-api-key": api_key},
+    )
 
 
 def fetch_gemini_models(api_key: str) -> List[str]:
     """Fetch available models from Google Gemini."""
-    try:
-        req = urllib.request.Request(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            models = [m["name"].split("/")[-1] for m in data.get("models", [])]
-            return sorted(models)
-    except Exception as e:
-        return [f"Error: {e}"]
+    return _fetch_models_generic(
+        f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+        model_key="models",
+        id_field="name",
+        name_prefix="models/",
+    )
 
 
 def fetch_ollama_models(base_url: str = "http://localhost:11434") -> List[str]:
     """Fetch available models from Ollama (本地模型)."""
-    try:
-        req = urllib.request.Request(f"{base_url}/api/tags")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            models = [m["name"] for m in data.get("models", [])]
-            return sorted(models)
-    except Exception as e:
-        return [f"Error: {e}"]
+    return _fetch_models_generic(
+        f"{base_url}/api/tags",
+        model_key="models",
+        id_field="name",
+    )
 
 
 # Provider configurations - 完整的预设服务商列表

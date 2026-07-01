@@ -15,6 +15,7 @@ import asyncio
 import logging
 import logging.handlers
 import os
+import re
 import signal
 import sys
 from pathlib import Path
@@ -104,13 +105,6 @@ class MemoryConfig(BaseModel):
     procedural: MemoryProcedural = Field(default_factory=MemoryProcedural)
 
 
-class RoleConfig(BaseModel):
-    """角色系统配置 — 让 Agent 扮演不同行业/场景的专家角色。"""
-    enabled: bool = True
-    current: str = ""  # 当前角色名（空 = 默认 One-Agent 身份）
-    library: str = "data/roles/prompts-zh.json"  # 角色库 JSON 文件路径
-
-
 class AgentConfig(BaseModel):
     name: str = "One-Agent"
     description: str = "Token-efficient self-evolving microkernel AI agent"
@@ -119,7 +113,6 @@ class AgentConfig(BaseModel):
     log_level: str = Field(default="INFO")
     timezone: str = Field(default="UTC")
     language: str = Field(default="en")  # 语言设置: en | zh
-    role: RoleConfig = Field(default_factory=RoleConfig)
 
     @field_validator("log_level")
     @classmethod
@@ -206,7 +199,11 @@ def load_config(path: str) -> FullConfig:
                 if isinstance(value, str):
                     keys_section[provider] = _try_decrypt(value, cipher)
         except ImportError:
-            pass
+            logger.warning(
+                "ONE_AGENT_ENCRYPTION_KEY is set but the 'cryptography' package "
+                "is not installed; encrypted values cannot be decrypted and will "
+                "be passed through unchanged. Install with: pip install cryptography"
+            )
 
     return FullConfig(**expanded)
 
@@ -245,6 +242,10 @@ def setup_logging(config) -> None:
     root.addHandler(file_handler)
     root.addHandler(console_handler)
 
+    # Install sensitive info filter on root logger — all child loggers inherit
+    from core.log_sanitizer import install_sensitive_info_filter
+    install_sensitive_info_filter(root)
+
     # Silence noisy third-party loggers
     for noisy in ["httpx", "httpcore", "urllib3", "asyncio"]:
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -258,26 +259,53 @@ class OneAgentApp:
     """Top-level assembly: builds plugin manager, coordinates plugins."""
 
     def __init__(self, config_path: str) -> None:
+        # NOTE: this synchronously instantiates ~20 subsystems. Ideally each
+        # plugin should be constructed lazily and wired up in async setup()
+        # (start()) so heavy I/O doesn't block the event loop at import time.
+        # Left as-is for now to avoid destabilizing the startup order.
+        from api import RESTAPIGateway
         from core.coordinator import Coordinator
         from core.events import EventBus
-        from core.module_registry import create_default_registry
         from executors import BrowserExecutor, DockerExecutor, PythonExecutor, ShellExecutor
 
-        # Import only CORE modules eagerly — everything else is lazy-loaded.
+        # Import gateways with graceful degradation — if a gateway's dependencies
+        # are missing (e.g., cryptography for WeCom), log warning and skip it
+        # rather than crashing the entire startup.
         from gateways import CLIGateway
+        from marketplace import MarketplacePlugin
         from memory import MemoryPlugin
         from models import LLMProvider
+        from monitor import MonitoringPlugin
+        from multimodal import MultimodalPlugin
         from router import SmartRouter
         from scheduler import SchedulerPlugin
         from skills import SkillManager
         self.cli = CLIGateway()
+
+        gateways_to_load = [
+            ("telegram", "TelegramGateway"),
+            ("wecom", "WeComGateway"),
+            ("dingtalk", "DingTalkGateway"),
+            ("feishu", "FeishuGateway"),
+            ("discord", "DiscordGateway"),
+            ("slack", "SlackGateway"),
+            ("web", "WebGateway"),
+        ]
+
+        for attr_name, class_name in gateways_to_load:
+            try:
+                module = __import__("gateways", fromlist=[class_name])
+                cls = getattr(module, class_name)
+                setattr(self, attr_name, cls())
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"Gateway {class_name} not available: {e}")
+                setattr(self, attr_name, None)
 
         self.config = load_config(config_path)
         setup_logging(self.config)  # type: ignore[arg-type]
 
         self.bus = EventBus()
 
-        # --- 核心模块：始终立即加载 ---
         self.llm = LLMProvider()
         self.router = SmartRouter()
         self.memory = MemoryPlugin()
@@ -288,42 +316,32 @@ class OneAgentApp:
         self.exec_python = PythonExecutor()
         self.coordinator = Coordinator()
         self.scheduler = SchedulerPlugin()
+        self.multimodal = MultimodalPlugin()
+        self.rest_api = RESTAPIGateway()
+        self.monitor = MonitoringPlugin()
+        self.marketplace = MarketplacePlugin()
 
         # Initialize MCP client for external tool servers
         from skills.mcp_client import MCPClient
         self.mcp_client = MCPClient()
 
+        # Initialize alert manager
+        from alerting import AlertManager
+        self._alert_manager = AlertManager()
+
         # Initialize approval manager for human-in-the-loop
         from core.approval import ApprovalManager
         self._approval_manager = ApprovalManager()
 
-        # --- 可选模块：通过 ModuleRegistry 按需加载 ---
-        # 网关类初始化为 None，由 registry 管理
-        self.telegram = None
-        self.wecom = None
-        self.dingtalk = None
-        self.feishu = None
-        self.discord = None
-        self.slack = None
-        self.web = None
-        # 可选增强模块初始化为 None，由 registry 按需加载
-        self.multimodal = None
-        self.rest_api = None
-        self.monitor = None
-        self.marketplace = None
-        self._alert_manager = None
-
-        # 创建模块注册表并从配置加载策略
-        self._registry = create_default_registry()
-        self._registry.set_policies_from_config(self.config.model_dump())
-
         self._pm = PluginManager()
-        # 仅注册核心模块
         for p in (
             self.llm, self.router, self.memory, self.skills,
             self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
             self.coordinator, self.scheduler,
-            self.cli,
+            self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
+            self.discord, self.slack, self.web,
+            self.multimodal, self.rest_api, self.monitor, self.marketplace,
+            self._alert_manager,
         ):
             if p is not None:
                 self._pm.register(p)
@@ -367,25 +385,26 @@ class OneAgentApp:
             _store = self.ctx.session_store
             if _store is None:
                 return
-            # Save user message
-            _store.add_message(sid, "user", turn.input_text,
-                               meta={"source": turn.source, "turn_id": turn.turn_id},
-                               tokens=turn.tokens_used)
+            # Save user message (offload blocking SQLite I/O to a worker thread)
+            await asyncio.to_thread(
+                _store.add_message, sid, "user", turn.input_text,
+                meta={"source": turn.source, "turn_id": turn.turn_id},
+                tokens=turn.tokens_used,
+            )
             # Save assistant response
             if turn.result:
-                _store.add_message(sid, "assistant", turn.result,
-                                   meta={"model": turn.model or "", "turn_id": turn.turn_id},
-                                   tokens=turn.tokens_used)
+                await asyncio.to_thread(
+                    _store.add_message, sid, "assistant", turn.result,
+                    meta={"model": turn.model or "", "turn_id": turn.turn_id},
+                    tokens=turn.tokens_used,
+                )
         self.bus.subscribe("turn_completed", _persist_turn)
 
-        self.ctx._plugins = [
-            p for p in (
-                self.llm, self.router, self.memory, self.skills,
-                self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
-                self.coordinator, self.scheduler,
-                self.cli,
-            ) if p is not None
-        ]
+        # Single source of truth for the plugin registry: derive ctx._plugins
+        # from PluginManager (which already filtered out None gateways) so the
+        # two lists can never drift. Previously this was a hand-maintained list
+        # that omitted _alert_manager, diverging from _pm._plugins.
+        self.ctx._plugins = list(self._pm._plugins)
         self.ctx._alert_manager = self._alert_manager
 
         # Attach approval manager to agent context
@@ -397,40 +416,8 @@ class OneAgentApp:
         # Attach Python executor to agent context (shared instance)
         self.ctx.python_executor = self.exec_python
 
-        # Attach llm provider to ctx so skills can call set_api_key / rebuild_tiers
-        self.ctx._llm = self.llm
-
         await self.bus.start()
         await self._pm.setup_all(self.ctx)
-
-        # --- 加载 eager 策略的可选模块 ---
-        self._registry.bind(self.ctx, self._pm)
-        eager_plugins = await self._registry.setup_eager(self.ctx, self._pm)
-        # 将已加载的 eager 模块挂到 self 上（方便后续引用）
-        for plugin in eager_plugins:
-            if hasattr(plugin, 'name'):
-                # 映射插件名到属性名
-                attr_map = {
-                    'multimodal': 'multimodal', 'rest_api': 'rest_api',
-                    'monitor': 'monitor', 'monitoring': 'monitor',
-                    'marketplace': 'marketplace', 'alerting': '_alert_manager',
-                    'web': 'web',
-                }
-                attr_name = attr_map.get(plugin.name)
-                if attr_name:
-                    setattr(self, attr_name, plugin)
-
-        # 将 registry 挂到 ctx，供 /module 命令和其他模块使用
-        self.ctx._registry = self._registry
-
-        # --- 注册代理技能：让 LLM 能"看到"所有可选模块的能力 ---
-        # 代理技能在 LLM 调用时自动加载对应模块
-        from core.module_autoloader import ModuleAutoLoader
-        self._autoloader = ModuleAutoLoader(self._registry, self.skills)
-        self._autoloader.set_context(self.ctx)
-        proxy_count = self._autoloader.register_proxy_skills()
-        logger.info("registered %d proxy skills for lazy-loaded modules", proxy_count)
-
         # Register knowledge graph search skill (KG is created by MemoryPlugin during setup)
         if self.memory._kg is not None:
             from memory.knowledge_graph import make_graph_search_handler
@@ -482,18 +469,18 @@ class OneAgentApp:
             ))
         self.router.bind_llm(self.llm)
         self.coordinator.bind(self.llm, self.skills)
-        # 可选模块可能尚未加载（lazy），安全检查后再调用
+        # Guard against optional gateways that may be None if their import failed
         if self.web is not None:
             self.web.bind_callback(self.chat)
-        if self.rest_api is not None:
-            self.rest_api.bind_callback(self.chat)
+        self.rest_api.bind_callback(self.chat)
         # wire marketplace to skills plugin
-        if self.marketplace is not None:
-            self.marketplace._skills_plugin = self.skills  # type: ignore[attr-defined]
+        self.marketplace._skills_plugin = self.skills  # type: ignore[attr-defined]
 
         # Wire the monitoring plugin's metrics collector into the alert
         # manager so _check_loop actually evaluates rules against live metrics.
-        if self.monitor is not None and self._alert_manager is not None:
+        # AlertManager.setup is invoked by PluginManager.setup_all above
+        # (depends_on=["monitoring"]); start/stop are handled by start_all/stop_all.
+        if self.monitor is not None:
             self._alert_manager.set_metrics_getter(self.monitor.collect_metrics)
 
         await self._pm.start_all()
@@ -521,18 +508,29 @@ class OneAgentApp:
     async def chat(self, text: str, source: str = "cli", session_id: str = "default") -> str:
         from core.context import TurnContext
         turn = TurnContext(input_text=text, source=source, session_id=session_id)
-        self.bus.publish({
-            "type": "user_message",
-            "payload": {"turn": turn, "session_id": session_id},
-            "source": source,
-        })
-        import time as _time
-        deadline = _time.monotonic() + 180
-        while _time.monotonic() < deadline:
-            if turn.result is not None or turn.error is not None:
-                break
-            await asyncio.sleep(0.1)
-        return turn.result if turn.result is not None else "[timeout]"
+        # Subscribe to turn_completed BEFORE publishing the user_message so we
+        # never miss the completion event (the bus dispatches asynchronously,
+        # but subscribing first eliminates any ordering race entirely).
+        completion_event = asyncio.Event()
+
+        def _on_turn_completed(evt) -> None:
+            if evt.get("turn") is turn:
+                completion_event.set()
+
+        self.bus.subscribe("turn_completed", _on_turn_completed)
+        try:
+            self.bus.publish({
+                "type": "user_message",
+                "payload": {"turn": turn, "session_id": session_id},
+                "source": source,
+            })
+            try:
+                await asyncio.wait_for(completion_event.wait(), timeout=180)
+            except asyncio.TimeoutError:
+                return "[timeout]"
+            return turn.result if turn.result is not None else "[timeout]"
+        finally:
+            self.bus.unsubscribe("turn_completed", _on_turn_completed)
 
     async def chat_with_thinking(self, text: str, source: str = "api", session_id: str = "default") -> dict:
         """Like chat(), but returns {"reply": ..., "thinking": ...} with thinking process.
@@ -541,32 +539,77 @@ class OneAgentApp:
         """
         from core.context import TurnContext
         turn = TurnContext(input_text=text, source=source, session_id=session_id)
-        self.bus.publish({
-            "type": "user_message",
-            "payload": {"turn": turn, "session_id": session_id},
-            "source": source,
-        })
-        import time as _time
-        deadline = _time.monotonic() + 180
-        while _time.monotonic() < deadline:
-            if turn.result is not None or turn.error is not None:
-                break
-            await asyncio.sleep(0.1)
-        reply = turn.result if turn.result is not None else "[timeout]"
+        completion_event = asyncio.Event()
+
+        def _on_turn_completed(evt) -> None:
+            if evt.get("turn") is turn:
+                completion_event.set()
+
+        self.bus.subscribe("turn_completed", _on_turn_completed)
+        try:
+            self.bus.publish({
+                "type": "user_message",
+                "payload": {"turn": turn, "session_id": session_id},
+                "source": source,
+            })
+            try:
+                await asyncio.wait_for(completion_event.wait(), timeout=180)
+            except asyncio.TimeoutError:
+                reply = "[timeout]"
+            else:
+                reply = turn.result if turn.result is not None else "[timeout]"
+        finally:
+            self.bus.unsubscribe("turn_completed", _on_turn_completed)
         thinking_text = turn.meta.get("thinking", "")
         return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
 
     async def stop(self) -> None:
-        # 先卸载按需加载的模块
-        if hasattr(self, '_registry'):
-            await self._registry.unload_all()
         await self._pm.stop_all()
         await self.bus.stop()
+        # Explicitly close SQLite connections created in start(); they would
+        # otherwise only be released on GC (see __del__), leaking file
+        # descriptors across restarts.
+        if self.ctx is not None:
+            for attr in ("session_store", "self_improver"):
+                store = getattr(self.ctx, attr, None)
+                if store is not None:
+                    try:
+                        store.close()
+                    except Exception:
+                        pass
 
 
 # ============================================================
 # Entry point
 # ============================================================
+
+# Pre-compiled CLI intent patterns. Compiling once at import (instead of
+# re-running re.search on every user input) keeps the hot input loop cheap.
+_INTENT_PATTERNS: Dict[str, list] = {
+    "exit": [re.compile(r"退出|再见|拜拜|结束|关闭|退出程序|再见啦|bye|goodbye|see you")],
+    "help": [re.compile(r"帮助|怎么用|使用说明|能做什么|有什么功能|help|命令列表|功能列表|怎么操作|使用方法")],
+    "skills": [re.compile(r"技能|会什么|能做什么|有哪些能力|有什么技能|skill|能力列表|你会啥|你会什么")],
+    "status": [re.compile(r"状态|运行状态|当前状态|系统状态|运行情况|status|还好吗|活着吗|运行多久")],
+    "metrics": [re.compile(r"指标|统计|性能|调用量|token|用量|metrics|stats|统计数据|性能指标|使用量")],
+    "dlq": [re.compile(r"死信|失败事件|未处理|错误队列|死信队列|dlq|dead.?letter|失败的消息")],
+    "bus": [re.compile(r"事件|总线|event.?bus|事件类型|总线状态|bus")],
+    "clear": [re.compile(r"清屏|清除屏幕|清理屏幕|clear|刷新屏幕")],
+    "settings": [re.compile(r"设置|配置|修改设置|查看设置|更改|切换模型|改模型|改温度|开启|关闭|启用|禁用|把.*改|set.*to|change|configure")],
+    "models": [re.compile(r"\bmodels?\b|模型列表|有哪些模型|看模型|看.*模型|可.*模型|所有模型|免费模型|列出模型|列出.*模型|model.*list")],
+    # 智能分层：把 provider 的全部模型按 free/paid、context、features 自动分配到 4 层
+    "rebuild_tiers": [re.compile(
+        r"智能分层|自动分层|自动分配|重新分层|刷新分层|rebuild.?tiers|auto.?tier|"
+        r"分层|分类|分档|auto.?classif|smart.?tier|分配.*模型|模型.*分配"
+    )],
+}
+
+# Pre-compiled helpers for the models / rebuild_tiers command parsers.
+_CONTEXT_K_PATTERN = re.compile(r"(\d+)\s*k\b")
+_PROVIDER_HINT_PATTERN = re.compile(
+    r"(?:provider|提供商|从|用|on)\s*[:：=]?\s*([a-z][a-z0-9_\-]*)",
+    re.IGNORECASE,
+)
+
 
 async def _interactive(app: OneAgentApp) -> None:
     print()
@@ -575,51 +618,11 @@ async def _interactive(app: OneAgentApp) -> None:
     print("╚══════════════════════════════════════════════╝")
 
     # ---------- 自然语言意图匹配 ----------
-    # 用户无需记住精准命令，用自然语言即可触发内置功能
-    _INTENT_PATTERNS = {
-        "exit": [
-            r"^退出$|^再见$|^拜拜$|^结束$|^退出程序$|^bye$|^goodbye$|^quit$",
-        ],
-        "help": [
-            r"^帮助$|^怎么用$|^使用说明$|^help$|^命令列表$|^功能列表$",
-        ],
-        "skills": [
-            r"^技能$|^会什么$|^有什么技能$|^skill$|^能力列表$|^你会啥$|^你会什么$",
-        ],
-        "status": [
-            r"^状态$|^运行状态$|^系统状态$|^status$|^运行情况$",
-        ],
-        "metrics": [
-            r"^指标$|^统计$|^metrics$|^stats$|^性能指标$",
-        ],
-        "dlq": [
-            r"^死信$|^死信队列$|^dlq$|^dead.?letter$",
-        ],
-        "bus": [
-            r"^事件总线$|^bus$|^event.?bus$",
-        ],
-        "clear": [
-            r"^清屏$|^clear$|^清除屏幕$",
-        ],
-        # settings 只匹配精确的 /set 命令格式，自然语言交给 LLM
-        "settings": [
-            r"^/set\s+|^设置\s+\S+\s*[=＝]|^配置\s+\S+\s*[=＝]|^/config\s+",
-        ],
-        "models": [
-            r"^/models?$|^模型列表$|^列出模型$|^所有模型$|^免费模型$",
-        ],
-        # 智能分层：把 provider 的全部模型按 free/paid、context、features 自动分配到 4 层
-        "rebuild_tiers": [
-            r"^智能分层$|^自动分层$|^重新分层$|^刷新分层$|^rebuild.?tiers$",
-        ],
-        "module": [
-            r"^/module|^模块列表$|^模块状态$|^/modules?$",
-        ],
-    }
+    # 用户无需记住精准命令，用自然语言即可触发内置功能。
+    # Patterns are pre-compiled at module level (see _INTENT_PATTERNS above).
 
     def _match_intent(text: str) -> Optional[str]:
         """从自然语言中匹配用户意图，返回命令名或 None。"""
-        import re
         lower = text.lower().strip()
         exact_map = {
             "exit": "exit", "quit": "exit", "q": "exit",
@@ -633,7 +636,7 @@ async def _interactive(app: OneAgentApp) -> None:
             return exact_map[lower]
         for intent, patterns in _INTENT_PATTERNS.items():
             for pat in patterns:
-                if re.search(pat, lower):
+                if pat.search(lower):
                     return intent
         return None
 
@@ -649,123 +652,6 @@ async def _interactive(app: OneAgentApp) -> None:
             return
         if not line:
             continue
-        import re as _re_key
-
-        # 检测待确认的 provider 集成命令（全部/免费/选择 N/取消）
-        _pending = getattr(app.ctx, "_pending_provider", None)
-        if _pending:
-            _low = line.lower().strip()
-            _handled = False
-            if _low in ("取消", "cancel", "放弃", "exit", "退出"):
-                app.ctx._pending_provider = None
-                print("已取消集成。API key 已保存，可稍后重新发送服务商+key 来集成。")
-                continue
-            elif _low in ("全部", "all", "所有", "全部集成"):
-                _handled = True
-                _selected = _pending["models"]
-            elif _low in ("免费", "free", "免费模型"):
-                _handled = True
-                _selected = _pending.get("free_models", [])
-                if not _selected:
-                    print("❌ 没有免费模型可选")
-                    continue
-            elif _re_key.match(r"(?:选择|select|pick)\s+([\d,\s]+)", _low):
-                _handled = True
-                _nums = [int(x) for x in _re_key.findall(r"\d+", _low)]
-                _free = _pending.get("free_models", [])
-                _selected = [_free[i - 1] for i in _nums if 0 < i <= len(_free)]
-                if not _selected:
-                    print(f"❌ 编号无效，请输入 1-{len(_free)} 之间的数字")
-                    continue
-            elif _re_key.match(r"^[\d,\s]+$", _low):
-                # 直接输入数字 "1,3,5"
-                _handled = True
-                _nums = [int(x) for x in _re_key.findall(r"\d+", _low)]
-                _free = _pending.get("free_models", [])
-                _selected = [_free[i - 1] for i in _nums if 0 < i <= len(_free)]
-                if not _selected:
-                    print(f"❌ 编号无效，请输入 1-{len(_free)} 之间的数字")
-                    continue
-
-            if _handled:
-                _prov = _pending["provider"]
-                app.ctx._pending_provider = None
-                print(f"🔄 正在将 {len(_selected)} 个模型集成到 {_prov}...")
-                try:
-                    _llm = getattr(app, "llm", None)
-                    if _llm:
-                        _result = await _llm.rebuild_tiers(provider=_prov, persist=True)
-                        if _result.get("ok"):
-                            _tiers = _result.get("tiers", {})
-                            print(f"✅ 集成成功！共 {_result.get('model_count', 0)} 个模型已分配到 4 层：")
-                            for _tier_name in ("trivial", "simple", "complex", "expert"):
-                                _models = _tiers.get(_tier_name, [])
-                                print(f"  [{_tier_name:8s}] {len(_models)} 个: {', '.join(_models[:3])}{'...' if len(_models) > 3 else ''}")
-                            print(f"\n💡 如需切换到此服务商，可以对我说：'使用{_prov}' 或 '/set provider {_prov}'")
-                        else:
-                            print(f"⚠️ 集成失败: {_result.get('error', 'unknown')}")
-                    else:
-                        print("❌ LLM provider 不可用")
-                except Exception as exc:
-                    print(f"❌ 集成错误: {exc}")
-                continue
-            # 不是确认命令，清除待确认状态，继续正常处理
-            app.ctx._pending_provider = None
-
-        # 检测"服务商 + API key"模式，直接调用 add_provider 技能
-        # 不依赖 LLM 工具调用（某些模型不支持 tools）
-        # 支持多行输入：如果当前行只有 key，检查上一行是否是服务商名
-        _key_only = _re_key.match(r"^\s*key\s*[=：:]\s*(\S+)\s*$", line, _re_key.IGNORECASE)
-        if _key_only:
-            _last_provider = getattr(app, "_last_provider_hint", None)
-            if _last_provider:
-                line = f"{_last_provider} {_key_only.group(1)}"
-                app._last_provider_hint = None
-        if _re_key.search(r"(?:key[:：]?\s*)?(nvapi-\S+|sk-\S+|ak-\S+)", line):
-            try:
-                from skills import SkillManager
-                _sm = getattr(app, "_skills_mgr", None)
-                if _sm is None:
-                    # 临时创建 SkillManager 来执行 add_provider
-                    _sm = SkillManager()
-                    await _sm.setup(app.ctx)
-                    app._skills_mgr = _sm
-                _result = await _sm.dispatch("add_provider", {"input": line})
-                if _result and str(_result) != "__SKIP__":
-                    print(_result)
-                    continue
-            except Exception as exc:
-                print(f"[add_provider error: {exc}]")
-                continue
-        # 检测"搜索 服务商名"命令：网上搜索未知服务商的 API 地址
-        _search_m = _re_key.match(r"^(?:搜索|search|查找|find)\s+(.+)", line, _re_key.IGNORECASE)
-        if _search_m:
-            _provider_query = _search_m.group(1).strip()
-            print(f"🔍 正在网上搜索「{_provider_query}」的 API 地址...")
-            try:
-                from models.resolver import resolve
-                _resolved = await resolve(_provider_query, probe=True, timeout=8.0)
-                if _resolved.found:
-                    print(f"✅ 找到「{_provider_query}」的 API 地址：{_resolved.base_url}")
-                    print(f"   （来源：{_resolved.via}）")
-                    print(f"   现在你可以发送：{_provider_query} {_resolved.base_url} key=你的API密钥")
-                else:
-                    print(f"❌ 未能自动找到「{_provider_query}」的 API 地址。")
-                    print("   请直接提供 base URL，例如：")
-                    print(f"   {_provider_query} https://api.example.com/v1 key=你的API密钥")
-            except Exception as exc:
-                print(f"❌ 搜索失败: {exc}")
-                print("   请直接提供 base URL，例如：")
-                print(f"   {_provider_query} https://api.example.com/v1 key=你的API密钥")
-            continue
-        # 保存服务商名作为 hint（用于多行输入：用户先发服务商名，下一行发 key）
-        try:
-            from models.resolver import _PROVIDER_ALIASES
-            _hint = _re_key.sub(r"[，,。.：:：]+$", "", line.strip())
-            if _hint in _PROVIDER_ALIASES or _hint.lower() in _PROVIDER_ALIASES:
-                app._last_provider_hint = _hint
-        except Exception:
-            pass
         intent = _match_intent(line)
         if intent == "exit":
             return
@@ -780,9 +666,6 @@ async def _interactive(app: OneAgentApp) -> None:
             print("  事件/总线/bus       → 事件总线")
             print("  清屏/clear          → 清除屏幕")
             print("  设置/配置/改模型    → 修改设置")
-            print("  /module list       → 查看模块加载状态")
-            print("  /module load <名>  → 按需加载模块")
-            print("  /module unload <名>→ 卸载模块")
             print("  其他任何文字        → 与 AI 对话")
             continue
         if intent == "skills":
@@ -816,60 +699,7 @@ async def _interactive(app: OneAgentApp) -> None:
             # 将设置请求路由到 settings 技能
             from skills import _process_settings_command
             result = _process_settings_command(line, app.config)
-            # None 或 "__SKIP__" 表示不是设置命令，跳过继续正常对话
-            if result is None or result == "__SKIP__":
-                pass  # 继续到下面的 LLM 对话
-            else:
-                print(result)
-            # 只有明确返回了内容才结束，继续时不要 continue
-            if result is not None and result != "__SKIP__":
-                continue
-        if intent == "module":
-            # 模块管理：/module list | /module load <name> | /module unload <name>
-            registry = getattr(app, '_registry', None)
-            if registry is None:
-                print("[module registry not available]")
-                continue
-            parts = line.strip().split()
-            if len(parts) < 2 or parts[1] in ("list", "ls", "列表", "状态"):
-                # 列出所有模块
-                status = registry.get_status()
-                print(f"\n模块状态 (共{status['total_modules']}个, 已加载{status['loaded']}, "
-                      f"eager={status['eager']}, lazy={status['lazy']}, off={status['off']})")
-                print("-" * 70)
-                for m in status["modules"]:
-                    mark = "✓" if m["loaded"] else "✗"
-                    policy = m["load_policy"]
-                    err = f" [错误: {m['error']}]" if m["error"] else ""
-                    print(f"  {mark} {m['name']:<22} {policy:<6} {m['description']}{err}")
-                print()
-            elif parts[1] in ("load", "加载") and len(parts) >= 3:
-                mod_name = parts[2]
-                if registry.is_loaded(mod_name):
-                    print(f"模块 {mod_name} 已加载")
-                else:
-                    print(f"正在加载模块 {mod_name}...")
-                    plugin = await registry.get(mod_name, app.ctx)
-                    if plugin is not None:
-                        print(f"✓ 模块 {mod_name} 加载成功")
-                    else:
-                        entry = registry.get_entry(mod_name)
-                        if entry and entry.load_policy.value == "off":
-                            print(f"✗ 模块 {mod_name} 已禁用(off)，请在配置中改为 lazy 或 eager")
-                        else:
-                            print(f"✗ 模块 {mod_name} 加载失败")
-            elif parts[1] in ("unload", "卸载") and len(parts) >= 3:
-                mod_name = parts[2]
-                if not registry.is_loaded(mod_name):
-                    print(f"模块 {mod_name} 未加载")
-                else:
-                    ok = await registry.unload(mod_name)
-                    if ok:
-                        print(f"✓ 模块 {mod_name} 已卸载")
-                    else:
-                        print(f"✗ 模块 {mod_name} 卸载失败")
-            else:
-                print("用法: /module list | /module load <名称> | /module unload <名称>")
+            print(result)
             continue
         if intent == "models":
             # 模型发现：拉取当前 provider 的模型列表并按需过滤
@@ -884,8 +714,7 @@ async def _interactive(app: OneAgentApp) -> None:
                 spec["free_only"] = True
             if any(k in low for k in ("paid", "收费")):
                 spec["paid_only"] = True
-            import re as _re
-            m = _re.search(r"(\d+)\s*k\b", low)
+            m = _CONTEXT_K_PATTERN.search(low)
             if m:
                 spec["min_context"] = int(m.group(1)) * 1000
             models = await llm.list_models(**spec)
@@ -907,12 +736,8 @@ async def _interactive(app: OneAgentApp) -> None:
                 print("[llm provider not available]")
                 continue
             # 解析用户是否指定了 provider（默认当前 primary）
-            import re as _re
             prov = None
-            prov_match = _re.search(
-                r"(?:provider|提供商|从|用|on)\s*[:：=]?\s*([a-z][a-z0-9_\-]*)",
-                line, _re.IGNORECASE,
-            )
+            prov_match = _PROVIDER_HINT_PATTERN.search(line)
             if prov_match:
                 prov = prov_match.group(1)
             else:
@@ -954,13 +779,9 @@ async def _interactive(app: OneAgentApp) -> None:
             print("[timeout — try again]")
             continue
         print(reply)
-        # 检测退出标志（quit_handler 设置）
-        _quit_ev = getattr(app.ctx, "_quit_event", None)
-        if _quit_ev is not None and _quit_ev.is_set():
-            return
 
 
-async def main() -> None:
+async def main(interactive: bool = True) -> None:
     # ── Load .env file if it exists ──
     # This makes environment variables from .env available to the config
     env_file = ROOT / ".env"
@@ -1025,24 +846,385 @@ async def main() -> None:
             pass  # Windows or lack of signal support
 
     try:
-        await _interactive(app)
+        if interactive:
+            await _interactive(app)
+        else:
+            # Serve mode — wait indefinitely for shutdown signal
+            print("\n  One-Agent 服务已启动 (serve 模式)")
+            print("  按 Ctrl+C 停止\n")
+            stop_event = asyncio.Event()
+            def _on_serve_signal():
+                stop_event.set()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(sig, _on_serve_signal)
+                except (NotImplementedError, OSError):
+                    pass
+            await stop_event.wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         # Clean exit on Ctrl+C or signal
         print("\n\n========================================")
         print("  👋 再见！One-Agent 已关闭")
         print("========================================\n")
     finally:
-        await app.stop()
+        if _shutdown_task is not None:
+            # A signal already initiated shutdown via app.stop(); await that
+            # task to completion rather than starting a second, concurrent
+            # stop() that could race with the in-flight one.
+            try:
+                await _shutdown_task
+            except Exception:
+                pass
+        else:
+            await app.stop()
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 
 def cli():
-    """Console-script entry point for ``one-agent`` command."""
+    """Console-script entry point for ``one-agent`` command.
+
+    Subcommands:
+      one-agent            — 启动 agent（默认交互模式）
+      one-agent setup      — 交互式配置向导
+      one-agent version    — 显示版本号
+      one-agent config     — 检查配置文件路径和状态
+      one-agent serve      — 启动后台服务（无 CLI 交互）
+    """
+    args = sys.argv[1:]
+
+    if not args:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print()
+            sys.exit(0)
+        return
+
+    cmd = args[0]
+    rest = args[1:]
+
+    if cmd in ("version", "-v", "--version"):
+        _cmd_version()
+    elif cmd in ("setup", "config", "init"):
+        _cmd_setup()
+    elif cmd in ("check", "doctor"):
+        _cmd_doctor()
+    elif cmd in ("serve", "start", "run"):
+        try:
+            asyncio.run(main(interactive=False))
+        except KeyboardInterrupt:
+            print()
+            sys.exit(0)
+    elif cmd in ("-h", "--help", "help"):
+        _cmd_help()
+    else:
+        print(f"Unknown command: {cmd}")
+        print("Run 'one-agent help' for usage.")
+        sys.exit(1)
+
+
+def _cmd_version():
+    """Show version information."""
+    print(f"One-Agent v{__version__}")
+    print(f"Python  {sys.version.split()[0]}")
+    print(f"Config  {_get_config_path()}")
+
+
+def _cmd_setup():
+    """Interactive setup wizard."""
+    print()
+    print("  ╔══════════════════════════════════════════════════╗")
+    print("  ║           One-Agent 设置向导                    ║")
+    print("  ║           Setup Wizard                          ║")
+    print("  ╚══════════════════════════════════════════════════╝")
+    print()
+
+    # Step 1: LLM API Key
+    print("  第 1 步：设置 LLM API Key")
+    print("  ───────────────────────")
+    print("  1. SenseNova (商汤)     — 新用户免费额度")
+    print("  2. DeepSeek (深度求索)  — 价格极低")
+    print("  3. DashScope (阿里百炼)  — 新用户免费额度")
+    print("  4. OpenAI")
+    print("  5. Anthropic (Claude)")
+    print("  6. Ollama (本地/免费)")
+    print("  7. 跳过")
+    print()
+
+    provider_map = {
+        "1": ("SENSENOVA_API_KEY", "sensenova", "SenseNova", ["deepseek-v4-flash", "sensenova-6.7-flash-lite"]),
+        "2": ("DEEPSEEK_API_KEY", "deepseek", "DeepSeek", ["deepseek-chat", "deepseek-reasoner"]),
+        "3": ("DASHSCOPE_API_KEY", "dashscope", "DashScope", ["qwen-plus", "qwen-max", "qwen-turbo"]),
+        "4": ("OPENAI_API_KEY", "openai", "OpenAI", ["gpt-4o-mini", "gpt-4o"]),
+        "5": ("ANTHROPIC_API_KEY", "anthropic", "Anthropic", ["claude-3-5-haiku-latest", "claude-sonnet-4.5-20250514"]),
+        "6": ("OLLAMA_HOST", "ollama", "Ollama", ["qwen2.5:7b", "llama3.1:8b"]),
+        "7": (None, None, None, []),
+    }
+
+    choice = _ask("请选择 [1-7, 默认 1]: ", "1")
+    info = provider_map.get(choice)
+    if info is None or info[0] is None:
+        print("  已跳过。稍后可编辑 .env 文件添加。")
+    else:
+        env_var, provider_key, name, models = info
+        if env_var == "OLLAMA_HOST":
+            val = _ask(f"  Ollama 地址 [默认 http://localhost:11434]: ", "http://localhost:11434")
+        else:
+            val = _ask(f"  请输入 {name} API Key: ", "").strip()
+            if not val:
+                print("  未输入，已跳过。")
+                name = None
+        if val and name:
+            _write_env(env_var, val)
+            print(f"  ✓ 已保存 {env_var}")
+
+            # Choose model
+            print(f"\n  可用的 {name} 模型:")
+            for i, m in enumerate(models, 1):
+                mark = " (默认)" if i == 1 else ""
+                print(f"    {i}. {m}{mark}")
+            mc = _ask("  选择模型 [默认 1]: ", "1")
+            try:
+                idx = int(mc) - 1
+                model = models[idx] if 0 <= idx < len(models) else models[0]
+            except (ValueError, IndexError):
+                model = models[0]
+
+            _update_config_llm(provider_key, model)
+            print(f"  ✓ 模型设置为: {provider_key}/{model}")
+
+    # Step 2: Basic settings
+    print("\n  第 2 步：基础设置")
+    print("  ──────────────")
+    lang = _ask("  界面语言 (zh/en) [默认 zh]: ", "zh")
+    _update_config("agent.language", lang)
+
+    tz = _ask("  时区 [默认 Asia/Shanghai]: ", "Asia/Shanghai")
+    _update_config("agent.timezone", tz)
+
+    # Step 3: Security
+    print("\n  第 3 步：安全设置（可选）")
+    print("  ──────────────────")
+    pwd = _ask("  设置系统执行密码（回车跳过）: ", "")
+    if pwd:
+        import hashlib
+        pwd_hash = hashlib.sha256(pwd.encode()).hexdigest()
+        _update_config("security.system_executor_password", pwd_hash)
+        print("  ✓ 密码已设置")
+
+    # Step 4: Gateway selection
+    print("\n  第 4 步：消息网关（空格多选，回车确认）")
+    print("  ───────────────────────────────────────")
+    print("  1. CLI 命令行     (默认)")
+    print("  2. Web UI 网页界面")
+    print("  3. Telegram")
+    print("  4. 企业微信")
+    print("  5. 钉钉")
+    print("  6. 飞书")
+    print("  7. Discord")
+    print("  8. Slack")
+    print("  9. 个人微信")
+    gw = _ask("  选择网关 [默认 1]: ", "1")
+
+    gw_map = {
+        "1": ("cli", "CLI"),
+        "2": ("web", "Web UI"),
+        "3": ("telegram", "Telegram"),
+        "4": ("wecom", "企业微信"),
+        "5": ("dingtalk", "钉钉"),
+        "6": ("feishu", "飞书"),
+        "7": ("discord", "Discord"),
+        "8": ("slack", "Slack"),
+        "9": ("wechat_personal", "个人微信"),
+    }
+    for key in gw:
+        if key in gw_map:
+            gw_key, gw_name = gw_map[key]
+            _update_config(f"gateways.{gw_key}.enabled", "true")
+            print(f"  ✓ 已启用: {gw_name}")
+
+    # Summary
+    print()
+    print("  ✅ 设置完成！")
+    print()
+    print(f"  配置文件: {_get_config_path()}")
+    print(f"  环境变量: {ROOT / '.env'}")
+    print()
+    print("  启动命令:")
+    print("    one-agent          # 交互模式")
+    print("    one-agent serve    # 后台服务")
+    print()
+
+
+def _cmd_doctor():
+    """Check system health and config status."""
+    print()
+    print("  🩺 One-Agent 健康检查")
+    print("  ────────────────────")
+    print()
+
+    # Python version
+    py_ok = sys.version_info >= (3, 10)
+    print(f"  {'✓' if py_ok else '✗'}  Python {sys.version.split()[0]}", end="")
+    print("" if py_ok else " (需要 3.10+)")
+
+    # Config file
+    cfg_path = _get_config_path()
+    cfg_ok = Path(cfg_path).exists()
+    print(f"  {'✓' if cfg_ok else '✗'}  配置文件: {cfg_path}")
+
+    # .env file
+    env_ok = (ROOT / ".env").exists()
+    print(f"  {'✓' if env_ok else '○'}  .env 文件: {ROOT / '.env'}")
+
+    # API keys
+    print()
+    print("  API Keys:")
+    key_vars = ["SENSENOVA_API_KEY", "DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY",
+                "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
+                "OLLAMA_HOST"]
+    found = 0
+    for var in key_vars:
+        val = os.environ.get(var, "")
+        if (ROOT / ".env").exists():
+            # Also check .env
+            try:
+                with open(ROOT / ".env") as f:
+                    for line in f:
+                        if line.strip().startswith(f"{var}=") and "=" in line:
+                            v = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                            if v:
+                                val = v
+                            break
+            except Exception:
+                pass
+        if val:
+            status = "✓" if val.startswith("http") else f"✓ ({val[:4]}...{val[-4:]})"
+            print(f"    {status}  {var}")
+            found += 1
+        else:
+            print(f"    ○  {var}  (未设置)")
+
+    if found == 0:
+        print("\n  ⚠  未配置任何 API Key，运行 'one-agent setup' 设置")
+
+    # Data dir
+    data_dir = ROOT / "data"
+    print(f"\n  {'✓' if data_dir.exists() else '○'}  数据目录: {data_dir}")
+
+    print()
+    print("  运行 'one-agent setup' 修改配置")
+    print()
+
+
+def _cmd_help():
+    """Show help message."""
+    print()
+    print(f"  One-Agent v{__version__}")
+    print()
+    print("  用法:")
+    print("    one-agent              启动 agent（交互模式）")
+    print("    one-agent setup        交互式配置向导")
+    print("    one-agent serve        启动后台服务（无 CLI）")
+    print("    one-agent version      显示版本号")
+    print("    one-agent doctor       健康检查")
+    print("    one-agent help         显示此帮助")
+    print()
+    print("  配置文件:")
+    print(f"    {_get_config_path()}")
+    print()
+    print("  环境变量:")
+    print(f"    {ROOT / '.env'}")
+    print()
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    """Ask a question, return user's answer or default."""
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print()
-        sys.exit(0)
+        ans = input(f"  {prompt}")
+    except (EOFError, KeyboardInterrupt):
+        return default
+    return ans.strip() or default
+
+
+def _get_config_path() -> str:
+    """Get the active config file path."""
+    return os.environ.get("ONE_AGENT_CONFIG", str(ROOT / "config" / "default_config.yaml"))
+
+
+def _write_env(key: str, value: str) -> None:
+    """Write an environment variable to .env file."""
+    env_path = ROOT / ".env"
+    env_path.touch(exist_ok=True)
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.stat().st_size > 0 else []
+    updated = False
+    new_lines = []
+    for line in lines:
+        if line.strip().startswith(f"{key}="):
+            new_lines.append(f"{key}={value}")
+            updated = True
+        else:
+            new_lines.append(line)
+    if not updated:
+        new_lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+def _update_config(key_path: str, value: str) -> None:
+    """Update a nested config value by dot path (e.g. "agent.language")."""
+    cfg_path = Path(_get_config_path())
+    if not cfg_path.exists():
+        return
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except yaml.YAMLError:
+        return
+
+    keys = key_path.split(".")
+    d = cfg
+    for k in keys[:-1]:
+        if k not in d or not isinstance(d[k], dict):
+            d[k] = {}
+        d = d[k]
+
+    # Try to keep type: bool stays bool, int stays int
+    if value.lower() in ("true", "yes", "on"):
+        d[keys[-1]] = True
+    elif value.lower() in ("false", "no", "off"):
+        d[keys[-1]] = False
+    else:
+        try:
+            d[keys[-1]] = int(value)
+        except (ValueError, TypeError):
+            try:
+                d[keys[-1]] = float(value)
+            except (ValueError, TypeError):
+                d[keys[-1]] = value
+
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+def _update_config_llm(provider: str, model: str) -> None:
+    """Update LLM provider and model in config."""
+    cfg_path = Path(_get_config_path())
+    if not cfg_path.exists():
+        return
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+    except yaml.YAMLError:
+        return
+
+    if "llm" not in cfg:
+        cfg["llm"] = {}
+    cfg["llm"]["primary_provider"] = provider
+    cfg["llm"]["primary_model"] = f"{provider}/{model}"
+
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+if __name__ == "__main__":
+    cli()

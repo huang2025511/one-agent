@@ -1,0 +1,38 @@
+# ============================================================================
+# One-Agent 开发环境配置
+#
+# 使用方式：ONE_AGENT_ENV=dev one-agent
+# 或复制此文件为 config.yaml 覆盖默认配置
+# ============================================================================
+
+# 开发环境使用宽松设置
+agent:
+  log_level: DEBUG           # 开发环境用 DEBUG
+  language: zh
+
+# 开发环境使用模拟/免费 API
+llm:
+  primary_model: sensenova/sensenova-6.7-flash-lite  # 使用轻量模型
+  lightweight_model: sensenova/sensenova-6.7-flash-lite
+  timeout: 60                # 开发环境超时更长
+  retries: 3                 # 允许多次重试
+
+# 开发环境路由优化
+router:
+  enabled: true
+  task_complexity_thresholds:
+    trivial: 0.1
+    simple: 0.3
+    complex: 0.6
+    expert: 0.9
+
+# 开发环境监控
+monitor:
+  metrics_enabled: true
+  tracing_enabled: true
+  health_check_interval: 30  # 更频繁的健康检查
+
+# 开发环境功能开关
+features:
+  self_evolution: true       # 允许自进化
+  experimental: true         # 启用实验功能

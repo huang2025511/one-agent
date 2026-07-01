@@ -201,16 +201,16 @@ class EventBus:
 
     # ---------------------------------------------------------------- public
     def subscribe(self, event_type: str, handler: Handler) -> None:
-        assert event_type, "event_type cannot be empty"
-        assert isinstance(event_type, str), "event_type must be a string"
-        assert handler is not None, "handler cannot be None"
-        assert callable(handler), "handler must be callable"
+        # Use explicit validation instead of assert — assert statements are
+        # stripped when Python runs with -O, which would silently disable
+        # these safety checks in production.
+        if not event_type or not isinstance(event_type, str):
+            raise ValueError("event_type must be a non-empty string")
+        if handler is None or not callable(handler):
+            raise ValueError("handler must be callable")
 
         self._subscribers.setdefault(event_type, []).append(handler)
         logger.info("subscribed %s to %s", handler, event_type)
-
-    def subscribe_all(self, handler: Handler) -> None:
-        self._wildcards.append(handler)
 
     def unsubscribe(self, event_type: str, handler: Handler) -> None:
         """Remove a previously subscribed handler from an event type.
@@ -297,7 +297,10 @@ class EventBus:
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
+        if self._task is not None:
+            remaining = self._queue.qsize()
+            if remaining > 0:
+                logger.warning("EventBus stopping with %d pending events", remaining)
             self._task.cancel()
             try:
                 await self._task
@@ -311,9 +314,11 @@ class EventBus:
                 event = await self._queue.get()
             except asyncio.CancelledError:
                 break
-            # Batch: collect all pending items, sort by priority
+            # Batch: collect pending items (bounded so one giant backlog
+            # doesn't monopolize a single loop iteration), sort by priority.
+            MAX_BATCH = 100
             pending = [event]
-            while not self._queue.empty():
+            while not self._queue.empty() and len(pending) < MAX_BATCH:
                 try:
                     pending.append(self._queue.get_nowait())
                 except asyncio.QueueEmpty:
@@ -349,20 +354,13 @@ class EventBus:
             self._metrics["dead_lettered"] += 1
             return
 
-        handler_errors: List[str] = []
-        for handler in handlers:
-            try:
-                result = handler(event)
-                if asyncio.iscoroutine(result):
-                    await result
-            except (ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
-                logger.error("handler %s failed on %s: %s", handler, event.type, exc, exc_info=True)
-                handler_errors.append(str(handler))
-                self._metrics["errors"] += 1
-            except Exception as exc:
-                logger.error("handler %s failed on %s with unexpected error: %s", handler, event.type, exc, exc_info=True)
-                handler_errors.append(str(handler))
-                self._metrics["errors"] += 1
+        # Run handlers concurrently. Handlers may be sync or coroutine;
+        # _call_handler normalizes both and captures per-handler outcomes so
+        # we can still report partial success and tally errors per handler.
+        results = await asyncio.gather(
+            *[self._call_handler(h, event) for h in handlers]
+        )
+        handler_errors = [str(handlers[i]) for i, ok in enumerate(results) if not ok]
 
         # Mark event status based on handler results
         if not handler_errors:
@@ -379,6 +377,23 @@ class EventBus:
                 "event %s partial success: %d/%d handlers failed",
                 event.type, len(handler_errors), len(handlers),
             )
+
+    async def _call_handler(self, handler: Handler, event: Event) -> bool:
+        """Invoke a single handler (sync or coroutine), capturing failures.
+
+        Returns True on success, False if the handler raised. A single
+        ``except Exception`` is used — the previous split between specific
+        and generic exception types applied identical handling.
+        """
+        try:
+            result = handler(event)
+            if asyncio.iscoroutine(result):
+                await result
+            return True
+        except Exception as exc:
+            logger.error("handler %s failed on %s: %s", handler, event.type, exc, exc_info=True)
+            self._metrics["errors"] += 1
+            return False
 
     # ---------------------------------------------------------------- DLQ
     def _add_to_dlq(self, event: Event) -> None:
@@ -430,9 +445,6 @@ class EventBus:
             del self._tracker_timestamps[eid]
         if expired:
             logger.debug("cleaned up %d expired tracker entries", len(expired))
-
-    def get_tracked(self, event_id: str) -> Optional[Event]:
-        return self._tracker.get(event_id)
 
     def get_dlq(self, limit: int = 50) -> List[Event]:
         return list(reversed(self._dead_letter_queue))[:limit]

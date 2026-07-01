@@ -193,39 +193,12 @@ DASHBOARD_HTML = """
                     <div class="loading">暂无待审批项</div>
                 </div>
             </div>
-
-            <div class="card">
-                <h2>🎭 角色选择</h2>
-                <select id="role-selector" onchange="selectRole(this.value)" style="width:100%;padding:8px;background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:5px;margin-bottom:10px;">
-                    <option value="">— 选择角色 —</option>
-                </select>
-                <div id="role-info" style="font-size:0.9em;color:#94a3b8;">
-                    选择一个角色来改变 AI 的行为方式
-                </div>
-            </div>
         </div>
 
         <div class="card">
             <h2>💬 会话列表</h2>
             <div class="session-list" id="session-list">
                 <div class="loading">加载中...</div>
-            </div>
-        </div>
-
-        <div class="grid">
-            <div class="card">
-                <h2>🛒 技能市场</h2>
-                <input type="text" id="marketplace-search" placeholder="搜索技能..." oninput="searchMarketplace()" style="width:100%;padding:8px;background:#334155;color:#e2e8f0;border:1px solid #475569;border-radius:5px;margin-bottom:10px;">
-                <div id="marketplace-list" style="max-height:300px;overflow-y:auto;">
-                    <div class="loading">加载中...</div>
-                </div>
-            </div>
-
-            <div class="card">
-                <h2>📋 实时日志</h2>
-                <div id="log-viewer" style="max-height:300px;overflow-y:auto;background:#0f172a;border:1px solid #334155;border-radius:8px;padding:10px;font-family:monospace;font-size:0.85em;">
-                    <div class="loading">等待日志...</div>
-                </div>
             </div>
         </div>
 
@@ -352,86 +325,6 @@ DASHBOARD_HTML = """
             `).join('');
         }
 
-        // 角色选择
-        async function updateRoles() {
-            const data = await fetchJSON(`${API_BASE}/roles`);
-            const selector = document.getElementById('role-selector');
-            if (!data || !data.roles) return;
-            const current = data.current || '';
-            selector.innerHTML = '<option value="">— 关闭角色 —</option>' +
-                data.roles.map(r => `<option value="${escJs(r.act)}" ${r.act === current ? 'selected' : ''}>${esc(r.act)} — ${esc(r.title || '')}</option>`).join('');
-            const info = document.getElementById('role-info');
-            if (current) {
-                const role = data.roles.find(r => r.act === current);
-                info.textContent = role ? `当前: ${role.act}` : '角色已关闭';
-            } else {
-                info.textContent = '选择一个角色来改变 AI 的行为方式';
-            }
-        }
-
-        async function selectRole(roleAct) {
-            const resp = await fetch(`${API_BASE}/roles/current`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ role: roleAct })
-            });
-            if (resp.ok) {
-                showRefresh();
-                updateRoles();
-            }
-        }
-
-        // 技能市场
-        let _allSkills = [];
-        async function updateMarketplace() {
-            const data = await fetchJSON(`${API_BASE}/marketplace`);
-            const container = document.getElementById('marketplace-list');
-            if (!data || !data.packages) {
-                container.innerHTML = '<div class="loading">暂无技能包</div>';
-                return;
-            }
-            _allSkills = data.packages;
-            renderMarketplace(_allSkills);
-        }
-
-        function renderMarketplace(items) {
-            const container = document.getElementById('marketplace-list');
-            if (!items || items.length === 0) {
-                container.innerHTML = '<div class="loading">无匹配技能</div>';
-                return;
-            }
-            container.innerHTML = items.map(s => `
-                <div class="session-item">
-                    <div class="session-title">${esc(s.name)} <span style="color:#fbbf24;">★${(s.rating || 0).toFixed(1)}</span></div>
-                    <div class="session-meta">${esc(s.description || '无描述')} · v${esc(s.version || '1.0')}</div>
-                </div>
-            `).join('');
-        }
-
-        function searchMarketplace() {
-            const q = document.getElementById('marketplace-search').value.toLowerCase();
-            if (!q) { renderMarketplace(_allSkills); return; }
-            renderMarketplace(_allSkills.filter(s =>
-                s.name.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q)
-            ));
-        }
-
-        // 实时日志
-        let _lastLogTime = 0;
-        async function updateLogs() {
-            const data = await fetchJSON(`${API_BASE}/audit?limit=20`);
-            const container = document.getElementById('log-viewer');
-            if (!data || !data.entries || data.entries.length === 0) {
-                container.innerHTML = '<div class="loading">暂无日志</div>';
-                return;
-            }
-            container.innerHTML = data.entries.reverse().map(e => {
-                const ts = new Date((e.timestamp || 0) * 1000).toLocaleTimeString('zh-CN');
-                const color = e.severity === 'critical' ? '#ef4444' : e.severity === 'warning' ? '#fbbf24' : '#94a3b8';
-                return `<div style="color:${color};margin-bottom:4px;"><span style="color:#64748b;">[${ts}]</span> ${esc(e.action || '')} — ${esc(e.details || '')}</div>`;
-            }).join('');
-        }
-
         async function approveRequest(id) {
             await fetchJSON(`${API_BASE}/approvals/${id}/approve`);
             showRefresh();
@@ -480,10 +373,7 @@ DASHBOARD_HTML = """
                 updateCosts(),
                 updateStats(),
                 updateSessions(),
-                updateApprovals(),
-                updateRoles(),
-                updateMarketplace(),
-                updateLogs()
+                updateApprovals()
             ]);
         }
 

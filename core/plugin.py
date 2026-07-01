@@ -57,6 +57,9 @@ class Plugin:
     def publish(self, event_type: str, **payload) -> None:
         if self.bus is None:
             return
+        # context_id is intentionally lifted from payload to event metadata:
+        # callers pass it as a kwarg to tag the conversation/turn context,
+        # and the bus surfaces it at the top level for routing & tracking.
         self.bus.publish({
             "type": event_type,
             "payload": payload,
@@ -151,31 +154,48 @@ class PluginManager:
 
         return pm
 
-    async def setup_all(self, ctx: "AgentContext") -> None:
+    async def setup_all(self, ctx: "AgentContext") -> tuple[int, int]:
         ordered = self._topological(self._plugins)
+        success = 0
+        failed = 0
         for plugin in ordered:
-            await plugin.setup(ctx)
-        logger.info("%d plugins set up (priority-sorted)", len(ordered))
+            try:
+                await plugin.setup(ctx)
+                success += 1
+            except Exception:
+                logger.exception("plugin %s setup failed", plugin.name)
+                failed += 1
+        logger.info("%d plugins set up, %d failed (priority-sorted)", success, failed)
+        return success, failed
 
-    async def start_all(self) -> None:
+    async def start_all(self) -> tuple[int, int]:
         ordered = self._topological(self._plugins)
+        success = 0
+        failed = 0
         for plugin in ordered:
-            await plugin.start()
+            try:
+                await plugin.start()
+                success += 1
+            except Exception:
+                logger.exception("plugin %s start failed", plugin.name)
+                failed += 1
+        logger.info("%d plugins started, %d failed", success, failed)
+        return success, failed
 
-    async def stop_all(self) -> None:
-        errors: list[Exception] = []
-        for plugin in reversed(self._plugins):
+    async def stop_all(self) -> tuple[int, int]:
+        success = 0
+        failed = 0
+        # Stop in reverse topological order (dependents before dependencies),
+        # mirroring setup_all/start_all which use self._topological(self._plugins).
+        for plugin in reversed(self._topological(self._plugins)):
             try:
                 await plugin.stop()
-            except (RuntimeError, asyncio.TimeoutError, OSError) as exc:
-                logger.error("failed to stop %s: %s", plugin.name, exc, exc_info=True)
-                errors.append(exc)
-            except Exception as exc:
-                logger.error("failed to stop %s with unexpected error: %s", plugin.name, exc, exc_info=True)
-                errors.append(exc)
-        if errors:
-            # Re-raise on critical shutdown path so callers know teardown was incomplete
-            raise RuntimeError(f"{len(errors)} plugin(s) failed to stop: {[str(e) for e in errors]}")
+                success += 1
+            except Exception:
+                logger.exception("plugin %s stop failed", plugin.name)
+                failed += 1
+        logger.info("%d plugins stopped, %d failed", success, failed)
+        return success, failed
 
     def get_by_name(self, name: str) -> Optional[Plugin]:
         for p in self._plugins:

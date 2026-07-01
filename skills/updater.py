@@ -5,11 +5,14 @@ Usage: /update 或 /更新
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict
+
+from core.subprocess_utils import run_subprocess_async
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +42,25 @@ def _run_git(args: list, timeout: int = 10) -> subprocess.CompletedProcess:
     )
 
 
+async def _run_git_async(args: list, timeout: int = 10) -> subprocess.CompletedProcess:
+    """Async wrapper around _run_git — runs the blocking subprocess in a
+    thread to avoid freezing the asyncio event loop.
+
+    Use this from async contexts (e.g. skill handlers) instead of _run_git.
+    """
+    return await run_subprocess_async(
+        ["git"] + args, timeout=timeout, cwd=str(ROOT)
+    )
+
+
 def _detect_branch() -> str:
     """自动检测当前分支。失败则返回 'main'。"""
     try:
         result = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("failed to detect git branch, defaulting to 'main': %s", exc)
     return "main"
 
 
@@ -60,8 +74,8 @@ def _detect_remote() -> str:
                 return "origin"
             if remotes and remotes[0]:
                 return remotes[0]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("failed to detect git remote, defaulting to 'origin': %s", exc)
     return "origin"
 
 
@@ -76,12 +90,7 @@ def make_updater_handler():
 
         # 1. 检查 git 是否可用
         try:
-            result = subprocess.run(
-                ["git", "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+            result = await run_subprocess_async(["git", "--version"], timeout=5)
             if result.returncode != 0:
                 raise FileNotFoundError("git not found")
             results.append(f"✓ Git 版本: {result.stdout.strip()}")
@@ -92,7 +101,7 @@ def make_updater_handler():
         results.append(f"📍 项目目录: {ROOT}")
 
         # 2. 检查是否为 git 仓库
-        result = _run_git(["rev-parse", "--is-inside-work-tree"])
+        result = await _run_git_async(["rev-parse", "--is-inside-work-tree"])
         if result.returncode != 0 or result.stdout.strip() != "true":
             results.append("")
             results.append("❌ 当前目录不是 Git 仓库")
@@ -109,7 +118,7 @@ def make_updater_handler():
 
         # 3. 检查远程仓库
         remote = _detect_remote()
-        result = _run_git(["remote", "-v"])
+        result = await _run_git_async(["remote", "-v"])
         if result.returncode != 0:
             results.append("❌ 无法获取远程仓库信息")
             results.append("")
@@ -145,7 +154,7 @@ def make_updater_handler():
         results.append("")
         results.append("📡 正在获取远程最新版本...")
         try:
-            result = _run_git(["fetch", remote, branch], timeout=60)
+            result = await _run_git_async(["fetch", remote, branch], timeout=60)
             if result.returncode != 0:
                 err = result.stderr.strip() or "fetch failed"
                 results.append(f"⚠️ Fetch 失败: {err}")
@@ -158,7 +167,7 @@ def make_updater_handler():
                 results.append("尝试使用 curl 方式更新...")
                 return await _update_with_curl(branch, results)
 
-            result = _run_git(["log", "-1", "--format=%H %s", f"{remote}/{branch}"])
+            result = await _run_git_async(["log", "-1", "--format=%H %s", f"{remote}/{branch}"])
             if result.returncode == 0 and result.stdout.strip():
                 parts = result.stdout.strip().split(" ", 1)
                 if len(parts) == 2:
@@ -176,7 +185,7 @@ def make_updater_handler():
         # 6. 获取当前版本
         results.append("")
         results.append("📌 当前版本:")
-        result = _run_git(["log", "-1", "--format=%H %s"])
+        result = await _run_git_async(["log", "-1", "--format=%H %s"])
         if result.returncode == 0 and result.stdout.strip():
             parts = result.stdout.strip().split(" ", 1)
             if len(parts) == 2:
@@ -187,23 +196,23 @@ def make_updater_handler():
         results.append("")
         results.append("📥 正在拉取更新...")
         try:
-            result = _run_git(["status", "--porcelain"])
+            result = await _run_git_async(["status", "--porcelain"])
             has_changes = result.stdout.strip()
 
             if has_changes:
                 results.append("⚠️ 检测到本地修改，自动 stash...")
-                _run_git(["stash"])
+                await _run_git_async(["stash"])
 
-            result = _run_git(["pull", remote, branch], timeout=120)
+            result = await _run_git_async(["pull", remote, branch], timeout=120)
 
             if result.returncode == 0:
                 results.append("✓ 代码更新成功!")
-                result = _run_git(["log", "-1", "--format=%H"])
+                result = await _run_git_async(["log", "-1", "--format=%H"])
                 if result.returncode == 0 and result.stdout.strip():
                     results.append(f"   新版本: {result.stdout.strip()[:8]}")
 
                 # 检查是否有依赖变化
-                result = _run_git(
+                result = await _run_git_async(
                     ["diff", "--name-only", "ORIG_HEAD", "HEAD", "--",
                      "requirements.txt", "pyproject.toml"]
                 )
@@ -213,13 +222,10 @@ def make_updater_handler():
                     results.append("📦 检测到依赖文件变化，正在更新...")
                     pip_cmd = sys.executable
                     try:
-                        r = subprocess.run(
+                        r = await run_subprocess_async(
                             [pip_cmd, "-m", "pip", "install", "-r",
                              str(ROOT / "requirements.txt")],
-                            capture_output=True,
-                            text=True,
                             timeout=180,
-                            cwd=str(ROOT),
                         )
                         if r.returncode == 0:
                             results.append("✓ 依赖更新成功!")
@@ -266,7 +272,7 @@ async def _update_with_curl(branch: str, results: list) -> str:
         # 从当前 git remote 或使用默认地址
         remote_url = ""
         try:
-            result = _run_git(["remote", "-v"])
+            result = await _run_git_async(["remote", "-v"])
             if result.returncode == 0:
                 for line in result.stdout.strip().split("\n"):
                     if "origin" in line and "fetch" in line:
@@ -274,8 +280,8 @@ async def _update_with_curl(branch: str, results: list) -> str:
                         if len(parts) > 1:
                             remote_url = parts[1]
                         break
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("failed to detect remote URL for version check: %s", exc)
 
         # 从 remote URL 提取 user/repo
         gh_prefix = "https://github.com/"
@@ -322,9 +328,8 @@ async def _update_with_curl(branch: str, results: list) -> str:
             local_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
-                r = subprocess.run(
+                r = await run_subprocess_async(
                     ["curl", "-s", "-L", "-f", "-o", str(local_path), url],
-                    capture_output=True,
                     timeout=30,
                 )
                 if r.returncode == 0 and local_path.exists() and local_path.stat().st_size > 0:

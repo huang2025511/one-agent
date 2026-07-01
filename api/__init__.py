@@ -33,16 +33,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Import FastAPI types at module level for type annotation resolution
-# (needed because of `from __future__ import annotations`)
-try:
-    from fastapi import Body, Request  # noqa: F401
-except ImportError:
-    # Will be handled in start() method
-    pass
-
 from core.exceptions import InputValidationError
 from core.plugin import Plugin
+from core.security import is_path_within
 from i18n import _
 
 logger = logging.getLogger(__name__)
@@ -53,48 +46,6 @@ DEFAULT_PORT = 18792
 DEFAULT_RATE_LIMIT = 60
 MAX_CHAT_BODY_SIZE = 64 * 1024  # 64 KB
 MAX_CHAT_TEXT_LENGTH = 10000
-
-
-def _sanitize_log_message(msg: str) -> str:
-    """Remove sensitive information from log messages.
-
-    Filters out API keys, bearer tokens, passwords, and other secrets.
-    """
-    import re
-    # Remove OpenAI-style API keys (sk-...)
-    msg = re.sub(r'sk-[a-zA-Z0-9]{20,}', '***', msg)
-    # Remove Bearer tokens
-    msg = re.sub(r'Bearer [a-zA-Z0-9\-\.]+', 'Bearer ***', msg)
-    # Remove Anthropic-style API keys (sk-ant-...)
-    msg = re.sub(r'sk-ant-[a-zA-Z0-9\-]+', '***', msg)
-    # Remove generic API key patterns
-    msg = re.sub(r'api[_-]?key[=:]\s*["\']?[a-zA-Z0-9]{20,}["\']?', 'api_key=***', msg, flags=re.IGNORECASE)
-    # Remove passwords
-    msg = re.sub(r'password[=:]\s*\S+', 'password=***', msg, flags=re.IGNORECASE)
-    return msg
-
-
-class _SensitiveInfoFilter(logging.Filter):
-    """Automatically filter sensitive information from log messages."""
-    def filter(self, record):
-        if isinstance(record.msg, str):
-            record.msg = _sanitize_log_message(record.msg)
-        # Only sanitize string args, preserve numeric types for % formatting
-        if record.args:
-            if isinstance(record.args, tuple):
-                record.args = tuple(
-                    _sanitize_log_message(arg) if isinstance(arg, str) else arg
-                    for arg in record.args
-                )
-            elif isinstance(record.args, dict):
-                record.args = {
-                    k: _sanitize_log_message(v) if isinstance(v, str) else v
-                    for k, v in record.args.items()
-                }
-        return True
-
-
-logger.addFilter(_SensitiveInfoFilter())
 
 
 def _validate_chat_text(text: str) -> str:
@@ -115,14 +66,6 @@ def _mask_api_key(key: str) -> str:
     return f"{key[:4]}...{key[-4:]}"
 
 
-def _check_auth(api_key: Optional[str], required_key: str) -> bool:
-    """Compare API keys using constant-time comparison to prevent timing attacks."""
-    if not required_key:
-        return True  # Auth disabled if no key configured
-    # Use hmac.compare_digest for constant-time comparison
-    return hmac.compare_digest(api_key or "", required_key)
-
-
 class RESTAPIGateway(Plugin):
     """FastAPI REST server plugin."""
 
@@ -141,6 +84,7 @@ class RESTAPIGateway(Plugin):
         # survive any restart of the underlying FastAPI app (e.g. dev
         # mode auto-reload).  Format: {ip: [timestamp, ...]}
         self._rate_buckets: Dict[str, list] = {}
+        self._last_bucket_cleanup: float = 0.0
         # Default rate limit (overridden in setup() from config)
         self._rate_limit = DEFAULT_RATE_LIMIT
         # Audit log for tracking operations
@@ -163,8 +107,7 @@ class RESTAPIGateway(Plugin):
         self._api_key = cfg.get("api_key", "")
         self._rate_limit = int(cfg.get("rate_limit_per_minute", self._rate_limit))
         self._max_chat_bytes = int(cfg.get("max_chat_bytes", self._max_chat_bytes))
-        import os as _os
-        self._api_key = _os.environ.get("ONE_AGENT_API_KEY", self._api_key)
+        self._api_key = os.environ.get("ONE_AGENT_API_KEY", self._api_key)
         # CORS: restrict to configured origins in production.  Falls back
         # to a wildcard when no origins are configured (developer mode).
         self._cors_origins = cfg.get("cors_origins") or ["http://localhost", "http://127.0.0.1"]
@@ -190,6 +133,12 @@ class RESTAPIGateway(Plugin):
         self._host = cfg.get("host", self._host)
         self._port = int(cfg.get("port", self._port))
         self._api_key = cfg.get("api_key", self._api_key)
+        # Environment variable takes precedence over config file, matching
+        # the setup() behavior. Without this, reloading config would silently
+        # disable auth when the API key was set via env var.
+        env_key = os.environ.get("ONE_AGENT_API_KEY")
+        if env_key:
+            self._api_key = env_key
         self._rate_limit = int(cfg.get("rate_limit_per_minute", self._rate_limit))
         self._max_chat_bytes = int(cfg.get("max_chat_bytes", self._max_chat_bytes))
         self._cors_origins = cfg.get("cors_origins") or self._cors_origins
@@ -203,137 +152,8 @@ class RESTAPIGateway(Plugin):
         if hasattr(cb, "__self__"):
             self._app_instance = cb.__self__
 
-    async def start(self) -> None:
-        if not self._enabled:
-            return
-        try:
-            from fastapi import (  # noqa: F401
-                Body,
-                FastAPI,
-                Header,
-                HTTPException,
-                Request,
-                UploadFile,
-            )
-            from fastapi.middleware.cors import CORSMiddleware
-            from fastapi.responses import JSONResponse
-        except ImportError:
-            logger.warning("fastapi not installed — REST API disabled")
-            return
-
-        # OpenAPI 标签定义 — 用于 /docs 自动文档的端点分组
-        _openapi_tags = [
-            {"name": "Chat", "description": "对话与消息流接口"},
-            {"name": "Memory", "description": "长期记忆查询与管理"},
-            {"name": "Skills", "description": "技能列表与安装"},
-            {"name": "Marketplace", "description": "技能市场：发布、发现、安装、评分"},
-            {"name": "Sessions", "description": "会话管理与分叉"},
-            {"name": "Config", "description": "配置查看、热重载与备份"},
-            {"name": "Settings", "description": "运行时配置项读写"},
-            {"name": "Health", "description": "健康检查与就绪探针"},
-            {"name": "Metrics", "description": "系统指标与 Prometheus 监控"},
-            {"name": "Audit", "description": "审计日志查询"},
-            {"name": "Costs", "description": "成本追踪与预算"},
-            {"name": "Documents", "description": "文档 RAG 摄取与搜索"},
-            {"name": "MCP", "description": "Model Context Protocol 工具管理"},
-            {"name": "Alerts", "description": "告警规则与历史"},
-            {"name": "Approvals", "description": "人工审批请求"},
-            {"name": "Roles", "description": "角色系统管理"},
-            {"name": "Export", "description": "数据导出与会话/记忆备份"},
-            {"name": "Templates", "description": "提示词模板管理与渲染"},
-            {"name": "Workflows", "description": "工作流编排与定时任务"},
-        ]
-
-        app = FastAPI(
-            title="One-Agent API",
-            version="2.0.0",
-            description="REST API for One-Agent integration",
-            openapi_tags=_openapi_tags,
-        )
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=self._cors_origins,
-            allow_credentials=False,
-            allow_methods=["GET", "POST"],
-            allow_headers=["*"],
-        )
-
-        @app.middleware("http")
-        async def rate_limit_middleware(request, call_next):
-            # Get real client IP from X-Forwarded-For header
-            # Only trust X-Forwarded-For if request comes from a trusted proxy
-            client_ip = None
-            if request.client:
-                client_ip = request.client.host
-            elif "client" in request.scope:
-                # Fallback to scope client info
-                client_info = request.scope["client"]
-                if client_info and len(client_info) > 0:
-                    client_ip = client_info[0]
-
-            if not client_ip:
-                # All unknown clients share a single bucket — using a unique
-                # ID per request (e.g. md5(time.time())) would give every
-                # request its own empty bucket, making the rate limit a no-op
-                # and leaking memory into _rate_buckets indefinitely.
-                client_ip = "unknown"
-                logger.warning("Rate limit: unable to determine client IP, using shared 'unknown' bucket")
-
-            if client_ip in self._trusted_proxies:
-                # Request from trusted proxy - use X-Forwarded-For
-                forwarded_for = request.headers.get("X-Forwarded-For")
-                if forwarded_for:
-                    # X-Forwarded-For format: client, proxy1, proxy2
-                    # Take the first IP (original client)
-                    ip = forwarded_for.split(",")[0].strip()
-                else:
-                    ip = client_ip
-            else:
-                # Direct connection or untrusted proxy - use client IP directly
-                ip = client_ip
-
-            now = time.time()
-            bucket = self._rate_buckets.setdefault(ip, [])
-            # evict entries older than 60s
-            bucket[:] = [t for t in bucket if now - t < 60]
-            if len(bucket) >= self._rate_limit:
-                return JSONResponse({"error": {"code": 429, "message": _("rate_limit_exceeded"), "type": "rate_limit"}}, status_code=429)
-            bucket.append(now)
-            return await call_next(request)
-
-        # Reject chat requests with absurdly large bodies before FastAPI
-        # even tries to parse JSON — protects the server from accidental
-        # 100 MB /chat posts.
-        @app.middleware("http")
-        async def body_size_middleware(request, call_next):
-            if request.url.path in ("/api/chat", "/api/chat/stream"):
-                cl = request.headers.get("content-length")
-                try:
-                    if cl is not None and int(cl) > self._max_chat_bytes:
-                        return JSONResponse(
-                            {"error": {"code": 413, "message": _("request_body_too_large", size=cl, max=self._max_chat_bytes), "type": "request_too_large"}},
-                            status_code=413,
-                        )
-                except ValueError:
-                    pass
-            return await call_next(request)
-
-        _agent = self._agent_callback
-        _app_instance: Any = getattr(self, "_app_instance", None)
-        _ctx = self.ctx
-        _llm = _ctx.get_plugin("llm") if _ctx else None
-        _memory = _ctx.get_plugin("memory") if _ctx else None
-        _skills = _ctx.get_plugin("skills") if _ctx else None
-        _bus = _ctx.bus if _ctx else None
-
-        def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
-            if self._api_key and not hmac.compare_digest(x_api_key or "", self._api_key):
-                raise HTTPException(401, _("invalid_api_key"))
-
-        # ---------------------------------------------------------------- Health & Readiness
-        _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
-
-        @app.get("/health", tags=["Health"])
+    def _register_health_routes(self, app, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin):
+        @app.get("/health")
         async def health_check():
             """Basic health check - service is alive"""
             return {
@@ -342,13 +162,13 @@ class RESTAPIGateway(Plugin):
                 "version": "2.0.0"
             }
 
-        @app.get("/ready", tags=["Health"])
+        @app.get("/ready")
         async def readiness_check():
             """Readiness check - service can handle requests"""
             def _check_database():
                 """Check database connectivity."""
                 try:
-                    _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+                    _session_store = _cp("session_store")
                     if _session_store:
                         _session_store.get_session_count()
                         return True
@@ -370,7 +190,7 @@ class RESTAPIGateway(Plugin):
                 "timestamp": time.time()
             }
 
-        @app.get("/api/health", tags=["Health"])
+        @app.get("/api/health")
         async def health():
             """Enhanced health check with subsystem status for K8s probes."""
             if _ctx is None:
@@ -484,7 +304,8 @@ class RESTAPIGateway(Plugin):
                 "components": components,
             }
 
-        # ── Dashboard ──────────────────────────────────────────────────
+    def _register_dashboard_config_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/dashboard")
         async def dashboard(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Serve the monitoring dashboard."""
@@ -495,7 +316,7 @@ class RESTAPIGateway(Plugin):
             return HTMLResponse(content=get_dashboard_html())
 
         # ── Configuration Management ───────────────────────────────────
-        @app.post("/api/config/reload", tags=["Config"])
+        @app.post("/api/config/reload")
         async def reload_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Hot reload configuration without restarting the service.
 
@@ -534,15 +355,6 @@ class RESTAPIGateway(Plugin):
 
                 logger.info("Configuration reloaded successfully")
 
-                # 审计日志：记录配置热重载
-                if self._audit_log:
-                    self._audit_log.log(
-                        action="config_reload",
-                        actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
-                        resource="/api/config/reload",
-                        details={"config_path": config_path},
-                    )
-
                 return {
                     "status": "ok",
                     "message": "Configuration reloaded",
@@ -552,7 +364,7 @@ class RESTAPIGateway(Plugin):
                 logger.error("Failed to reload config: %s", e, exc_info=True)
                 raise HTTPException(500, f"Config reload failed: {str(e)}")
 
-        @app.get("/api/config", tags=["Config"])
+        @app.get("/api/config")
         async def get_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get current runtime configuration (sanitized)."""
             auth(x_api_key)
@@ -579,13 +391,13 @@ class RESTAPIGateway(Plugin):
                 "timestamp": time.time()
             }
 
-
-        # ── Dashboard API endpoints ────────────────────────────────────
+    def _register_session_probe_routes(self, app, auth, _ctx, _agent):
+        from fastapi import Header, HTTPException
         @app.get("/api/sessions/list")
         async def sessions_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List recent sessions."""
             auth(x_api_key)
-            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            _session_store = _cp("session_store")
             if _session_store is None:
                 return {"sessions": []}
             sessions = _session_store.list_sessions(limit=20)
@@ -595,7 +407,7 @@ class RESTAPIGateway(Plugin):
         async def fork_session(session_id: str, body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Fork a session at a specific message index."""
             auth(x_api_key)
-            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            _session_store = _cp("session_store")
             if _session_store is None:
                 raise HTTPException(503, _("session_store_not_available"))
             fork_point = body.get("fork_point", 0)
@@ -609,7 +421,7 @@ class RESTAPIGateway(Plugin):
         async def session_tree(session_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get the fork tree of a session."""
             auth(x_api_key)
-            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            _session_store = _cp("session_store")
             if _session_store is None:
                 raise HTTPException(503, _("session_store_not_available"))
             tree = _session_store.get_session_tree(session_id)
@@ -617,26 +429,31 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(404, _("session_not_found"))
             return tree
 
-        @app.get("/api/health/ready", tags=["Health"])
+        @app.get("/api/health/ready")
         async def readiness():
             """Kubernetes-style readiness probe — returns 503 if not ready."""
             if _ctx is None or _agent is None:
                 raise HTTPException(503, _("not_ready"))
             return {"ready": True}
 
-        @app.get("/api/health/live", tags=["Health"])
+        @app.get("/api/health/live")
         async def liveness():
             """Kubernetes-style liveness probe."""
             return {"alive": True}
 
-        @app.get("/api/stats", tags=["Metrics"])
+    def _register_stats_metrics_routes(self, app, auth, _ctx, _llm, _memory, _bus, _skills, _memory_plugin):
+        from fastapi import JSONResponse
+        @app.get("/api/stats")
         async def stats():
             """System statistics for dashboard."""
-            _session_store = getattr(_ctx, "session_store", None) if _ctx else None
+            if not auth(x_api_key):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            _session_store = _cp("session_store")
             _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
 
             # Get session statistics
             sessions_data = {}
+            total_messages = 0  # initialize to avoid UnboundLocalError
             if _session_store:
                 try:
                     all_sessions = _session_store.list_sessions(limit=1000)
@@ -674,8 +491,10 @@ class RESTAPIGateway(Plugin):
                 "skills": {"installed": len(_skills.all_skill_ids()) if _skills else 0},
             }
 
-        @app.get("/api/metrics", tags=["Metrics"])
+        @app.get("/api/metrics")
         async def metrics():
+            if not auth(x_api_key):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
             return {
                 "bus": _bus.metrics() if _bus else {},
                 "llm": _llm.stats() if _llm else {},
@@ -689,6 +508,8 @@ class RESTAPIGateway(Plugin):
 
             Returns metrics in Prometheus text format for scraping.
             """
+            if not auth(x_api_key):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
             lines = []
 
             # System metrics
@@ -759,9 +580,9 @@ class RESTAPIGateway(Plugin):
 
             return "\n".join(lines) + "\n"
 
-
-        # ── Audit Log Endpoints ────────────────────────────────────────
-        @app.get("/api/audit", tags=["Audit"])
+    def _register_audit_routes(self, app, auth):
+        from fastapi import Header
+        @app.get("/api/audit")
         async def audit_query(
             action: Optional[str] = None,
             actor: Optional[str] = None,
@@ -775,7 +596,7 @@ class RESTAPIGateway(Plugin):
             entries = self._audit_log.query(action=action, actor=actor, limit=min(limit, 500))
             return {"entries": entries, "count": len(entries)}
 
-        @app.get("/api/audit/stats", tags=["Audit"])
+        @app.get("/api/audit/stats")
         async def audit_stats(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get audit log statistics."""
             auth(x_api_key)
@@ -783,7 +604,9 @@ class RESTAPIGateway(Plugin):
                 return {"error": {"code": 503, "message": "Audit log not initialized", "type": "service_unavailable"}}
             return self._audit_log.stats()
 
-        @app.post("/api/chat", tags=["Chat"])
+    def _register_chat_routes(self, app, auth, _agent, _app_instance, _llm):
+        from fastapi import Header, HTTPException, Body, Request
+        @app.post("/api/chat")
         async def chat(request: Request, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
@@ -837,7 +660,7 @@ class RESTAPIGateway(Plugin):
                 result = {"reply": reply, "session_id": session_id, "thinking": ""}
             return result
 
-        @app.post("/api/chat/stream", tags=["Chat"])
+        @app.post("/api/chat/stream")
         async def chat_stream(body: dict, request: Request, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
@@ -908,7 +731,9 @@ class RESTAPIGateway(Plugin):
                 },
             )
 
-        @app.get("/api/memory/search", tags=["Memory"])
+    def _register_memory_skills_routes(self, app, auth, _memory, _skills):
+        from fastapi import Header, HTTPException
+        @app.get("/api/memory/search")
         async def memory_search(
             q: str,
             limit: int = 5,
@@ -921,7 +746,7 @@ class RESTAPIGateway(Plugin):
             results = _memory.search_facts(q, limit=limit, offset=offset)
             return {"query": q, "results": results, "limit": limit, "offset": offset}
 
-        @app.post("/api/memory/add", tags=["Memory"])
+        @app.post("/api/memory/add")
         async def memory_add(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _memory is None:
@@ -929,17 +754,10 @@ class RESTAPIGateway(Plugin):
             text = body.get("text", "")
             tags = body.get("tags", "")
             source = body.get("source", "api")
-
-            # 输入验证：text 不能为空，不能超过最大长度
-            try:
-                _validate_chat_text(text)
-            except InputValidationError as exc:
-                raise HTTPException(400, str(exc))
-
             _memory.add_fact(text, source=source, tags=tags)
             return {"added": True, "text": text[:100]}
 
-        @app.get("/api/memory/page", tags=["Memory"])
+        @app.get("/api/memory/page")
         async def memory_page(
             page: int = 1,
             page_size: int = 20,
@@ -950,28 +768,29 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("memory_not_available"))
             return _memory.paginate_facts(page=page, page_size=page_size)
 
-        @app.get("/api/skills", tags=["Skills"])
+        @app.get("/api/skills")
         async def skills_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _skills is None:
                 raise HTTPException(503, _("skills_not_available"))
             return {"skills": _skills.all_skill_ids()}
 
-        # ---------------------------------------------------------------- Marketplace endpoints
-        @app.get("/api/marketplace", tags=["Marketplace"])
+    def _register_marketplace_routes(self, app, auth, _ctx, _skills, _llm):
+        from fastapi import Header, HTTPException
+        @app.get("/api/marketplace")
         async def list_marketplace(query: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Discover available skill packages in the marketplace."""
             auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            mp = _cp("marketplace")
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
             return {"packages": mp.discover(query)}
 
-        @app.post("/api/marketplace/publish", tags=["Marketplace"])
+        @app.post("/api/marketplace/publish")
         async def publish_skill(dirpath: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Publish a local skill directory to the marketplace."""
             auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            mp = _cp("marketplace")
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
 
@@ -1011,23 +830,13 @@ class RESTAPIGateway(Plugin):
             pkg = mp.publish(str(resolved_path))
             if pkg is None:
                 raise HTTPException(400, _("invalid_skill_package", path=dirpath))
-
-            # 审计日志：记录技能发布
-            if self._audit_log:
-                self._audit_log.log(
-                    action="marketplace_publish",
-                    actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
-                    resource=f"/api/marketplace/publish",
-                    details={"skill_name": pkg.name, "version": pkg.version},
-                )
-
             return {"published": True, "package": pkg.to_dict()}
 
-        @app.post("/api/marketplace/install", tags=["Marketplace"])
+        @app.post("/api/marketplace/install")
         async def install_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Install a skill package from the marketplace."""
             auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            mp = _cp("marketplace")
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
 
@@ -1038,13 +847,9 @@ class RESTAPIGateway(Plugin):
                 # Validate path is within allowed directory (strict containment
                 # via Path.relative_to — startswith can be bypassed by sibling
                 # dirs like /data/skills_evil).
-                from pathlib import Path
-                allowed_base = Path(os.path.realpath(os.path.join(
-                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "skills")))
-                target_real = Path(os.path.realpath(target_dir))
-                try:
-                    target_real.relative_to(allowed_base)
-                except ValueError:
+                allowed_base = os.path.realpath(os.path.join(
+                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
+                if not is_path_within(target_dir, allowed_base):
                     raise HTTPException(403, "target_dir must be within skills directory")
 
             ok = mp.install(name, target_dir)
@@ -1053,23 +858,13 @@ class RESTAPIGateway(Plugin):
             # Reload skills after installation
             if _skills is not None:
                 _skills._scan_directory(target_dir)
-
-            # 审计日志：记录技能安装
-            if self._audit_log:
-                self._audit_log.log(
-                    action="marketplace_install",
-                    actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
-                    resource=f"/api/marketplace/install",
-                    details={"skill_name": name, "target_dir": target_dir},
-                )
-
             return {"installed": True, "name": name, "target_dir": target_dir}
 
-        @app.delete("/api/marketplace/{name}", tags=["Marketplace"])
+        @app.delete("/api/marketplace/{name}")
         async def uninstall_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Uninstall a skill package from the target directory."""
             auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
+            mp = _cp("marketplace")
             if mp is None:
                 raise HTTPException(503, _("marketplace_not_available"))
 
@@ -1080,41 +875,29 @@ class RESTAPIGateway(Plugin):
                 # Validate path is within allowed directory.
                 # Use Path.relative_to instead of str.startswith to
                 # prevent "/data/skills_evil" bypassing "/data/skills".
-                allowed_base = Path(os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills")))
-                target_real = Path(os.path.realpath(target_dir))
-                try:
-                    target_real.relative_to(allowed_base)
-                except ValueError:
+                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
+                if not is_path_within(target_dir, allowed_base):
                     raise HTTPException(403, "target_dir must be within skills directory")
 
             ok = mp.uninstall(name, target_dir)
             if not ok:
                 raise HTTPException(404, _("skill_not_found", name=name))
-
-            # 审计日志：记录技能卸载
-            if self._audit_log:
-                self._audit_log.log(
-                    action="marketplace_uninstall",
-                    actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
-                    resource=f"/api/marketplace/{name}",
-                    details={"skill_name": name},
-                )
-
             return {"uninstalled": True, "name": name}
 
-        @app.post("/api/cache/clear", tags=["Config"])
+        @app.post("/api/cache/clear")
         async def cache_clear(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             if _llm is None:
                 raise HTTPException(503, _("llm_not_available"))
             return _llm.clear_cache()
 
-        # ---------------------------------------------------------------- Self-improvement endpoints
+    def _register_improvement_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/improvements")
         async def get_improvements(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get self-improvement stats and patterns."""
             auth(x_api_key)
-            improver = getattr(_ctx, "self_improver", None) if _ctx else None
+            improver = _cp("self_improver")
             if improver is None:
                 raise HTTPException(503, _("improvement_not_available"))
             stats = improver.get_stats()
@@ -1125,13 +908,14 @@ class RESTAPIGateway(Plugin):
         async def get_failures(limit: int = 50, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get recent failure cases."""
             auth(x_api_key)
-            improver = getattr(_ctx, "self_improver", None) if _ctx else None
+            improver = _cp("self_improver")
             if improver is None:
                 raise HTTPException(503, _("improvement_not_available"))
             failures = improver.get_failures(limit=limit)
             return {"failures": failures, "limit": limit}
 
-        # ---------------------------------------------------------------- Cost tracking endpoints
+    def _register_cost_routes(self, app, auth, _llm):
+        from fastapi import Header, HTTPException
         @app.get("/api/costs/daily")
         async def daily_costs(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get daily cost breakdown."""
@@ -1196,7 +980,8 @@ class RESTAPIGateway(Plugin):
             tracker = _llm._cost_tracker
             return {"recent": tracker.get_recent(limit=limit)}
 
-        # ---------------------------------------------------------------- Session endpoints
+    def _register_sessions_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/sessions")
         async def list_sessions(
             limit: int = 50,
@@ -1238,8 +1023,9 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(404, _("session_not_found", session_id=session_id))
             return {"deleted": True, "session_id": session_id}
 
-        # ---------------------------------------------------------------- Settings
-        @app.get("/api/settings", tags=["Settings"])
+    def _register_settings_routes(self, app, auth, _ctx, _get_backup_mgr):
+        from fastapi import Header, HTTPException
+        @app.get("/api/settings")
         async def settings_get(key: Optional[str] = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """读取配置项。不传 key 则返回所有可配置项列表。"""
             auth(x_api_key)
@@ -1270,7 +1056,7 @@ class RESTAPIGateway(Plugin):
                     return {"alias": alias, "path": path, "value": val}
             return {"error": {"code": 404, "message": _("unknown_key", key=key), "type": "not_found"}}
 
-        @app.post("/api/settings", tags=["Settings"])
+        @app.post("/api/settings")
         async def settings_set(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """修改配置项。body: {"key": "模型", "value": "gpt-4o"}"""
             auth(x_api_key)
@@ -1296,52 +1082,27 @@ class RESTAPIGateway(Plugin):
                         raise HTTPException(400, _("cannot_parse_value", type=vtype.__name__))
                     if _ctx:
                         # Create backup before changing config
-                        import os
-
-                        from config_backup import ConfigBackupManager
-                        cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-                        backup_mgr = ConfigBackupManager(cfg_path)
+                        backup_mgr = _get_backup_mgr()
                         backup_mgr.create_backup(reason="pre-change")
                         _set_nested(_ctx.config, path, parsed)
                         _save_config(_ctx.config)
-
-                        # 审计日志：记录配置项修改
-                        if self._audit_log:
-                            is_sensitive = any(sk in path for sk in _SENSITIVE_KEYS)
-                            self._audit_log.log(
-                                action="settings_change",
-                                actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
-                                resource="/api/settings",
-                                details={
-                                    "key": alias,
-                                    "path": path,
-                                    "value": "***" if is_sensitive else parsed,
-                                },
-                            )
                     return {"alias": alias, "path": path, "value": parsed, "saved": True}
             raise HTTPException(404, _("unknown_key", key=key))
 
-        # ---------------------------------------------------------------- Config Backup
+    def _register_config_backup_routes(self, app, auth, _get_backup_mgr):
+        from fastapi import Header, HTTPException
         @app.get("/api/config/backups")
         async def config_backups_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List all config backups."""
             auth(x_api_key)
-            import os
-
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             return {"backups": backup_mgr.list_backups()}
 
         @app.post("/api/config/backup")
         async def config_backup_create(body: dict = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Create a config backup."""
             auth(x_api_key)
-            import os
-
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             reason = (body or {}).get("reason", "manual")
             backup_name = backup_mgr.create_backup(reason=reason)
             if backup_name:
@@ -1352,11 +1113,7 @@ class RESTAPIGateway(Plugin):
         async def config_restore(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Restore config from a backup."""
             auth(x_api_key)
-            import os
-
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             backup_name = body.get("filename")  # None means most recent
             success = backup_mgr.restore_backup(backup_name)
             if success:
@@ -1370,11 +1127,7 @@ class RESTAPIGateway(Plugin):
             # Validate filename to prevent path traversal
             if not filename or '/' in filename or '\\' in filename or '..' in filename:
                 raise HTTPException(400, "invalid_filename")
-            import os
-
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             content = backup_mgr.get_backup_content(filename)
             if content is not None:
                 return {"filename": filename, "content": content}
@@ -1387,20 +1140,20 @@ class RESTAPIGateway(Plugin):
             # Validate filename to prevent path traversal
             if not filename or '/' in filename or '\\' in filename or '..' in filename:
                 raise HTTPException(400, "invalid_filename")
-            from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-            backup_mgr = ConfigBackupManager(cfg_path)
+            backup_mgr = _get_backup_mgr()
             success = backup_mgr.delete_backup(filename)
             if success:
                 return {"deleted": True, "filename": filename}
             raise HTTPException(404, _("backup_not_found", filename=filename))
 
-        # ---------------------------------------------------------------- Document RAG
+    def _register_document_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException, UploadFile
         @app.post("/api/documents/ingest")
         async def ingest_document(file: UploadFile = None, path: str = None,
                                   x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
-            from skills import _doc_store
+            from skills import get_doc_store
+            _doc_store = get_doc_store()
 
             if file is not None:
                 import shutil
@@ -1418,12 +1171,10 @@ class RESTAPIGateway(Plugin):
                 # Security: restrict path to data/documents directory only
                 # Use Path.relative_to() for strict containment (startswith can be bypassed
                 # e.g. "/data/skills_evil" starts with "/data/skills")
-                allowed_base = Path(os.path.realpath(os.path.join(
-                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "documents")))
+                allowed_base = os.path.realpath(os.path.join(
+                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "documents"))
                 path_real = Path(os.path.realpath(path))
-                try:
-                    path_real.relative_to(allowed_base)
-                except ValueError:
+                if not is_path_within(path_real, allowed_base):
                     raise HTTPException(403, "path must be within data/documents directory")
 
                 # Also check file exists and is a regular file
@@ -1438,33 +1189,34 @@ class RESTAPIGateway(Plugin):
         @app.get("/api/documents")
         async def list_documents(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
-            from skills import _doc_store
-            docs = _doc_store.list_documents()
+            from skills import get_doc_store
+            docs = get_doc_store().list_documents()
             return {"documents": docs}
 
         @app.get("/api/documents/search")
         async def search_documents(q: str, limit: int = 5,
                                    x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
-            from skills import _doc_store
-            results = _doc_store.search(q, limit=limit)
+            from skills import get_doc_store
+            results = get_doc_store().search(q, limit=limit)
             return {"query": q, "results": results, "limit": limit}
 
         @app.delete("/api/documents/{name}")
         async def delete_document(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
-            from skills import _doc_store
-            deleted = _doc_store.delete_document(name)
+            from skills import get_doc_store
+            deleted = get_doc_store().delete_document(name)
             if not deleted:
                 raise HTTPException(404, _("document_not_found", name=name))
             return {"deleted": True, "name": name}
 
-        # ---------------------------------------------------------------- Alerting
+    def _register_alerting_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/alerts/rules")
         async def alert_rules_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List all alert rules."""
             auth(x_api_key)
-            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            _alert_mgr = _cp("_alert_manager")
             if _alert_mgr is None:
                 return {"rules": []}
             return {"rules": _alert_mgr.list_rules()}
@@ -1473,7 +1225,7 @@ class RESTAPIGateway(Plugin):
         async def alert_rule_create(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Create or update an alert rule."""
             auth(x_api_key)
-            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            _alert_mgr = _cp("_alert_manager")
             if _alert_mgr is None:
                 raise HTTPException(503, _("alert_manager_not_available"))
             from alerting import AlertRule
@@ -1497,7 +1249,7 @@ class RESTAPIGateway(Plugin):
         async def alert_rule_delete(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Delete an alert rule."""
             auth(x_api_key)
-            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            _alert_mgr = _cp("_alert_manager")
             if _alert_mgr is None:
                 raise HTTPException(503, _("alert_manager_not_available"))
             _alert_mgr.remove_rule(name)
@@ -1507,17 +1259,18 @@ class RESTAPIGateway(Plugin):
         async def alert_history(limit: int = 50, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get recent alert events."""
             auth(x_api_key)
-            _alert_mgr = getattr(_ctx, "_alert_manager", None) if _ctx else None
+            _alert_mgr = _cp("_alert_manager")
             if _alert_mgr is None:
                 return {"alerts": []}
             return {"alerts": _alert_mgr.list_history(limit=limit)}
 
-        # ---------------------------------------------------------------- Approval (Human-in-the-Loop)
+    def _register_approval_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/approvals/pending")
         async def list_pending_approvals(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """List pending approval requests."""
             auth(x_api_key)
-            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            _approval_mgr = _cp("approval_manager")
             if _approval_mgr is None:
                 return {"pending": []}
             return {"pending": _approval_mgr.get_pending()}
@@ -1526,7 +1279,7 @@ class RESTAPIGateway(Plugin):
         async def approve_request(request_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Approve a pending request."""
             auth(x_api_key)
-            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            _approval_mgr = _cp("approval_manager")
             if _approval_mgr is None:
                 raise HTTPException(503, _("approval_manager_not_available"))
             ok = _approval_mgr.approve(request_id)
@@ -1538,7 +1291,7 @@ class RESTAPIGateway(Plugin):
         async def deny_request(request_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Deny a pending request."""
             auth(x_api_key)
-            _approval_mgr = getattr(_ctx, "approval_manager", None) if _ctx else None
+            _approval_mgr = _cp("approval_manager")
             if _approval_mgr is None:
                 raise HTTPException(503, _("approval_manager_not_available"))
             ok = _approval_mgr.deny(request_id)
@@ -1546,12 +1299,13 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(404, _("approval_request_not_found", request_id=request_id))
             return {"approved": False, "request_id": request_id}
 
-        # ── MCP (Model Context Protocol) 端点 ──────────────────────────
+    def _register_mcp_routes(self, app, auth, _ctx):
+        from fastapi import Header, HTTPException
         @app.get("/api/mcp/tools")
         async def mcp_list_tools(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """列出所有可用的 MCP 工具"""
             auth(x_api_key)
-            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            _mcp_client = _cp("mcp_client")
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             tools = _mcp_client.list_tools()
@@ -1561,7 +1315,7 @@ class RESTAPIGateway(Plugin):
         async def mcp_call_tool(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """调用 MCP 工具"""
             auth(x_api_key)
-            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            _mcp_client = _cp("mcp_client")
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             server_name = body.get("server")
@@ -1582,7 +1336,7 @@ class RESTAPIGateway(Plugin):
         async def mcp_add_server(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """添加并连接 MCP 服务器"""
             auth(x_api_key)
-            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            _mcp_client = _cp("mcp_client")
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             name = body.get("name")
@@ -1599,200 +1353,184 @@ class RESTAPIGateway(Plugin):
         async def mcp_remove_server(server_name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """移除 MCP 服务器"""
             auth(x_api_key)
-            _mcp_client = getattr(_ctx, "mcp_client", None) if _ctx else None
+            _mcp_client = _cp("mcp_client")
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             await _mcp_client.remove_server(server_name)
             return {"success": True, "server": server_name}
 
-        # ================================================================
-        # 角色 API
-        # ================================================================
-        @app.get("/api/roles", tags=["Roles"])
-        async def list_roles(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """列出所有可用角色"""
-            auth(x_api_key)
-            try:
-                from core.roles import get_library
-                library = get_library()
-                if not library.loaded:
-                    library.load()
-                roles = [{"act": r.get("act", ""), "title": r.get("title", r.get("act", ""))} for r in library.roles]
-                current = ""
-                if _ctx and hasattr(_ctx, "config"):
-                    current = (_ctx.config.get("agent", {}).get("role", {}) or {}).get("current", "")
-                return {"roles": roles, "current": current}
-            except Exception as exc:
-                logger.warning("list roles failed: %s", exc)
-                return {"roles": [], "current": ""}
-
-        @app.post("/api/roles/current", tags=["Roles"])
-        async def set_current_role(body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """设置当前角色"""
-            auth(x_api_key)
-            role_name = body.get("role", "")
-            if _ctx and hasattr(_ctx, "config"):
-                _ctx.config.setdefault("agent", {}).setdefault("role", {})["current"] = role_name
-                _save_config(_ctx.config)
-                # 审计日志
-                if self._audit_log:
-                    self._audit_log.log(
-                        action="role_change",
-                        actor=_mask_api_key(x_api_key) if x_api_key else "anonymous",
-                        resource="/api/roles/current",
-                        details={"role": role_name},
-                    )
-            return {"current": role_name}
-
-        # ================================================================
-        # 数据导出 API
-        # ================================================================
-        @app.post("/api/export/sessions", tags=["Export"])
-        async def export_sessions(body: dict = Body(default={}), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """导出会话历史"""
-            auth(x_api_key)
-            fmt = body.get("format", "json")
-            from export import DataExporter
-            exporter = DataExporter()
-            path = exporter.export_sessions(fmt)
-            if not path:
-                raise HTTPException(500, "导出失败")
-            return {"path": path, "format": fmt}
-
-        @app.post("/api/export/memory", tags=["Export"])
-        async def export_memory(body: dict = Body(default={}), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """导出长期记忆"""
-            auth(x_api_key)
-            fmt = body.get("format", "json")
-            limit = body.get("limit", 1000)
-            from export import DataExporter
-            exporter = DataExporter()
-            path = exporter.export_memory(fmt, limit)
-            if not path:
-                raise HTTPException(500, "导出失败")
-            return {"path": path, "format": fmt}
-
-        @app.post("/api/export/all", tags=["Export"])
-        async def export_all(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """导出所有数据为 ZIP"""
-            auth(x_api_key)
-            from export import DataExporter
-            exporter = DataExporter()
-            path = exporter.export_all()
-            if not path:
-                raise HTTPException(500, "导出失败")
-            return {"path": path}
-
-        # ================================================================
-        # 提示词模板 API
-        # ================================================================
-        @app.get("/api/templates", tags=["Templates"])
-        async def list_templates(category: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """列出提示词模板"""
-            auth(x_api_key)
-            from prompt_templates import PromptTemplateManager
-            mgr = PromptTemplateManager()
-            return {"templates": mgr.list_templates(category or None), "categories": mgr.list_categories()}
-
-        @app.post("/api/templates", tags=["Templates"])
-        async def add_template(body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """添加提示词模板"""
-            auth(x_api_key)
-            from prompt_templates import PromptTemplateManager
-            mgr = PromptTemplateManager()
-            tmpl = mgr.add_template(
-                name=body.get("name", ""),
-                template=body.get("template", ""),
-                category=body.get("category", "general"),
-                description=body.get("description", ""),
+    async def start(self) -> None:
+        if not self._enabled:
+            return
+        try:
+            from fastapi import (  # noqa: F401
+                Body,
+                FastAPI,
+                Header,
+                HTTPException,
+                Request,
+                UploadFile,
             )
-            return {"template": tmpl}
+            from fastapi.middleware.cors import CORSMiddleware
+            from fastapi.responses import JSONResponse
+        except ImportError:
+            logger.warning("fastapi not installed — REST API disabled")
+            return
 
-        @app.post("/api/templates/{template_id}/render", tags=["Templates"])
-        async def render_template(template_id: str, body: dict = Body(default={}), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """渲染提示词模板"""
-            auth(x_api_key)
-            from prompt_templates import PromptTemplateManager
-            mgr = PromptTemplateManager()
-            result = mgr.render(template_id, body.get("variables", {}))
-            if result is None:
-                raise HTTPException(404, "模板不存在")
-            return {"rendered": result}
+        app = FastAPI(
+            title="One-Agent API",
+            version="2.0.0",
+            description="REST API for One-Agent integration",
+        )
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=self._cors_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST"],
+            allow_headers=["*"],
+        )
 
-        # ================================================================
-        # 工作流 API
-        # ================================================================
-        @app.get("/api/workflows", tags=["Workflows"])
-        async def list_workflows(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """列出所有工作流"""
-            auth(x_api_key)
-            scheduler = getattr(_ctx, "scheduler", None) if _ctx else None
-            if scheduler is None:
-                return {"workflows": []}
-            return {"workflows": scheduler.list_workflows()}
+        @app.middleware("http")
+        async def rate_limit_middleware(request, call_next):
+            # Get real client IP from X-Forwarded-For header
+            # Only trust X-Forwarded-For if request comes from a trusted proxy
+            client_ip = None
+            if request.client:
+                client_ip = request.client.host
+            elif "client" in request.scope:
+                # Fallback to scope client info
+                client_info = request.scope["client"]
+                if client_info and len(client_info) > 0:
+                    client_ip = client_info[0]
 
-        @app.post("/api/workflows", tags=["Workflows"])
-        async def create_workflow(body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """创建工作流"""
-            auth(x_api_key)
-            scheduler = getattr(_ctx, "scheduler", None) if _ctx else None
-            if scheduler is None:
-                raise HTTPException(503, "调度器未启用")
-            from scheduler import Workflow, WorkflowStep
-            steps = [WorkflowStep(**s) for s in body.get("steps", [])]
-            wf = Workflow(
-                id=body.get("id", ""),
-                name=body.get("name", ""),
-                description=body.get("description", ""),
-                steps=steps,
-                trigger=body.get("trigger", "manual"),
-                cron=body.get("cron", ""),
-            )
-            scheduler.add_workflow(wf)
-            return {"workflow": wf.id, "created": True}
+            if not client_ip:
+                # All unknown clients share a single bucket — using a unique
+                # ID per request (e.g. md5(time.time())) would give every
+                # request its own empty bucket, making the rate limit a no-op
+                # and leaking memory into _rate_buckets indefinitely.
+                client_ip = "unknown"
+                logger.warning("Rate limit: unable to determine client IP, using shared 'unknown' bucket")
 
-        @app.post("/api/workflows/{workflow_id}/run", tags=["Workflows"])
-        async def run_workflow(workflow_id: str, body: dict = Body(default={}), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """执行工作流"""
-            auth(x_api_key)
-            scheduler = getattr(_ctx, "scheduler", None) if _ctx else None
-            if scheduler is None:
-                raise HTTPException(503, "调度器未启用")
-            result = await scheduler.run_workflow(workflow_id, body.get("context"))
-            return result
+            if client_ip in self._trusted_proxies:
+                # Request from trusted proxy - use X-Forwarded-For
+                forwarded_for = request.headers.get("X-Forwarded-For")
+                if forwarded_for:
+                    # X-Forwarded-For format: client, proxy1, proxy2
+                    # Take the first IP (original client)
+                    ip = forwarded_for.split(",")[0].strip()
+                else:
+                    ip = client_ip
+            else:
+                # Direct connection or untrusted proxy - use client IP directly
+                ip = client_ip
 
-        # ================================================================
-        # 技能市场扩展 API（依赖检查 + 评论）
-        # ================================================================
-        @app.get("/api/marketplace/{name}/deps", tags=["Marketplace"])
-        async def check_deps(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """检查技能包依赖"""
-            auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
-            if mp is None:
-                raise HTTPException(503, "marketplace not available")
-            return mp.check_dependencies(name)
+            now = time.time()
+            bucket = self._rate_buckets.setdefault(ip, [])
+            # evict entries older than 60s
+            bucket[:] = [t for t in bucket if now - t < 60]
+            # Periodically clean up stale buckets to prevent unbounded growth
+            if not bucket and now - self._last_bucket_cleanup > 300:  # every 5 min
+                self._last_bucket_cleanup = now
+                stale = [k for k, v in self._rate_buckets.items()
+                         if not v or (now - v[-1] > 60)]
+                for k in stale:
+                    self._rate_buckets.pop(k, None)
+            if len(bucket) >= self._rate_limit:
+                return JSONResponse({"error": {"code": 429, "message": _("rate_limit_exceeded"), "type": "rate_limit"}}, status_code=429)
+            bucket.append(now)
+            return await call_next(request)
 
-        @app.post("/api/marketplace/{name}/comments", tags=["Marketplace"])
-        async def add_comment(name: str, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """添加技能评论"""
-            auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
-            if mp is None:
-                raise HTTPException(503, "marketplace not available")
-            ok = mp.add_comment(name, body.get("author", "anonymous"), body.get("content", ""), body.get("rating"))
-            if not ok:
-                raise HTTPException(404, "技能包不存在或内容为空")
-            return {"added": True}
+        # Reject chat requests with absurdly large bodies before FastAPI
+        # even tries to parse JSON — protects the server from accidental
+        # 100 MB /chat posts.
+        @app.middleware("http")
+        async def body_size_middleware(request, call_next):
+            if request.url.path in ("/api/chat", "/api/chat/stream"):
+                cl = request.headers.get("content-length")
+                try:
+                    if cl is not None and int(cl) > self._max_chat_bytes:
+                        return JSONResponse(
+                            {"error": {"code": 413, "message": _("request_body_too_large", size=cl, max=self._max_chat_bytes), "type": "request_too_large"}},
+                            status_code=413,
+                        )
+                except ValueError:
+                    pass
+            return await call_next(request)
 
-        @app.get("/api/marketplace/{name}/comments", tags=["Marketplace"])
-        async def get_comments(name: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """获取技能评论"""
-            auth(x_api_key)
-            mp = getattr(_ctx, "marketplace", None) if _ctx else None
-            if mp is None:
-                raise HTTPException(503, "marketplace not available")
-            return {"comments": mp.get_comments(name)}
+        _agent = self._agent_callback
+        _app_instance: Any = getattr(self, "_app_instance", None)
+        _ctx = self.ctx
+        _llm = _ctx.get_plugin("llm") if _ctx else None
+        _memory = _ctx.get_plugin("memory") if _ctx else None
+        _skills = _ctx.get_plugin("skills") if _ctx else None
+        _bus = _ctx.bus if _ctx else None
+
+        def _cp(name):
+            """Get plugin from context."""
+            return getattr(_ctx, name, None) if _ctx else None
+
+        def auth(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
+            if self._api_key and not hmac.compare_digest(x_api_key or "", self._api_key):
+                raise HTTPException(401, _("invalid_api_key"))
+
+        def _get_backup_mgr():
+            """Shared ConfigBackupManager factory for the config-backup endpoints."""
+            from config_backup import ConfigBackupManager
+            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            return ConfigBackupManager(cfg_path)
+
+        # ---------------------------------------------------------------- Health & Readiness
+        _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
+
+        self._register_health_routes(app, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin)
+
+        # ── Dashboard ────────────────────────────────────────────────────────────
+        self._register_dashboard_config_routes(app, auth, _ctx)
+
+        # ── Dashboard API endpoints ──────────────────────────────────────────────────
+        self._register_session_probe_routes(app, auth, _ctx, _agent)
+
+        # ---------------------------------------------------------------- Stats & Metrics
+        self._register_stats_metrics_routes(app, auth, _ctx, _llm, _memory, _bus, _skills, _memory_plugin)
+
+        # ── Audit Log Endpoints ────────────────────────────────────────────────────────
+        self._register_audit_routes(app, auth)
+
+        # ---------------------------------------------------------------- Chat
+        self._register_chat_routes(app, auth, _agent, _app_instance, _llm)
+
+        # ---------------------------------------------------------------- Memory & Skills
+        self._register_memory_skills_routes(app, auth, _memory, _skills)
+
+        # ---------------------------------------------------------------- Marketplace endpoints
+        self._register_marketplace_routes(app, auth, _ctx, _skills, _llm)
+
+        # ---------------------------------------------------------------- Self-improvement endpoints
+        self._register_improvement_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Cost tracking endpoints
+        self._register_cost_routes(app, auth, _llm)
+
+        # ---------------------------------------------------------------- Session endpoints
+        self._register_sessions_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Settings
+        self._register_settings_routes(app, auth, _ctx, _get_backup_mgr)
+
+        # ---------------------------------------------------------------- Config Backup
+        self._register_config_backup_routes(app, auth, _get_backup_mgr)
+
+        # ---------------------------------------------------------------- Document RAG
+        self._register_document_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Alerting
+        self._register_alerting_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Approval (Human-in-the-Loop)
+        self._register_approval_routes(app, auth, _ctx)
+
+        # ── MCP (Model Context Protocol) 端点 ───────────────────────────────────────────────────────────
+        self._register_mcp_routes(app, auth, _ctx)
 
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):
@@ -1833,29 +1571,21 @@ class RESTAPIGateway(Plugin):
         self._app = app
         try:
             import uvicorn
-            config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning")
+            config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning", capture_output=False)
             server = uvicorn.Server(config)
-            self._server = server
             self._task = __import__("asyncio").create_task(server.serve())
             logger.info("REST API running on http://%s:%d", self._host, self._port)
         except Exception as exc:
             logger.warning("could not start REST API: %s", exc)
 
     async def stop(self) -> None:
-        # 优雅关闭 uvicorn：设置 should_exit 让其自行完成 in-flight 请求
-        server = getattr(self, "_server", None)
-        if server is not None:
-            server.should_exit = True
         if self._task:
+            self._task.cancel()
             try:
-                await asyncio.wait_for(self._task, timeout=5.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                # 关闭超时或被取消，强制清理
-                self._task.cancel()
-                try:
-                    await self._task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            except Exception as exc:
-                logger.debug("REST API shutdown error: %s", exc)
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                # We don't care about shutdown errors — just make sure
+                # the task is awaited so we don't leak the unhandled
+                # "Task was destroyed but it is pending" warning.
+                pass
         await super().stop()

@@ -17,6 +17,8 @@ import threading
 import time
 from typing import Any, Dict, List
 
+from core.db import create_sqlite_connection
+
 logger = logging.getLogger(__name__)
 
 # Default per-token cost (USD per token) when no MODEL_COST entry exists.
@@ -40,11 +42,7 @@ class CostTracker:
         daily_budget: float = 1.0,
         monthly_budget: float = 20.0,
     ) -> None:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = create_sqlite_connection(db_path)
         self._lock = threading.Lock()
         self._daily_budget = daily_budget
         self._monthly_budget = monthly_budget
@@ -82,7 +80,7 @@ class CostTracker:
         (per-1K-token price), falling back to the default 0.0001 USD/token.
         """
         try:
-            from . import MODEL_COST
+            from models.tiers import MODEL_COST
         except ImportError:
             MODEL_COST: Dict[str, float] = {}  # type: ignore[no-redef]
 
@@ -111,7 +109,7 @@ class CostTracker:
                 )
                 self._conn.commit()
         except sqlite3.Error as exc:
-            logger.error("cost_tracker: failed to persist cost entry: %s", exc)
+            logger.exception("cost_tracker: failed to persist cost entry: %s", exc)
             raise  # propagate so caller can fall back to estimated cost
 
         # Check budget (fire-and-forget — never block the caller)
@@ -145,7 +143,7 @@ class CostTracker:
             ).fetchone()
             return round(row["total"], 8) if row else 0.0
         except sqlite3.Error as exc:
-            logger.error("cost_tracker query failed: %s", exc)
+            logger.exception("cost_tracker query failed: %s", exc)
             return 0.0
 
     def daily_cost(self) -> Dict[str, Any]:

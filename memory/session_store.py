@@ -47,30 +47,35 @@ class SessionStore(BaseSQLiteStore):
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
         """)
-        # Add fork columns to existing tables
-        try:
+        # Add columns to existing tables only if missing (avoids running
+        # ALTER-then-catch on every startup).
+        existing_session_cols = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "parent_id" not in existing_session_cols:
             self._conn.execute("ALTER TABLE sessions ADD COLUMN parent_id TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        try:
+        if "fork_point" not in existing_session_cols:
             self._conn.execute("ALTER TABLE sessions ADD COLUMN fork_point INTEGER")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
         # Add tokens column to messages so fork_session can sum per-message
         # token counts (previously messages had no tokens column, causing
         # forked sessions to always report total_tokens=0).
-        try:
+        existing_message_cols = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        if "tokens" not in existing_message_cols:
             self._conn.execute("ALTER TABLE messages ADD COLUMN tokens INTEGER DEFAULT 0")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
         self._conn.commit()
 
     # -------------------------------------------------------- public API
 
     def create_session(self, session_id: str, title: str = "") -> None:
         """Create a new session record (idempotent — upsert)."""
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
 
         now = time.time()
         with self._write_lock:
@@ -82,7 +87,7 @@ class SessionStore(BaseSQLiteStore):
                 )
                 self._conn.commit()
             except sqlite3.Error as exc:
-                logger.error("create_session(%s) failed: %s", session_id, exc)
+                logger.exception("create_session(%s) failed: %s", session_id, exc)
 
     def add_message(
         self,
@@ -107,25 +112,32 @@ class SessionStore(BaseSQLiteStore):
             message_id: Optional unique message ID for idempotency. If provided and
                        a message with this ID already exists, the operation is skipped.
         """
-        assert session_id, "session_id cannot be empty"
-        assert role in ("user", "assistant", "system"), "role must be user/assistant/system"
-        assert isinstance(content, str), "content must be a string"
-        assert tokens >= 0, "tokens must be non-negative"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if role not in ("user", "assistant", "system"):
+            raise ValueError("role must be user/assistant/system")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        if tokens < 0:
+            raise ValueError("tokens must be non-negative")
 
         now = time.time()
         meta_json = json.dumps(meta or {})
 
         with self._write_lock:
             try:
-                # Idempotency check: if message_id provided, check if it already exists
-                if message_id:
-                    cur = self._conn.execute(
-                        "SELECT id FROM messages WHERE id = ?", (message_id,)
-                    )
-                    if cur.fetchone():
-                        return  # Message already exists, skip insertion
-
                 with self._conn:  # automatic transaction
+                    # Idempotency check inside the transaction so a
+                    # concurrent insert of the same message_id cannot race
+                    # past the SELECT (TOCTOU). Combined with the write
+                    # lock this makes the check-then-insert atomic.
+                    if message_id:
+                        cur = self._conn.execute(
+                            "SELECT id FROM messages WHERE id = ?", (message_id,)
+                        )
+                        if cur.fetchone():
+                            return  # Message already exists, skip insertion
+
                     # Ensure session exists (auto-create)
                     self._conn.execute(
                         "INSERT OR IGNORE INTO sessions(id, created_at, updated_at) "
@@ -171,13 +183,15 @@ class SessionStore(BaseSQLiteStore):
                         (now, tokens, session_id),
                     )
             except sqlite3.Error as exc:
-                logger.error("add_message(%s) transaction failed: %s", session_id, exc)
+                logger.exception("add_message(%s) transaction failed: %s", session_id, exc)
                 raise
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a session with all its messages."""
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
 
         try:
             cur = self._conn.execute(
@@ -203,13 +217,15 @@ class SessionStore(BaseSQLiteStore):
             session["messages"] = messages
             return session
         except sqlite3.Error as exc:
-            logger.error("get_session(%s) failed: %s", session_id, exc)
+            logger.exception("get_session(%s) failed: %s", session_id, exc)
             return None
 
     def list_sessions(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         """List recent sessions ordered by last update time."""
-        assert limit > 0, "limit must be positive"
-        assert offset >= 0, "offset must be non-negative"
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
 
         try:
             cur = self._conn.execute(
@@ -218,26 +234,28 @@ class SessionStore(BaseSQLiteStore):
             )
             return [dict(row) for row in cur.fetchall()]
         except sqlite3.Error as exc:
-            logger.error("list_sessions failed: %s", exc)
+            logger.exception("list_sessions failed: %s", exc)
             return []
 
     def delete_session(self, session_id: str) -> bool:
         """Delete a session and all its messages. Returns True if deleted."""
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
 
         with self._write_lock:
             try:
-                cur = self._conn.execute(
-                    "DELETE FROM messages WHERE session_id = ?", (session_id,)
-                )
-                cur = self._conn.execute(
-                    "DELETE FROM sessions WHERE id = ?", (session_id,)
-                )
-                self._conn.commit()
+                with self._conn:  # explicit transaction for both deletes
+                    self._conn.execute(
+                        "DELETE FROM messages WHERE session_id = ?", (session_id,)
+                    )
+                    cur = self._conn.execute(
+                        "DELETE FROM sessions WHERE id = ?", (session_id,)
+                    )
                 return cur.rowcount > 0
             except sqlite3.Error as exc:
-                logger.error("delete_session(%s) failed: %s", session_id, exc)
+                logger.exception("delete_session(%s) failed: %s", session_id, exc)
                 return False
 
     def get_session_count(self) -> int:
@@ -246,7 +264,7 @@ class SessionStore(BaseSQLiteStore):
             cur = self._conn.execute("SELECT COUNT(*) FROM sessions")
             return cur.fetchone()[0]
         except sqlite3.Error as exc:
-            logger.error("get_session_count failed: %s", exc)
+            logger.exception("get_session_count failed: %s", exc)
             return 0
 
     def fork_session(self, session_id: str, fork_point: int, new_session_id: Optional[str] = None) -> Optional[str]:
@@ -265,9 +283,12 @@ class SessionStore(BaseSQLiteStore):
             new_id = store.fork_session("abc123", 5)
             # 新会话包含原会话的前 5 条消息
         """
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
-        assert fork_point >= 0, "fork_point must be non-negative"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
+        if fork_point < 0:
+            raise ValueError("fork_point must be non-negative")
 
         import uuid
 
@@ -297,17 +318,24 @@ class SessionStore(BaseSQLiteStore):
                     (new_session_id, title, now, now, session_id, fork_point),
                 )
 
-                # 复制分叉点之前的消息
+                # 复制分叉点之前的消息 — batch insert via executemany to
+                # avoid one INSERT round-trip (and commit flush) per message.
+                rows = []
                 for msg in messages[:fork_point]:
                     meta = msg.get("meta", {})
                     meta_json = json.dumps(meta) if isinstance(meta, dict) else (meta or "{}")
                     # Preserve per-message token count so the forked session's
                     # total_tokens is accurate (was always 0 before tokens col).
                     msg_tokens = msg.get("tokens", 0) or 0
-                    self._conn.execute(
-                        "INSERT INTO messages(id, session_id, role, content, meta, created_at, tokens) "
-                        "VALUES (NULL, ?, ?, ?, ?, ?, ?)",
-                        (new_session_id, msg["role"], msg["content"], meta_json, msg["created_at"], msg_tokens),
+                    rows.append((
+                        new_session_id, msg["role"], msg["content"],
+                        meta_json, msg["created_at"], msg_tokens,
+                    ))
+                if rows:
+                    self._conn.executemany(
+                        "INSERT INTO messages(session_id, role, content, meta, created_at, tokens) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        rows,
                     )
 
                 # 更新消息计数和 token 统计
@@ -321,7 +349,7 @@ class SessionStore(BaseSQLiteStore):
                 return new_session_id
 
             except sqlite3.Error as exc:
-                logger.error("fork_session(%s) failed: %s", session_id, exc)
+                logger.exception("fork_session(%s) failed: %s", session_id, exc)
                 self._conn.rollback()
                 return None
 
@@ -334,8 +362,10 @@ class SessionStore(BaseSQLiteStore):
         Returns:
             包含 parent_id, children, fork_point 的树结构
         """
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
+        if not session_id:
+            raise ValueError("session_id cannot be empty")
+        if not isinstance(session_id, str):
+            raise ValueError("session_id must be a string")
 
         try:
             # 获取当前会话
@@ -370,209 +400,5 @@ class SessionStore(BaseSQLiteStore):
             return tree
 
         except sqlite3.Error as exc:
-            logger.error("get_session_tree(%s) failed: %s", session_id, exc)
+            logger.exception("get_session_tree(%s) failed: %s", session_id, exc)
             return {}
-
-    # -------------------------------------------------------- async wrappers
-
-    async def create_session_async(self, session_id: str, title: str = "") -> None:
-        """Async wrapper for create_session"""
-        await asyncio.to_thread(self.create_session, session_id, title)
-
-    async def add_message_async(
-        self,
-        session_id: str,
-        role: str,
-        content: str,
-        meta: Optional[dict] = None,
-        tokens: int = 0,
-    ) -> None:
-        """Async wrapper for add_message"""
-        await asyncio.to_thread(self.add_message, session_id, role, content, meta, tokens)
-
-    async def get_session_async(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Async wrapper for get_session"""
-        return await asyncio.to_thread(self.get_session, session_id)
-
-    async def list_sessions_async(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-        """Async wrapper for list_sessions"""
-        return await asyncio.to_thread(self.list_sessions, limit, offset)
-
-    async def delete_session_async(self, session_id: str) -> bool:
-        """Async wrapper for delete_session"""
-        return await asyncio.to_thread(self.delete_session, session_id)
-
-    async def get_session_count_async(self) -> int:
-        """Async wrapper for get_session_count"""
-        return await asyncio.to_thread(self.get_session_count)
-
-    async def fork_session_async(
-        self, session_id: str, fork_point: int, new_session_id: Optional[str] = None
-    ) -> Optional[str]:
-        """Async wrapper for fork_session"""
-        return await asyncio.to_thread(self.fork_session, session_id, fork_point, new_session_id)
-
-    async def get_session_tree_async(self, session_id: str) -> Dict[str, Any]:
-        """Async wrapper for get_session_tree"""
-        return await asyncio.to_thread(self.get_session_tree, session_id)
-
-    # -------------------------------------------------------- export/import
-
-    def export_session(self, session_id: str, format: str = "json") -> Optional[str]:
-        """导出会话为 JSON 或 Markdown 格式。
-
-        Args:
-            session_id: 会话 ID
-            format: 导出格式 ("json" 或 "markdown")
-
-        Returns:
-            导出的字符串内容，失败返回 None
-        """
-        assert session_id, "session_id cannot be empty"
-        assert isinstance(session_id, str), "session_id must be a string"
-        assert format in ("json", "markdown"), "format must be 'json' or 'markdown'"
-
-        session = self.get_session(session_id)
-        if not session:
-            logger.error("export_session: session %s not found", session_id)
-            return None
-
-        if format == "json":
-            return json.dumps(session, ensure_ascii=False, indent=2)
-        else:  # markdown
-            lines = [
-                f"# {session.get('title', 'Untitled Session')}",
-                "",
-                f"**Session ID**: `{session_id}`",
-                f"**Created**: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(session.get('created_at', 0)))}",
-                f"**Messages**: {session.get('message_count', 0)}",
-                f"**Tokens**: {session.get('total_tokens', 0)}",
-                "",
-                "---",
-                "",
-            ]
-            for msg in session.get("messages", []):
-                role = msg.get("role", "unknown").upper()
-                content = msg.get("content", "")
-                lines.append(f"## {role}")
-                lines.append("")
-                lines.append(content)
-                lines.append("")
-            return "\n".join(lines)
-
-    def import_session(self, data: str, format: str = "json", new_session_id: Optional[str] = None) -> Optional[str]:
-        """从 JSON 或 Markdown 导入会话。
-
-        Args:
-            data: 导入的字符串内容
-            format: 导入格式 ("json" 或 "markdown")
-            new_session_id: 新会话 ID（可选，不传则自动生成）
-
-        Returns:
-            新会话 ID，失败返回 None
-        """
-        assert isinstance(data, str), "data must be a string"
-        assert format in ("json", "markdown"), "format must be 'json' or 'markdown'"
-
-        import uuid
-
-        try:
-            if format == "json":
-                session = json.loads(data)
-                if not isinstance(session, dict):
-                    raise ValueError("JSON must be an object")
-                if "id" not in session or "messages" not in session:
-                    raise ValueError("JSON must contain 'id' and 'messages' fields")
-
-                # Use provided ID or generate new one
-                session_id = new_session_id or f"import_{uuid.uuid4().hex[:8]}"
-                title = session.get("title", "Imported Session")
-
-                # Create session
-                self.create_session(session_id, title)
-
-                # Import messages
-                for msg in session.get("messages", []):
-                    self.add_message(
-                        session_id=session_id,
-                        role=msg.get("role", "user"),
-                        content=msg.get("content", ""),
-                        meta=msg.get("meta", {}),
-                        tokens=msg.get("tokens", 0),
-                    )
-
-                logger.info("import_session: imported %s from JSON", session_id)
-                return session_id
-
-            else:  # markdown
-                # Parse markdown format
-                lines = data.split("\n")
-                if not lines:
-                    raise ValueError("Markdown is empty")
-
-                # Extract title from first H1
-                title = "Imported Session"
-                if lines[0].startswith("# "):
-                    title = lines[0][2:].strip()
-
-                # Extract messages (H2 headers followed by content)
-                messages = []
-                current_role = None
-                current_content = []
-
-                for line in lines:
-                    if line.startswith("## "):
-                        # Save previous message if exists
-                        if current_role and current_content:
-                            messages.append({
-                                "role": current_role.lower(),
-                                "content": "\n".join(current_content).strip(),
-                            })
-                        # Start new message
-                        current_role = line[3:].strip()
-                        current_content = []
-                    elif current_role:
-                        current_content.append(line)
-
-                # Save last message
-                if current_role and current_content:
-                    messages.append({
-                        "role": current_role.lower(),
-                        "content": "\n".join(current_content).strip(),
-                    })
-
-                if not messages:
-                    raise ValueError("No messages found in markdown")
-
-                # Create session
-                session_id = new_session_id or f"import_{uuid.uuid4().hex[:8]}"
-                self.create_session(session_id, title)
-
-                # Import messages
-                for msg in messages:
-                    if msg["role"] in ("user", "assistant", "system"):
-                        self.add_message(
-                            session_id=session_id,
-                            role=msg["role"],
-                            content=msg["content"],
-                        )
-
-                logger.info("import_session: imported %s from markdown", session_id)
-                return session_id
-
-        except (json.JSONDecodeError, ValueError, KeyError) as exc:
-            logger.error("import_session failed: %s", exc)
-            return None
-        except sqlite3.Error as exc:
-            logger.error("import_session database error: %s", exc)
-            return None
-
-    async def export_session_async(self, session_id: str, format: str = "json") -> Optional[str]:
-        """Async wrapper for export_session"""
-        return await asyncio.to_thread(self.export_session, session_id, format)
-
-    async def import_session_async(
-        self, data: str, format: str = "json", new_session_id: Optional[str] = None
-    ) -> Optional[str]:
-        """Async wrapper for import_session"""
-        return await asyncio.to_thread(self.import_session, data, format, new_session_id)

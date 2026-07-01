@@ -56,5 +56,4 @@ coverage.xml
 # Node (in case MCP tools get installed)
 node_modules/
 test-report.log
-data/*
-!data/roles/
+data/

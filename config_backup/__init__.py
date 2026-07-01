@@ -93,7 +93,7 @@ class ConfigBackupManager:
             return backup_name
 
         except Exception as exc:
-            logger.error("failed to create config backup: %s", exc)
+            logger.exception("failed to create config backup: %s", exc)
             return None
 
     def restore_backup(self, backup_name: Optional[str] = None) -> bool:
@@ -137,7 +137,7 @@ class ConfigBackupManager:
             return True
 
         except Exception as exc:
-            logger.error("failed to restore config: %s", exc)
+            logger.exception("failed to restore config: %s", exc)
             # Clean up temp file if it exists
             temp_path = self._config_path.with_suffix(".yaml.tmp")
             if temp_path.exists():
@@ -176,7 +176,7 @@ class ConfigBackupManager:
             logger.info("backup deleted: %s", backup_name)
             return True
         except Exception as exc:
-            logger.error("failed to delete backup: %s", exc)
+            logger.exception("failed to delete backup: %s", exc)
             return False
 
     def _rotate_backups(self) -> None:
@@ -210,7 +210,7 @@ class ConfigBackupManager:
             with open(backup_path, "r", encoding="utf-8") as f:
                 return yaml.safe_load(f) or {}
         except Exception as exc:
-            logger.error("failed to read backup %s: %s", backup_name, exc)
+            logger.exception("failed to read backup %s: %s", backup_name, exc)
             return None
 
     def diff_with_current(self, backup_name: str) -> Optional[Dict[str, Any]]:
@@ -223,7 +223,7 @@ class ConfigBackupManager:
             with open(self._config_path, "r", encoding="utf-8") as f:
                 current_content = yaml.safe_load(f) or {}
         except Exception as exc:
-            logger.error("failed to read current config: %s", exc)
+            logger.exception("failed to read current config: %s", exc)
             return None
 
         # Simple diff: show keys that differ

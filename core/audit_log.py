@@ -16,6 +16,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from core.db import create_sqlite_connection
+
 logger = logging.getLogger(__name__)
 
 # Audit log configuration
@@ -38,11 +40,7 @@ class AuditLog:
     """
 
     def __init__(self, db_path: str = AUDIT_LOG_PATH) -> None:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn = create_sqlite_connection(db_path)
         # Serialize writes: check_same_thread=False allows cross-thread access
         # but SQLite connections are not safe for concurrent writes from
         # multiple threads — a threading.Lock prevents ProgrammingError and
@@ -104,7 +102,7 @@ class AuditLog:
                 # Auto-rotate if too many entries
                 self._check_rotation()
         except sqlite3.Error as exc:
-            logger.error("Failed to write audit log: %s", exc)
+            logger.exception("Failed to write audit log: %s", exc)
 
     def _check_rotation(self) -> None:
         """Delete old entries if table exceeds max size."""
@@ -125,7 +123,7 @@ class AuditLog:
                 self._conn.commit()
                 logger.info("Audit log rotated: deleted %d old entries", count - keep_count)
         except sqlite3.Error as exc:
-            logger.error("Audit log rotation failed: %s", exc)
+            logger.exception("Audit log rotation failed: %s", exc)
 
     def query(
         self,
@@ -185,7 +183,7 @@ class AuditLog:
                 for row in rows
             ]
         except sqlite3.Error as exc:
-            logger.error("Audit log query failed: %s", exc)
+            logger.exception("Audit log query failed: %s", exc)
             return []
 
     def stats(self) -> Dict[str, Any]:
@@ -222,7 +220,7 @@ class AuditLog:
                 "retention_days": AUDIT_RETENTION_DAYS,
             }
         except sqlite3.Error as exc:
-            logger.error("Audit log stats failed: %s", exc)
+            logger.exception("Audit log stats failed: %s", exc)
             return {"total_entries": 0, "error": str(exc)}
 
     def close(self) -> None:
@@ -234,7 +232,7 @@ class AuditLog:
         except Exception:
             pass
 
-    def __del__(self) -> None:
+    def __del__(self):
         """Ensure connection is closed on garbage collection."""
         try:
             self.close()
