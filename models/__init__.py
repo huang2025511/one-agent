@@ -143,6 +143,19 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._fallback_count: Dict[str, int] = {}
         # Circuit breakers per provider: {provider: CircuitBreaker}
         self._circuit_breakers: Dict[str, CircuitBreaker] = {}
+        # Models known to NOT support tool calling (cached after first 400)
+        # so we don't waste a failed request every time.  Key is bare model name.
+        self._no_tools_models: Set[str] = set()
+        # Heuristic patterns for models that likely don't support tools.
+        # These are checked in addition to the explicit _no_tools_models set.
+        self._no_tools_patterns = [
+            re.compile(r"-flash", re.IGNORECASE),
+            re.compile(r"-lite", re.IGNORECASE),
+            re.compile(r"flash[-_]?lite", re.IGNORECASE),
+            re.compile(r"-mini", re.IGNORECASE),
+            re.compile(r"-tiny", re.IGNORECASE),
+            re.compile(r"-small", re.IGNORECASE),
+        ]
         # If setup() can't find an event loop, defer the first auto-classify
         # to the next chat_completion() / get_catalog() call.
         self._pending_auto_classify: bool = False
@@ -182,6 +195,15 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._fallback_chain = llm_cfg.get("fallback_chain", []) or []
         if self._fallback_chain:
             logger.info("LLM fallback chain configured: %s", self._fallback_chain)
+
+        # Pre-seed models known to NOT support tool calling (based on model name).
+        # This avoids wasting a failed request on the first turn.
+        _KNOWN_NO_TOOLS = [
+            "deepseek-v4-flash", "sensenova-6.7-flash-lite",
+            "sensenova-6.7-flash", "sensenova-default",
+        ]
+        for m in _KNOWN_NO_TOOLS:
+            self._no_tools_models.add(m)
 
         # Cache config: read from dedicated llm_cache section first, fall back to llm inline
         cache_cfg = ctx.config.get("llm_cache") or {}
@@ -282,6 +304,29 @@ class LLMProvider(RecommendationMixin, Plugin):
                         await self._try_endpoint_fallback(provider)
             except (httpx.RequestError, httpx.TimeoutException) as exc:
                 logger.debug("endpoint check probe failed: %s", exc)
+
+    def model_supports_tools(self, model: str) -> bool:
+        """Check whether a model likely supports tool/function calling.
+
+        Combines explicit cache (_no_tools_models) with heuristic
+        pattern matching so flash/lite/small models are detected on the
+        very first turn — no wasted failed round-trip needed.
+
+        Args:
+            model: Full model string like "sensenova/deepseek-v4-flash"
+                   or bare model name like "deepseek-v4-flash".
+
+        Returns:
+            True if the model probably supports tool calling,
+            False if it probably doesn't.
+        """
+        bare = model.split("/", 1)[1] if "/" in model else model
+        if bare in self._no_tools_models:
+            return False
+        for pat in self._no_tools_patterns:
+            if pat.search(bare):
+                return False
+        return True
 
     async def stop(self) -> None:
         # Wait for any in-flight auto-classify background tasks (max 5s)
@@ -799,6 +844,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                 "failed": True,
             }
 
+        # If this model is known to NOT support tool calling,
+        # skip sending tools entirely — saves a failed round-trip.
+        if tools and not self.model_supports_tools(model):
+            logger.debug("model %s known to not support tools, stripping", bare_model)
+            tools = None
+
         # --- Auto-heal: build model name map and normalize model ID ---
         # Fetches the real model list from the API and builds a
         # case-insensitive mapping so users can type "DeepSeek-V4-Flash"
@@ -903,12 +954,26 @@ class LLMProvider(RecommendationMixin, Plugin):
                     # If we sent tools and got 400, retry without tools.
                     if status == 400 and tools:
                         logger.info("tools not supported by %s, retrying without tools", provider)
+                        # Clean messages: strip tool role and tool_calls fields
+                        # that some providers reject when tools aren't enabled.
+                        clean_msgs = []
+                        for m in messages:
+                            role = m.get("role", "")
+                            if role == "tool":
+                                continue
+                            if role == "assistant" and m.get("tool_calls"):
+                                clean_msg = {k: v for k, v in m.items() if k != "tool_calls"}
+                                clean_msgs.append(clean_msg)
+                            else:
+                                clean_msgs.append(m)
                         try:
                             result = await self._do_call(
                                 base=base, api_key=api_key, model=model,
-                                messages=messages, temperature=temperature,
+                                messages=clean_msgs, temperature=temperature,
                                 max_tokens=max_tokens, tools=None, provider=provider,
                             )
+                            # Remember: this model doesn't support tools
+                            self._no_tools_models.add(bare_model)
                             self._record_cost(
                                 model,
                                 result.get("tokens_used", 0),
@@ -917,7 +982,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                                 result=result,
                             )
                             if use_cache and self._cache is not None:
-                                self._cache.set(messages, model, [], result, temperature)
+                                self._cache.set(clean_msgs, model, [], result, temperature)
                             return result
                         except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as retry_exc:
                             retry_status = getattr(getattr(retry_exc, "response", None), "status_code", None)
@@ -952,6 +1017,8 @@ class LLMProvider(RecommendationMixin, Plugin):
                                         messages=minimal_msgs, temperature=temperature,
                                         max_tokens=max_tokens, tools=None, provider=provider,
                                     )
+                                    # Remember: this model doesn't support tools
+                                    self._no_tools_models.add(bare_model)
                                     self._record_cost(
                                         model,
                                         result.get("tokens_used", 0),
@@ -1103,6 +1170,11 @@ class LLMProvider(RecommendationMixin, Plugin):
         if not api_key:
             yield {"delta": "", "done": True, "error": f"no API key for provider '{provider}'"}
             return
+
+        # If this model is known to NOT support tool calling, skip sending tools.
+        if tools and not self.model_supports_tools(model):
+            logger.debug("stream: model %s known to not support tools, stripping", bare_model)
+            tools = None
 
         # --- Circuit breaker check (mirror non-streaming path) ---
         # Without this, streaming callers keep hitting a provider that is

@@ -623,6 +623,11 @@ class Coordinator(Plugin):
         # Context compression (always, but cheap when not needed)
         await self._compress_context(messages, turn)
 
+        # --- Step 2.5: Auto web-search fallback for models without tool calling ---
+        # If the model doesn't support function calling, try to detect
+        # search intent and inject results before the main LLM call.
+        await self._auto_web_search_if_needed(messages, turn)
+
         # --- Step 3: Tool-call loop ---
         await self._tool_loop(messages, turn, tools)
 
@@ -1063,6 +1068,100 @@ class Coordinator(Plugin):
             messages.extend(recent)
             turn.meta["context_compressed"] = True
             turn.meta["compressed_messages"] = len(early)
+
+    def _needs_web_search(self, text: str) -> bool:
+        """Heuristic check whether the user's request requires web search.
+
+        Used as a fallback when the model doesn't support tool calling —
+        so the agent can still look up real-time info.
+        """
+        import re
+        t = text.lower()
+        search_patterns = [
+            r"搜索|搜|查找|查一下|查一查|查新|最新|最近|新闻|资讯|头条|热门|热搜|实时|今天|昨天|近日|近期",
+            r"web search|search for|look up|find out|what's new|what is new|latest|recent news|current events|breaking",
+            r"价格|股价|行情|比分|比赛结果|天气|汇率|价格表|排行榜",
+            r"how much|how many|price of|weather|score|result",
+        ]
+        for pat in search_patterns:
+            if re.search(pat, t):
+                return True
+        if re.search(r"今年|本月|本周|今天|现在|目前|当前|2025|2026", t) and len(t) > 10:
+            return True
+        return False
+
+    async def _auto_web_search_if_needed(self, messages: List[Dict[str, Any]], turn: TurnContext) -> bool:
+        """If the model doesn't support tools, auto-run web_search before the main LLM call.
+
+        This bridges the gap when a model without function calling still needs
+        real-time info.  Returns True if search was performed and
+        results were injected into messages.
+        """
+        if self._llm is None or self._skills is None:
+            return False
+
+        model_name = turn.model or ""
+
+        # Use model_supports_tools() if available (combines cache + heuristics),
+        # otherwise fall back to checking _no_tools_models cache.
+        no_tools = False
+        if hasattr(self._llm, "model_supports_tools"):
+            no_tools = not self._llm.model_supports_tools(model_name)
+        elif hasattr(self._llm, "_no_tools_models"):
+            bare_model = ""
+            if model_name and "/" in model_name:
+                bare_model = model_name.split("/", 1)[1]
+            elif model_name:
+                bare_model = model_name
+            no_tools = bare_model in self._llm._no_tools_models
+
+        if not no_tools:
+            return False
+
+        if not self._needs_web_search(turn.input_text):
+            return False
+
+        web_search_skill = self._skills.get("web_search")
+        if web_search_skill is None:
+            return False
+
+        logger.info("model %s doesn't support tools; auto-searching for: %s",
+                    model_name, turn.input_text[:60])
+
+        try:
+            query = turn.input_text.strip()
+            result = await web_search_skill.execute({"input": query}, {})
+            if not result or "error" in str(result).lower() or "无法" in str(result):
+                logger.debug("auto-search failed or no results")
+                return False
+
+            search_note = (
+                "【重要：本对话运行在纯文本模式，你无法调用任何工具。】\n"
+                "【但系统已自动为你执行了联网搜索，以下是搜索到的最新信息，"
+                "请完全基于这些真实信息回答用户问题，不要用旧知识推测，"
+                "也不要告诉用户\"我无法联网\"或\"请点击联网搜索按钮\"。】\n\n"
+                "━━━━━━━━━━━━ 搜索结果开始 ━━━━━━━━━━━━\n"
+                f"{str(result)[:4000]}\n"
+                "━━━━━━━━━━━━ 搜索结果结束 ━━━━━━━━━━━━"
+            )
+            inserted = False
+            for i, m in enumerate(messages):
+                if m.get("role") == "system":
+                    messages[i] = {
+                        "role": "system",
+                        "content": m["content"] + "\n\n" + search_note,
+                    }
+                    inserted = True
+                    break
+            if not inserted:
+                messages.insert(0, {"role": "system", "content": search_note})
+
+            turn.meta["auto_searched"] = True
+            logger.info("auto-search completed, results injected")
+            return True
+        except Exception as exc:
+            logger.warning("auto-web-search failed: %s", exc, exc_info=True)
+            return False
 
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
         """Execute tool-call loop until final reply."""
