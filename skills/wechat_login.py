@@ -67,13 +67,14 @@ async def _ensure_wechat_gateway(ctx_ref=None) -> tuple:
 
     # 检查依赖
     try:
-        import itchat  # type: ignore  # noqa: F401
+        import aiohttp  # noqa: F401
+        from cryptography.hazmat.backends import default_backend  # noqa: F401
     except ImportError:
-        return None, """❌ 缺少 itchat-uos 依赖
+        return None, """❌ 缺少微信网关依赖
 
-请先安装微信网关依赖：
+请先安装依赖：
 ```bash
-pip install itchat-uos
+pip install aiohttp cryptography
 ```
 安装后重启 One-Agent，再输入 "微信登录"
 """
@@ -117,45 +118,30 @@ def make_wechat_login_handler(ctx_ref=None):
         if gateway is None:
             return "❌ 无法启动微信网关"
 
-        # 如果网关被禁用了（setup 时 self._enabled=False），手动启用
-        if not getattr(gateway, '_enabled', False):
-            try:
-                gateway._enabled = True
-                # 从配置中读取其他参数
-                cfg = {}
-                try:
-                    gateways_cfg = getattr(gateway.ctx, 'config', {}) if gateway.ctx else {}
-                    if isinstance(gateways_cfg, dict):
-                        wxp = (gateways_cfg.get('gateways') or {}).get('wechat_personal') or {}
-                    else:
-                        wxp = (getattr(gateways_cfg, 'gateways', None) or {}).get('wechat_personal') or {}
-                    cfg = wxp or {}
-                except Exception:
-                    pass
-                gateway._allowed_users = [str(u).strip() for u in (cfg.get('allowed_users') or []) if str(u).strip()]
-                gateway._reply_prefix = str(cfg.get('reply_prefix', ''))
-                gateway._hot_reload = bool(cfg.get('hot_reload', False))
-                # 订阅事件总线
-                if gateway.bus is not None:
-                    gateway.bus.subscribe("turn_completed", gateway._on_done)
-            except Exception as e:
-                logger.error(f"手动启用微信网关失败: {e}")
-                return f"❌ 启用微信网关失败: {e}"
-
         try:
             result = await gateway.login()
             if result:
-                return """✅ 微信网关启动中...
+                qr_url = getattr(gateway, 'qr_url', '')
+                running = getattr(gateway, 'running', False)
+                if running:
+                    return "✅ 微信网关已在运行中\n\n你可以直接在微信上与我对话了"
+                elif qr_url:
+                    return f"""✅ 微信网关启动中...
 
-请在终端中扫描显示的二维码完成登录
+请复制以下链接到浏览器打开，用微信扫描二维码登录：
+
+{qr_url}
 
 💡 提示：
 - 二维码有效期有限，请尽快扫描
-- 扫码后即可在微信上与我对话
-- 如需退出，输入 "微信退出"
+- 扫码后在手机上点击确认登录
+- 登录成功后即可在微信上与我对话
+- 登录凭证会自动保存，下次启动无需重新扫码
 """
+                else:
+                    return "✅ 微信网关启动中，请稍候...\n（二维码链接将在日志中显示）"
             else:
-                return "⚠️ 微信网关已在运行中"
+                return "⚠️ 微信网关启动失败，请查看日志"
         except Exception as e:
             logger.error(f"WeChat login error: {e}", exc_info=True)
             return f"❌ 登录失败: {e}"

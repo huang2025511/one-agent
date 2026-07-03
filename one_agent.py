@@ -281,6 +281,7 @@ class OneAgentApp:
             ("discord", "DiscordGateway"),
             ("slack", "SlackGateway"),
             ("web", "WebGateway"),
+            ("wechat_personal", "WeChatPersonalGateway"),
         ]
 
         for attr_name, class_name in gateways_to_load:
@@ -330,7 +331,7 @@ class OneAgentApp:
             self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
             self.coordinator, self.scheduler,
             self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
-            self.discord, self.slack, self.web,
+            self.discord, self.slack, self.web, self.wechat_personal,
             self.multimodal, self.rest_api, self.monitor, self.marketplace,
             self._alert_manager,
         ):
@@ -393,7 +394,7 @@ class OneAgentApp:
                 self.exec_shell, self.exec_docker, self.exec_browser, self.exec_python,
                 self.coordinator, self.scheduler,
                 self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
-                self.discord, self.slack, self.web,
+                self.discord, self.slack, self.web, self.wechat_personal,
                 self.multimodal, self.rest_api, self.monitor, self.marketplace,
             ) if p is not None
         ]
