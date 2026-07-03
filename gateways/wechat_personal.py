@@ -454,11 +454,17 @@ class WeChatPersonalGateway(Plugin):
         logger.info("wechat_personal: poll loop started, account=%s, base=%s",
                    self._account_id[:8], self._base_url)
         sync_buf = _load_sync_buf(self._account_id)
+        logger.info("wechat_personal: initial sync_buf=%s", sync_buf[:50] if sync_buf else "(empty)")
         consecutive_errors = 0
+        poll_count = 0
 
         while self._running:
             try:
+                poll_count += 1
                 self._last_heartbeat = time.time()
+                logger.info("wechat_personal: poll #%d, waiting for updates (sync_buf=%s)...",
+                           poll_count, sync_buf[:30] if sync_buf else "(empty)")
+
                 response = await _get_updates(
                     self._session,
                     base_url=self._base_url,
@@ -466,6 +472,10 @@ class WeChatPersonalGateway(Plugin):
                     sync_buf=sync_buf,
                     timeout_ms=35000,
                 )
+
+                # 记录完整响应（截断到500字符）
+                logger.info("wechat_personal: poll #%d response: %s",
+                           poll_count, json.dumps(response, ensure_ascii=False)[:500])
 
                 ret = response.get("ret", 0)
                 if ret not in (0, None):
@@ -483,8 +493,10 @@ class WeChatPersonalGateway(Plugin):
                 if new_buf and new_buf != sync_buf:
                     sync_buf = new_buf
                     _save_sync_buf(self._account_id, sync_buf)
+                    logger.info("wechat_personal: sync_buf updated to %s", sync_buf[:30])
 
-                msgs = response.get("msgs", [])
+                # 尝试多种可能的消息字段名
+                msgs = response.get("msgs") or response.get("messages") or response.get("msg_list") or []
                 if msgs:
                     logger.info("wechat_personal: received %d message(s)", len(msgs))
                     for msg in msgs:
@@ -492,6 +504,9 @@ class WeChatPersonalGateway(Plugin):
                         task = asyncio.create_task(self._handle_message(msg))
                         self._msg_tasks.add(task)
                         task.add_done_callback(self._msg_tasks.discard)
+                else:
+                    logger.info("wechat_personal: poll #%d: no messages (response keys=%s)",
+                               poll_count, list(response.keys()))
 
                 await asyncio.sleep(0)
 
