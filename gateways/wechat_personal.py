@@ -1,257 +1,591 @@
-"""Personal WeChat (个人微信) gateway — using itchat-uos.
+"""Personal WeChat (个人微信) gateway — using Tencent iLink Bot API.
 
-This gateway logs into a **personal** WeChat account (not an Official Account /
-not a Mini Program), scans the QR code displayed in terminal, and then listens
-for private messages.
+This gateway logs into a **personal** WeChat account using the official iLink
+Bot API (not web WeChat / not itchat).
 
 Requirements
 ------------
-``pip install itchat-uos`` (recommended) or ``pip install itchat`` (legacy).
-
-``itchat-uos`` patches the old itchat to work with UOS protocol, which is what
-current WeChat Desktop/Web versions use.
-
-Security Warning
-----------------
-This gateway runs on a *personal* WeChat account.  WeChat's Terms of Service
-prohibit automated messaging on personal accounts (see §10.5).  Use at your
-own risk.  The authors recommend using the WeCom (企业微信) gateway for
-production.
+``pip install aiohttp cryptography``
 
 Usage
 -----
-1. ``pip install one-agent[wechat]`` or ``pip install itchat-uos``
-2. Enable in config:
+1. Enable in config:
 
-.. code-block:: yaml
+   .. code-block:: yaml
 
-   gateways:
-     wechat_personal:
-       enabled: true
-       allowed_users: []       # empty = allow all
-       reply_prefix: "[Bot] "  # prefix auto-replies
-       hot_reload: false       # True = watch .pkl for QR changes
+      gateways:
+        wechat_personal:
+          enabled: true
+          allowed_users: []  # empty = allow all
 
-3. Start one-agent — a QR code will appear in terminal.
-4. Scan with WeChat mobile app.
-5. Agent listens for private messages and answers.
+2. Start one-agent
+3. Type "微信登录" to get QR code URL
+4. Open URL in browser, scan with WeChat
+5. Agent listens for messages and answers
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.events import Event
 from core.plugin import Plugin
 
 logger = logging.getLogger(__name__)
 
-# ---- Pending sessions: we need to wait for the coordinator to reply ----
-_REPLY_TIMEOUT = 120.0  # seconds
+AIOHTTP_AVAILABLE = False
+CRYPTO_AVAILABLE = False
+
+try:
+    import aiohttp  # noqa: F401
+    AIOHTTP_AVAILABLE = True
+except ImportError:
+    pass
+
+try:
+    from cryptography.hazmat.backends import default_backend  # noqa: F401
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    pass
+
+ILINK_APP_ID = "wx1124bf4936a4d8cf"
+ILINK_APP_CLIENT_VERSION = 100000223
+ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
+EP_GET_QRCODE = "ilink/bot/getqrcode"
+EP_CHECK_QRCODE = "ilink/bot/checkqrcode"
+EP_GET_UPDATES = "ilink/bot/getupdates"
+EP_SEND_MSG = "ilink/bot/sendmsg"
+
+MSG_TYPE_TEXT = 1
+
+DATA_DIR = Path.home() / ".one-agent" / "weixin" / "accounts"
+
+
+def _sanitize_chat_id(chat_id: str) -> str:
+    return "".join(c if c.isalnum() or c in "@.-_" else "_" for c in chat_id)
+
+
+def _account_path(account_id: str) -> Path:
+    safe = _sanitize_chat_id(account_id)
+    return DATA_DIR / f"{safe}.json"
+
+
+def _sync_path(account_id: str) -> Path:
+    safe = _sanitize_chat_id(account_id)
+    return DATA_DIR / f"{safe}.sync.json"
+
+
+def _load_sync_buf(account_id: str) -> str:
+    path = _sync_path(account_id)
+    if path.exists():
+        try:
+            return path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+    return ""
+
+
+def _save_sync_buf(account_id: str, sync_buf: str) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _sync_path(account_id).write_text(sync_buf, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _save_credentials(account_id: str, token: str, base_url: str, user_id: str = "") -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        data = {
+            "account_id": account_id,
+            "token": token,
+            "base_url": base_url,
+            "user_id": user_id,
+            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        _account_path(account_id).write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("wechat_personal: failed to save credentials: %s", exc)
+
+
+async def _api_post(
+    session: "aiohttp.ClientSession",
+    *,
+    base_url: str,
+    endpoint: str,
+    payload: Dict[str, Any],
+    token: str = "",
+    timeout_ms: int,
+) -> Dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/{endpoint}"
+    headers = {
+        "iLink-App-Id": ILINK_APP_ID,
+        "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
+        "Content-Type": "application/json",
+    }
+    if token:
+        headers["iLink-Bot-Token"] = token
+
+    async def _do():
+        async with session.post(url, json=payload, headers=headers) as response:
+            raw = await response.text()
+            if not response.ok:
+                raise RuntimeError(f"iLink POST {endpoint} HTTP {response.status}: {raw[:200]}")
+            return json.loads(raw)
+
+    return await asyncio.wait_for(_do(), timeout=timeout_ms / 1000)
+
+
+async def _api_get(
+    session: "aiohttp.ClientSession",
+    *,
+    base_url: str,
+    endpoint: str,
+    timeout_ms: int,
+) -> Dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/{endpoint}"
+    headers = {
+        "iLink-App-Id": ILINK_APP_ID,
+        "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
+    }
+
+    async def _do():
+        async with session.get(url, headers=headers) as response:
+            raw = await response.text()
+            if not response.ok:
+                raise RuntimeError(f"iLink GET {endpoint} HTTP {response.status}: {raw[:200]}")
+            return json.loads(raw)
+
+    return await asyncio.wait_for(_do(), timeout=timeout_ms / 1000)
+
+
+async def _get_updates(
+    session: "aiohttp.ClientSession",
+    *,
+    base_url: str,
+    token: str,
+    sync_buf: str,
+    timeout_ms: int,
+) -> Dict[str, Any]:
+    try:
+        return await _api_post(
+            session,
+            base_url=base_url,
+            endpoint=EP_GET_UPDATES,
+            payload={"get_updates_buf": sync_buf},
+            token=token,
+            timeout_ms=timeout_ms,
+        )
+    except asyncio.TimeoutError:
+        return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf}
+
+
+async def _send_msg(
+    session: "aiohttp.ClientSession",
+    *,
+    base_url: str,
+    token: str,
+    chat_id: str,
+    content: str,
+    msg_type: int = MSG_TYPE_TEXT,
+) -> Dict[str, Any]:
+    return await _api_post(
+        session,
+        base_url=base_url,
+        endpoint=EP_SEND_MSG,
+        payload={
+            "to_id": chat_id,
+            "msg_type": msg_type,
+            "content": content,
+        },
+        token=token,
+        timeout_ms=10000,
+    )
 
 
 class WeChatPersonalGateway(Plugin):
-    """个人微信网关 — 登录个人微信号，收发消息。
-
-    使用 itchat-uos 库（基于 UOS 协议绕过 Web WeChat 限制）。
-    通过 ``itchat.auto_login()`` 弹出二维码供手机扫描。
-    """
+    """个人微信网关 — 使用腾讯 iLink Bot API."""
 
     name = "gateway_wechat_personal"
 
     def __init__(self) -> None:
         super().__init__()
-        self._allowed_users: List[str] = []        # RemarkName or NickName
-        self._reply_prefix: str = ""               # e.g. "[Bot] "
-        self._hot_reload: bool = False
-        self._enabled: bool = False
-        self._itchat = None
-        self._task: Optional[asyncio.Task] = None
-        self._replies: Dict[str, str] = {}
-        self._pending: Dict[str, asyncio.Event] = {}
-        self._logged_in: bool = False
-        self._own_user_name: str = ""
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._account_id: str = ""
+        self._token: str = ""
+        self._base_url: str = ILINK_BASE_URL
+        self._user_id: str = ""
+        self._allowed_users: List[str] = []
+        self._session: Optional["aiohttp.ClientSession"] = None
+        self._running: bool = False
+        self._poll_task: Optional[asyncio.Task] = None
+        self._login_task: Optional[asyncio.Task] = None
+        self._qr_url: str = ""
+        self._msg_tasks: set = set()
+        self._last_heartbeat: float = 0
 
-    # ------------------------------------------------------------ lifecycle
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
-        self._loop = asyncio.get_running_loop()
         cfg = (ctx.config.get("gateways") or {}).get("wechat_personal") or {}
-        self._enabled = bool(cfg.get("enabled", False))
-        if not self._enabled:
-            logger.info("wechat_personal disabled")
-            return
+        enabled_cfg = bool(cfg.get("enabled", False))
         self._allowed_users = [str(u).strip() for u in (cfg.get("allowed_users") or []) if str(u).strip()]
-        self._reply_prefix = str(cfg.get("reply_prefix", ""))
-        self._hot_reload = bool(cfg.get("hot_reload", False))
 
-        # Check dependency
-        try:
-            import itchat  # type: ignore  # noqa: F401
-        except ImportError as exc:
-            logger.warning(
-                "itchat / itchat-uos not installed. "
-                "Run: pip install itchat-uos.  Skipping personal WeChat gateway."
-            )
-            logger.debug("import error: %s", exc)
-            return
+        saved = self._find_saved_account()
+        logger.info("wechat_personal: auto-discovering saved accounts (account_id=%s, token=%s)",
+                    bool(self._account_id), bool(self._token))
 
-        self.bus.subscribe("turn_completed", self._on_done)
-        # 不再自动启动，改为按需启动
-        logger.info("wechat_personal enabled (按需启动模式，输入 '微信登录' 开始)")
+        if saved and saved.get("token"):
+            self._account_id = saved.get("account_id", "")
+            self._token = saved.get("token", "")
+            self._base_url = saved.get("base_url", ILINK_BASE_URL)
+            self._user_id = saved.get("user_id", "")
+            logger.info("wechat_personal: auto-loaded saved account %s", self._account_id[:8])
+            logger.info("wechat_personal enabled, account=%s", self._account_id[:8])
+            await self._connect()
+        elif enabled_cfg:
+            logger.info("wechat_personal enabled but no saved credentials, waiting for QR login")
+        else:
+            logger.info("wechat_personal disabled, account=none")
+
+        self.bus.subscribe("turn_completed", self._on_turn_completed)
+
+    def _find_saved_account(self) -> Optional[Dict[str, Any]]:
+        logger.info("wechat_personal: _find_saved_account, dir=%s, exists=%s", DATA_DIR, DATA_DIR.exists())
+        if not DATA_DIR.exists():
+            return None
+        best: Optional[Dict[str, Any]] = None
+        best_time = 0.0
+        files_found = []
+        for path in DATA_DIR.glob("*.json"):
+            files_found.append(str(path))
+            if path.name.endswith(".sync.json"):
+                logger.info("wechat_personal: found sync file %s, skipping", path.name)
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                saved_at = data.get("saved_at", "")
+                has_token = bool(data.get("token", ""))
+                logger.info("wechat_personal: found account file %s, has_token=%s, saved_at=%s",
+                           path.name, has_token, saved_at)
+                if not data.get("token"):
+                    continue
+                ts = 0.0
+                try:
+                    ts = time.mktime(time.strptime(saved_at, "%Y-%m-%dT%H:%M:%SZ"))
+                except Exception:
+                    pass
+                if ts > best_time:
+                    best_time = ts
+                    best = data
+            except Exception as exc:
+                logger.warning("wechat_personal: error reading %s: %s", path.name, exc)
+                continue
+        logger.info("wechat_personal: _find_saved_account done, files_found=%s, best=%s",
+                   files_found, best is not None)
+        return best
 
     async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._itchat:
-            try:
-                self._itchat.logout()
-            except Exception:  # noqa: BLE001
-                pass
+        await self._disconnect()
         await super().stop()
 
-    # ------------------------------------------------------------ helpers
     async def login(self) -> bool:
-        """手动登录微信（按需启动）"""
-        if self._logged_in:
+        if self._running:
             return True
-
-        if self._task is None:
-            logger.info("wechat_personal: 启动微信网关...")
-            self._task = asyncio.create_task(self._run())
+        if self._login_task is not None and not self._login_task.done():
             return True
-
-        return False
-
-    async def _on_done(self, event) -> None:
-        turn = event.get("turn")
-        if turn is None:
-            return
-        sid = turn.session_id
-        if sid in self._pending:
-            self._replies[sid] = turn.result if turn.result is not None else f"[error: {turn.error}]"
-            self._pending[sid].set()
-
-    async def _send_text(self, to_user_name: str, text: str) -> bool:
-        """Send a text message via itchat (runs in thread since itchat is sync)."""
-        if self._itchat is None:
+        if not AIOHTTP_AVAILABLE or not CRYPTO_AVAILABLE:
+            logger.error("wechat_personal: aiohttp and cryptography are required")
             return False
-        full = f"{self._reply_prefix}{text}" if self._reply_prefix else text
+
+        saved = self._find_saved_account()
+        if saved and saved.get("token"):
+            logger.info("wechat_personal: trying saved credentials for %s", saved.get("account_id", "")[:8])
+            self._account_id = saved.get("account_id", "")
+            self._token = saved.get("token", "")
+            self._base_url = saved.get("base_url", ILINK_BASE_URL)
+            self._user_id = saved.get("user_id", "")
+            await self._connect()
+            if self._running:
+                self._qr_url = ""
+                logger.info("wechat_personal: reconnected with saved credentials")
+                return True
+            else:
+                logger.warning("wechat_personal: saved credentials failed, falling back to QR login")
+
+        self._login_task = asyncio.create_task(self._do_login())
+        return True
+
+    async def _do_login(self) -> bool:
+        if not AIOHTTP_AVAILABLE:
+            return False
+
+        session = aiohttp.ClientSession(trust_env=True)
         try:
-            result = await asyncio.to_thread(
-                self._itchat.send, full[:2000], toUserName=to_user_name
+            qr_data = await _api_get(
+                session,
+                base_url=self._base_url,
+                endpoint=EP_GET_QRCODE,
+                timeout_ms=10000,
             )
-            return result is not None and str(result).lower() != "false"
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("wechat_personal send error: %s", exc)
+            if qr_data.get("ret") not in (0, None):
+                logger.error("wechat_personal: get qrcode failed: %s", qr_data)
+                return False
+            self._qr_url = qr_data.get("qrcode_url", "")
+            logger.info("wechat_personal: QR code URL: %s", self._qr_url)
+
+            poll_count = 0
+            timeout = 300
+            start = time.time()
+            while time.time() - start < timeout:
+                poll_count += 1
+                await asyncio.sleep(3)
+                try:
+                    check = await _api_get(
+                        session,
+                        base_url=self._base_url,
+                        endpoint=EP_CHECK_QRCODE,
+                        timeout_ms=10000,
+                    )
+                except Exception as exc:
+                    logger.warning("wechat_personal: check qrcode error: %s", exc)
+                    continue
+
+                status = check.get("status", "")
+                if status == "success":
+                    self._token = check.get("token", "")
+                    self._account_id = check.get("account_id", "")
+                    self._user_id = check.get("user_id", "")
+                    logger.info("wechat_personal: login successful, account_id=%s", self._account_id)
+                    _save_credentials(self._account_id, self._token, self._base_url, self._user_id)
+                    await self._connect_from_session(session)
+                    return True
+                elif status == "expired":
+                    logger.warning("wechat_personal: QR code expired, refreshing...")
+                    try:
+                        qr_data = await _api_get(
+                            session,
+                            base_url=self._base_url,
+                            endpoint=EP_GET_QRCODE,
+                            timeout_ms=10000,
+                        )
+                        if qr_data.get("ret") in (0, None):
+                            self._qr_url = qr_data.get("qrcode_url", "")
+                            logger.info("wechat_personal: new QR code URL: %s", self._qr_url)
+                    except Exception as e:
+                        logger.error("wechat_personal: refresh QR failed: %s", e)
+                elif status == "scanned":
+                    logger.info("wechat_personal: QR scanned, waiting for confirm...")
+                elif status == "waiting":
+                    pass
+                else:
+                    logger.debug("wechat_personal: QR status=%s", status)
+
+            logger.error("wechat_personal: login timeout")
             return False
+        finally:
+            if not self._running:
+                await session.close()
 
-    # ------------------------------------------------------------ main loop
-    async def _run(self) -> None:
-        """Run itchat in a side thread, bridge messages to the event bus."""
-        import itchat  # type: ignore
-        from itchat.content import TEXT  # type: ignore
+    async def _connect(self) -> None:
+        if not self._account_id or not self._token:
+            return
+        try:
+            logger.info("wechat_personal: _connect starting, account=%s", self._account_id[:8])
+            self._session = aiohttp.ClientSession(trust_env=True)
+            logger.info("wechat_personal: _connect: session created")
+            await self._verify_credentials()
+            logger.info("wechat_personal: _connect: credentials verified OK")
+            self._running = True
+            self._last_heartbeat = time.time()
+            logger.info("wechat_personal: _connect: _running=True, creating poll task")
+            self._poll_task = asyncio.create_task(self._poll_loop())
+            logger.info("wechat_personal: _connect: poll task created: %s, done=%s, cancelled=%s",
+                       self._poll_task, self._poll_task.done(), self._poll_task.cancelled())
+            await asyncio.sleep(0)
+            logger.info("wechat_personal: _connect: after yield, poll task done=%s, cancelled=%s",
+                       self._poll_task.done(), self._poll_task.cancelled())
+            logger.info("wechat_personal: connected to %s", self._base_url)
+        except Exception as exc:
+            logger.error("wechat_personal: _connect failed: %s", exc, exc_info=True)
+            if self._session and not self._session.closed:
+                await self._session.close()
+            self._session = None
 
-        self._itchat = itchat
+    async def _connect_from_session(self, session: "aiohttp.ClientSession") -> None:
+        self._session = session
+        self._running = True
+        self._last_heartbeat = time.time()
+        self._poll_task = asyncio.create_task(self._poll_loop())
+        logger.info("wechat_personal: connected to %s", self._base_url)
 
-        # ---- register message handler (runs in itchat's internal thread) ----
-        @itchat.msg_register(TEXT, isFriendChat=True, isGroupChat=False)
-        def _on_text(msg: Any) -> None:
-            """Called by itchat's internal thread.  Must NOT block.
+    async def _verify_credentials(self) -> None:
+        assert self._session is not None
+        response = await _get_updates(
+            self._session,
+            base_url=self._base_url,
+            token=self._token,
+            sync_buf="",
+            timeout_ms=5000,
+        )
+        ret = response.get("ret", 0)
+        errcode = response.get("errcode", 0)
+        if ret not in {0, None} or errcode not in {0, None}:
+            raise RuntimeError(f"credentials invalid: ret={ret} errcode={errcode}")
 
-            We schedule a coroutine on the asyncio event loop to handle the
-            message asynchronously.
-            """
+    async def _disconnect(self) -> None:
+        self._running = False
+        if self._poll_task:
+            self._poll_task.cancel()
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = self._loop or asyncio.get_event_loop()
-            asyncio.run_coroutine_threadsafe(
-                self._handle_message(msg), loop
-            )
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+            self._poll_task = None
+        if self._session and not self._session.closed:
+            await self._session.close()
+        self._session = None
 
-        # ---- login (this blocks!) ----
-        logger.info("wechat_personal: launching QR code login...")
+    async def _poll_loop(self) -> None:
+        logger.info("wechat_personal: poll loop started, account=%s, base=%s",
+                   self._account_id[:8], self._base_url)
+        sync_buf = _load_sync_buf(self._account_id)
+        consecutive_errors = 0
+
+        while self._running:
+            try:
+                self._last_heartbeat = time.time()
+                response = await _get_updates(
+                    self._session,
+                    base_url=self._base_url,
+                    token=self._token,
+                    sync_buf=sync_buf,
+                    timeout_ms=35000,
+                )
+
+                ret = response.get("ret", 0)
+                if ret not in (0, None):
+                    errcode = response.get("errcode", 0)
+                    logger.warning("wechat_personal: get_updates ret=%s errcode=%s", ret, errcode)
+                    consecutive_errors += 1
+                    if consecutive_errors > 5:
+                        logger.error("wechat_personal: too many errors, reconnecting...")
+                        await asyncio.sleep(5)
+                        consecutive_errors = 0
+                    continue
+
+                consecutive_errors = 0
+                new_buf = response.get("get_updates_buf", "")
+                if new_buf and new_buf != sync_buf:
+                    sync_buf = new_buf
+                    _save_sync_buf(self._account_id, sync_buf)
+
+                msgs = response.get("msgs", [])
+                if msgs:
+                    logger.info("wechat_personal: received %d message(s)", len(msgs))
+                    for msg in msgs:
+                        logger.info("wechat_personal: raw message: %s", json.dumps(msg, ensure_ascii=False)[:500])
+                        task = asyncio.create_task(self._handle_message(msg))
+                        self._msg_tasks.add(task)
+                        task.add_done_callback(self._msg_tasks.discard)
+
+                await asyncio.sleep(0)
+
+            except asyncio.CancelledError:
+                logger.info("wechat_personal: poll loop cancelled")
+                break
+            except Exception as exc:
+                logger.error("wechat_personal: poll loop error: %s", exc, exc_info=True)
+                consecutive_errors += 1
+                await asyncio.sleep(min(2 ** consecutive_errors, 30))
+
+        logger.info("wechat_personal: poll loop exited")
+
+    async def _handle_message(self, msg: Dict[str, Any]) -> None:
         try:
-            await asyncio.to_thread(
-                self._itchat.auto_login,
-                hotReload=self._hot_reload,
-                enableCmdQR=2,  # simplified QR code (good for terminal)
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error("wechat_personal login failed: %s", exc)
-            return
+            msg_type = msg.get("msg_type", 0)
+            from_id = msg.get("from_id", "")
+            content = msg.get("content", "")
 
-        self._logged_in = True
-        self._own_user_name = self._itchat.instance.storageClass.userName or ""
-        logger.info("wechat_personal: logged in as %s", self._own_user_name)
+            logger.info("wechat_personal: message from %s (type=%s): %s",
+                       from_id, msg_type, content[:200] if isinstance(content, str) else str(content)[:200])
 
-        # ---- run itchat's internal event loop in thread ----
-        try:
-            await asyncio.to_thread(self._itchat.run)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("wechat_personal loop exited: %s", exc)
-
-    # ------------------------------------------------------------ message handling
-    async def _handle_message(self, msg: Any) -> None:
-        """Process a single text message from WeChat."""
-        from_user = getattr(msg, "FromUserName", "")
-        text_raw = getattr(msg, "Text", "") or getattr(msg, "Content", "") or ""
-        text = str(text_raw).strip()
-
-        if not text or not from_user or from_user == self._own_user_name:
-            return
-
-        # Resolve sender identity
-        sender_name = ""
-        sender_remark = ""
-        sender_nick = ""
-        try:
-            sender = getattr(msg, "User", None) or {}
-            sender_nick = getattr(sender, "NickName", "") or ""
-            sender_remark = getattr(sender, "RemarkName", "") or ""
-            sender_name = sender_remark or sender_nick
-        except Exception:  # noqa: BLE001
-            pass
-
-        # Check allowed_users filter
-        if self._allowed_users:
-            if (sender_nick not in self._allowed_users and
-                sender_remark not in self._allowed_users and
-                from_user not in self._allowed_users):
-                logger.debug("wechat_personal: blocked message from %s", sender_name)
+            if msg_type != MSG_TYPE_TEXT:
+                logger.debug("wechat_personal: skipping non-text message type=%s", msg_type)
                 return
 
-        msg_key = f"wxp-{from_user}-{time.time_ns()}"
-        evt = asyncio.Event()
-        self._pending[msg_key] = evt
+            text = str(content).strip()
+            if not text or not from_id:
+                return
 
-        if self.bus is not None:
-            self.bus.publish({
-                "type": "external_message",
-                "source": "wechat_personal",
-                "session_id": msg_key,
+            if self._allowed_users:
+                if from_id not in self._allowed_users:
+                    logger.debug("wechat_personal: blocked message from %s", from_id)
+                    return
+
+            session_id = f"wechat-{from_id}"
+            logger.info("wechat_personal: publishing external_message, session_id=%s", session_id)
+            event = Event("external_message", {
+                "source": "wechat",
+                "session_id": session_id,
                 "text": text,
-                "chat_id": from_user,
+                "chat_id": from_id,
             })
+            self.bus.publish(event)
+            logger.info("wechat_personal: external_message published OK")
+        except Exception as exc:
+            logger.error("wechat_personal: _handle_message error: %s", exc, exc_info=True)
 
-        # Wait for coordinator reply
+    async def _on_turn_completed(self, event) -> None:
+        turn = event.get("turn")
+        if turn is None or not hasattr(turn, "session_id"):
+            return
+        session_id = turn.session_id
+        if not session_id.startswith("wechat-"):
+            return
+        chat_id = session_id[7:]
+        result = getattr(turn, "result", "")
+        if result:
+            logger.info("wechat_personal: turn_completed for %s, result_len=%d",
+                       chat_id[:8], len(str(result)))
+            await self.send(chat_id, str(result))
+
+    async def send(self, chat_id: str, text: str) -> bool:
+        if not self._running or not self._session:
+            logger.warning("wechat_personal: send failed, not running, running=%s session=%s",
+                          self._running, self._session is not None)
+            return False
         try:
-            await asyncio.wait_for(evt.wait(), timeout=_REPLY_TIMEOUT)
-            reply = self._replies.get(msg_key, "[no reply]")
-            await self._send_text(from_user, reply)
-        except asyncio.TimeoutError:
-            await self._send_text(from_user, "抱歉，处理超时，请稍后再试。")
-        finally:
-            self._pending.pop(msg_key, None)
-            self._replies.pop(msg_key, None)
+            result = await _send_msg(
+                self._session,
+                base_url=self._base_url,
+                token=self._token,
+                chat_id=chat_id,
+                content=text,
+            )
+            ret = result.get("ret", -1)
+            success = ret in (0, None)
+            logger.info("wechat_personal: send result=%s (ret=%s)", success, ret)
+            return success
+        except Exception as exc:
+            logger.error("wechat_personal: send error: %s", exc)
+            return False
+
+    @property
+    def qr_url(self) -> str:
+        return self._qr_url
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
 
 
 __all__ = ["WeChatPersonalGateway"]
