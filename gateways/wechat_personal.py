@@ -587,13 +587,21 @@ class WeChatPersonalGateway(Plugin):
 
     async def _on_turn_completed(self, event) -> None:
         turn = event.get("turn")
-        if turn is None or not hasattr(turn, "session_id"):
+        if turn is None:
+            logger.info("wechat_personal: _on_turn_completed: turn is None, event keys=%s", list(event.keys()))
+            return
+        if not hasattr(turn, "session_id"):
+            logger.info("wechat_personal: _on_turn_completed: turn has no session_id, turn type=%s", type(turn).__name__)
             return
         session_id = turn.session_id
-        if not session_id.startswith("wechat-"):
+        logger.info("wechat_personal: _on_turn_completed: session_id=%s", session_id)
+        if not session_id or not session_id.startswith("wechat-"):
+            logger.info("wechat_personal: _on_turn_completed: session_id=%s does not start with wechat-", session_id)
             return
         chat_id = session_id[7:]
-        result = getattr(turn, "result", "")
+        result = getattr(turn, "result", "") or getattr(turn, "text", "") or getattr(turn, "output", "")
+        logger.info("wechat_personal: _on_turn_completed: chat_id=%s, result=%s, has_result=%s",
+                   chat_id[:8], bool(result), hasattr(turn, "result"))
         if result:
             logger.info("wechat_personal: turn_completed for %s, result_len=%d",
                        chat_id[:8], len(str(result)))
