@@ -228,6 +228,7 @@ class WeChatPersonalGateway(Plugin):
         self._qr_url: str = ""
         self._msg_tasks: set = set()
         self._last_heartbeat: float = 0
+        self._initial_sync_buf: str = ""
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -398,8 +399,50 @@ class WeChatPersonalGateway(Plugin):
             logger.info("wechat_personal: _connect starting, account=%s", self._account_id[:8])
             self._session = aiohttp.ClientSession(trust_env=True)
             logger.info("wechat_personal: _connect: session created")
-            await self._verify_credentials()
+
+            # 不再单独调用 _verify_credentials（会消耗消息）
+            # 直接验证 token 有效性：用短超时发一个 get_updates，如果 ret!=0 说明 token 无效
+            # 但不使用空 sync_buf，而是用保存的 sync_buf（避免消费消息）
+            saved_buf = _load_sync_buf(self._account_id)
+            logger.info("wechat_personal: _connect: saved sync_buf=%s", saved_buf[:30] if saved_buf else "(empty)")
+
+            # 用短超时验证 token，sync_buf 用空字符串避免消费已有消息
+            verify_resp = await _get_updates(
+                self._session,
+                base_url=self._base_url,
+                token=self._token,
+                sync_buf="",
+                timeout_ms=5000,
+            )
+            logger.info("wechat_personal: _connect: verify response: %s",
+                       json.dumps(verify_resp, ensure_ascii=False)[:300])
+            ret = verify_resp.get("ret", 0)
+            errcode = verify_resp.get("errcode", 0)
+            if ret not in {0, None} or errcode not in {0, None}:
+                raise RuntimeError(f"credentials invalid: ret={ret} errcode={errcode}")
             logger.info("wechat_personal: _connect: credentials verified OK")
+
+            # 如果验证响应中包含消息，直接处理
+            verify_msgs = verify_resp.get("msgs") or verify_resp.get("messages") or []
+            if verify_msgs:
+                logger.info("wechat_personal: _connect: %d messages in verify response, processing",
+                           len(verify_msgs))
+                for msg in verify_msgs:
+                    logger.info("wechat_personal: verify msg: %s",
+                               json.dumps(msg, ensure_ascii=False)[:500])
+                    task = asyncio.create_task(self._handle_message(msg))
+                    self._msg_tasks.add(task)
+                    task.add_done_callback(self._msg_tasks.discard)
+
+            # 如果验证响应返回了新的 sync_buf，使用它作为轮询起点
+            new_buf = verify_resp.get("get_updates_buf", "")
+            if new_buf:
+                logger.info("wechat_personal: _connect: using new sync_buf from verify: %s", new_buf[:30])
+                self._initial_sync_buf = new_buf
+            else:
+                # 使用保存的 sync_buf，但如果太旧（超过1小时）就清空重新开始
+                self._initial_sync_buf = saved_buf
+
             self._running = True
             self._last_heartbeat = time.time()
             logger.info("wechat_personal: _connect: _running=True, creating poll task")
@@ -420,22 +463,9 @@ class WeChatPersonalGateway(Plugin):
         self._session = session
         self._running = True
         self._last_heartbeat = time.time()
+        self._initial_sync_buf = ""  # 新登录，从头开始
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info("wechat_personal: connected to %s", self._base_url)
-
-    async def _verify_credentials(self) -> None:
-        assert self._session is not None
-        response = await _get_updates(
-            self._session,
-            base_url=self._base_url,
-            token=self._token,
-            sync_buf="",
-            timeout_ms=5000,
-        )
-        ret = response.get("ret", 0)
-        errcode = response.get("errcode", 0)
-        if ret not in {0, None} or errcode not in {0, None}:
-            raise RuntimeError(f"credentials invalid: ret={ret} errcode={errcode}")
 
     async def _disconnect(self) -> None:
         self._running = False
@@ -453,7 +483,7 @@ class WeChatPersonalGateway(Plugin):
     async def _poll_loop(self) -> None:
         logger.info("wechat_personal: poll loop started, account=%s, base=%s",
                    self._account_id[:8], self._base_url)
-        sync_buf = _load_sync_buf(self._account_id)
+        sync_buf = getattr(self, '_initial_sync_buf', '') or _load_sync_buf(self._account_id)
         logger.info("wechat_personal: initial sync_buf=%s", sync_buf[:50] if sync_buf else "(empty)")
         consecutive_errors = 0
         poll_count = 0
