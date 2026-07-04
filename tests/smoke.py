@@ -217,8 +217,12 @@ def test_coordinator():
         turn = TurnContext(input_text="hello world", source="smoke", session_id="test")
         bus.publish({"type": "user_message", "payload": {"turn": turn}, "source": "smoke"})
 
-        deadline = asyncio.get_event_loop().time() + 15
-        while asyncio.get_event_loop().time() < deadline:
+        # 修复：用 get_running_loop().time() 替代 get_event_loop().time()。
+        # 这里已在 async 函数里，get_running_loop() 是更明确的 API；
+        # get_event_loop() 在 Python 3.12+ 同步上下文里 DeprecationWarning。
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 15
+        while loop.time() < deadline:
             if turn.result is not None:
                 break
             await asyncio.sleep(0.05)

@@ -296,8 +296,18 @@ class TestSetApiKeyPassesKeyToResolve:
         provider._provider_base_urls = {}
         provider._auto_classify_timestamps = {}
         provider._no_tools_models = set()
-        # 阻止 auto_classify 真正执行
-        provider._spawn_bg = MagicMock(return_value=MagicMock())
+        # 阻止 auto_classify 真正执行。
+        # 修复：用闭包替代 MagicMock 让 _spawn_bg 收到的 coro 被 close，
+        # 避免「coroutine was never awaited」warning（_spawn_bg 是 fire-
+        # and-forget 调度入口，正常路径会 create_task 包装 coro；mock
+        # 时不包装就必须显式 close，否则 coro 会被 GC 检测到泄漏）。
+        def fake_spawn_bg(coro):
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return MagicMock()
+        provider._spawn_bg = fake_spawn_bg
 
         # 拦截 resolve 调用
         resolve_calls = []
@@ -327,6 +337,12 @@ class TestSetApiKeyPassesKeyToResolve:
             # 创建一个 fake task
             task = MagicMock()
             task.add_done_callback = lambda cb: None
+            # 修复：close coro 避免「coroutine was never awaited」警告
+            # 后续断言用源码静态检查，不需要 await
+            try:
+                coro.close()
+            except Exception:
+                pass
             return task
 
         # 由于 set_api_key 路径复杂，最简单的验证方式是直接调 fake_resolve
@@ -334,10 +350,10 @@ class TestSetApiKeyPassesKeyToResolve:
         import asyncio as _asyncio
         monkeypatch.setattr(_asyncio, "ensure_future", tracking_ensure_future)
 
-        # 强制走 is_running()=True 分支
+        # 强制走 running loop 分支（ensure_future 路径）
+        # 修复后 set_api_key 用 get_running_loop() 而非 get_event_loop()
         running_loop = MagicMock()
-        running_loop.is_running.return_value = True
-        monkeypatch.setattr(_asyncio, "get_event_loop", lambda: running_loop)
+        monkeypatch.setattr(_asyncio, "get_running_loop", lambda: running_loop)
 
         provider.set_api_key("custom_provider", "sk-test-key-123")
 

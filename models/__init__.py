@@ -282,27 +282,25 @@ class LLMProvider(RecommendationMixin, Plugin):
             if task is not None:
                 ran = True
             else:
+                # 修复：Python 3.12+ 起 asyncio.get_event_loop() 在同步
+                # 上下文里 DeprecationWarning，3.16 移除。直接用
+                # new_event_loop + run_until_complete + close。
+                # 之所以不尝试 get_running_loop，是因为 _spawn_bg 已经
+                # 试过了——它返回 None 就意味着当前不在 async 上下文。
                 try:
-                    loop = _asyncio.get_event_loop()
-                    if not loop.is_running():
-                        loop.run_until_complete(coro)
-                        ran = True
-                except RuntimeError:
-                    # Python 3.12+ — no event loop. Spin one up.
+                    new_loop = _asyncio.new_event_loop()
                     try:
-                        new_loop = _asyncio.new_event_loop()
-                        try:
-                            new_loop.run_until_complete(coro)
-                            ran = True
-                        finally:
-                            new_loop.close()
-                    except (RuntimeError, OSError) as exc:
-                        # Final safety net: avoid "coroutine was never awaited"
-                        logger.error("auto-classify setup failed: %s", exc, exc_info=True)
-                        try:
-                            coro.close()
-                        except (RuntimeError, AttributeError):
-                            pass
+                        new_loop.run_until_complete(coro)
+                        ran = True
+                    finally:
+                        new_loop.close()
+                except (RuntimeError, OSError) as exc:
+                    # Final safety net: avoid "coroutine was never awaited"
+                    logger.error("auto-classify setup failed: %s", exc, exc_info=True)
+                    try:
+                        coro.close()
+                    except (RuntimeError, AttributeError):
+                        pass
             if not ran:
                 # Defer to the first chat_completion() / get_catalog() call
                 self._pending_auto_classify = True
@@ -409,15 +407,18 @@ class LLMProvider(RecommendationMixin, Plugin):
                 import asyncio as _asyncio
 
                 from .resolver import resolve
+                # 修复：用 get_running_loop() 替代 get_event_loop()。
+                # set_api_key 是同步函数，但用户可能在 async 上下文里
+                # 调它。在 running loop 里就用 ensure_future 异步调度，
+                # 否则用 new_event_loop 一次性跑。
                 try:
-                    loop = _asyncio.get_event_loop()
-                    if loop.is_running():
-                        hint_info = _asyncio.ensure_future(resolve(provider, api_key=key))
-                        hint_info.add_done_callback(
-                            lambda fut: self._on_provider_resolved(provider, fut.result())
-                        )
+                    _asyncio.get_running_loop()
+                    hint_info = _asyncio.ensure_future(resolve(provider, api_key=key))
+                    hint_info.add_done_callback(
+                        lambda fut: self._on_provider_resolved(provider, fut.result())
+                    )
                 except RuntimeError:
-                    # No event loop — schedule via new_event_loop for the
+                    # No running loop — schedule via new_event_loop for the
                     # background resolve, then register the URL
                     try:
                         new_loop = _asyncio.new_event_loop()
@@ -438,27 +439,22 @@ class LLMProvider(RecommendationMixin, Plugin):
         if task is not None:
             ran = True
         else:
+            # 修复：Python 3.12+ 起 get_event_loop() 在同步上下文里
+            # DeprecationWarning。_spawn_bg 返回 None 就意味着当前没在
+            # async 上下文里，所以直接用 new_event_loop 一次性跑。
             try:
-                loop = _asyncio.get_event_loop()
-                if not loop.is_running():
-                    loop.run_until_complete(coro)
-                    ran = True
-            except RuntimeError:
-                # Python 3.12+ raises here when no event loop exists.
-                # Spin up a one-shot loop just for the reclassify.
+                new_loop = _asyncio.new_event_loop()
                 try:
-                    new_loop = _asyncio.new_event_loop()
-                    try:
-                        new_loop.run_until_complete(coro)
-                        ran = True
-                    finally:
-                        new_loop.close()
-                except (RuntimeError, OSError) as exc:
-                    logger.error("set_api_key: failed to run auto-classify for %s: %s", provider, exc, exc_info=True)
-                    try:
-                        coro.close()
-                    except (RuntimeError, AttributeError):
-                        pass
+                    new_loop.run_until_complete(coro)
+                    ran = True
+                finally:
+                    new_loop.close()
+            except (RuntimeError, OSError) as exc:
+                logger.error("set_api_key: failed to run auto-classify for %s: %s", provider, exc, exc_info=True)
+                try:
+                    coro.close()
+                except (RuntimeError, AttributeError):
+                    pass
         return {"ok": True, "provider": provider, "key_set": bool(key), "reclassified": ran}
 
     def _on_provider_resolved(self, provider: str, hint_info: Any) -> None:
@@ -499,18 +495,14 @@ class LLMProvider(RecommendationMixin, Plugin):
         """Schedule a coroutine as a background task with a strong ref so
         asyncio doesn't GC it before it runs.  Returns the Task or None."""
         import asyncio as _asyncio
-        # If we're inside a running coroutine, get_running_loop() works;
-        # otherwise we have to use get_event_loop() which can return None.
+        # 修复：Python 3.12+ 起 get_event_loop() 在同步上下文里
+        # DeprecationWarning，3.16 移除。这里只在 running loop 里调度；
+        # 没 running loop 时返回 None 让调用方走 new_event_loop 兜底。
         try:
             loop = _asyncio.get_running_loop()
         except RuntimeError:
-            try:
-                loop = _asyncio.get_event_loop()
-                if not loop.is_running():
-                    return None
-            except RuntimeError:
-                logger.debug("_spawn_bg: no running event loop, auto-classify deferred")
-                return None
+            logger.debug("_spawn_bg: no running event loop, auto-classify deferred")
+            return None
         task = loop.create_task(coro)
         self._bg_tasks.add(task)
 
@@ -548,24 +540,21 @@ class LLMProvider(RecommendationMixin, Plugin):
             coro = self._auto_classify_all_providers()
             task = self._spawn_bg(coro)
             if task is None:
-                # No running loop — try a one-shot run
+                # 修复：_spawn_bg 返回 None 意味着没 running loop，
+                # 直接用 new_event_loop 一次性跑（不再尝试 get_event_loop，
+                # 因为 Python 3.12+ 已 DeprecationWarning）。
                 try:
-                    loop = _asyncio.get_event_loop()
-                    if not loop.is_running():
-                        loop.run_until_complete(coro)
-                except RuntimeError:
+                    new_loop = _asyncio.new_event_loop()
                     try:
-                        new_loop = _asyncio.new_event_loop()
-                        try:
-                            new_loop.run_until_complete(coro)
-                        finally:
-                            new_loop.close()
-                    except (RuntimeError, OSError) as exc:
-                        logger.error("get_catalog: deferred auto-classify failed: %s", exc, exc_info=True)
-                        try:
-                            coro.close()
-                        except (RuntimeError, AttributeError):
-                            pass
+                        new_loop.run_until_complete(coro)
+                    finally:
+                        new_loop.close()
+                except (RuntimeError, OSError) as exc:
+                    logger.error("get_catalog: deferred auto-classify failed: %s", exc, exc_info=True)
+                    try:
+                        coro.close()
+                    except (RuntimeError, AttributeError):
+                        pass
         return ModelCatalog(base_url=base, api_key=api_key, provider=prov)
 
     def _infer_primary_provider(self) -> str:

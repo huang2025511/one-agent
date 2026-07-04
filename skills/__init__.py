@@ -604,11 +604,17 @@ class SkillManager(Plugin):
 
             import asyncio as _aio
             try:
-                loop = _aio.get_event_loop()
+                # 修复：用 get_running_loop() 替代 get_event_loop()。
+                # restart handler 是同步函数，但被 Coordinator 在 async
+                # 上下文里调用。get_event_loop() 在 Python 3.12+ 同步
+                # 上下文里 DeprecationWarning；只有在 running loop 里
+                # create_task 才有意义，没 running loop 直接 fallback
+                # 到 os.execv。
+                loop = _aio.get_running_loop()
                 # 用 create_task 调度 async 清理 + execv
                 loop.create_task(_do_restart_async())
-            except Exception:
-                # 如果拿不到 loop，直接同步执行（跳过清理作为最后兜底）
+            except RuntimeError:
+                # 没 running loop，直接同步执行（跳过清理作为最后兜底）
                 try:
                     os.execv(sys.executable, [sys.executable] + sys.argv)
                 except Exception:
