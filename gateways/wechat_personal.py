@@ -27,9 +27,12 @@ Usage
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
+import random
+import struct
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -54,8 +57,10 @@ try:
 except ImportError:
     pass
 
-ILINK_APP_ID = "wx1124bf4936a4d8cf"
-ILINK_APP_CLIENT_VERSION = 100000223
+# iLink 官方协议（参考阿里云/掘金逆向文章 + wechatbot.dev 文档）：
+# - GET 请求（获取二维码、轮询扫码状态）不需要 iLink-App-Id
+# - iLink-App-ClientVersion 的值应为 "1"（不是 "100000223"）
+# - POST 请求需要 Authorization: Bearer <bot_token> + AuthorizationType: ilink_bot_token
 ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
 # 修复：iLink 官方端点名是 get_bot_qrcode / get_qrcode_status / sendmessage。
 # 之前用的 getqrcode / checkqrcode / sendmsg 全部返回 HTTP 404。
@@ -126,13 +131,22 @@ async def _api_post(
     timeout_ms: int,
 ) -> Dict[str, Any]:
     url = f"{base_url.rstrip('/')}/{endpoint}"
+    # POST 请求需要 Authorization + AuthorizationType + X-WECHAT-UIN
+    # base_info.channel_version 在 payload 中设置（由调用方处理）
     headers = {
-        "iLink-App-Id": ILINK_APP_ID,
-        "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
         "Content-Type": "application/json",
+        "iLink-App-ClientVersion": "1",
     }
     if token:
-        headers["iLink-Bot-Token"] = token
+        headers["Authorization"] = f"Bearer {token}"
+        headers["AuthorizationType"] = "ilink_bot_token"
+        # X-WECHAT-UIN: 随机 4 字节 → uint32 → base64
+        uin = struct.pack(">I", random.randint(0, 0xFFFFFFFF))
+        headers["X-WECHAT-UIN"] = base64.b64encode(uin).decode()
+
+    # 官方协议：所有 POST 请求体需包含 base_info.channel_version
+    if "base_info" not in payload:
+        payload = {**payload, "base_info": {"channel_version": "2.0.0"}}
 
     async def _do():
         async with session.post(url, json=payload, headers=headers) as response:
@@ -152,9 +166,10 @@ async def _api_get(
     timeout_ms: int,
 ) -> Dict[str, Any]:
     url = f"{base_url.rstrip('/')}/{endpoint}"
+    # GET 请求（获取二维码、轮询扫码状态）不需要 iLink-App-Id
+    # 官方协议：iLink-App-ClientVersion 值为 "1"
     headers = {
-        "iLink-App-Id": ILINK_APP_ID,
-        "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
+        "iLink-App-ClientVersion": "1",
     }
 
     async def _do():

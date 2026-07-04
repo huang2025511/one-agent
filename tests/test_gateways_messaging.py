@@ -1136,7 +1136,7 @@ class TestWeChatPersonalHelpers:
 
     @pytest.mark.asyncio
     async def test_api_post_sends_required_headers(self):
-        """_api_post 应在 header 中带 iLink-App-Id 和 iLink-App-ClientVersion。"""
+        """_api_post 应在 header 中带 Authorization + AuthorizationType + X-WECHAT-UIN。"""
         from gateways.wechat_personal import _api_post
         session = MagicMock()
         resp_cm, resp = self._make_aiohttp_response(body='{"ret": 0, "data": "ok"}')
@@ -1150,12 +1150,17 @@ class TestWeChatPersonalHelpers:
             timeout_ms=5000,
         )
         assert result["ret"] == 0
-        # 验证 header 含必需字段
+        # 验证 header 含必需字段（官方协议）
         called_kwargs = session.post.call_args.kwargs
         headers = called_kwargs.get("headers", {})
-        assert headers.get("iLink-App-Id") is not None
-        assert headers.get("iLink-App-ClientVersion") is not None
-        assert headers.get("iLink-Bot-Token") == "my-token"
+        assert headers.get("Authorization") == "Bearer my-token"
+        assert headers.get("AuthorizationType") == "ilink_bot_token"
+        assert headers.get("X-WECHAT-UIN") is not None
+        assert headers.get("iLink-App-ClientVersion") == "1"
+        # 验证 payload 含 base_info
+        payload = called_kwargs.get("json", {})
+        assert "base_info" in payload
+        assert payload["base_info"]["channel_version"] == "2.0.0"
 
     @pytest.mark.asyncio
     async def test_api_post_raises_on_http_error(self):
