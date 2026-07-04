@@ -325,8 +325,15 @@ class WeChatPersonalGateway(Plugin):
     async def login(self) -> bool:
         if self._running:
             return True
+        # 如果登录 task 还在运行（后台轮询扫码状态），直接返回。
+        # /微信 skill 会读取最新的 self._qr_url——如果二维码已自动刷新，
+        # 这里返回后 skill 会显示新的 URL，用户无需等待。
         if self._login_task is not None and not self._login_task.done():
             return True
+        # 旧的登录 task 已结束（超时/失败），清空旧二维码重新开始
+        self._qr_url = ""
+        self._qrcode_token = ""
+        self._login_task = None
         if not AIOHTTP_AVAILABLE or not CRYPTO_AVAILABLE:
             logger.error("wechat_personal: aiohttp and cryptography are required")
             return False
