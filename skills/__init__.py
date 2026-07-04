@@ -634,7 +634,17 @@ class SkillManager(Plugin):
         async def calc_handler(args: Dict[str, Any]) -> str:
             import ast
             import operator
-            expr = str(args.get("input", "")).strip()
+            # LLM 经常把算式参数命名为 expression / expr / query / formula 等，
+            # 而 schema 只声明了 input。直接拒掉会让 LLM 多走一轮重试，
+            # 浪费 token。这里接受常见别名，提升一次成功率。
+            expr = ""
+            for key in ("input", "expression", "expr", "formula", "query", "text"):
+                v = args.get(key)
+                if v:
+                    expr = str(v).strip()
+                    break
+            if not expr:
+                return "[calc: 缺少算式参数]"
             if not re.fullmatch(r"[0-9+\-*/(). ]+", expr):
                 return "[invalid math expression]"
             _ops = {
@@ -659,10 +669,17 @@ class SkillManager(Plugin):
             except (ValueError, TypeError, SyntaxError) as exc:
                 logger.error("math expression evaluation failed: %s", exc, exc_info=True)
                 return f"[math error: {exc}]"
+        # calc 的 schema 不强制 required（calc_handler 自己兜底接受
+        # input / expression / expr / formula / query / text 等别名）。
+        # 之前 schema 把 input 设为 required，LLM 用 expression 调用会
+        # 被 _validate_args 拦掉、handler 根本跑不到，浪费一轮重试。
         self.register(Skill(
             id="calc", title="Calculator",
-            description="/calc 或 /计算：执行数学计算，如 /calc 2+2*3",
-            schema=_schema("calc", "evaluate arithmetic expression", ["input"]),
+            description="/calc 或 /计算：执行数学计算。参数名 input（字符串，算式）。"
+                         "示例：input=\"2+2*3\"",
+            schema=_schema("calc", "evaluate arithmetic expression; "
+                                   "pass the expression as the 'input' parameter",
+                           []),
             handler=calc_handler,
         ))
 

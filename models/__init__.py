@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -191,6 +192,10 @@ class LLMProvider(RecommendationMixin, Plugin):
         primary = llm_cfg.get("primary_model")
         if primary:
             self._default_model = primary
+        # 读取 config 显式声明的 primary_provider，供 _infer_primary_provider 使用。
+        # 修复 bug：之前只从 model 名字推断 provider，对 nvidia 等
+        # "vendor/model" 格式的 model id 会误判 provider。
+        self._primary_provider = (llm_cfg.get("primary_provider") or "").strip() or None
         self._default_temperature = llm_cfg.get("default_temperature", 0.3)
         self._default_max_tokens = llm_cfg.get("default_max_tokens", 2048)
         self._timeout = llm_cfg.get("timeout", 60)
@@ -227,9 +232,17 @@ class LLMProvider(RecommendationMixin, Plugin):
             logger.info("LLM cache enabled (size=%d, ttl=%ds)", max_size, self._cache_ttl)
 
         # Cost tracking
+        # 修复 bug：之前 db_path 默认 "data/memory/costs.db"（相对 CWD），
+        # 与 config 的 data_dir 无关 → 多个 app 实例共享同一个 DB（包括
+        # 跨测试、跨用户运行），导致：
+        #   1. 测试间 budget 状态互相污染（前次跑的 cost 累积到下次）
+        #   2. 用户重启 app 后 budget 状态依然存在（一次超预算就永久锁死）
+        # 修复：默认放到 {data_dir}/memory/costs.db，与其它持久化数据共用
+        # data_dir；只有当用户显式指定 db_path 时才用绝对路径覆盖。
         cost_cfg = (ctx.config.get("llm") or {}).get("cost_tracking") or {}
         if cost_cfg:
-            db_path = cost_cfg.get("db_path", "data/memory/costs.db")
+            data_dir = ctx.config.get("agent", {}).get("data_dir", "./data")
+            db_path = cost_cfg.get("db_path") or os.path.join(data_dir, "memory", "costs.db")
             self._cost_tracker = CostTracker(
                 db_path=db_path,
                 daily_budget=cost_cfg.get("daily_budget", 1.0),
@@ -556,6 +569,14 @@ class LLMProvider(RecommendationMixin, Plugin):
         return ModelCatalog(base_url=base, api_key=api_key, provider=prov)
 
     def _infer_primary_provider(self) -> str:
+        # 优先使用 config 显式声明的 primary_provider。
+        # 之前只从 _default_model 名字推断 provider（split "/")[0]），
+        # 但很多 provider 的 model id 是 "<vendor>/<model>" 格式
+        # （如 nvidia 的 "meta/llama-3.1-8b-instruct"），
+        # 会被误判为 provider="meta"，导致 base_url 查找错误。
+        # 修复：config 的 primary_provider 是权威来源，model 名字只作 fallback。
+        if getattr(self, "_primary_provider", None):
+            return self._primary_provider
         m = self._default_model or ""
         if "/" in m:
             return m.split("/", 1)[0]
@@ -850,7 +871,19 @@ class LLMProvider(RecommendationMixin, Plugin):
                 )
                 model = self._find_cheapest_free_model()
 
-        provider = model.split("/", 1)[0] if "/" in model else "openai"
+        # 推断 provider：之前只从 model 名字 split "/")[0] 推断，但很多
+        # provider 的 model id 是 "<vendor>/<model>" 格式（如 nvidia 的
+        # "meta/llama-3.1-8b-instruct"），会被误判为 provider="meta"，
+        # 导致 base_url 和 api_key 查找失败。
+        # 修复：如果 model 的第一段是已注册的 provider（在 _provider_base_urls
+        # 里有对应 URL），用它；否则用 config 显式声明的 _primary_provider。
+        _first_seg = model.split("/", 1)[0] if "/" in model else ""
+        if _first_seg and _first_seg in self._provider_base_urls:
+            provider = _first_seg
+        elif getattr(self, "_primary_provider", None):
+            provider = self._primary_provider
+        else:
+            provider = _first_seg or "openai"
         # Use .get() with fallback to avoid KeyError if openrouter is missing
         base = self._provider_base_urls.get(
             provider,
@@ -861,7 +894,23 @@ class LLMProvider(RecommendationMixin, Plugin):
         # endpoints expect the bare model name (e.g. "deepseek-v4-flash",
         # not "sensenova/deepseek-v4-flash").  Anthropic keeps the prefix
         # stripped in its own branch below.
-        bare_model = model.split("/", 1)[1] if "/" in model else model
+        #
+        # 修复 bug：之前无条件 strip 第一段，但对 nvidia 等 provider，
+        # model id 是 "<vendor>/<model>" 格式（如 "meta/llama-3.1-8b-instruct"），
+        # API 期望完整的 "meta/llama-3.1-8b-instruct"，strip 后的 "llama-3.1-8b-instruct"
+        # 会 404。修复：只有当第一段就是 provider 本身时才 strip
+        # （如 "openai/gpt-4o" → "gpt-4o"，"nvidia/nemotron-70b" → "nemotron-70b"）。
+        # 如果第一段不是 provider（vendor/model 格式），保留完整 id。
+        if "/" in model:
+            first_seg = model.split("/", 1)[0]
+            if first_seg == provider:
+                # "provider/model" 格式 → strip provider 前缀
+                bare_model = model.split("/", 1)[1]
+            else:
+                # "vendor/model" 格式（provider≠vendor）→ 保留完整 id
+                bare_model = model
+        else:
+            bare_model = model
 
         # If no API key is available, fail fast instead of retrying 3 times
         if not api_key:
@@ -1067,8 +1116,28 @@ class LLMProvider(RecommendationMixin, Plugin):
                     # The resolver module has 40+ provider aliases and
                     # candidate host patterns — this is what makes
                     # "give a provider name + key → auto-adapt" work.
+                    #
+                    # 修复 bug：之前对所有 403/404 都触发 _try_endpoint_fallback，
+                    # 但 404 更常见的原因是 "model 不存在/无权限"（base_url 是对的，
+                    # /models 能拉到）。此时 fallback 探测 77 个候选 URL 浪费 16s
+                    # 且无济于事。修复：404 时先检查 /models 是否可访问，如果可访问
+                    # 说明 base_url 对，404 是 model 问题，不触发 fallback。
                     if status in (403, 404) and self._fallback_count.get(provider, 0) < 2:
-                        new_base = await self._try_endpoint_fallback(provider)
+                        should_fallback = True
+                        if status == 404:
+                            # /models 可访问 → base_url 对，404 是 model 问题
+                            mapping = self._model_name_cache.get(provider, {})
+                            if mapping:
+                                should_fallback = False
+                                logger.info(
+                                    "404 for model %s on %s, but /models reachable "
+                                    "(%d models) — model issue, not endpoint issue, skipping fallback",
+                                    bare_model, provider, len(mapping),
+                                )
+                        if should_fallback:
+                            new_base = await self._try_endpoint_fallback(provider)
+                        else:
+                            new_base = None
                         if new_base:
                             base = new_base
                             # Rebuild model name map with new URL
@@ -1504,7 +1573,14 @@ class LLMProvider(RecommendationMixin, Plugin):
         # Strip the "<provider>/" prefix from the model id — OpenAI-compatible
         # endpoints expect the bare model name (e.g. "deepseek-v4-flash",
         # not "sensenova/deepseek-v4-flash").
-        bare_model = model.split("/", 1)[1] if "/" in model else model
+        # 修复 bug：和 chat_completion 保持一致的 strip 逻辑——只有当
+        # 第一段是 provider 本身时才 strip（"provider/model" → "model"），
+        # 否则保留完整 id（"vendor/model" 格式，如 nvidia 的 "meta/llama-3.1-8b-instruct"）。
+        if "/" in model:
+            _fs = model.split("/", 1)[0]
+            bare_model = model.split("/", 1)[1] if _fs == provider else model
+        else:
+            bare_model = model
         payload = {
             "model": bare_model,
             "messages": messages,

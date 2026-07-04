@@ -50,6 +50,12 @@ class LLMApiKeys(BaseModel):
 
 
 class LLMConfig(BaseModel):
+    # 允许保留未声明的字段：LLMProvider.setup 会读取很多 llm 段下的
+    # 配置项（auto_classify_on_setup / cache_enabled / cache_ttl_seconds /
+    # cache_max_size / base_urls / fallback_chain 等），如果这里禁止 extra，
+    # Pydantic 会静默丢弃它们，导致 auto_classify_on_setup=False 不生效、
+    # 后台 auto-classify 仍然跑、阻塞 setup 等隐蔽 bug。
+    model_config = {"extra": "allow"}
     primary_provider: str = "openrouter"
     primary_model: str = "anthropic/claude-3.5-sonnet"
     lightweight_model: str = "gpt-4o-mini"
