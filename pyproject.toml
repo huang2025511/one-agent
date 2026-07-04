@@ -8,24 +8,29 @@ version = "2.0.0"
 description = "One-Agent: Universal AI agent with multi-gateway, multi-model support"
 requires-python = ">=3.10"
 dependencies = [
-    "httpx>=0.27.0",
-    "pyyaml>=6.0.1",
-    "pydantic>=2.5.0",
+    "httpx>=0.27.0,<1.0",
+    "pyyaml>=6.0.1,<7.0",
+    "pydantic>=2.5.0,<3.0",
+    # fastapi/uvicorn/APScheduler/cryptography 之前在 optional [web]/[scheduler]/
+    # [crypto] 下，但 requirements.txt 把它们当必装，且 REST API / Web UI /
+    # 调度器 / 加密是项目核心功能。移到核心依赖让 `pip install .` 后即可
+    # 用全部功能，与 requirements.txt 保持单一来源一致。
+    "fastapi>=0.110.0,<1.0",
+    "uvicorn[standard]>=0.27.0,<1.0",
+    "APScheduler>=3.10.4,<4.0",
+    "cryptography>=41.0.0,<46.0",
 ]
 
 [project.optional-dependencies]
-web = ["fastapi>=0.110.0", "uvicorn[standard]>=0.27.0"]
-scheduler = ["APScheduler>=3.10.4"]
-crypto = ["cryptography>=41.0.0"]
 wechat = ["itchat-uos"]
+test = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.23.0,<1.0",
+    "pytest-cov>=4.0,<7.0",
+]
 full = [
-    "httpx>=0.27.0",
-    "pyyaml>=6.0.1",
-    "pydantic>=2.5.0",
-    "fastapi>=0.110.0",
-    "uvicorn[standard]>=0.27.0",
-    "APScheduler>=3.10.4",
-    "cryptography>=41.0.0",
+    # full 现在等价于核心依赖 + wechat + test
+    "itchat-uos",
 ]
 
 [project.scripts]
@@ -34,7 +39,7 @@ one = "one_agent:cli"
 
 [tool.setuptools]
 py-modules = ["one_agent"]
-packages = ["core", "gateways", "executors", "models", "memory", "skills", "router", "api", "monitor", "scheduler", "multimodal", "marketplace", "alerting", "config_backup", "i18n", "tests"]
+packages = ["core", "gateways", "executors", "models", "memory", "skills", "router", "api", "monitor", "scheduler", "multimodal", "marketplace", "alerting", "config_backup", "i18n"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

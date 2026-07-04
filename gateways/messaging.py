@@ -20,6 +20,15 @@ import httpx
 
 from core.plugin import Plugin
 
+# 修复 ForwardRef 隐患（同 api/__init__.py、gateways/__init__.py 的 bug）：
+# 文件有 `from __future__ import annotations`，FastAPI 解析 `request: Request`
+# 时需要模块全局命名空间有 `Request`。之前 Request 只在方法内局部导入，
+# 导致 WeCom/Feishu 回调路由 422。在顶层导入让 ForwardRef 能解析。
+try:
+    from fastapi import Request, Response  # noqa: F401
+except ImportError:  # pragma: no cover
+    Request = Response = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 

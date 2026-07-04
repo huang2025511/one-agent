@@ -20,6 +20,16 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+# 修复 ForwardRef 隐患（同 api/__init__.py 的 bug）：
+# 文件有 `from __future__ import annotations`，FastAPI 解析 `request: Request`
+# 时需要模块全局命名空间有 `Request`。之前 Request 只在
+# register_setup_endpoints() 内局部导入，导致 /setup/configure 路由 422。
+# 在顶层导入让 ForwardRef 能解析。fastapi 是可选依赖，用 try/except 保护。
+try:
+    from fastapi import Request  # noqa: F401
+except ImportError:  # pragma: no cover
+    Request = None  # type: ignore[assignment]
+
 # ---- Known API key env vars across all providers ----
 _KNOWN_KEY_ENV_VARS: List[str] = [
     "OPENAI_API_KEY",

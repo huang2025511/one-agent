@@ -24,7 +24,9 @@ router:
     expert: 1.0
   self_evolution: false
 
-monitor:
+# 修复：之前用 `monitor:` 但代码读 `monitoring:`（FullConfig.monitoring），
+# 导致监控配置被 Pydantic 静默忽略。
+monitoring:
   metrics_enabled: true
   tracing_enabled: true
   health_check_interval: 60

@@ -17,6 +17,19 @@ from typing import Optional
 
 from core.plugin import Plugin
 
+# 修复 ForwardRef 隐患（同 api/__init__.py 的 bug）：
+# 文件有 `from __future__ import annotations`，所有类型注解会变成字符串
+# ForwardRef。FastAPI 解析 `request: Request` 时需要在模块全局命名空间
+# 找到 `Request`。但 Request 之前只在 start() 方法内局部导入，导致
+# FastAPI 解析 ForwardRef('Request') 失败 → WebGateway 的 /api/chat、
+# /api/chat/stream 路由 422。在顶层导入让 ForwardRef 能解析。
+# fastapi 是可选依赖，用 try/except 保护导入。
+try:
+    from fastapi import Request as _Request  # noqa: F401
+    Request = _Request  # 让模块全局命名空间可见
+except ImportError:  # pragma: no cover — fastapi 未装时的降级路径
+    Request = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # Lazy gateway class loader — only imports a messaging gateway module when
