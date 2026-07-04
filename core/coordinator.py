@@ -364,6 +364,10 @@ class Coordinator(Plugin):
         # ---------- 配置 ----------
         "settings": "settings", "设置": "settings", "配置": "settings", "设定": "settings",
         "config": "settings", "configure": "settings", "配置项": "settings",
+        # ---------- 模型管理 ----------
+        "添加模型": "model_manage", "addmodel": "model_manage", "add-model": "model_manage",
+        "显示模型": "model_manage", "showmodels": "model_manage", "show-models": "model_manage",
+        "models": "model_manage", "模型列表": "model_manage",
         # ---------- 更新与维护 ----------
         "update": "updater", "更新": "updater", "升级": "updater", "upgrade": "updater",
         "restart": "restart", "重启": "restart", "reboot": "restart",

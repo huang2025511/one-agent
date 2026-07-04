@@ -364,6 +364,8 @@ class SkillManager(Plugin):
                 ("📜 /history /历史", "显示最近的对话历史"),
                 ("🧹 /clear /清屏", "清空当前对话上下文"),
                 ("⚙️ /settings /设置", "查看和修改设置"),
+                ("📡 /添加模型", "拉取并添加 provider 模型到智能路由"),
+                ("📡 /显示模型", "显示所有层级模型及能力"),
                 ("🔄 /update /更新", "从 GitHub 更新到最新版本"),
                 ("♻️ /restart /重启", "重启 One-Agent"),
                 ("💬 /wechat /微信", "启动微信网关并显示登录二维码"),
@@ -1148,12 +1150,49 @@ class SkillManager(Plugin):
             handler=make_python_handler(python_executor),
         ))
 
+    def _seed_model_management_skill(self) -> None:
+        """模型管理技能：拉取 provider 模型、智能路由展示、交互式添加。"""
+
+        async def model_manage_handler(args: Dict[str, Any]) -> str:
+            """模型管理：添加模型 / 显示模型。
+
+            用法：
+              /添加模型 nvidia key:nvapi-xxx        — 注册 key 并拉取免费模型
+              /添加模型 nvidia key:nvapi-xxx 免费    — 只拉取免费模型
+              /添加模型 nvidia key:nvapi-xxx 全部    — 拉取所有模型
+              /显示模型                              — 显示所有层级模型及能力
+              /显示模型 免费                         — 只显示免费模型
+            """
+            input_text = str(args.get("input", "")).strip()
+            ctx_ref = getattr(self, "_ctx_ref", None)
+            if ctx_ref is None:
+                return "❌ 无法访问系统上下文"
+
+            llm = ctx_ref.get_plugin("llm")
+            if llm is None:
+                return "❌ LLM 提供器未初始化"
+
+            # ---- /显示模型 ----
+            if not input_text or input_text.startswith("显示") or input_text.startswith("list") or input_text.startswith("show"):
+                return await _show_models(llm, input_text)
+
+            # ---- /添加模型 ----
+            return await _add_models(llm, input_text)
+
+        self.register(Skill(
+            id="model_manage", title="Model Manager",
+            description="/添加模型 或 /显示模型：管理智能路由模型",
+            schema=_schema("model_manage", "manage models and routing", []),
+            handler=model_manage_handler,
+        ))
+
     def _seed_builtins(self) -> None:
         """Seed built-in skills that are always available."""
         self._seed_core_skills()
         self._seed_system_skills()
         self._seed_lifecycle_skills()
         self._seed_settings_skill()
+        self._seed_model_management_skill()
         self._seed_web_search_skill()
         self._seed_media_skills()
         self._seed_doc_search_skill()
@@ -1517,3 +1556,229 @@ def _save_config(config: dict) -> None:
                 os.unlink(temp_path)
         except OSError as exc2:
             logger.error("failed to clean up temp file %s: %s", temp_path, exc2, exc_info=True)
+
+
+# ============================================================
+# 模型管理辅助函数
+# ============================================================
+
+# 层级中文描述
+_TIER_INFO = {
+    "trivial":  {"name": "第1层·轻量",   "desc": "极简单任务（打招呼、查时间）", "icon": "🟢"},
+    "simple":   {"name": "第2层·标准",   "desc": "简单对话和常见问题",           "icon": "🔵"},
+    "complex":  {"name": "第3层·高级",   "desc": "复杂推理、代码、多步骤任务",   "icon": "🟡"},
+    "expert":   {"name": "第4层·专家",   "desc": "极复杂推理、长文分析、专家级", "icon": "🔴"},
+}
+_TIER_ORDER = ["trivial", "simple", "complex", "expert"]
+
+
+def _model_capability_desc(model_id: str) -> str:
+    """从模型名推断能力描述。"""
+    name = model_id.lower()
+    caps = []
+    if any(k in name for k in ("vision", "image", "multimodal", "vl")):
+        caps.append("视觉")
+    if any(k in name for k in ("code", "coder", "coding")):
+        caps.append("代码")
+    if any(k in name for k in ("reason", "thinking", "r1", "o1", "o3")):
+        caps.append("推理")
+    if any(k in name for k in ("70b", "72b", "405b", "ultra", "max", "opus", "sonnet")):
+        caps.append("大参数")
+    if any(k in name for k in ("8b", "7b", "3b", "mini", "haiku", "flash", "nano", "lite")):
+        caps.append("轻量")
+    if any(k in name for k in ("tool", "function")):
+        caps.append("工具")
+    return "、".join(caps) if caps else "通用"
+
+
+def _model_cost_desc(model_id: str) -> str:
+    """从 MODEL_COST 查询价格。"""
+    from models.tiers import MODEL_COST
+    cost = MODEL_COST.get(model_id, 0)
+    if cost == 0:
+        return "免费"
+    if cost < 0.001:
+        return f"${cost}/1K"
+    return f"${cost:.4f}/1K"
+
+
+async def _show_models(llm, input_text: str) -> str:
+    """显示所有层级模型及能力。"""
+    from models.tiers import MODEL_TIERS
+
+    free_only = any(k in input_text for k in ("免费", "free", "free_only"))
+
+    lines = ["📡 智能路由模型列表", "=" * 50, ""]
+
+    has_any = False
+    for tier in _TIER_ORDER:
+        info = _TIER_INFO[tier]
+        models = MODEL_TIERS.get(tier, [])
+        if free_only:
+            # 过滤：只显示免费模型（cost=0 或名字含 free）
+            models = [m for m in models if _model_cost_desc(m) == "免费"]
+
+        lines.append(f"{info['icon']} {info['name']} — {info['desc']}")
+        lines.append(f"   复杂度阈值见 config/default_config.yaml → router.task_complexity_thresholds")
+
+        if not models:
+            lines.append("   （暂无模型）")
+        else:
+            for idx, model_id in enumerate(models):
+                role = "主模型" if idx == 0 else f"备选{idx}"
+                caps = _model_capability_desc(model_id)
+                cost = _model_cost_desc(model_id)
+                # 检查是否有可用 key
+                provider = model_id.split("/")[0] if "/" in model_id else ""
+                has_key = llm._has_usable_key(provider) if provider else False
+                key_status = "✅" if has_key else "⚠️ 无key"
+                lines.append(f"   {idx+1}. [{role}] {model_id}")
+                lines.append(f"      能力: {caps} | 费用: {cost} | {key_status}")
+        lines.append("")
+
+    has_any = any(MODEL_TIERS.get(t) for t in _TIER_ORDER)
+    if not has_any:
+        lines.append("⚠️ 当前没有任何模型配置。使用 /添加模型 来添加。")
+
+    lines.append("=" * 50)
+    lines.append("💡 提示：")
+    lines.append("  • /添加模型 <provider> key:<你的key>  — 拉取并添加模型")
+    lines.append("  • /添加模型 <provider> key:<key> 免费  — 只添加免费模型")
+    lines.append("  • /显示模型 免费  — 只显示免费模型")
+
+    return "\n".join(lines)
+
+
+async def _add_models(llm, input_text: str) -> str:
+    """解析 provider + key，拉取模型列表，让用户选择后加入路由。"""
+    import re as _re
+
+    # 解析输入: "nvidia key:nvapi-xxx" 或 "英伟达 key:nvapi-xxx 免费"
+    text = input_text.strip()
+
+    # 提取 key
+    key_match = _re.search(r'key[:\s]+(\S+)', text, _re.IGNORECASE)
+    if not key_match:
+        return (
+            "❌ 未检测到 API Key。\n"
+            "用法: /添加模型 <provider> key:<你的key>\n"
+            "示例: /添加模型 nvidia key:nvapi-xxxxx\n"
+            "示例: /添加模型 英伟达 key:nvapi-xxxxx 免费"
+        )
+    api_key = key_match.group(1)
+
+    # 移除 key 部分，剩下的用于解析 provider
+    remaining = text[:key_match.start()].strip() + " " + text[key_match.end():].strip()
+    remaining = remaining.strip()
+
+    # 检查是否要求免费
+    free_only = any(k in remaining for k in ("免费", "free"))
+    # 检查是否要求全部
+    all_models_flag = any(k in remaining for k in ("全部", "all"))
+    # 移除这些修饰词
+    for word in ("免费", "free", "全部", "all"):
+        remaining = remaining.replace(word, "").strip()
+
+    provider = remaining.lower().strip()
+    if not provider:
+        return "❌ 未检测到 provider 名称。\n用法: /添加模型 nvidia key:nvapi-xxx"
+
+    # 别名转换
+    from models.resolver import _PROVIDER_ALIASES
+    if provider in _PROVIDER_ALIASES:
+        provider = _PROVIDER_ALIASES[provider]
+
+    # 注册 API key
+    llm.set_api_key(provider, api_key)
+
+    # 等待 base_url 解析
+    import asyncio as _aio
+    import time as _time
+    deadline = _time.time() + 10
+    while provider not in llm._provider_base_urls and _time.time() < deadline:
+        await _aio.sleep(0.5)
+
+    if provider not in llm._provider_base_urls:
+        return (
+            f"❌ 无法解析 provider '{provider}' 的 API 地址。\n"
+            f"请检查 provider 名称是否正确，或手动在配置中设置 base_url。"
+        )
+
+    base_url = llm._provider_base_urls[provider]
+
+    # 拉取模型列表
+    from models.catalog import ModelCatalog, auto_classify_tier
+    cat = ModelCatalog(base_url=base_url, api_key=api_key, provider=provider)
+    try:
+        n = await cat.refresh(force=True)
+    except Exception as exc:
+        await cat.aclose()
+        return f"❌ 拉取模型列表失败: {exc}"
+
+    if n == 0:
+        await cat.aclose()
+        return (
+            f"❌ 从 {provider} ({base_url}) 未获取到任何模型。\n"
+            f"请检查 API Key 是否正确。"
+        )
+
+    all_models_list = cat.all()
+
+    # 筛选
+    if free_only:
+        filtered = [m for m in all_models_list if m.is_free]
+        filter_desc = "免费"
+    elif all_models_flag:
+        filtered = all_models_list
+        filter_desc = "全部"
+    else:
+        # 默认只显示免费模型
+        filtered = [m for m in all_models_list if m.is_free]
+        filter_desc = "免费（默认）"
+
+    if not filtered:
+        # 如果筛免费但没结果，显示全部
+        filtered = all_models_list
+        filter_desc = f"全部（未找到免费模型）"
+
+    await cat.aclose()
+
+    # 展示模型列表供用户选择
+    lines = [
+        f"✅ 从 {provider} 拉取到 {n} 个模型（{filter_desc}筛选后 {len(filtered)} 个）",
+        "",
+        "📋 模型列表（已按能力自动分类到 4 层路由）：",
+        "",
+    ]
+
+    # 按层级分组展示
+    for tier in _TIER_ORDER:
+        tier_models = [m for m in filtered if m.tier == tier]
+        if not tier_models:
+            continue
+        info = _TIER_INFO[tier]
+        lines.append(f"{info['icon']} {info['name']} — {info['desc']}")
+        for i, m in enumerate(tier_models):
+            # 模型全名: provider/model_id
+            full_id = f"{provider}/{m.id}" if not m.id.startswith(f"{provider}/") else m.id
+            caps = _model_capability_desc(full_id)
+            ctx = f"{m.context_length:,}" if m.context_length else "?"
+            free_tag = "🆓" if m.is_free else "💰"
+            lines.append(f"   {i+1}. {free_tag} {m.id}")
+            lines.append(f"      层级: {tier} | 上下文: {ctx} | 能力: {caps}")
+        lines.append("")
+
+    lines.append("=" * 50)
+    lines.append("💡 这些模型已自动添加到智能路由的对应层级。")
+    lines.append("   输入 /显示模型 可查看当前所有层级模型。")
+    lines.append("   输入 /设置 主模型 <provider/model> 可切换默认模型。")
+
+    # 自动执行 rebuild_tiers 把模型加入 MODEL_TIERS
+    try:
+        result = await llm.rebuild_tiers(provider=provider, max_per_tier=0, persist=True)
+        if not result.get("ok"):
+            lines.append(f"\n⚠️ 自动分类时出错: {result.get('error', 'unknown')}")
+    except Exception as exc:
+        lines.append(f"\n⚠️ 自动分类异常: {exc}")
+
+    return "\n".join(lines)

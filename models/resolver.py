@@ -48,6 +48,7 @@ KNOWN_PROVIDERS: Dict[str, str] = {
     "groq": "https://api.groq.com/openai/v1",
     "together": "https://api.together.xyz/v1",
     "fireworks": "https://api.fireworks.ai/inference/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
     "perplexity": "https://api.perplexity.ai",
     "xai": "https://api.x.ai/v1",
     "grok": "https://api.x.ai/v1",
@@ -297,6 +298,7 @@ _PROVIDER_ALIASES: Dict[str, str] = {
     "mistral": "mistral", "cohere": "cohere", "xai": "xai", "grok": "xai",
     "perplexity": "perplexity", "huggingface": "huggingface",
     "replicate": "replicate",
+    "nvidia": "nvidia", "英伟达": "nvidia",
 }
 
 
