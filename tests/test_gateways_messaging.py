@@ -1144,7 +1144,7 @@ class TestWeChatPersonalHelpers:
         result = await _api_post(
             session,
             base_url="https://ilinkai.weixin.qq.com",
-            endpoint="ilink/bot/sendmsg",
+            endpoint="ilink/bot/sendmessage",
             payload={"k": "v"},
             token="my-token",
             timeout_ms=5000,

@@ -57,10 +57,12 @@ except ImportError:
 ILINK_APP_ID = "wx1124bf4936a4d8cf"
 ILINK_APP_CLIENT_VERSION = 100000223
 ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
-EP_GET_QRCODE = "ilink/bot/getqrcode"
-EP_CHECK_QRCODE = "ilink/bot/checkqrcode"
+# 修复：iLink 官方端点名是 get_bot_qrcode / get_qrcode_status / sendmessage。
+# 之前用的 getqrcode / checkqrcode / sendmsg 全部返回 HTTP 404。
+EP_GET_QRCODE = "ilink/bot/get_bot_qrcode?bot_type=3"
+EP_CHECK_QRCODE = "ilink/bot/get_qrcode_status"
 EP_GET_UPDATES = "ilink/bot/getupdates"
-EP_SEND_MSG = "ilink/bot/sendmsg"
+EP_SEND_MSG = "ilink/bot/sendmessage"
 
 MSG_TYPE_TEXT = 1
 
@@ -226,6 +228,8 @@ class WeChatPersonalGateway(Plugin):
         self._poll_task: Optional[asyncio.Task] = None
         self._login_task: Optional[asyncio.Task] = None
         self._qr_url: str = ""
+        # iLink 二维码 token，用于轮询扫码状态
+        self._qrcode_token: str = ""
         self._msg_tasks: set = set()
         self._last_heartbeat: float = 0
         self._initial_sync_buf: str = ""
@@ -372,7 +376,9 @@ class WeChatPersonalGateway(Plugin):
             if qr_data.get("ret") not in (0, None):
                 logger.error("wechat_personal: get qrcode failed: %s", qr_data)
                 return False
-            self._qr_url = qr_data.get("qrcode_url", "")
+            # iLink 官方响应字段：qrcode（用于轮询）+ qrcode_img_content（扫码图片 URL）
+            self._qrcode_token = qr_data.get("qrcode", "")
+            self._qr_url = qr_data.get("qrcode_img_content", "")
             logger.info("wechat_personal: QR code URL: %s", self._qr_url)
 
             poll_count = 0
@@ -385,7 +391,7 @@ class WeChatPersonalGateway(Plugin):
                     check = await _api_get(
                         session,
                         base_url=self._base_url,
-                        endpoint=EP_CHECK_QRCODE,
+                        endpoint=f"{EP_CHECK_QRCODE}?qrcode={self._qrcode_token}",
                         timeout_ms=10000,
                     )
                 except Exception as exc:
@@ -393,7 +399,7 @@ class WeChatPersonalGateway(Plugin):
                     continue
 
                 status = check.get("status", "")
-                if status == "success":
+                if status == "confirmed":
                     self._token = check.get("token", "")
                     self._account_id = check.get("account_id", "")
                     self._user_id = check.get("user_id", "")
@@ -411,13 +417,14 @@ class WeChatPersonalGateway(Plugin):
                             timeout_ms=10000,
                         )
                         if qr_data.get("ret") in (0, None):
-                            self._qr_url = qr_data.get("qrcode_url", "")
+                            self._qrcode_token = qr_data.get("qrcode", "")
+                            self._qr_url = qr_data.get("qrcode_img_content", "")
                             logger.info("wechat_personal: new QR code URL: %s", self._qr_url)
                     except Exception as e:
                         logger.error("wechat_personal: refresh QR failed: %s", e)
-                elif status == "scanned":
+                elif status == "scaned":
                     logger.info("wechat_personal: QR scanned, waiting for confirm...")
-                elif status == "waiting":
+                elif status == "wait":
                     pass
                 else:
                     logger.debug("wechat_personal: QR status=%s", status)
