@@ -210,17 +210,23 @@ async def _send_msg(
     token: str,
     chat_id: str,
     content: str,
+    context_token: str = "",
     msg_type: int = MSG_TYPE_TEXT,
 ) -> Dict[str, Any]:
+    # iLink 官方协议发送消息格式：
+    # { "msg": { "to_user_id": ..., "context_token": ..., "item_list": [{"type": 1, "text_item": {"text": ...}}] } }
+    # context_token 来自入站消息的 client_id，必须原样回传，否则消息会被静默丢弃
+    msg_obj: Dict[str, Any] = {
+        "to_user_id": chat_id,
+        "item_list": [{"type": msg_type, "text_item": {"text": content}}],
+    }
+    if context_token:
+        msg_obj["context_token"] = context_token
     return await _api_post(
         session,
         base_url=base_url,
         endpoint=EP_SEND_MSG,
-        payload={
-            "to_id": chat_id,
-            "msg_type": msg_type,
-            "content": content,
-        },
+        payload={"msg": msg_obj},
         token=token,
         timeout_ms=10000,
     )
@@ -246,6 +252,8 @@ class WeChatPersonalGateway(Plugin):
         # iLink 二维码 token，用于轮询扫码状态
         self._qrcode_token: str = ""
         self._msg_tasks: set = set()
+        # 按用户缓存 context_token（从 client_id 获取），回复时必须回传
+        self._context_tokens: Dict[str, str] = {}
         self._last_heartbeat: float = 0
         self._initial_sync_buf: str = ""
         # 实时进度反馈：追踪每个会话的进度状态
@@ -369,12 +377,9 @@ class WeChatPersonalGateway(Plugin):
                 logger.warning("wechat_personal: saved credentials failed, falling back to QR login")
 
         self._login_task = asyncio.create_task(self._do_login())
-        # 修复：之前 login() 立即返回 True，但 _do_login 是后台 task，
-        # QR code URL 还没拿到。/微信 skill 检查 qr_url 时还是空字符串，
-        # 只能显示"二维码链接将在日志中显示"——但 CLI 用户看不到日志。
-        # 这里同步等待 QR URL 就绪（最多 5 秒），让 /微信 命令返回时
-        # 已能展示二维码链接。
-        for _ in range(50):
+        # 同步等待 QR URL 就绪：API 超时 10 秒，这里等 13 秒（130 × 0.1s）
+        # 确保 /微信 命令返回时已能展示二维码（修复"第一次不显示二维码"问题）
+        for _ in range(130):
             if self._qr_url:
                 break
             if self._login_task.done():
@@ -653,7 +658,7 @@ class WeChatPersonalGateway(Plugin):
                 if msgs:
                     logger.info("wechat_personal: received %d message(s)", len(msgs))
                     for msg in msgs:
-                        logger.info("wechat_personal: raw message: %s", json.dumps(msg, ensure_ascii=False)[:500])
+                        logger.info("wechat_personal: raw message: %s", json.dumps(msg, ensure_ascii=False)[:1000])
                         task = asyncio.create_task(self._handle_message(msg))
                         self._msg_tasks.add(task)
                         task.add_done_callback(self._msg_tasks.discard)
@@ -675,20 +680,41 @@ class WeChatPersonalGateway(Plugin):
 
     async def _handle_message(self, msg: Dict[str, Any]) -> None:
         try:
-            msg_type = msg.get("msg_type", 0)
-            from_id = msg.get("from_id", "")
-            content = msg.get("content", "")
+            # iLink 官方协议字段名：
+            # from_user_id（不是 from_id）
+            # message_type（不是 msg_type）
+            # item_list[0].text_item.text（不是 content）
+            # client_id = context_token（回复时必须回传）
+            msg_type = msg.get("message_type", 0) or msg.get("msg_type", 0)
+            from_id = msg.get("from_user_id", "") or msg.get("from_id", "")
+            context_token = msg.get("client_id", "") or msg.get("context_token", "")
+
+            # 从 item_list 提取文本
+            text = ""
+            item_list = msg.get("item_list", [])
+            if item_list:
+                for item in item_list:
+                    if item.get("type") == MSG_TYPE_TEXT:
+                        text_item = item.get("text_item", {})
+                        text = text_item.get("text", "")
+                        if text:
+                            break
 
             logger.info("wechat_personal: message from %s (type=%s): %s",
-                       from_id, msg_type, content[:200] if isinstance(content, str) else str(content)[:200])
+                       from_id, msg_type, text[:200] if isinstance(text, str) else str(text)[:200])
 
             if msg_type != MSG_TYPE_TEXT:
                 logger.debug("wechat_personal: skipping non-text message type=%s", msg_type)
                 return
 
-            text = str(content).strip()
+            text = str(text).strip()
             if not text or not from_id:
                 return
+
+            # 缓存 context_token（回复时必须回传）
+            if context_token:
+                self._context_tokens[from_id] = context_token
+                logger.debug("wechat_personal: cached context_token for %s", from_id[:20])
 
             if self._allowed_users:
                 if from_id not in self._allowed_users:
@@ -844,12 +870,17 @@ class WeChatPersonalGateway(Plugin):
                           self._running, self._session is not None)
             return False
         try:
+            # 从缓存获取 context_token（回复时必须回传）
+            context_token = self._context_tokens.get(chat_id, "")
+            if not context_token:
+                logger.warning("wechat_personal: no context_token for %s, message may not be delivered", chat_id[:20])
             result = await _send_msg(
                 self._session,
                 base_url=self._base_url,
                 token=self._token,
                 chat_id=chat_id,
                 content=text,
+                context_token=context_token,
             )
             ret = result.get("ret", -1)
             success = ret in (0, None)
