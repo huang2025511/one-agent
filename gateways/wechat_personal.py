@@ -499,6 +499,19 @@ class WeChatPersonalGateway(Plugin):
             if self._session and not self._session.closed:
                 await self._session.close()
             self._session = None
+            # 修复：如果 _connect 失败是因为 token 过期（errcode=-14），
+            # 删除本地凭据文件，避免下次启动又尝试用过期 token 连接
+            # （导致用户每次启动都看到 ERROR 但没机会重新扫码）。
+            if "-14" in str(exc) and self._account_id:
+                from pathlib import Path as _Path
+                for fname in (f"{self._account_id}.json", f"{self._account_id}.sync.json"):
+                    fpath = _Path(DATA_DIR) / fname
+                    if fpath.exists():
+                        try:
+                            fpath.unlink()
+                            logger.info("wechat_personal: removed expired credentials file %s", fname)
+                        except OSError:
+                            pass
 
     async def _connect_from_session(self, session: "aiohttp.ClientSession") -> None:
         self._session = session
@@ -549,8 +562,41 @@ class WeChatPersonalGateway(Plugin):
                            poll_count, json.dumps(response, ensure_ascii=False)[:500])
 
                 ret = response.get("ret", 0)
+                # 修复：errcode=-14 (session timeout) 是 token 过期的标志。
+                # 之前代码只检查 ret 字段，但 ercode=-14 的响应里可能没有
+                # ret 字段（或 ret=0），导致被当作"成功但无消息"处理，
+                # poll loop 无限循环用过期 token 轮询。现在检测到 -14
+                # 时断开连接、清除凭据、设 _running=False，让下次 /微信
+                # 自动触发重新扫码登录。
+                errcode = response.get("errcode", 0)
+                if errcode == -14:
+                    logger.warning("wechat_personal: session expired (errcode=-14), clearing credentials "
+                                   "and disconnecting — user must re-login with /微信")
+                    # 先保存凭据文件路径（在清空 _account_id 之前）
+                    saved_account = self._account_id
+                    from pathlib import Path as _Path
+                    cred_file = _Path(DATA_DIR) / f"{saved_account}.json" if saved_account else None
+                    sync_file = _Path(DATA_DIR) / f"{saved_account}.sync.json" if saved_account else None
+                    self._running = False
+                    self._token = ""
+                    self._account_id = ""
+                    # 不能调 self._disconnect()——我们就在 _poll_loop 里，
+                    # _disconnect() 会 cancel self._poll_task 然后 await 它，
+                    # 等于自己等自己，死锁。直接关闭 session。
+                    if self._session and not self._session.closed:
+                        await self._session.close()
+                    self._session = None
+                    self._poll_task = None
+                    # 删除过期的凭据文件，避免下次启动又尝试连接
+                    for fpath in (cred_file, sync_file):
+                        if fpath and fpath.exists():
+                            try:
+                                fpath.unlink()
+                                logger.info("wechat_personal: removed expired file %s", fpath.name)
+                            except OSError:
+                                pass
+                    break
                 if ret not in (0, None):
-                    errcode = response.get("errcode", 0)
                     logger.warning("wechat_personal: get_updates ret=%s errcode=%s", ret, errcode)
                     consecutive_errors += 1
                     if consecutive_errors > 5:
