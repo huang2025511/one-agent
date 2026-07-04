@@ -110,6 +110,10 @@ class LongTermMemory:
         ``last_insert_rowid()`` query, which would be racy in a
         multi-threaded context.
         """
+        # 修复：连接已关闭（restart 路径 stop() 后事件可能仍在分发）
+        # 时直接返回 None，避免 AttributeError。
+        if self._conn is None:
+            return None
         with self._write_lock:
             # Retry logic for "database is locked" errors
             max_retries = 3
@@ -177,6 +181,12 @@ class LongTermMemory:
         is done by passing limit=1 to discover any match).  Callers
         should set ``limit=1`` for a boolean "does it match?" check.
         """
+        # 修复：restart 路径会先 stop 所有 plugin（关闭 sqlite 连接），
+        # 但事件总线上可能还有正在处理的 user_message 事件，会调到
+        # 这里。连接已关闭时直接返回空结果，避免 AttributeError:
+        # 'NoneType' object has no attribute 'cursor'。
+        if self._conn is None:
+            return []
         # Escape FTS5 special characters to prevent injection attacks
         query = _escape_fts5_query(query)
 
@@ -494,6 +504,11 @@ class MemoryPlugin(Plugin):
         turn: TurnContext | None = event.get("turn")
         if turn is None or self._long is None:
             return
+        # 修复：restart 路径 stop() 会先 close 长记忆 sqlite 连接，
+        # 但事件总线上可能还有正在处理的 user_message 事件。检查
+        # _conn 是否已关闭，是的话直接 return 避免 AttributeError。
+        if getattr(self._long, "_conn", None) is None:
+            return
 
         # FTS5 keyword search — wrap in to_thread to avoid blocking
         # the event loop on SQLite I/O
@@ -556,6 +571,10 @@ class MemoryPlugin(Plugin):
     async def _on_turn_completed(self, event: Event) -> None:
         turn: TurnContext | None = event.get("turn")
         if turn is None or self._long is None:
+            return
+        # 修复：restart 路径 stop() 会先 close 长记忆 sqlite 连接，
+        # 但事件总线上可能还有正在处理的 turn_completed 事件。
+        if getattr(self._long, "_conn", None) is None:
             return
         if turn.result and not turn.error:
             content = f"Q: {turn.input_text}\nA: {turn.result}"
