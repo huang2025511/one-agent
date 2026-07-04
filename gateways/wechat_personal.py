@@ -687,7 +687,8 @@ class WeChatPersonalGateway(Plugin):
             # client_id = context_token（回复时必须回传）
             msg_type = msg.get("message_type", 0) or msg.get("msg_type", 0)
             from_id = msg.get("from_user_id", "") or msg.get("from_id", "")
-            context_token = msg.get("client_id", "") or msg.get("context_token", "")
+            # context_token 是回复时必须回传的字段（iLink 官方协议）
+            context_token = msg.get("context_token", "") or msg.get("client_id", "")
 
             # 从 item_list 提取文本
             text = ""
@@ -882,9 +883,13 @@ class WeChatPersonalGateway(Plugin):
                 content=text,
                 context_token=context_token,
             )
-            ret = result.get("ret", -1)
-            success = ret in (0, None)
-            logger.info("wechat_personal: send result=%s (ret=%s)", success, ret)
+            ret = result.get("ret", 0)
+            errcode = result.get("errcode", 0)
+            # iLink sendmessage 成功响应通常是 {} 空对象（无 ret 字段）
+            # 或 ret=0。errcode != 0 表示错误。
+            success = (ret in (0, None)) and (errcode in (0, None))
+            logger.info("wechat_personal: send result=%s (ret=%s, errcode=%s, response=%s)",
+                       success, ret, errcode, json.dumps(result, ensure_ascii=False)[:200])
             return success
         except Exception as exc:
             logger.error("wechat_personal: send error: %s", exc)
