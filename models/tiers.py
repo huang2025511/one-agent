@@ -14,27 +14,30 @@ MODEL_TIERS: Dict[str, List[str]] = {
         "anthropic/claude-haiku-latest",
         "deepseek/deepseek-chat",
         "qwen/qwen-2.5-7b-instruct",
-        # 修复：补 sensenova/tiny，与 default_config.yaml / dev_config 一致。
-        # 之前此条缺失，导致只配了 sensenova key 时 model_for_tier('trivial')
-        # 在 tier 内找不到可用模型，fallback 到无 key 的 _default_model。
-        "sensenova/tiny",
+        # 商汤实际可用模型（公测免费）：sensenova-6.7-flash-lite（对话+多模态）。
+        # 修复：之前写的是 sensenova/tiny（虚构模型，调用返回 404，每次请求都
+        # 浪费一次往返再 fallback）。改为真实模型名后不再 404。
+        "sensenova/sensenova-6.7-flash-lite",
     ],
     "simple": [
         "anthropic/claude-3.5-haiku-20241022",
         "openai/gpt-4o-mini",
         "google/gemini-2.0-flash",
+        "sensenova/sensenova-6.7-flash-lite",
     ],
     "complex": [
         "anthropic/claude-3.5-sonnet-20241022",
         "openai/gpt-4o",
         "google/gemini-2.5-pro-exp-03-25",
+        # deepseek-v4-flash 是商汤托管的 DeepSeek V4 推理模型（商汤免费公测）。
+        # 256K context + reasoning_effort 控制，适合复杂任务。
+        "sensenova/deepseek-v4-flash",
     ],
     "expert": [
         "anthropic/claude-4.5-sonnet-20250514",
         "openai/o3",
         "google/gemini-2.5-pro-preview-05-15",
-        # 修复：补 sensenova/opus，与 default_config.yaml 一致。
-        "sensenova/opus",
+        "sensenova/deepseek-v4-flash",
     ],
 }
 

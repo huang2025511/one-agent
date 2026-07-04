@@ -52,20 +52,22 @@ llm:
     - anthropic/claude-haiku-latest
     - deepseek/deepseek-chat
     - qwen/qwen-2.5-7b-instruct
-    - sensenova/tiny
+    - sensenova/sensenova-6.7-flash-lite  # 商汤实际可用模型（之前误写 sensenova/tiny 调用 404）
     simple:
     - anthropic/claude-3.5-haiku-20241022
     - openai/gpt-4o-mini
     - google/gemini-2.0-flash
+    - sensenova/sensenova-6.7-flash-lite
     complex:
     - anthropic/claude-3.5-sonnet-20241022
     - openai/gpt-4o
     - google/gemini-2.5-pro-exp-03-25
+    - sensenova/deepseek-v4-flash  # 商汤托管的 DeepSeek V4 推理模型
     expert:
     - anthropic/claude-4.5-sonnet-20250514
     - openai/o3
     - google/gemini-2.5-pro-preview-05-15
-    - sensenova/opus
+    - sensenova/deepseek-v4-flash
 
 router:
   enabled: true

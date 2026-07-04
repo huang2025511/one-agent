@@ -658,10 +658,10 @@ def test_llm_provider_rebuild_tiers_with_mock():
 
     fake = {
         "data": [
-            {"id": "tiny", "context_length": 2_000,
+            {"id": "sensenova-6.7-flash-lite", "context_length": 2_000,
              "pricing": {"prompt": 0, "completion": 0},
              "supported_features": []},
-            {"id": "opus", "context_length": 1_000_000,
+            {"id": "deepseek-v4-flash", "context_length": 1_000_000,
              "pricing": {"prompt": 15.0, "completion": 75.0},
              "supported_features": ["reasoning"]},
         ]
@@ -690,11 +690,15 @@ def test_llm_provider_rebuild_tiers_with_mock():
 
     _check("rebuild ok", r.get("ok") is True)
     _check("rebuild model_count=2", r.get("model_count") == 2)
-    _check("trivial has sensenova/tiny", "sensenova/tiny" in r["tiers"].get("trivial", []))
-    _check("expert has sensenova/opus", "sensenova/opus" in r["tiers"].get("expert", []))
+    _check("trivial has sensenova/sensenova-6.7-flash-lite",
+           "sensenova/sensenova-6.7-flash-lite" in r["tiers"].get("trivial", []))
+    _check("expert has sensenova/deepseek-v4-flash",
+           "sensenova/deepseek-v4-flash" in r["tiers"].get("expert", []))
     # Module-level MODEL_TIERS must be updated
-    _check("global trivial updated", "sensenova/tiny" in _models_pkg.MODEL_TIERS.get("trivial", []))
-    _check("global expert updated", "sensenova/opus" in _models_pkg.MODEL_TIERS.get("expert", []))
+    _check("global trivial updated",
+           "sensenova/sensenova-6.7-flash-lite" in _models_pkg.MODEL_TIERS.get("trivial", []))
+    _check("global expert updated",
+           "sensenova/deepseek-v4-flash" in _models_pkg.MODEL_TIERS.get("expert", []))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -845,10 +849,10 @@ def test_rebuild_tiers_no_user_action_does_what_user_would():
     # Use the same patched-httpx trick as the earlier integration test
     fake = {
         "data": [
-            {"id": "tiny", "context_length": 2_000,
+            {"id": "sensenova-6.7-flash-lite", "context_length": 2_000,
              "pricing": {"prompt": 0, "completion": 0},
              "supported_features": []},
-            {"id": "opus", "context_length": 1_000_000,
+            {"id": "deepseek-v4-flash", "context_length": 1_000_000,
              "pricing": {"prompt": 15.0, "completion": 75.0},
              "supported_features": ["reasoning"]},
         ]
@@ -887,19 +891,21 @@ def test_rebuild_tiers_no_user_action_does_what_user_would():
         asyncio.run(p._client.aclose())
 
     post_expert = set(_models_pkg.MODEL_TIERS.get("expert", []))
-    # Note: opus may already be in pre_expert if an earlier test added
-    # it to the global MODEL_TIERS. The real assertion is that it's
+    # Note: deepseek-v4-flash may already be in pre_expert if an earlier test
+    # added it to the global MODEL_TIERS. The real assertion is that it's
     # present AFTER set_api_key ran — i.e. the user didn't have to call
     # rebuild_tiers() manually.
-    _check("opus in expert after set_api_key", "sensenova/opus" in post_expert)
-    # Tiny should also be auto-added (to simple or trivial)
+    _check("deepseek-v4-flash in expert after set_api_key",
+           "sensenova/deepseek-v4-flash" in post_expert)
+    # sensenova-6.7-flash-lite should also be auto-added (to simple or trivial)
     all_tiers = (
         _models_pkg.MODEL_TIERS.get("trivial", [])
         + _models_pkg.MODEL_TIERS.get("simple", [])
         + _models_pkg.MODEL_TIERS.get("complex", [])
         + _models_pkg.MODEL_TIERS.get("expert", [])
     )
-    _check("tiny auto-added somewhere", "sensenova/tiny" in all_tiers)
+    _check("sensenova-6.7-flash-lite auto-added somewhere",
+           "sensenova/sensenova-6.7-flash-lite" in all_tiers)
 
 
 # ══════════════════════════════════════════════════════════════════════════
