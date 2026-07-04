@@ -233,11 +233,19 @@ class WeChatPersonalGateway(Plugin):
         self._progress_last_sent: Dict[str, float] = {}   # chat_id → 上次进度消息时间
         self._progress_count: Dict[str, int] = {}           # chat_id → 本次 turn 已发进度条数
         self._heartbeat_tasks: Dict[str, asyncio.Task] = {}  # chat_id → 心跳任务
+        # 与全仓库其它 gateway/executor 约定一致（WebGateway / RESTAPIGateway /
+        # SystemExecutor / DockerExecutor / BrowserExecutor 都用 _enabled 表示
+        # 「配置层是否启用」。_running 表示「已连接并正在轮询」是另一层语义，
+        # 不能替代 _enabled。setup() 会根据 config 把 enabled_cfg 赋到这里。
+        self._enabled: bool = False
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         cfg = (ctx.config.get("gateways") or {}).get("wechat_personal") or {}
         enabled_cfg = bool(cfg.get("enabled", False))
+        # 修复 bug：之前 enabled_cfg 只用来打日志，没赋给 self._enabled，
+        # 导致外部无法通过 self._enabled 查询网关是否启用（全仓库约定）。
+        self._enabled = enabled_cfg
         self._allowed_users = [str(u).strip() for u in (cfg.get("allowed_users") or []) if str(u).strip()]
 
         saved = self._find_saved_account()

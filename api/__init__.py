@@ -35,6 +35,18 @@ from typing import Any, Dict, List, Optional
 
 from core.exceptions import InputValidationError
 from core.plugin import Plugin
+
+# 修复 bug：文件有 `from __future__ import annotations`，所有类型注解会
+# 变成字符串 ForwardRef。FastAPI 解析 `request: Request` 时需要在模块全局
+# 命名空间找到 `Request`。但 Request 之前只在方法内部局部导入
+# （`from fastapi import Request`），FastAPI 解析 ForwardRef('Request') 时
+# 找不到 → chat 路由 422: loc=["query","request"] Field required。
+# 在顶层导入 Request（及 Header/Body/HTTPException）让 ForwardRef 能解析。
+# fastapi 是可选依赖，用 try/except 保护导入。
+try:
+    from fastapi import Body, Header, HTTPException, Request
+except ImportError:  # pragma: no cover — fastapi 未装时的降级路径
+    Body = Header = HTTPException = Request = None  # type: ignore[assignment]
 from core.security import is_path_within
 from i18n import _
 
@@ -442,12 +454,20 @@ class RESTAPIGateway(Plugin):
             return {"alive": True}
 
     def _register_stats_metrics_routes(self, app, auth, _ctx, _llm, _memory, _bus, _skills, _memory_plugin):
-        from fastapi import JSONResponse
+        # 修复：新版 fastapi（0.139+）把 JSONResponse 从顶层命名空间移除，
+        # 必须从 fastapi.responses 导入。旧代码 `from fastapi import JSONResponse`
+        # 会在 import 时抛 ImportError，导致整个 REST API gateway start 失败。
+        from fastapi.responses import JSONResponse
+        from fastapi import Header
+        from typing import Optional
         @app.get("/api/stats")
-        async def stats():
+        async def stats(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """System statistics for dashboard."""
-            if not auth(x_api_key):
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            # 修复 bug：auth() 成功时返回 None（falsy），之前用
+            # `if not auth(x_api_key):` 检查会误判为未授权 → 总是 401。
+            # 正确用法是直接调用 auth()（失败时它自己抛 HTTPException(401)），
+            # 和其它路由一致。
+            auth(x_api_key)
             _session_store = _cp("session_store")
             _memory_plugin = _ctx.get_plugin("memory") if _ctx else None
 
@@ -492,9 +512,9 @@ class RESTAPIGateway(Plugin):
             }
 
         @app.get("/api/metrics")
-        async def metrics():
-            if not auth(x_api_key):
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+        async def metrics(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            # 修复：同 stats 路由，auth() 成功返回 None，不能用 if not 检查。
+            auth(x_api_key)
             return {
                 "bus": _bus.metrics() if _bus else {},
                 "llm": _llm.stats() if _llm else {},
@@ -503,13 +523,13 @@ class RESTAPIGateway(Plugin):
 
         # ── Prometheus Metrics Endpoint ────────────────────────────────
         @app.get("/metrics")
-        async def prometheus_metrics():
+        async def prometheus_metrics(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Prometheus-compatible metrics endpoint.
 
             Returns metrics in Prometheus text format for scraping.
             """
-            if not auth(x_api_key):
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            # 修复：同 stats 路由，auth() 成功返回 None，不能用 if not 检查。
+            auth(x_api_key)
             lines = []
 
             # System metrics
@@ -1571,7 +1591,12 @@ class RESTAPIGateway(Plugin):
         self._app = app
         try:
             import uvicorn
-            config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning", capture_output=False)
+            # 修复：uvicorn 0.30+ 移除了 Config 的 capture_output 参数。
+            # 用 try/except 兼容新旧版本。
+            try:
+                config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning", capture_output=False)
+            except TypeError:
+                config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning")
             server = uvicorn.Server(config)
             self._task = __import__("asyncio").create_task(server.serve())
             logger.info("REST API running on http://%s:%d", self._host, self._port)

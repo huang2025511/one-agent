@@ -92,12 +92,17 @@ def test_wechat_personal_disabled_by_default():
 
 
 def test_wechat_personal_lifecycle_methods():
-    """Gateway has setup/stop/dispatch."""
+    """Gateway has setup/stop/send."""
     from gateways.wechat_personal import WeChatPersonalGateway
     gw = WeChatPersonalGateway()
     assert hasattr(gw, "setup")
     assert hasattr(gw, "stop")
-    assert hasattr(gw, "_send_text")
+    # 修复测试 bug：之前断言 hasattr(gw, "_send_text")，但全仓库没有任何
+    # gateway 定义这个方法（也无此约定）。WeChatPersonalGateway 实际的
+    # 发消息入口是 async def send(self, chat_id, text)（见
+    # gateways/wechat_personal.py）。其它 gateway 的私有发消息方法命名
+    # 各异（_send / _send_message / _send_app_message），没有统一约定。
+    assert hasattr(gw, "send")
 
 
 # ============================================================

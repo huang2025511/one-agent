@@ -63,6 +63,17 @@ def isolated_config(tmp_path, monkeypatch):
             "system_executor_password": "",
             "require_password_for_dangerous": True,
         },
+        # 禁用所有 HTTP server：test_e2e_real 测的是 bus 内部流程（coordinator
+        # chat turn / skill dispatch / memory / router），不需要 REST API /
+        # WebGateway / Monitor。否则会和 conftest.py 的 session-scoped app
+        # 抢 18791/18792/18793 端口（fastapi 装上后两个 app 实例都会尝试
+        # bind 同一组端口 → SystemExit: 3）。
+        "rest": {"enabled": False},
+        "gateways": {
+            "web": {"enabled": False},
+            "wechat_personal": {"enabled": False},
+        },
+        "monitoring": {"enabled": False},
     }
     config_file.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     monkeypatch.setenv("ONE_AGENT_CONFIG", str(config_file))
