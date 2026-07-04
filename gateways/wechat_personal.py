@@ -282,6 +282,14 @@ class WeChatPersonalGateway(Plugin):
                 continue
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
+                # 修复：旧版本保存的凭据文件可能没有 account_id 字段
+                # （或为空字符串），导致 _connect() 因 self._account_id 为空
+                # 而静默跳过，微信网关不工作。从文件名推断 account_id
+                # （_save_credentials 用 _sanitize_chat_id(account_id) 作
+                # 文件名，sanitized 后 alnum/@.-_ 都保留，对于常见 account_id
+                # 如 "c147268ca92c@im.bot" 反向提取无损）。
+                if not data.get("account_id"):
+                    data["account_id"] = path.stem
                 saved_at = data.get("saved_at", "")
                 has_token = bool(data.get("token", ""))
                 logger.info("wechat_personal: found account file %s, has_token=%s, saved_at=%s",
@@ -410,6 +418,11 @@ class WeChatPersonalGateway(Plugin):
 
     async def _connect(self) -> None:
         if not self._account_id or not self._token:
+            # 修复：之前这里静默 return，导致 setup 看似成功但微信网关
+            # 没真正连接，用户输入消息无响应也无日志可查。打 warning 让
+            # 问题立即可见（常见原因：saved 凭据文件缺 account_id 字段）。
+            logger.warning("wechat_personal: _connect skipped (account_id=%s, token=%s)",
+                           bool(self._account_id), bool(self._token))
             return
         try:
             logger.info("wechat_personal: _connect starting, account=%s", self._account_id[:8])

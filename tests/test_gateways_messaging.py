@@ -1066,6 +1066,56 @@ class TestWeChatPersonalHelpers:
         assert data["user_id"] == "u1"
         assert "saved_at" in data
 
+    def test_find_saved_account_infers_account_id_from_filename(
+        self, monkeypatch, tmp_path
+    ):
+        """旧版本保存的凭据文件可能缺 account_id 字段。
+
+        _find_saved_account 应从文件名推断 account_id（_save_credentials
+        用 _sanitize_chat_id(account_id) 作文件名，反向提取无损）。
+        这修复了「saved 凭据 account_id 为空 → _connect 静默跳过 →
+        微信网关不工作」的 bug。
+        """
+        import json
+        import gateways.wechat_personal as wp
+        from gateways.wechat_personal import WeChatPersonalGateway
+        monkeypatch.setattr(wp, "DATA_DIR", tmp_path / "wx")
+        accounts_dir = tmp_path / "wx"
+        accounts_dir.mkdir(parents=True)
+        # 模拟旧版本保存的凭据：文件名含 account_id 但 JSON 内容缺该字段
+        legacy_file = accounts_dir / "c147268ca92c@im.bot.json"
+        legacy_file.write_text(json.dumps({
+            # 故意不写 account_id 字段（模拟旧版本）
+            "token": "legacy-token-abc",
+            "base_url": "https://ilinkai.weixin.qq.com",
+            "user_id": "u1",
+            "saved_at": "2026-07-03T05:39:09Z",
+        }), encoding="utf-8")
+        gw = WeChatPersonalGateway()
+        result = gw._find_saved_account()
+        assert result is not None
+        # account_id 应从文件名推断
+        assert result["account_id"] == "c147268ca92c@im.bot"
+        assert result["token"] == "legacy-token-abc"
+
+    @pytest.mark.asyncio
+    async def test_connect_logs_warning_when_account_id_empty(self, monkeypatch, tmp_path):
+        """_connect 在 account_id 为空时应打 warning（不再静默 return）。
+
+        这让「saved 凭据缺 account_id」类问题在日志里立即可见。
+        """
+        import gateways.wechat_personal as wp
+        from gateways.wechat_personal import WeChatPersonalGateway
+        monkeypatch.setattr(wp, "DATA_DIR", tmp_path / "wx")
+        gw = WeChatPersonalGateway()
+        # account_id 和 token 都是空
+        gw._account_id = ""
+        gw._token = ""
+        # 调 _connect 不应抛异常，也不应创建 session
+        await gw._connect()
+        assert gw._session is None
+        assert gw._running is False
+
     def _make_aiohttp_response(self, status_code=200, body=None, ok=True):
         """构造一个支持 `async with session.post(...) as response` 的 mock。
 
