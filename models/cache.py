@@ -44,10 +44,15 @@ class LLMCache:
 
     @staticmethod
     def _make_key(messages, model, tools, temperature=None) -> str:
+        # 规范化 tools：None 和 [] 都视为空列表，避免 get(None) 和
+        # set([]) 产生不同 cache key 导致 cache 永远 miss。
+        # 这是修复 5 的根本修复——chat_completion 传 tools or [] 只是
+        # 上层兜底，_make_key 本身规范化才能彻底保证一致性。
+        normalized_tools = tools or []
         payload = json.dumps({
             "messages": messages,
             "model": model,
-            "tools": tools,
+            "tools": normalized_tools,
             "temperature": temperature,
         }, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
