@@ -364,7 +364,7 @@ class SkillManager(Plugin):
                 ("📜 /history /历史", "显示最近的对话历史"),
                 ("🧹 /clear /清屏", "清空当前对话上下文"),
                 ("⚙️ /settings /设置", "查看和修改设置"),
-                ("📡 /添加模型", "拉取并添加 provider 模型到智能路由"),
+                ("📡 /添加模型", "拉取并添加任意 provider 模型到智能路由"),
                 ("📡 /显示模型", "显示所有层级模型及能力"),
                 ("🔄 /update /更新", "从 GitHub 更新到最新版本"),
                 ("♻️ /restart /重启", "重启 One-Agent"),
@@ -1157,9 +1157,11 @@ class SkillManager(Plugin):
             """模型管理：添加模型 / 显示模型。
 
             用法：
-              /添加模型 nvidia key:nvapi-xxx        — 注册 key 并拉取免费模型
+              /添加模型 nvidia key:nvapi-xxx        — 已知 provider，拉取免费模型
               /添加模型 nvidia key:nvapi-xxx 免费    — 只拉取免费模型
               /添加模型 nvidia key:nvapi-xxx 全部    — 拉取所有模型
+              /添加模型 myai key:xxx url:https://...  — 手动指定 API 地址
+              /添加模型 someai key:xxx              — 未知 provider，自动探测+搜索
               /显示模型                              — 显示所有层级模型及能力
               /显示模型 免费                         — 只显示免费模型
             """
@@ -1177,6 +1179,11 @@ class SkillManager(Plugin):
                 return await _show_models(llm, input_text)
 
             # ---- /添加模型 ----
+            # 如果没有 key 参数，显示用法
+            import re as _re
+            if not _re.search(r'key[:\s]+\S+', input_text, _re.IGNORECASE):
+                return _add_models_usage()
+
             return await _add_models(llm, input_text)
 
         self.register(Skill(
@@ -1642,33 +1649,46 @@ async def _show_models(llm, input_text: str) -> str:
 
     lines.append("=" * 50)
     lines.append("💡 提示：")
-    lines.append("  • /添加模型 <provider> key:<你的key>  — 拉取并添加模型")
+    lines.append("  • /添加模型 <provider> key:<你的key>  — 拉取并添加模型（支持所有 provider）")
     lines.append("  • /添加模型 <provider> key:<key> 免费  — 只添加免费模型")
+    lines.append("  • /添加模型 <provider> key:<key> url:<地址> — 手动指定 API 地址")
     lines.append("  • /显示模型 免费  — 只显示免费模型")
 
     return "\n".join(lines)
 
 
 async def _add_models(llm, input_text: str) -> str:
-    """解析 provider + key，拉取模型列表，让用户选择后加入路由。"""
-    import re as _re
+    """解析 provider + key，拉取模型列表，让用户选择后加入路由。
 
-    # 解析输入: "nvidia key:nvapi-xxx" 或 "英伟达 key:nvapi-xxx 免费"
+    支持所有 provider，包括未知 provider（自动探测或 web 搜索）。
+    用法:
+      /添加模型 nvidia key:nvapi-xxx              — 已知 provider
+      /添加模型 英伟达 key:nvapi-xxx 免费           — 中文别名 + 只拉免费
+      /添加模型 myprovider key:xxx url:https://... — 手动指定 base_url
+      /添加模型 someai key:xxx                    — 未知 provider，自动探测+搜索
+    """
+    import re as _re
+    import asyncio as _aio
+    import time as _time
+
     text = input_text.strip()
 
     # 提取 key
     key_match = _re.search(r'key[:\s]+(\S+)', text, _re.IGNORECASE)
     if not key_match:
-        return (
-            "❌ 未检测到 API Key。\n"
-            "用法: /添加模型 <provider> key:<你的key>\n"
-            "示例: /添加模型 nvidia key:nvapi-xxxxx\n"
-            "示例: /添加模型 英伟达 key:nvapi-xxxxx 免费"
-        )
+        return _add_models_usage()
     api_key = key_match.group(1)
 
-    # 移除 key 部分，剩下的用于解析 provider
-    remaining = text[:key_match.start()].strip() + " " + text[key_match.end():].strip()
+    # 提取 url（可选）
+    url_match = _re.search(r'url[:\s]+(https?://\S+)', text, _re.IGNORECASE)
+    explicit_url = url_match.group(1).rstrip(",;") if url_match else ""
+
+    # 移除 key 和 url 部分，剩下的用于解析 provider
+    remaining = text
+    if key_match:
+        remaining = remaining[:key_match.start()] + remaining[key_match.end():]
+    if url_match:
+        remaining = remaining[:url_match.start()] + remaining[url_match.end():]
     remaining = remaining.strip()
 
     # 检查是否要求免费
@@ -1681,39 +1701,72 @@ async def _add_models(llm, input_text: str) -> str:
 
     provider = remaining.lower().strip()
     if not provider:
-        return "❌ 未检测到 provider 名称。\n用法: /添加模型 nvidia key:nvapi-xxx"
+        return _add_models_usage()
 
     # 别名转换
-    from models.resolver import _PROVIDER_ALIASES
+    from models.resolver import _PROVIDER_ALIASES, KNOWN_PROVIDERS, resolve as _resolve_provider
     if provider in _PROVIDER_ALIASES:
         provider = _PROVIDER_ALIASES[provider]
 
-    # 注册 API key
-    llm.set_api_key(provider, api_key)
+    # ---- 确定 base_url ----
+    base_url = ""
 
-    # 等待 base_url 解析
-    import asyncio as _aio
-    import time as _time
-    deadline = _time.time() + 10
-    while provider not in llm._provider_base_urls and _time.time() < deadline:
-        await _aio.sleep(0.5)
+    # 1. 用户显式指定 url
+    if explicit_url:
+        base_url = explicit_url
+        llm._provider_base_urls[provider] = base_url
 
-    if provider not in llm._provider_base_urls:
-        return (
-            f"❌ 无法解析 provider '{provider}' 的 API 地址。\n"
-            f"请检查 provider 名称是否正确，或手动在配置中设置 base_url。"
-        )
+    # 2. 已知 provider（在 KNOWN_PROVIDERS 里）
+    elif provider in llm._provider_base_urls:
+        base_url = llm._provider_base_urls[provider]
 
-    base_url = llm._provider_base_urls[provider]
+    elif provider in KNOWN_PROVIDERS:
+        base_url = KNOWN_PROVIDERS[provider]
+        llm._provider_base_urls[provider] = base_url
 
-    # 拉取模型列表
-    from models.catalog import ModelCatalog, auto_classify_tier
+    # 3. 未知 provider — 先用 resolver 探测
+    else:
+        # 注册 API key 触发探测
+        llm.set_api_key(provider, api_key)
+
+        # 等待探测完成（最多 15 秒）
+        deadline = _time.time() + 15
+        while provider not in llm._provider_base_urls and _time.time() < deadline:
+            await _aio.sleep(0.5)
+
+        if provider in llm._provider_base_urls:
+            base_url = llm._provider_base_urls[provider]
+        else:
+            # 4. resolver 探测失败 — web 搜索
+            base_url = await _search_provider_url(provider, api_key)
+
+            if base_url:
+                llm._provider_base_urls[provider] = base_url
+            else:
+                return (
+                    f"❌ 无法找到 provider '{provider}' 的 API 地址。\n\n"
+                    f"已尝试：\n"
+                    f"  1. 查询已知 provider 列表 — 未找到\n"
+                    f"  2. 自动探测常见域名 — 失败\n"
+                    f"  3. 网络搜索 — 未找到\n\n"
+                    f"请手动指定 API 地址：\n"
+                    f"  /添加模型 {provider} key:{api_key[:8]}... url:https://api.example.com/v1"
+                )
+
+    # 注册 API key（如果还没注册）
+    if provider not in llm._api_keys:
+        llm.set_api_key(provider, api_key)
+    else:
+        llm._api_keys[provider] = api_key
+
+    # ---- 拉取模型列表 ----
+    from models.catalog import ModelCatalog
     cat = ModelCatalog(base_url=base_url, api_key=api_key, provider=provider)
     try:
         n = await cat.refresh(force=True)
     except Exception as exc:
         await cat.aclose()
-        return f"❌ 拉取模型列表失败: {exc}"
+        return f"❌ 拉取模型列表失败: {exc}\nbase_url: {base_url}"
 
     if n == 0:
         await cat.aclose()
@@ -1739,13 +1792,14 @@ async def _add_models(llm, input_text: str) -> str:
     if not filtered:
         # 如果筛免费但没结果，显示全部
         filtered = all_models_list
-        filter_desc = f"全部（未找到免费模型）"
+        filter_desc = "全部（未找到免费模型）"
 
     await cat.aclose()
 
-    # 展示模型列表供用户选择
+    # 展示模型列表
     lines = [
         f"✅ 从 {provider} 拉取到 {n} 个模型（{filter_desc}筛选后 {len(filtered)} 个）",
+        f"   API 地址: {base_url}",
         "",
         "📋 模型列表（已按能力自动分类到 4 层路由）：",
         "",
@@ -1759,7 +1813,6 @@ async def _add_models(llm, input_text: str) -> str:
         info = _TIER_INFO[tier]
         lines.append(f"{info['icon']} {info['name']} — {info['desc']}")
         for i, m in enumerate(tier_models):
-            # 模型全名: provider/model_id
             full_id = f"{provider}/{m.id}" if not m.id.startswith(f"{provider}/") else m.id
             caps = _model_capability_desc(full_id)
             ctx = f"{m.context_length:,}" if m.context_length else "?"
@@ -1782,3 +1835,170 @@ async def _add_models(llm, input_text: str) -> str:
         lines.append(f"\n⚠️ 自动分类异常: {exc}")
 
     return "\n".join(lines)
+
+
+def _add_models_usage() -> str:
+    """返回 /添加模型 的用法说明，包含已知 provider 列表。"""
+    from models.resolver import KNOWN_PROVIDERS
+
+    # 按类别分组
+    cn_providers = []
+    us_providers = []
+    other_providers = []
+    cn_keys = {"sensenova", "deepseek", "qwen", "glm", "kimi", "yi", "doubao",
+               "hunyuan", "spark", "wenxin", "baichuan", "stepfun", "minimax"}
+    for name in sorted(KNOWN_PROVIDERS.keys()):
+        if name in cn_keys:
+            cn_providers.append(name)
+        elif name in ("ollama",):
+            other_providers.append(name)
+        else:
+            us_providers.append(name)
+
+    lines = [
+        "📡 /添加模型 — 从任意 provider 拉取模型并加入智能路由",
+        "",
+        "用法:",
+        "  /添加模型 <provider> key:<你的key>            — 已知 provider，默认拉免费模型",
+        "  /添加模型 <provider> key:<key> 免费            — 只拉免费模型",
+        "  /添加模型 <provider> key:<key> 全部            — 拉取所有模型",
+        "  /添加模型 <provider> key:<key> url:<地址>      — 手动指定 API 地址",
+        "  /添加模型 <未知provider> key:<key>            — 自动探测+网络搜索",
+        "",
+        "已知 provider 列表:",
+    ]
+    if cn_providers:
+        lines.append(f"  🇨🇳 国内: {', '.join(cn_providers)}")
+    if us_providers:
+        lines.append(f"  🌍 国际: {', '.join(us_providers)}")
+    if other_providers:
+        lines.append(f"  💻 其他: {', '.join(other_providers)}")
+    lines += [
+        "",
+        "示例:",
+        "  /添加模型 nvidia key:nvapi-xxxxx",
+        "  /添加模型 英伟达 key:nvapi-xxxxx 免费",
+        "  /添加模型 deepseek key:sk-xxxxx 全部",
+        "  /添加模型 openai key:sk-xxxxx",
+        "  /添加模型 自定义AI key:xxx url:https://api.myai.com/v1",
+    ]
+    return "\n".join(lines)
+
+
+async def _search_provider_url(provider: str, api_key: str) -> str:
+    """通过网络搜索查找未知 provider 的 API base_url。
+
+    策略：
+      1. 尝试用 httpx 直接访问常见域名模式
+      2. 搜索 provider 官网找到 API 文档
+    """
+    import httpx
+
+    # 1. 构造候选 URL 并并行探测
+    from models.resolver import _candidate_hosts, _PROBE_PATH_PATTERNS, _probe_one
+    candidates: list = []
+    for host in _candidate_hosts(provider):
+        for pattern in _PROBE_PATH_PATTERNS:
+            candidates.append(pattern.format(h=host))
+
+    if candidates:
+        cli = httpx.AsyncClient(timeout=6.0)
+        try:
+            # 批量探测，每批 10 个
+            batch_size = 10
+            for i in range(0, len(candidates), batch_size):
+                batch = candidates[i:i + batch_size]
+                results = await _aio_gather(
+                    *[_probe_one(cli, url, api_key, 6.0) for url in batch]
+                )
+                for url, ok in zip(batch, results):
+                    if ok:
+                        return url
+        except Exception:
+            pass
+        finally:
+            try:
+                await cli.aclose()
+            except Exception:
+                pass
+
+    # 2. Web 搜索
+    try:
+        url = await _web_search_provider_api(provider)
+        if url:
+            return url
+    except Exception:
+        pass
+
+    return ""
+
+
+async def _aio_gather(*coros):
+    """asyncio.gather 包装。"""
+    import asyncio
+    return await asyncio.gather(*coros, return_exceptions=False)
+
+
+async def _web_search_provider_api(provider: str) -> str:
+    """通过 web 搜索查找 provider 的 API base_url。"""
+    import httpx
+    import re as _re
+    import json as _json
+
+    # 构造搜索查询
+    query = f"{provider} API documentation base_url openai compatible endpoint"
+
+    # 尝试 DuckDuckGo Instant Answer API（无需 key）
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            resp = await cli.get(
+                "https://api.duckduckgo.com/",
+                params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # 从 AbstractText 或 RelatedTopics 中提取 URL
+                abstract = data.get("AbstractText", "")
+                abstract_url = data.get("AbstractURL", "")
+                if abstract_url:
+                    # 尝试从 abstract URL 推断 API 地址
+                    # 例如 https://docs.example.com/api → https://api.example.com/v1
+                    m = _re.search(r'https?://(?:docs?\.|api\.)?([\w.-]+)', abstract_url)
+                    if m:
+                        domain = m.group(1)
+                        # 尝试几个常见模式
+                        guess_urls = [
+                            f"https://api.{domain}/v1",
+                            f"https://{domain}/v1",
+                            f"https://api.{domain}/api/v1",
+                        ]
+                        for guess in guess_urls:
+                            try:
+                                r = await cli.get(f"{guess}/models", timeout=5.0)
+                                if 200 <= r.status_code < 300:
+                                    return guess
+                            except Exception:
+                                continue
+
+                # 搜索 RelatedTopics
+                for topic in data.get("RelatedTopics", [])[:5]:
+                    topic_url = topic.get("FirstURL", "") or topic.get("Text", "")
+                    if topic_url:
+                        m = _re.search(r'https?://(?:docs?\.|api\.)?([\w.-]+)', topic_url)
+                        if m:
+                            domain = m.group(1)
+                            guess_urls = [
+                                f"https://api.{domain}/v1",
+                                f"https://{domain}/v1",
+                            ]
+                            for guess in guess_urls:
+                                try:
+                                    r = await cli.get(f"{guess}/models", timeout=5.0)
+                                    if 200 <= r.status_code < 300:
+                                        return guess
+                                except Exception:
+                                    continue
+    except Exception:
+        pass
+
+    return ""
