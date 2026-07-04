@@ -407,9 +407,16 @@ class WeChatPersonalGateway(Plugin):
 
                 status = check.get("status", "")
                 if status == "confirmed":
-                    self._token = check.get("token", "")
-                    self._account_id = check.get("account_id", "")
-                    self._user_id = check.get("user_id", "")
+                    # iLink 官方协议 confirmed 响应字段：
+                    # bot_token, ilink_bot_id, ilink_user_id, baseurl
+                    # 兼容旧字段名 token/account_id/user_id
+                    self._token = check.get("bot_token", "") or check.get("token", "")
+                    self._account_id = check.get("ilink_bot_id", "") or check.get("account_id", "")
+                    self._user_id = check.get("ilink_user_id", "") or check.get("user_id", "")
+                    # baseurl 可能与默认值不同，始终使用返回值
+                    returned_baseurl = check.get("baseurl", "")
+                    if returned_baseurl:
+                        self._base_url = returned_baseurl
                     logger.info("wechat_personal: login successful, account_id=%s", self._account_id)
                     _save_credentials(self._account_id, self._token, self._base_url, self._user_id)
                     await self._connect_from_session(session)
