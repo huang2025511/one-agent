@@ -343,6 +343,18 @@ class WeChatPersonalGateway(Plugin):
                 logger.warning("wechat_personal: saved credentials failed, falling back to QR login")
 
         self._login_task = asyncio.create_task(self._do_login())
+        # 修复：之前 login() 立即返回 True，但 _do_login 是后台 task，
+        # QR code URL 还没拿到。/微信 skill 检查 qr_url 时还是空字符串，
+        # 只能显示"二维码链接将在日志中显示"——但 CLI 用户看不到日志。
+        # 这里同步等待 QR URL 就绪（最多 5 秒），让 /微信 命令返回时
+        # 已能展示二维码链接。
+        for _ in range(50):
+            if self._qr_url:
+                break
+            if self._login_task.done():
+                # _do_login 已结束（可能失败或成功），不再等
+                break
+            await asyncio.sleep(0.1)
         return True
 
     async def _do_login(self) -> bool:
