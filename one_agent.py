@@ -656,7 +656,12 @@ async def _interactive(app: OneAgentApp) -> None:
     session_id = "cli-session"
     while True:
         try:
-            line = input("one-agent> ").strip()
+            # 关键：用 asyncio.to_thread 包装同步 input()，避免阻塞 event loop。
+            # 如果用同步 input()，restart skill 创建的后台 task（asyncio.sleep + os.execv）
+            # 无法执行——event loop 被阻塞在 input() 上，直到用户再次输入才恢复。
+            # 这就是"更新/重启需要输入两次"的根因。
+            raw = await asyncio.to_thread(input, "one-agent> ")
+            line = raw.strip()
         except EOFError:
             print()
             return

@@ -537,6 +537,11 @@ class SkillManager(Plugin):
             清理逻辑执行。原实现直接 os.execv 跳过 finally 块，导致
             内存中数据丢失（如 cost tracker 未落盘、session 未持久化）。
             """
+            # 防止重复触发：如果已有 restart task 在运行，直接返回
+            existing = getattr(self, "_restart_task", None)
+            if existing is not None and not existing.done():
+                return "♻️ 重启已在进行中，请稍候..."
+
             import os
             import sys
             import json
