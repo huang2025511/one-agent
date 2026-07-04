@@ -211,17 +211,23 @@ async def _send_msg(
     chat_id: str,
     content: str,
     context_token: str = "",
+    client_id: str = "",
     msg_type: int = MSG_TYPE_TEXT,
 ) -> Dict[str, Any]:
     # iLink 官方协议发送消息格式：
-    # { "msg": { "to_user_id": ..., "context_token": ..., "item_list": [{"type": 1, "text_item": {"text": ...}}] } }
-    # context_token 来自入站消息的 client_id，必须原样回传，否则消息会被静默丢弃
+    # { "msg": { "to_user_id": ..., "context_token": ..., "client_id": ...,
+    #            "item_list": [{"type": 1, "text_item": {"text": ...}}] } }
+    # context_token 和 client_id 都来自入站消息，回复时原样回传。
+    # 之前误以为 client_id = context_token（值相同），实际是两个不同字段。
+    # 两个都传以覆盖 iLink 协议要求（HTTP 200 但消息静默丢弃是已知坑）。
     msg_obj: Dict[str, Any] = {
         "to_user_id": chat_id,
         "item_list": [{"type": msg_type, "text_item": {"text": content}}],
     }
     if context_token:
         msg_obj["context_token"] = context_token
+    if client_id:
+        msg_obj["client_id"] = client_id
     return await _api_post(
         session,
         base_url=base_url,
@@ -252,8 +258,12 @@ class WeChatPersonalGateway(Plugin):
         # iLink 二维码 token，用于轮询扫码状态
         self._qrcode_token: str = ""
         self._msg_tasks: set = set()
-        # 按用户缓存 context_token（从 client_id 获取），回复时必须回传
+        # 按用户缓存 context_token 和 client_id（回复时必须回传）。
+        # 修复：入站消息的 context_token 和 client_id 是两个不同的值，
+        # 之前误以为是同一个（注释"client_id = context_token"是错的）。
+        # iLink 可能要求发送时传其中一个或两个，故分别缓存。
         self._context_tokens: Dict[str, str] = {}
+        self._client_ids: Dict[str, str] = {}
         self._last_heartbeat: float = 0
         self._initial_sync_buf: str = ""
         # 实时进度反馈：追踪每个会话的进度状态
@@ -684,11 +694,13 @@ class WeChatPersonalGateway(Plugin):
             # from_user_id（不是 from_id）
             # message_type（不是 msg_type）
             # item_list[0].text_item.text（不是 content）
-            # client_id = context_token（回复时必须回传）
+            # context_token 和 client_id 是两个不同的值，都要缓存：
+            # - context_token: 会话上下文 token（AARzJWAFAAAB... 开头）
+            # - client_id: 消息投递标识（mmassistant_bypmsg_inbox_... 开头）
             msg_type = msg.get("message_type", 0) or msg.get("msg_type", 0)
             from_id = msg.get("from_user_id", "") or msg.get("from_id", "")
-            # context_token 是回复时必须回传的字段（iLink 官方协议）
-            context_token = msg.get("context_token", "") or msg.get("client_id", "")
+            context_token = msg.get("context_token", "")
+            client_id = msg.get("client_id", "")
 
             # 从 item_list 提取文本
             text = ""
@@ -712,10 +724,17 @@ class WeChatPersonalGateway(Plugin):
             if not text or not from_id:
                 return
 
-            # 缓存 context_token（回复时必须回传）
+            # 缓存 context_token 和 client_id（回复时必须回传）
             if context_token:
                 self._context_tokens[from_id] = context_token
-                logger.debug("wechat_personal: cached context_token for %s", from_id[:20])
+            if client_id:
+                self._client_ids[from_id] = client_id
+            logger.debug(
+                "wechat_personal: cached for %s: ctx_token=%s, client_id=%s",
+                from_id[:20],
+                "yes" if context_token else "no",
+                "yes" if client_id else "no",
+            )
 
             if self._allowed_users:
                 if from_id not in self._allowed_users:
@@ -871,10 +890,21 @@ class WeChatPersonalGateway(Plugin):
                           self._running, self._session is not None)
             return False
         try:
-            # 从缓存获取 context_token（回复时必须回传）
+            # 从缓存获取 context_token 和 client_id（回复时必须回传）
             context_token = self._context_tokens.get(chat_id, "")
-            if not context_token:
-                logger.warning("wechat_personal: no context_token for %s, message may not be delivered", chat_id[:20])
+            client_id = self._client_ids.get(chat_id, "")
+            if not context_token and not client_id:
+                logger.warning("wechat_personal: no context_token/client_id for %s, message may not be delivered", chat_id[:20])
+            # 诊断日志：打印发送关键字字段（token 脱敏只显示前 20 字符 + 长度）
+            logger.info(
+                "wechat_personal: sending to=%s, content=%s, ctx_token=%s(len=%d), client_id=%s(len=%d)",
+                chat_id[:20],
+                (text[:50] + "...") if len(text) > 50 else text,
+                (context_token[:20] + "...") if context_token else "EMPTY",
+                len(context_token),
+                (client_id[:20] + "...") if client_id else "EMPTY",
+                len(client_id),
+            )
             result = await _send_msg(
                 self._session,
                 base_url=self._base_url,
@@ -882,6 +912,7 @@ class WeChatPersonalGateway(Plugin):
                 chat_id=chat_id,
                 content=text,
                 context_token=context_token,
+                client_id=client_id,
             )
             ret = result.get("ret", 0)
             errcode = result.get("errcode", 0)
