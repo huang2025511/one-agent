@@ -139,6 +139,14 @@ class SmartRouter(Plugin):
             return
         total_routed = sum(s["picked"] for s in self._tier_stats.values())
         eval_interval = self_evo_cfg.get("eval_interval", 50)
+        # 防御：eval_interval=0 会导致 ZeroDivisionError（被 EventBus 捕获
+        # 后自演化逻辑永久停摆），且会触发每次 turn 都调整阈值的过频问题。
+        if eval_interval <= 0:
+            logger.warning(
+                "router.self_evolution.eval_interval=%s 无效，已重置为 50",
+                eval_interval,
+            )
+            eval_interval = 50
         if total_routed > 0 and total_routed % eval_interval == 0:
             self._adjust_thresholds()
 

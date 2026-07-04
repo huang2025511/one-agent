@@ -221,14 +221,20 @@ def test_password_hash_and_verify():
     assert mgr.verify("wrong_password") is False
 
 
-def test_password_no_hash_always_passes():
-    """When no password hash is set, verify() accepts anything."""
+def test_password_no_hash_rejects_all():
+    """When no password hash is set, verify() rejects everything.
+
+    修复说明：之前未配置密码时 verify() 返回 True，构成认证绕过——
+    任何 DANGEROUS 命令（rm -rf, mkfs 等）都能被任意非空密码解锁。
+    修复后：未配置密码 → 拒绝所有需要密码的操作，强制用户先配置密码。
+    """
     from executors.system import PasswordManager
     mgr = PasswordManager("")
     assert mgr.is_configured() is False
-    # Empty hash → password check always passes (no password required)
-    assert mgr.verify("anything") is True
-    assert mgr.verify("anything_else") is True
+    # 未配置密码 → 拒绝（修复后行为）
+    assert mgr.verify("anything") is False
+    assert mgr.verify("anything_else") is False
+    assert mgr.verify("") is False
 
 
 def test_password_cache():
@@ -396,7 +402,7 @@ def main() -> int:
         ("classify unknown", test_classify_unknown_is_medium),
         ("classify empty", test_classify_empty_command),
         ("password hash+verify", test_password_hash_and_verify),
-        ("password no hash", test_password_no_hash_always_passes),
+        ("password no hash", test_password_no_hash_rejects_all),
         ("password cache", test_password_cache),
         ("password lockout", test_password_lockout),
         ("password invalidate", test_password_invalidate_cache),

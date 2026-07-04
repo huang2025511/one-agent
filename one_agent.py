@@ -352,15 +352,28 @@ class OneAgentApp:
         from pathlib import Path as _Path
         restart_marker = _Path(self.config.agent.data_dir) / "restart_marker.json"
         if restart_marker.exists():
+            # 用 try/finally 确保 marker 文件被清理，即使 marker_data 不是 dict
+            # （如 JSON 解析出 list/str/int）导致 .get() 抛 AttributeError，
+            # 也要 unlink 而非永久残留。原代码 unlink 在 try 内被异常跳过。
             try:
                 marker_data = _json.loads(restart_marker.read_text(encoding="utf-8"))
-                restart_ts = marker_data.get("timestamp", 0)
-                if _time.time() - restart_ts < 120:  # 2 分钟内的重启
-                    self._recent_restart = restart_ts
-                    logger.info("detected recent restart at %s", restart_ts)
-                restart_marker.unlink()
-            except Exception:
-                pass
+                if isinstance(marker_data, dict):
+                    restart_ts = marker_data.get("timestamp", 0)
+                    if _time.time() - restart_ts < 120:  # 2 分钟内的重启
+                        self._recent_restart = restart_ts
+                        logger.info("detected recent restart at %s", restart_ts)
+                else:
+                    logger.warning(
+                        "restart_marker.json 内容不是 dict：%s，已忽略",
+                        type(marker_data).__name__,
+                    )
+            except Exception as exc:
+                logger.warning("读取 restart_marker.json 失败: %s", exc, exc_info=True)
+            finally:
+                try:
+                    restart_marker.unlink()
+                except OSError as unlink_exc:
+                    logger.debug("删除 restart_marker.json 失败: %s", unlink_exc)
 
         self.ctx = AgentContext(
             config=self.config.model_dump(),
@@ -415,6 +428,10 @@ class OneAgentApp:
                 self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
                 self.discord, self.slack, self.web, self.wechat_personal,
                 self.multimodal, self.rest_api, self.monitor, self.marketplace,
+                # 之前漏掉 alert_manager，导致 ctx.get_plugin("alerting") 返回 None，
+                # 与 _pm 注册形成不对称。approval_manager 不是 Plugin 子类
+                # （无 name 属性），仍通过 ctx.approval_manager 访问。
+                self._alert_manager,
             ) if p is not None
         ]
         self.ctx._alert_manager = self._alert_manager

@@ -263,9 +263,16 @@ class PasswordManager:
         Supports two formats:
         - ``pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>`` (recommended)
         - 64-char hex SHA-256 (legacy, unsalted — accepted for backward compat)
+
+        安全说明：未配置密码时返回 False（拒绝），而非 True。
+        之前的 `return True` 让 DANGEROUS 命令（rm -rf, mkfs 等）能被
+        任意非空密码解锁，构成认证绕过。正确做法是：未配置密码 →
+        所有需要密码的操作都拒绝，强制用户先配置密码。
         """
         if not self._password_hash:
-            return True  # no password configured = always pass
+            # 未配置密码 = 拒绝所有需要密码的操作（更安全）
+            # 之前的 `return True` 是认证绕过漏洞
+            return False
         stored = self._password_hash
         if stored.startswith("pbkdf2_sha256$"):
             return _verify_pbkdf2(password, stored)

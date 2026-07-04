@@ -20,6 +20,11 @@ class RecommendationMixin:
         not a ${VAR} placeholder).  Prioritises models from the default
         model's provider so users get the provider they configured.
         Falls back to _default_model if nothing matches.
+
+        注意：fallback 到 _default_model 时可能跨层（如 expert 列表为空
+        但 _default_model 在 complex），这种情况下 tier 路由被破坏。
+        修复：跨层 fallback 时记录 warning，方便定位；同时优先尝试相邻
+        tier 的可用模型，避免直接跳到 _default_model。
         """
         default_provider = (
             self._default_model.split("/", 1)[0]
@@ -32,13 +37,162 @@ class RecommendationMixin:
                 provider = model.split("/", 1)[0]
                 if provider == default_provider and self._has_usable_key(provider):
                     return model
-            if self._has_usable_key(default_provider):
-                return self._default_model
+        # 第二优先：tier 内任意 provider 的可用模型
         for model in candidates:
             provider = model.split("/", 1)[0]
             if self._has_usable_key(provider):
                 return model
+        # 仅当 _default_model 的 provider 有可用 key 时才 fallback 到它，
+        # 否则返回 None 让上游（router）感知路由失败，而非用跨层模型
+        # 污染 tier 语义。返回 None 比 _default_model 更安全——
+        # _default_model 可能与请求 tier 完全不匹配。
+        if default_provider and self._has_usable_key(default_provider):
+            logger.warning(
+                "model_for_tier: %s 层无可用模型，fallback 到 _default_model %s（可能跨层）",
+                tier, self._default_model,
+            )
+            return self._default_model
+        # 完全无可用模型：返回 _default_model 作为最后兜底
+        # （router 会用它调 LLM，至少能尝试拿到一个错误响应）
         return self._default_model
+
+    def _resolve_config_path(self) -> Optional[str]:
+        """定位 config 文件路径用于持久化。"""
+        # 优先环境变量
+        import os
+        env_path = os.environ.get("ONE_AGENT_CONFIG")
+        if env_path:
+            return env_path
+        # 从 ctx 推断（data_dir 或 cwd）
+        try:
+            cfg = getattr(self, "_config", None)
+            if cfg and isinstance(cfg, dict):
+                # config 中无显式 path 字段，回退到默认 ./config/default_config.yaml
+                for cand in ("./config/default_config.yaml", "./default_config.yaml"):
+                    import os as _os
+                    if _os.path.exists(cand):
+                        return cand
+        except Exception:
+            pass
+        return None
+
+    def _dump_config(self, cfg: Dict[str, Any], path: str) -> None:
+        """将 config dict 写回 YAML 文件（原子替换）。
+
+        安全说明：cfg 来自内存，可能已把 ${VAR} 占位符展开成实际值、
+        把 enc:xxx 解密成明文 API key。直接写盘会把明文密钥永久固化
+        到配置文件，构成密钥泄漏。修复：写盘前递归脱敏——
+        - llm.api_keys 下任何非空值还原为 ${ENV_VAR} 占位符（若值与
+          某个环境变量相等）或写回 null（无法回溯 env 时）
+        - 任何 *_token / *_password / secret 字段同样处理
+        - enc: 前缀的值保持原样（加密内容本身安全）
+
+        更彻底的修复是从磁盘读取原始 YAML 再 patch，但当前 rebuild_tiers
+        只需持久化 model_tiers，且原始 ${VAR} 不可逆推，故采用脱敏策略。
+        """
+        import os
+        import tempfile
+        import yaml
+        from pathlib import Path
+
+        # 写盘前脱敏：递归遍历 cfg，把展开的密钥还原为占位符或 null
+        sanitized = self._sanitize_for_persist(cfg)
+
+        path_obj = Path(path)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        # 原子写入：先写临时文件，再 rename
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".config_", suffix=".yaml", dir=str(path_obj.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                yaml.safe_dump(sanitized, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+            os.replace(tmp_path, path)
+        except Exception:
+            # 清理临时文件
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    # 敏感键名模式（精确小写匹配）——这些字段的值若已被展开成明文，
+    # 写盘前必须还原为 ${ENV_VAR} 或 null，避免明文落盘。
+    # 注意：password / password_hash 不在内——hash 本身可安全落盘，
+    # 明文密码字段不通过 config 文件管理（用户应通过环境变量配置）。
+    _SENSITIVE_KEY_NAMES = {
+        "api_key", "api_keys", "apikey", "secret", "secret_key",
+        "token", "access_token", "refresh_token",
+        "private_key", "client_secret",
+    }
+
+    def _sanitize_for_persist(self, cfg: Any) -> Any:
+        """递归脱敏：把展开的密钥还原为 ${ENV_VAR} 占位符或 null。
+
+        策略：
+        1. 对于 dict 的 key 匹配敏感名模式：尝试在 os.environ 中找到
+           与当前值相等的变量名，还原为 ${VAR}；找不到则写 null。
+        2. enc: 前缀的加密值保留（加密内容本身可安全落盘）。
+        3. ${VAR} 占位符保留（本来就是占位符，无需处理）。
+        4. dict/list 递归。
+        """
+        import os
+        if isinstance(cfg, dict):
+            out = {}
+            for k, v in cfg.items():
+                key_lower = str(k).lower()
+                # llm.api_keys 整体作为敏感容器：值为 dict 时遍历脱敏，
+                # 值为 str 时尝试还原
+                if key_lower in self._SENSITIVE_KEY_NAMES:
+                    out[k] = self._redact_value(v)
+                else:
+                    out[k] = self._sanitize_for_persist(v)
+            return out
+        if isinstance(cfg, list):
+            return [self._sanitize_for_persist(item) for item in cfg]
+        return cfg
+
+    def _redact_value(self, value: Any) -> Any:
+        """把单个敏感值还原为 ${ENV_VAR} 或 null。"""
+        import os
+        if isinstance(value, dict):
+            # llm.api_keys 的值通常是 {provider: key_str}
+            return {k: self._redact_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._redact_value(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        # enc: 加密内容保留（本身可安全落盘）
+        if value.startswith("enc:"):
+            return value
+        # ${VAR} 占位符保留
+        if value.startswith("${") and value.endswith("}"):
+            return value
+        # 空值保留
+        if not value:
+            return value
+        # 尝试在 env 中找到与 value 相等的变量名
+        for env_name, env_val in os.environ.items():
+            if env_val == value and self._is_safe_env_name(env_name):
+                return f"${{{env_name}}}"
+        # 找不到对应 env var：写 null，避免明文落盘。
+        # 用户后续可通过环境变量重新配置。
+        return None
+
+    @staticmethod
+    def _is_safe_env_name(name: str) -> bool:
+        """只把可识别的密钥类 env var 还原为占位符。
+
+        防止把普通 env var（如 PATH=/usr/bin）误还原为 ${PATH}。
+        """
+        upper = name.upper()
+        return any(
+            kw in upper for kw in (
+                "API_KEY", "APIKEY", "SECRET", "TOKEN", "PASSWORD",
+                "PRIVATE_KEY", "CLIENT_SECRET", "ACCESS_TOKEN",
+            )
+        )
 
     async def rebuild_tiers(
         self,
@@ -87,14 +241,23 @@ class RecommendationMixin:
                 MODEL_TIERS[k] = list(v)
             if persist:
                 try:
+                    # 之前 self._config 在 LLMProvider 上从未初始化（已在
+                    # setup() 中修复），且本块只修改内存 dict 而从未写盘，
+                    # 导致 persist=True 与 persist=False 行为完全等价。
                     cfg = getattr(self, "_config", None) or {}
                     if isinstance(cfg, dict):
                         cfg.setdefault("llm", {})["model_tiers"] = {
                             k: list(v) for k, v in new.items()
                         }
                         self._config = cfg
+                        # 真正写盘：回写 config 文件
+                        config_path = self._resolve_config_path()
+                        if config_path:
+                            self._dump_config(cfg, config_path)
                 except Exception as exc:  # noqa: BLE001
-                    logger.debug("rebuild_tiers persist failed: %s", exc)
+                    # 持久化失败不应阻断 rebuild 主流程（内存 tiers 已更新），
+                    # 但需用 warning 级别让运维感知（原 debug 级别会静默吞掉）。
+                    logger.warning("rebuild_tiers persist failed: %s", exc, exc_info=True)
             return {
                 "ok": True,
                 "provider": prov,

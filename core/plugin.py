@@ -182,7 +182,12 @@ class PluginManager:
     async def stop_all(self) -> tuple[int, int]:
         success = 0
         failed = 0
-        for plugin in reversed(self._plugins):
+        # 停止顺序应与启动顺序相反（反拓扑序），而非 reversed(注册序)。
+        # 注册序不等于拓扑序：如果依赖插件（如 llm）在注册序里靠后，
+        # reversed 后会先 stop，依赖它的插件（如 router）的 stop 里
+        # 若访问 self._llm 会拿到已关闭的 client，抛 RuntimeError。
+        ordered = self._topological(self._plugins)
+        for plugin in reversed(ordered):
             try:
                 await plugin.stop()
                 success += 1

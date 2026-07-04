@@ -79,11 +79,25 @@ class DelegationManager:
                 max_tokens=500,
                 tools=None,
             )
+            # 防御：LLM 在无 key / 服务不可用时返回 {"text": "no_api_key...",
+            # "failed": True}（不抛异常），如果不检查就把错误字符串
+            # split 成"子任务"喂给 SubAgent 执行，浪费 token 且毫无意义。
+            if resp.get("failed"):
+                logger.warning(
+                    "DelegationManager decompose: LLM returned failed response: %s",
+                    (resp.get("text", "") or "")[:200],
+                )
+                return [task]
             text = resp.get("text", "")
             subtasks = [s.strip() for s in text.split("\n") if s.strip() and len(s.strip()) > 10]
             return subtasks[:self._max_parallel]
         except (asyncio.TimeoutError, httpx.HTTPError, ValueError, KeyError) as exc:
             logger.warning("DelegationManager decompose failed: %s", exc)
+            return [task]
+        except Exception as exc:
+            # 兜底：chat_completion 可能抛 RuntimeError / ConnectionError /
+            # OSError（cost_tracker 写入失败等），不应让整个 turn 挂掉。
+            logger.warning("DelegationManager decompose unexpected error: %s", exc, exc_info=True)
             return [task]
 
     async def execute(self, task: str, model: Optional[str] = None) -> Dict[str, Any]:

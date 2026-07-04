@@ -531,6 +531,11 @@ class SkillManager(Plugin):
             写入重启标记后延迟 1.5 秒执行 execv，
             确保 turn_completed 事件有机会发送给用户。
             新进程启动时读取标记，感知到刚发生过重启。
+
+            安全修复：在 os.execv 之前调用所有 plugin 的 stop()，
+            确保 SQLite commit、httpx 连接池关闭、cost tracker 落盘等
+            清理逻辑执行。原实现直接 os.execv 跳过 finally 块，导致
+            内存中数据丢失（如 cost tracker 未落盘、session 未持久化）。
             """
             import os
             import sys
@@ -551,20 +556,63 @@ class SkillManager(Plugin):
             except Exception:
                 pass
 
-            # 延迟重启，让事件总线把回复发给用户
-            def _do_restart() -> None:
+            # 延迟重启，让事件总线把回复发给用户。
+            # 关键：_do_restart 是 async，先 sleep 1.5s 让回复发出，
+            # 再 await 所有 plugin 的 stop()（带 3s timeout 避免卡死），
+            # 最后 os.execv。
+            async def _do_restart_async() -> None:
+                import asyncio as _aio
+                # 1) 让事件总线把回复发给用户
+                try:
+                    await _aio.sleep(1.5)
+                except _aio.CancelledError:
+                    pass
+                # 2) 优雅停止所有 plugin
+                ctx_ref = getattr(self, "_ctx_ref", None)
+                if ctx_ref is not None:
+                    plugins = list(getattr(ctx_ref, "_plugins", []) or [])
+                    # 反向停止（依赖项最后停）
+                    for plugin in reversed(plugins):
+                        try:
+                            stop_fn = getattr(plugin, "stop", None)
+                            if stop_fn is None:
+                                continue
+                            maybe_coro = stop_fn()
+                            if hasattr(maybe_coro, "__await__"):
+                                try:
+                                    await _aio.wait_for(maybe_coro, timeout=3.0)
+                                except _aio.TimeoutError:
+                                    logger.warning(
+                                        "restart: plugin %s stop timeout, forcing restart",
+                                        getattr(plugin, "name", "?"),
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "restart: plugin %s stop failed",
+                                        getattr(plugin, "name", "?"),
+                                    )
+                        except Exception:
+                            logger.exception(
+                                "restart: plugin %s stop raised",
+                                getattr(plugin, "name", "?"),
+                            )
+                # 3) 清理后替换进程
                 try:
                     os.execv(sys.executable, [sys.executable] + sys.argv)
                 except Exception:
-                    pass
+                    logger.exception("restart: os.execv failed")
 
             import asyncio as _aio
             try:
                 loop = _aio.get_event_loop()
-                loop.call_later(1.5, _do_restart)
+                # 用 create_task 调度 async 清理 + execv
+                loop.create_task(_do_restart_async())
             except Exception:
-                # 如果拿不到 loop，立即重启
-                _do_restart()
+                # 如果拿不到 loop，直接同步执行（跳过清理作为最后兜底）
+                try:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception:
+                    logger.exception("restart: fallback os.execv failed")
 
             return "♻️ 正在重启 One-Agent...\n重启后将自动加载最新版本，请稍候。"
         self.register(Skill(
@@ -1490,12 +1538,25 @@ def _process_settings_command(input_text: str, config: dict) -> str:
 
 
 def _save_config(config: dict) -> None:
-    """将配置写回 YAML 文件（原子写入，带文件锁）。"""
+    """将配置写回 YAML 文件（原子写入，带文件锁）。
+
+    安全修复：
+    1. 写盘前调用 `_sanitize_config_for_persist` 脱敏——内存中的 config
+       来自 ctx.config，已把 ${VAR} 展开为明文、enc:xxx 解密为明文 API key。
+       直接 dump 会把明文密钥永久固化到配置文件。脱敏把敏感字段的值
+       还原为 ${ENV_VAR} 占位符（若能匹配环境变量）或 null。
+    2. 临时文件清理改为 try/finally + temp_path 预初始化为 None，避免
+       yaml.YAMLError 抛出时 temp_path 未定义导致临时文件残留磁盘
+       （原 except OSError 不捕获 YAMLError）。
+    """
     import tempfile
 
     import yaml
     config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
     lock_path = config_path + ".lock"
+
+    # 写盘前脱敏，避免明文密钥落盘
+    sanitized = _sanitize_config_for_persist(config)
 
     # Cross-platform file locking
     lock_fd = None
@@ -1510,6 +1571,7 @@ def _save_config(config: dict) -> None:
         except ImportError:
             logger.warning("File locking not available on this platform")
 
+    temp_path: str | None = None  # 预初始化，确保 finally 中可访问
     try:
         # Acquire file lock to prevent race conditions
         lock_fd = open(lock_path, "w")
@@ -1533,10 +1595,11 @@ def _save_config(config: dict) -> None:
                 dir=dir_name,
                 delete=False,
             ) as f:
-                yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                yaml.dump(sanitized, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
                 temp_path = f.name
             # Atomic rename
             os.replace(temp_path, config_path)
+            temp_path = None  # 已成功 rename，无需清理
         finally:
             if use_fcntl and lock_fd:
                 try:
@@ -1555,14 +1618,90 @@ def _save_config(config: dict) -> None:
                 os.unlink(lock_path)
             except OSError as exc:
                 logger.error("failed to unlink lock file %s: %s", lock_path, exc, exc_info=True)
-    except OSError as exc:
+    except Exception as exc:
+        # 改为 except Exception 而非 OSError，捕获 yaml.YAMLError 等所有异常
         logger.error("保存配置失败: %s", exc, exc_info=True)
-        # Clean up temp file on error
-        try:
-            if 'temp_path' in locals():
+    finally:
+        # 兜底清理临时文件（无论成功失败）
+        if temp_path is not None:
+            try:
                 os.unlink(temp_path)
-        except OSError as exc2:
-            logger.error("failed to clean up temp file %s: %s", temp_path, exc2, exc_info=True)
+            except OSError as exc2:
+                logger.error("failed to clean up temp file %s: %s", temp_path, exc2, exc_info=True)
+
+
+# 敏感键名集合（与 models/recommend.py 保持一致）
+_CONFIG_SENSITIVE_KEYS = {
+    "api_key", "api_keys", "apikey", "secret", "secret_key",
+    "token", "access_token", "refresh_token",
+    "private_key", "client_secret",
+}
+
+
+def _sanitize_config_for_persist(cfg, _seen=None):
+    """递归脱敏 config dict，把展开的密钥还原为 ${ENV_VAR} 或 null。
+
+    与 models/recommend.py 的 _sanitize_for_persist 等价——独立实现以
+    避免循环依赖（skills 在某些场景下先于 models 加载）。
+    """
+    import os
+    if _seen is None:
+        _seen = set()
+    if id(cfg) in _seen:
+        return cfg  # 防止循环引用
+    _seen.add(id(cfg))
+    if isinstance(cfg, dict):
+        out = {}
+        for k, v in cfg.items():
+            key_lower = str(k).lower()
+            if key_lower in _CONFIG_SENSITIVE_KEYS:
+                out[k] = _redact_config_value(v, _seen)
+            else:
+                out[k] = _sanitize_config_for_persist(v, _seen)
+        return out
+    if isinstance(cfg, list):
+        return [_sanitize_config_for_persist(item, _seen) for item in cfg]
+    return cfg
+
+
+def _redact_config_value(value, _seen):
+    """把单个敏感值还原为 ${ENV_VAR} 或 null。"""
+    import os
+    if isinstance(value, dict):
+        return {k: _redact_config_value(v, _seen) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_config_value(item, _seen) for item in value]
+    if not isinstance(value, str):
+        return value
+    # enc: 加密内容保留（本身可安全落盘）
+    if value.startswith("enc:"):
+        return value
+    # ${VAR} 占位符保留
+    if value.startswith("${") and value.endswith("}"):
+        return value
+    # 空值保留
+    if not value:
+        return value
+    # 尝试在 env 中找到与 value 相等的变量名
+    for env_name, env_val in os.environ.items():
+        if env_val == value and _is_safe_env_name(env_name):
+            return f"${{{env_name}}}"
+    # 找不到对应 env var：写 null，避免明文落盘
+    return None
+
+
+def _is_safe_env_name(name: str) -> bool:
+    """只把可识别的密钥类 env var 还原为占位符。
+
+    防止把普通 env var（如 PATH=/usr/bin）误还原为 ${PATH}。
+    """
+    upper = name.upper()
+    return any(
+        kw in upper for kw in (
+            "API_KEY", "APIKEY", "SECRET", "TOKEN", "PASSWORD",
+            "PRIVATE_KEY", "CLIENT_SECRET", "ACCESS_TOKEN",
+        )
+    )
 
 
 # ============================================================
@@ -1899,14 +2038,18 @@ def _add_models_usage() -> str:
 
 
 async def _search_provider_url(provider: str, api_key: str) -> str:
-    """通过网络搜索查找未知 provider 的 API base_url。
+    """通过网络搜索查找未知 provider 的 API base_url.
 
     注意：resolver 的 set_api_key 已经做过域名探测，这里只做 web 搜索。
     如果 web 搜索找到候选域名，再验证 /v1/models 端点是否可用。
+
+    安全修复：必须把 api_key 透传给 _web_search_provider_api，否则探测
+    /models 端点时不带 Authorization 头，所有需要认证的 provider
+    都会返回 401/403 而被误判为「不可用」。
     """
     # Web 搜索
     try:
-        url = await _web_search_provider_api(provider)
+        url = await _web_search_provider_api(provider, api_key=api_key)
         if url:
             return url
     except Exception:
@@ -1915,10 +2058,18 @@ async def _search_provider_url(provider: str, api_key: str) -> str:
     return ""
 
 
-async def _web_search_provider_api(provider: str) -> str:
-    """通过 web 搜索查找 provider 的 API base_url。"""
+async def _web_search_provider_api(provider: str, api_key: str = "") -> str:
+    """通过 web 搜索查找 provider 的 API base_url。
+
+    api_key 用于探测 /models 端点时携带 Authorization 头——绝大多数
+    OpenAI 兼容 provider 的 /models 端点都需要认证，不带 key 会全部
+    返回 401/403，导致 _web_search_provider_api 永远返回空串。
+    """
     import httpx
     import re as _re
+
+    # 探测端点时统一带 Authorization 头（若 api_key 非空）
+    auth_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     # 构造搜索查询
     query = f"{provider} API documentation base_url openai compatible endpoint"
@@ -1948,7 +2099,11 @@ async def _web_search_provider_api(provider: str) -> str:
                         ]
                         for guess in guess_urls:
                             try:
-                                r = await cli.get(f"{guess}/models", timeout=5.0)
+                                r = await cli.get(
+                                    f"{guess}/models",
+                                    headers=auth_headers,
+                                    timeout=5.0,
+                                )
                                 if 200 <= r.status_code < 300:
                                     return guess
                             except Exception:
@@ -1967,7 +2122,11 @@ async def _web_search_provider_api(provider: str) -> str:
                             ]
                             for guess in guess_urls:
                                 try:
-                                    r = await cli.get(f"{guess}/models", timeout=5.0)
+                                    r = await cli.get(
+                                        f"{guess}/models",
+                                        headers=auth_headers,
+                                        timeout=5.0,
+                                    )
                                     if 200 <= r.status_code < 300:
                                         return guess
                                 except Exception:

@@ -1116,6 +1116,10 @@ class Coordinator(Plugin):
             original_system = (
                 messages[0] if messages and messages[0].get("role") == "system" else None
             )
+            # 当 keep_recent >= len(messages) 时（短列表），recent 会包含
+            # messages[0]，再手动 append 一次会重复。这里过滤掉原 system。
+            if original_system is not None:
+                recent = [m for m in recent if m is not original_system]
             messages.clear()
             if original_system is not None:
                 messages.append(original_system)

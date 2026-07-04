@@ -72,7 +72,11 @@ class ToolResult:
             return f"[{self.tool_name} 不可用] {self.error or '该工具当前不可用，请尝试其他方法'}"
         elif self.status == "skipped":
             return f"[{self.tool_name} 已跳过] {self.error or ''}"
-        return str(self.data)
+        elif self.status == "timeout":
+            # timeout 状态没有专门分支时会 fallthrough 到 `str(self.data)`，
+            # 当 data is None 时返回字符串 "None" 被 LLM 当真值，造成混淆。
+            return f"[{self.tool_name} 执行超时] {self.error or '工具调用超过最大执行时间'}"
+        return str(self.data) if self.data is not None else "(无结果)"
 
     def to_dict(self) -> dict:
         """Serialize for API responses."""

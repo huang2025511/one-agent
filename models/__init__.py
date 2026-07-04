@@ -182,6 +182,10 @@ class LLMProvider(RecommendationMixin, Plugin):
     # -------------------------------------------------------- lifecycle
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
+        # 保存 config 引用，供 rebuild_tiers(persist=True) 持久化使用。
+        # 之前 LLMProvider 从未设置 self._config，导致 recommend.py 的
+        # getattr(self, "_config", None) 永远返回 None，persist 完全失效。
+        self._config = ctx.config
         llm_cfg = ctx.config.get("llm", {}) or {}
         self._api_keys = llm_cfg.get("api_keys", {}) or {}
         primary = llm_cfg.get("primary_model")
@@ -381,6 +385,13 @@ class LLMProvider(RecommendationMixin, Plugin):
         if provider not in self._provider_base_urls:
             # Use the resolver if available, otherwise just leave it —
             # get_catalog() / rebuild_tiers() will return no_api_key in that case
+            #
+            # 安全修复：必须把 api_key 传给 resolve()。原实现调用
+            # resolve(provider) 不带 api_key，导致 _probe_one 收到空 key
+            # → 不发 Authorization 头 → 任何需要认证的 /models 端点
+            # 返回 401/403 → 探测失败 → 未知 provider 永远无法自动发现
+            # base_url。已知 provider（在 KNOWN_PROVIDERS 内）不受影响，
+            # 但 _add_models 的「自动探测」场景几乎全失败。
             try:
                 import asyncio as _asyncio
 
@@ -388,7 +399,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                 try:
                     loop = _asyncio.get_event_loop()
                     if loop.is_running():
-                        hint_info = _asyncio.ensure_future(resolve(provider))
+                        hint_info = _asyncio.ensure_future(resolve(provider, api_key=key))
                         hint_info.add_done_callback(
                             lambda fut: self._on_provider_resolved(provider, fut.result())
                         )
@@ -398,7 +409,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                     try:
                         new_loop = _asyncio.new_event_loop()
                         try:
-                            hint_info = new_loop.run_until_complete(resolve(provider))
+                            hint_info = new_loop.run_until_complete(resolve(provider, api_key=key))
                         finally:
                             new_loop.close()
                         self._on_provider_resolved(provider, hint_info)
@@ -819,7 +830,10 @@ class LLMProvider(RecommendationMixin, Plugin):
         # configs don't share entries.  For stateful tools (weather, API calls)
         # callers should pass use_cache=False explicitly.
         if use_cache and self._cache is not None:
-            cached = self._cache.get(messages, model, tools, temperature)
+            # 缓存键一致性：get 和 set 必须用相同的 tools 规范化。
+            # 之前 set 用 `tools or []`（None → []），get 直接传 tools（None），
+            # 导致 tools=None 调用永远 miss（None 生成 "tools":null，[] 生成 "tools":[]）。
+            cached = self._cache.get(messages, model, tools or [], temperature)
             if cached is not None:
                 logger.info("cache hit for model=%s (tools=%s)", model, bool(tools))
                 return cached
