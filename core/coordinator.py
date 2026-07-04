@@ -651,7 +651,9 @@ class Coordinator(Plugin):
         await self._auto_web_search_if_needed(messages, turn)
 
         # --- Step 3: Tool-call loop ---
-        self._emit_progress(turn, "正在执行任务...", "tool_loop")
+        # 只对复杂任务发进度，简单任务靠心跳兜底
+        if complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
+            self._emit_progress(turn, "正在执行任务...", "tool_loop")
         await self._tool_loop(messages, turn, tools)
 
         # --- Step 4: Post-execution quality improvements by tier ---
@@ -1314,10 +1316,11 @@ class Coordinator(Plugin):
             for idx, tc in enumerate(tool_calls):
                 name = tc.get("name") or ""
                 args = tc.get("args") or {}
-                if iteration > 0:
-                    self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
-                else:
-                    self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
+                if getattr(turn, "estimated_complexity", 0) >= COMPLEX_COMPLEXITY_THRESHOLD:
+                    if iteration > 0:
+                        self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
+                    else:
+                        self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
                 result = await self._dispatch_smart(tc, name, args, failed_skills)
 
                 if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
@@ -1343,10 +1346,11 @@ class Coordinator(Plugin):
             for tc in tool_calls:
                 name = tc.get("name") or ""
                 args = tc.get("args") or {}
-                if iteration > 0:
-                    self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
-                else:
-                    self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
+                if getattr(turn, "estimated_complexity", 0) >= COMPLEX_COMPLEXITY_THRESHOLD:
+                    if iteration > 0:
+                        self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
+                    else:
+                        self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
                 result = await self._dispatch_smart(tc, name, args, failed_skills)
 
                 if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:

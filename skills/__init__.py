@@ -1617,7 +1617,6 @@ async def _show_models(llm, input_text: str) -> str:
 
     lines = ["📡 智能路由模型列表", "=" * 50, ""]
 
-    has_any = False
     for tier in _TIER_ORDER:
         info = _TIER_INFO[tier]
         models = MODEL_TIERS.get(tier, [])
@@ -1684,27 +1683,34 @@ async def _add_models(llm, input_text: str) -> str:
     explicit_url = url_match.group(1).rstrip(",;") if url_match else ""
 
     # 移除 key 和 url 部分，剩下的用于解析 provider
-    remaining = text
+    # 注意：两个 match 的索引都是相对于原始 text 的，不能依次切片
+    spans = []
     if key_match:
-        remaining = remaining[:key_match.start()] + remaining[key_match.end():]
+        spans.append((key_match.start(), key_match.end()))
     if url_match:
-        remaining = remaining[:url_match.start()] + remaining[url_match.end():]
+        spans.append((url_match.start(), url_match.end()))
+    spans.sort()
+    remaining = ""
+    prev_end = 0
+    for start, end in spans:
+        remaining += text[prev_end:start]
+        prev_end = end
+    remaining += text[prev_end:]
     remaining = remaining.strip()
 
-    # 检查是否要求免费
-    free_only = any(k in remaining for k in ("免费", "free"))
-    # 检查是否要求全部
-    all_models_flag = any(k in remaining for k in ("全部", "all"))
+    # 检查是否要求免费/全部（用词边界匹配，避免破坏 provider 名称）
+    free_only = "免费" in remaining or bool(_re.search(r'\bfree\b', remaining, _re.IGNORECASE))
+    all_models_flag = "全部" in remaining or bool(_re.search(r'\ball\b', remaining, _re.IGNORECASE))
     # 移除这些修饰词
-    for word in ("免费", "free", "全部", "all"):
-        remaining = remaining.replace(word, "").strip()
+    remaining = _re.sub(r'免费|\bfree\b', '', remaining, flags=_re.IGNORECASE).strip()
+    remaining = _re.sub(r'全部|\ball\b', '', remaining, flags=_re.IGNORECASE).strip()
 
     provider = remaining.lower().strip()
     if not provider:
         return _add_models_usage()
 
     # 别名转换
-    from models.resolver import _PROVIDER_ALIASES, KNOWN_PROVIDERS, resolve as _resolve_provider
+    from models.resolver import _PROVIDER_ALIASES, KNOWN_PROVIDERS
     if provider in _PROVIDER_ALIASES:
         provider = _PROVIDER_ALIASES[provider]
 
@@ -1888,41 +1894,10 @@ def _add_models_usage() -> str:
 async def _search_provider_url(provider: str, api_key: str) -> str:
     """通过网络搜索查找未知 provider 的 API base_url。
 
-    策略：
-      1. 尝试用 httpx 直接访问常见域名模式
-      2. 搜索 provider 官网找到 API 文档
+    注意：resolver 的 set_api_key 已经做过域名探测，这里只做 web 搜索。
+    如果 web 搜索找到候选域名，再验证 /v1/models 端点是否可用。
     """
-    import httpx
-
-    # 1. 构造候选 URL 并并行探测
-    from models.resolver import _candidate_hosts, _PROBE_PATH_PATTERNS, _probe_one
-    candidates: list = []
-    for host in _candidate_hosts(provider):
-        for pattern in _PROBE_PATH_PATTERNS:
-            candidates.append(pattern.format(h=host))
-
-    if candidates:
-        cli = httpx.AsyncClient(timeout=6.0)
-        try:
-            # 批量探测，每批 10 个
-            batch_size = 10
-            for i in range(0, len(candidates), batch_size):
-                batch = candidates[i:i + batch_size]
-                results = await _aio_gather(
-                    *[_probe_one(cli, url, api_key, 6.0) for url in batch]
-                )
-                for url, ok in zip(batch, results):
-                    if ok:
-                        return url
-        except Exception:
-            pass
-        finally:
-            try:
-                await cli.aclose()
-            except Exception:
-                pass
-
-    # 2. Web 搜索
+    # Web 搜索
     try:
         url = await _web_search_provider_api(provider)
         if url:
@@ -1933,17 +1908,10 @@ async def _search_provider_url(provider: str, api_key: str) -> str:
     return ""
 
 
-async def _aio_gather(*coros):
-    """asyncio.gather 包装。"""
-    import asyncio
-    return await asyncio.gather(*coros, return_exceptions=False)
-
-
 async def _web_search_provider_api(provider: str) -> str:
     """通过 web 搜索查找 provider 的 API base_url。"""
     import httpx
     import re as _re
-    import json as _json
 
     # 构造搜索查询
     query = f"{provider} API documentation base_url openai compatible endpoint"
@@ -1957,8 +1925,7 @@ async def _web_search_provider_api(provider: str) -> str:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                # 从 AbstractText 或 RelatedTopics 中提取 URL
-                abstract = data.get("AbstractText", "")
+                # 从 AbstractURL 或 RelatedTopics 中提取 URL
                 abstract_url = data.get("AbstractURL", "")
                 if abstract_url:
                     # 尝试从 abstract URL 推断 API 地址
