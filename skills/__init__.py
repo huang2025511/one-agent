@@ -656,8 +656,8 @@ class SkillManager(Plugin):
             def _eval(node):
                 if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
                     return node.value
-                if isinstance(node, ast.Num):  # py<3.8 compat
-                    return node.n
+                # ast.Num 在 Python 3.8 已废弃、3.14 已删除 — 只保留 ast.Constant
+                # 分支即可（py 3.8+ 的所有数字字面量都走 ast.Constant）。
                 if isinstance(node, ast.BinOp):
                     return _ops[type(node.op)](_eval(node.left), _eval(node.right))
                 if isinstance(node, ast.UnaryOp):
