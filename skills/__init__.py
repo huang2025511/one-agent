@@ -567,6 +567,7 @@ class SkillManager(Plugin):
                     await _aio.sleep(1.5)
                 except _aio.CancelledError:
                     pass
+                logger.info("restart: begin graceful shutdown")
                 # 2) 优雅停止所有 plugin
                 ctx_ref = getattr(self, "_ctx_ref", None)
                 if ctx_ref is not None:
@@ -597,24 +598,32 @@ class SkillManager(Plugin):
                                 getattr(plugin, "name", "?"),
                             )
                 # 3) 清理后替换进程
+                logger.info("restart: all plugins stopped, exec-ing new process")
                 try:
                     os.execv(sys.executable, [sys.executable] + sys.argv)
                 except Exception:
-                    logger.exception("restart: os.execv failed")
+                    logger.error("restart: os.execv failed — process will keep running with old code")
+                    logger.exception("restart: os.execv exception")
 
             import asyncio as _aio
             try:
-                # 修复：用 get_running_loop() 替代 get_event_loop()。
-                # restart handler 是同步函数，但被 Coordinator 在 async
-                # 上下文里调用。get_event_loop() 在 Python 3.12+ 同步
-                # 上下文里 DeprecationWarning；只有在 running loop 里
-                # create_task 才有意义，没 running loop 直接 fallback
-                # 到 os.execv。
                 loop = _aio.get_running_loop()
-                # 用 create_task 调度 async 清理 + execv
-                loop.create_task(_do_restart_async())
+                # 关键修复：保存 task 强引用，避免被 GC。
+                # asyncio 文档明确说 event loop 只保留 weak reference，
+                # task 在执行前可能被 GC 回收，导致重启静默不执行
+                # （用户看到"正在重启"消息后回到提示符，但什么都没发生）。
+                # 把 task 挂到 self._restart_task 形成强引用。
+                self._restart_task = loop.create_task(_do_restart_async())
+                # 加 done_callback 记录异常（task 因异常结束时 logging）
+                def _log_restart_failure(task):
+                    if task.cancelled():
+                        logger.warning("restart: task was cancelled, restart may not have completed")
+                    elif task.exception():
+                        logger.error("restart: task failed: %s", task.exception(), exc_info=task.exception())
+                self._restart_task.add_done_callback(_log_restart_failure)
             except RuntimeError:
                 # 没 running loop，直接同步执行（跳过清理作为最后兜底）
+                logger.info("restart: no running loop, sync os.execv")
                 try:
                     os.execv(sys.executable, [sys.executable] + sys.argv)
                 except Exception:
