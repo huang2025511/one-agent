@@ -14,6 +14,10 @@ MODEL_TIERS: Dict[str, List[str]] = {
         "anthropic/claude-haiku-latest",
         "deepseek/deepseek-chat",
         "qwen/qwen-2.5-7b-instruct",
+        # 修复：补 sensenova/tiny，与 default_config.yaml / dev_config 一致。
+        # 之前此条缺失，导致只配了 sensenova key 时 model_for_tier('trivial')
+        # 在 tier 内找不到可用模型，fallback 到无 key 的 _default_model。
+        "sensenova/tiny",
     ],
     "simple": [
         "anthropic/claude-3.5-haiku-20241022",
@@ -29,6 +33,8 @@ MODEL_TIERS: Dict[str, List[str]] = {
         "anthropic/claude-4.5-sonnet-20250514",
         "openai/o3",
         "google/gemini-2.5-pro-preview-05-15",
+        # 修复：补 sensenova/opus，与 default_config.yaml 一致。
+        "sensenova/opus",
     ],
 }
 

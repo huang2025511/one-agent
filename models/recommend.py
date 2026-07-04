@@ -52,8 +52,25 @@ class RecommendationMixin:
                 tier, self._default_model,
             )
             return self._default_model
-        # 完全无可用模型：返回 _default_model 作为最后兜底
-        # （router 会用它调 LLM，至少能尝试拿到一个错误响应）
+        # _default_model 的 provider 也没 key（典型场景：primary_model 默认到
+        # anthropic 但用户只配了 sensenova）。此时返回 _default_model 会让
+        # chat_completion 直接报 no_api_key——看似合理，但对用户而言是"明明
+        # 配了 sensenova 却用不了"。修复：扫描所有 tier，找任意有可用 key 的
+        # provider 的模型返回（跨 tier 也比用没 key 的 provider 强，至少能
+        # 跑通 LLM 调用）。这样即使用户只配了 sensenova，router 也能选到
+        # sensenova/tiny 而非无 key 的 anthropic/claude-3.5-sonnet。
+        for any_tier_models in MODEL_TIERS.values():
+            for model in any_tier_models:
+                prov = model.split("/", 1)[0] if "/" in model else ""
+                if prov and prov != default_provider and self._has_usable_key(prov):
+                    logger.warning(
+                        "model_for_tier: %s 层无可用模型且 _default_model 的 provider "
+                        "%s 也无 key，跨 tier 回退到 %s（有可用 key）",
+                        tier, default_provider, model,
+                    )
+                    return model
+        # 真的没有任何 provider 有 key：返回 _default_model 让 chat_completion
+        # 报 no_api_key（此时 fallback chain 也无济于事，因为没有 provider 有 key）
         return self._default_model
 
     def _resolve_config_path(self) -> Optional[str]:

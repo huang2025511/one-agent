@@ -123,7 +123,11 @@ class LLMProvider(RecommendationMixin, Plugin):
         super().__init__()
         self._client: Optional[httpx.AsyncClient] = None
         self._api_keys: Dict[str, str] = {}
-        self._default_model: str = "anthropic/claude-3.5-sonnet-20241022"
+        # 修复：默认 model 从 anthropic 改为 sensenova（商汤）。
+        # 与 LLMConfig / default_config.yaml / setup_wizard 默认一致。
+        # 之前默认 anthropic 但多数用户不配 anthropic key，导致
+        # model_for_tier 回退到无 key 的 anthropic → 0 tokens。
+        self._default_model: str = "sensenova/sensenova-6.7-flash-lite"
         self._default_temperature = 0.3
         self._default_max_tokens = 2048
         self._timeout = DEFAULT_TIMEOUT
@@ -196,6 +200,20 @@ class LLMProvider(RecommendationMixin, Plugin):
         # 修复 bug：之前只从 model 名字推断 provider，对 nvidia 等
         # "vendor/model" 格式的 model id 会误判 provider。
         self._primary_provider = (llm_cfg.get("primary_provider") or "").strip() or None
+        # 修复：加载 config 的 model_tiers 到运行时 MODEL_TIERS。
+        # 之前 config 里的 model_tiers 是"装饰性"的——只有 rebuild_tiers
+        # （从 provider /models 端点拉取后）才会写 MODEL_TIERS，启动时根本
+        # 不读 config 的 model_tiers。导致用户在 default_config.yaml 把
+        # sensenova/tiny 加进 trivial 也无效（运行时用的是 tiers.py 硬编码
+        # 的旧列表）。现在 setup 时把 config 的 model_tiers merge 进来，
+        # 用户改 config 即时生效，不依赖 rebuild_tiers。
+        cfg_tiers = llm_cfg.get("model_tiers") or {}
+        if isinstance(cfg_tiers, dict):
+            for tier_name, models in cfg_tiers.items():
+                if isinstance(models, list):
+                    MODEL_TIERS[tier_name] = list(models)
+            logger.info("loaded model_tiers from config: %s",
+                        {k: len(v) for k, v in MODEL_TIERS.items()})
         self._default_temperature = llm_cfg.get("default_temperature", 0.3)
         self._default_max_tokens = llm_cfg.get("default_max_tokens", 2048)
         self._timeout = llm_cfg.get("timeout", 60)
@@ -901,8 +919,34 @@ class LLMProvider(RecommendationMixin, Plugin):
         else:
             bare_model = model
 
-        # If no API key is available, fail fast instead of retrying 3 times
+        # If no API key is available, fail fast — 但先尝试 fallback chain，
+        # 这样当 primary_model 默认到一个未配置的 provider（如 Pydantic
+        # 默认的 anthropic）而用户只配了 sensenova 时，能回退到可用 provider，
+        # 而不是直接返回 no_api_key 错误。
         if not api_key:
+            if not _skip_fallback and self._fallback_chain:
+                logger.warning(
+                    "no API key for provider %s (model=%s); trying fallback chain",
+                    provider, model,
+                )
+                for fb in self._fallback_chain:
+                    fb_model = fb.get("model")
+                    if not fb_model or fb_model == model:
+                        continue
+                    try:
+                        result = await self.chat_completion(
+                            messages=messages, model=fb_model,
+                            temperature=temperature, max_tokens=max_tokens,
+                            tools=tools, use_cache=use_cache,
+                            _skip_fallback=True,
+                        )
+                        if not result.get("failed"):
+                            result["fallback_used"] = fb_model
+                            logger.info("Fallback succeeded with %s (no key for primary %s)", fb_model, provider)
+                            return result
+                    except Exception as exc:
+                        logger.warning("Fallback %s failed: %s", fb_model, exc)
+                        continue
             from i18n import _
             return {
                 "text": _("no_api_key", provider=provider),

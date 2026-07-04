@@ -56,9 +56,16 @@ class LLMConfig(BaseModel):
     # Pydantic 会静默丢弃它们，导致 auto_classify_on_setup=False 不生效、
     # 后台 auto-classify 仍然跑、阻塞 setup 等隐蔽 bug。
     model_config = {"extra": "allow"}
-    primary_provider: str = "openrouter"
-    primary_model: str = "anthropic/claude-3.5-sonnet"
-    lightweight_model: str = "gpt-4o-mini"
+    # 修复：默认 provider/model 从 anthropic 改为 sensenova（商汤）。
+    # 之前默认 anthropic，但 .env.example / setup_wizard / dev_config 都
+    # 推荐 sensenova 为首选低成本 provider。当 default_config.yaml 缺失
+    # primary_model 时，Pydantic 用此默认值 → _default_model = anthropic
+    # → 用户未配 anthropic key → model_for_tier 回退到无 key 的 anthropic
+    # → chat_completion 返回 no_api_key（0 tokens）。改为 sensenova 后，
+    # 即使用户只在 .env 配了 SENSENOVA_API_KEY 也能直接跑通。
+    primary_provider: str = "sensenova"
+    primary_model: str = "sensenova/sensenova-6.7-flash-lite"
+    lightweight_model: str = "sensenova/sensenova-6.7-flash-lite"
     local_endpoint: str = "http://localhost:11434"
     local_model: str = "qwen2.5:7b"
     api_keys: LLMApiKeys = Field(default_factory=LLMApiKeys)
@@ -835,7 +842,10 @@ async def main(interactive: bool = True) -> None:
         _setup_ran = False
         print(f"[setup wizard unavailable: {exc}]")
 
-    cfg_path = os.environ.get("ONE_AGENT_CONFIG", str(ROOT / "config" / "default_config.yaml"))
+    # 修复：支持 ONE_AGENT_ENV 选 config 文件（dev/staging/prod）。
+    # 之前 dev_config.yaml 等文件头注释 "使用方式：ONE_AGENT_ENV=dev one-agent"
+    # 是空头支票——没有任何代码读 ONE_AGENT_ENV。现在 _get_config_path 会处理。
+    cfg_path = _get_config_path()
     if not Path(cfg_path).exists():
         sys.exit(f"config not found: {cfg_path}")
     app = OneAgentApp(cfg_path)
@@ -1162,8 +1172,25 @@ def _ask(prompt: str, default: str = "") -> str:
 
 
 def _get_config_path() -> str:
-    """Get the active config file path."""
-    return os.environ.get("ONE_AGENT_CONFIG", str(ROOT / "config" / "default_config.yaml"))
+    """Get the active config file path.
+
+    优先级：
+    1. ONE_AGENT_CONFIG 环境变量（显式指定，最高优先级）
+    2. ONE_AGENT_ENV 环境变量 → config/{env}_config.yaml
+       （支持 dev/staging/prod，对应 dev_config.yaml 等文件头的
+       "使用方式：ONE_AGENT_ENV=dev one-agent" 注释，之前该注释
+       是空头支票——没有任何代码读 ONE_AGENT_ENV）
+    3. config/default_config.yaml（兜底默认）
+    """
+    explicit = os.environ.get("ONE_AGENT_CONFIG")
+    if explicit:
+        return explicit
+    env_name = os.environ.get("ONE_AGENT_ENV", "").strip().lower()
+    if env_name:
+        env_path = ROOT / "config" / f"{env_name}_config.yaml"
+        if env_path.exists():
+            return str(env_path)
+    return str(ROOT / "config" / "default_config.yaml")
 
 
 def _write_env(key: str, value: str) -> None:
