@@ -95,6 +95,21 @@ class Coordinator(Plugin):
         self._llm = llm
         self._skills = skills
 
+    def _emit_progress(self, turn: TurnContext, message: str, phase: str = "") -> None:
+        """向网关发布实时进度事件，让用户知道 agent 正在做什么。
+
+        避免长时间沉默无反馈。网关会根据 session_id 过滤并做速率控制。
+        """
+        try:
+            self.publish(
+                "turn_progress",
+                session_id=turn.session_id,
+                message=message,
+                phase=phase,
+            )
+        except Exception:
+            pass  # 进度事件失败不影响主流程
+
     async def _dispatch_smart(
         self,
         tc: Dict[str, Any],
@@ -605,12 +620,15 @@ class Coordinator(Plugin):
         multi_agent_done = False
         if complexity >= EXPERT_COMPLEXITY_THRESHOLD:
             # Expert level: tool chain planning + multi-agent pattern
+            self._emit_progress(turn, "正在分析任务并规划工具链...", "planning")
             if complexity >= TOOL_CHAIN_PLANNING_MIN_COMPLEXITY:
                 await self._plan_tool_chain(messages, turn, tools)
             # multi-agent publishes turn_completed itself on success
+            self._emit_progress(turn, "正在启动多智能体协作...", "multi_agent")
             multi_agent_done = await self._multi_agent_phase(messages, turn)
         elif complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
             # Complex level: think + reflect
+            self._emit_progress(turn, "正在思考分析...", "thinking")
             await self._think_phase(messages, turn)
             await self._reflect_phase(messages, turn)
         # else: simple/trivial — skip thinking entirely for speed
@@ -629,15 +647,18 @@ class Coordinator(Plugin):
         await self._auto_web_search_if_needed(messages, turn)
 
         # --- Step 3: Tool-call loop ---
+        self._emit_progress(turn, "正在执行任务...", "tool_loop")
         await self._tool_loop(messages, turn, tools)
 
         # --- Step 4: Post-execution quality improvements by tier ---
         # For complex+: combine self-verification and final polish into one
         # LLM call when possible (saves one round-trip).
         if complexity >= FINAL_POLISH_MIN_COMPLEXITY and turn.result and not turn.error:
+            self._emit_progress(turn, "正在验证和优化结果...", "verification")
             await self._verify_and_polish(messages, turn, complexity)
         elif complexity >= SELF_VERIFY_MIN_COMPLEXITY and turn.result and not turn.error:
             # simple tier: light self-verification only
+            self._emit_progress(turn, "正在验证结果...", "verification")
             await self._self_verify(messages, turn, complexity)
 
         if complexity >= POST_REFLECT_MIN_COMPLEXITY and turn.result:
@@ -736,6 +757,23 @@ class Coordinator(Plugin):
 
         # Inject Chain-of-Thought reasoning for complex tasks
         await self._maybe_inject_cot(messages, turn)
+
+        # 注入重启感知：如果刚重启过，告诉 LLM 已成功重启
+        if self.ctx and getattr(self.ctx, "recent_restart", 0):
+            import time as _t
+            elapsed = _t.time() - self.ctx.recent_restart
+            if elapsed < 120:  # 2 分钟内
+                restart_note = (
+                    "[系统提示：One-Agent 刚刚已成功重启，新版本已生效。"
+                    "如果用户问是否已重启，请确认已重启完成。]"
+                )
+                # 插入到消息列表开头（系统提示之后）
+                for i, m in enumerate(messages):
+                    if m.get("role") == "system":
+                        messages.insert(i + 1, {"role": "system", "content": restart_note})
+                        break
+                else:
+                    messages.insert(0, {"role": "system", "content": restart_note})
 
         return messages
 
@@ -1272,6 +1310,10 @@ class Coordinator(Plugin):
             for idx, tc in enumerate(tool_calls):
                 name = tc.get("name") or ""
                 args = tc.get("args") or {}
+                if iteration > 0:
+                    self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
+                else:
+                    self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
                 result = await self._dispatch_smart(tc, name, args, failed_skills)
 
                 if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
@@ -1297,6 +1339,10 @@ class Coordinator(Plugin):
             for tc in tool_calls:
                 name = tc.get("name") or ""
                 args = tc.get("args") or {}
+                if iteration > 0:
+                    self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
+                else:
+                    self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
                 result = await self._dispatch_smart(tc, name, args, failed_skills)
 
                 if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:

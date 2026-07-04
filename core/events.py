@@ -131,6 +131,7 @@ class EventBus:
     _ALLOWED_EVENT_TYPES = {
         # Core events
         "turn_start", "turn_completed", "turn_failed", "turn_routed",
+        "turn_progress",
         "skill_executed", "skill_failed",
         "memory_added", "memory_searched",
         "config_changed",

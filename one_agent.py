@@ -339,17 +339,36 @@ class OneAgentApp:
                 self._pm.register(p)
 
         self.ctx: Optional[AgentContext] = None
+        self._recent_restart: float = 0  # 重启时间戳，0 表示非重启启动
 
     async def start(self) -> None:
         # Initialize i18n based on config
         from i18n import set_language
         set_language(self.config.agent.language)
 
+        # 检查重启标记 — 如果刚重启过，记录时间供系统提示词使用
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+        restart_marker = _Path(self.config.agent.data_dir) / "restart_marker.json"
+        if restart_marker.exists():
+            try:
+                marker_data = _json.loads(restart_marker.read_text(encoding="utf-8"))
+                restart_ts = marker_data.get("timestamp", 0)
+                if _time.time() - restart_ts < 120:  # 2 分钟内的重启
+                    self._recent_restart = restart_ts
+                    logger.info("detected recent restart at %s", restart_ts)
+                restart_marker.unlink()
+            except Exception:
+                pass
+
         self.ctx = AgentContext(
             config=self.config.model_dump(),
             bus=self.bus,
             data_dir=self.config.agent.data_dir,
         )
+        # 传递重启标记给上下文
+        self.ctx.recent_restart = self._recent_restart
         # Create session store for persistence across restarts
         from pathlib import Path as _Path
         session_db_path = str(_Path(self.config.agent.data_dir) / "memory" / "sessions.db")

@@ -229,6 +229,10 @@ class WeChatPersonalGateway(Plugin):
         self._msg_tasks: set = set()
         self._last_heartbeat: float = 0
         self._initial_sync_buf: str = ""
+        # 实时进度反馈：追踪每个会话的进度状态
+        self._progress_last_sent: Dict[str, float] = {}   # chat_id → 上次进度消息时间
+        self._progress_count: Dict[str, int] = {}           # chat_id → 本次 turn 已发进度条数
+        self._heartbeat_tasks: Dict[str, asyncio.Task] = {}  # chat_id → 心跳任务
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -254,6 +258,7 @@ class WeChatPersonalGateway(Plugin):
             logger.info("wechat_personal disabled, account=none")
 
         self.bus.subscribe("turn_completed", self._on_turn_completed)
+        self.bus.subscribe("turn_progress", self._on_turn_progress)
 
     def _find_saved_account(self) -> Optional[Dict[str, Any]]:
         logger.info("wechat_personal: _find_saved_account, dir=%s, exists=%s", DATA_DIR, DATA_DIR.exists())
@@ -291,6 +296,9 @@ class WeChatPersonalGateway(Plugin):
         return best
 
     async def stop(self) -> None:
+        # 清理所有心跳任务
+        for chat_id in list(self._heartbeat_tasks.keys()):
+            self._stop_heartbeat(chat_id)
         await self._disconnect()
         await super().stop()
 
@@ -582,6 +590,9 @@ class WeChatPersonalGateway(Plugin):
             })
             self.bus.publish(event)
             logger.info("wechat_personal: external_message published OK")
+
+            # 启动心跳：如果 10 秒后还没回复，自动发"正在处理..."
+            self._start_heartbeat(from_id)
         except Exception as exc:
             logger.error("wechat_personal: _handle_message error: %s", exc, exc_info=True)
 
@@ -599,6 +610,10 @@ class WeChatPersonalGateway(Plugin):
             logger.info("wechat_personal: _on_turn_completed: session_id=%s does not start with wechat-", session_id)
             return
         chat_id = session_id[7:]
+
+        # 停止心跳，清理进度状态
+        self._stop_heartbeat(chat_id)
+
         result = getattr(turn, "result", "") or getattr(turn, "text", "") or getattr(turn, "output", "")
         logger.info("wechat_personal: _on_turn_completed: chat_id=%s, result=%s, has_result=%s",
                    chat_id[:8], bool(result), hasattr(turn, "result"))
@@ -606,6 +621,77 @@ class WeChatPersonalGateway(Plugin):
             logger.info("wechat_personal: turn_completed for %s, result_len=%d",
                        chat_id[:8], len(str(result)))
             await self.send(chat_id, str(result))
+
+    # -------------------------------------------------- 实时进度反馈
+    async def _on_turn_progress(self, event) -> None:
+        """处理 coordinator 发布的进度事件，自动给用户发反馈。"""
+        session_id = event.get("session_id") or ""
+        if not session_id or not session_id.startswith("wechat-"):
+            return
+        chat_id = session_id[7:]
+        message = event.get("message") or ""
+        if not message:
+            return
+
+        now = time.time()
+        # 速率控制：前 3 秒不发（太快说明任务简单），间隔至少 6 秒，最多 5 条
+        last_sent = self._progress_last_sent.get(chat_id, 0)
+        count = self._progress_count.get(chat_id, 0)
+
+        if count >= 5:
+            return
+        if count > 0 and (now - last_sent) < 6:
+            return
+
+        self._progress_last_sent[chat_id] = now
+        self._progress_count[chat_id] = count + 1
+
+        try:
+            await self.send(chat_id, f"⏳ {message}")
+        except Exception as exc:
+            logger.debug("wechat_personal: progress send failed: %s", exc)
+
+    def _start_heartbeat(self, chat_id: str) -> None:
+        """启动心跳任务：10 秒后还没回复就发"正在处理"，之后每 20 秒一次。"""
+        self._stop_heartbeat(chat_id)
+        self._progress_last_sent.pop(chat_id, None)
+        self._progress_count.pop(chat_id, None)
+        task = asyncio.create_task(self._heartbeat_loop(chat_id))
+        self._heartbeat_tasks[chat_id] = task
+
+    def _stop_heartbeat(self, chat_id: str) -> None:
+        """停止心跳任务并清理状态。"""
+        task = self._heartbeat_tasks.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+        self._progress_last_sent.pop(chat_id, None)
+        self._progress_count.pop(chat_id, None)
+
+    async def _heartbeat_loop(self, chat_id: str) -> None:
+        """心跳循环：10 秒后首次提醒，之后每 20 秒一次，最多 3 次。"""
+        try:
+            await asyncio.sleep(10)
+            for i in range(3):
+                count = self._progress_count.get(chat_id, 0)
+                if count >= 5:
+                    return
+                now = time.time()
+                last_sent = self._progress_last_sent.get(chat_id, 0)
+                if now - last_sent < 8:
+                    # 刚发过进度消息，跳过这次心跳
+                    pass
+                else:
+                    self._progress_last_sent[chat_id] = now
+                    self._progress_count[chat_id] = count + 1
+                    try:
+                        await self.send(chat_id, "⏳ 正在处理中，请稍候...")
+                    except Exception:
+                        pass
+                await asyncio.sleep(20)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("wechat_personal: heartbeat error: %s", exc)
 
     async def send(self, chat_id: str, text: str) -> bool:
         if not self._running or not self._session:

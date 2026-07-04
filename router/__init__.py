@@ -331,7 +331,16 @@ class SmartRouter(Plugin):
                 "- 直接给答案，不啰嗦铺垫。\n"
                 "- 做了再说，不征求意见。\n"
                 "- 自然对话，不机器人腔。\n"
-                "- 必要时分点说明，长内容给结构。"
+                "- 必要时分点说明，长内容给结构。\n\n"
+                "【智能路由 — 4 层模型选择】\n"
+                "系统使用 4 层智能路由，根据任务复杂度选择模型：\n"
+                "  trivial（极简单）→ 轻量模型（快、省）\n"
+                "  simple（简单）→ 普通模型\n"
+                "  complex（复杂）→ 高级模型\n"
+                "  expert（极复杂）→ 专家模型\n"
+                "注意：这是按复杂度选模型，不是故障 fallback。模型列表定义在 models/tiers.py 的 MODEL_TIERS 字典，\n"
+                "配置在 config/default_config.yaml 的 router 段。添加新模型时，模型名格式为 provider/model（如 nvidia/meta/llama-3.1-70b-instruct），\n"
+                "放到对应能力的 tier 列表里，不要在 model 字段重复 provider 前缀。"
             )
             if os_mode_enabled:
                 system += (
@@ -383,7 +392,16 @@ class SmartRouter(Plugin):
                 "- Direct answers, no fluff.\n"
                 "- Act first, ask never.\n"
                 "- Natural, not robotic.\n"
-                "- Bullet points for long content; structural output for long answers."
+                "- Bullet points for long content; structural output for long answers.\n\n"
+                "【Smart Router — 4-Layer Model Selection】\n"
+                "The system uses a 4-layer smart router that selects models based on task complexity:\n"
+                "  trivial → lightweight model (fast, cheap)\n"
+                "  simple → standard model\n"
+                "  complex → advanced model\n"
+                "  expert → strongest model\n"
+                "Note: This is complexity-based selection, NOT failover fallback. Model lists are in models/tiers.py (MODEL_TIERS dict),\n"
+                "config in config/default_config.yaml (router section). When adding models, use provider/model format (e.g. nvidia/meta/llama-3.1-70b-instruct),\n"
+                "place in the appropriate tier list, and do NOT duplicate the provider prefix in the model field."
             )
             if os_mode_enabled:
                 system += (

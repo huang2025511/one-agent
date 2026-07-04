@@ -524,16 +524,47 @@ class SkillManager(Plugin):
         ))
 
         async def restart_handler(args: Dict[str, Any]) -> str:
-            """重启 One-Agent。"""
+            """重启 One-Agent。
+
+            写入重启标记后延迟 1.5 秒执行 execv，
+            确保 turn_completed 事件有机会发送给用户。
+            新进程启动时读取标记，感知到刚发生过重启。
+            """
             import os
             import sys
-            results = ["♻️ 正在重启 One-Agent..."]
+            import json
+            import time as _time
+            from pathlib import Path
+
+            data_dir = os.environ.get("ONE_AGENT_DATA_DIR", "./data")
+            marker = Path(data_dir) / "restart_marker.json"
+
+            # 写入重启标记，供新进程启动时读取
             try:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            except Exception as exc:
-                results.append(f"❌ 重启失败: {exc}")
-                results.append("请手动退出后重新启动")
-            return "\n".join(results)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(json.dumps({
+                    "timestamp": _time.time(),
+                    "message": "重启完成，新版本已生效",
+                }, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+
+            # 延迟重启，让事件总线把回复发给用户
+            def _do_restart() -> None:
+                try:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception:
+                    pass
+
+            import asyncio as _aio
+            try:
+                loop = _aio.get_event_loop()
+                loop.call_later(1.5, _do_restart)
+            except Exception:
+                # 如果拿不到 loop，立即重启
+                _do_restart()
+
+            return "♻️ 正在重启 One-Agent...\n重启后将自动加载最新版本，请稍候。"
         self.register(Skill(
             id="restart", title="重启",
             description="/restart 或 /重启：重启 One-Agent 程序",

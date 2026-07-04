@@ -104,6 +104,9 @@ class AgentContext:
     # Python executor for code execution (set by OneAgentApp.start)
     python_executor: Any = None
 
+    # 重启时间戳 — 非 0 表示刚通过 /重启 命令重启过（set by OneAgentApp.start）
+    recent_restart: float = 0
+
     def get_plugin(self, name: str):
         """Return the first plugin registered with the given name, or None."""
         for p in self._plugins:
