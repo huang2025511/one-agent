@@ -100,6 +100,34 @@ pip install aiohttp cryptography
     return gateway, None
 
 
+def _generate_ascii_qrcode(data: str) -> str:
+    """生成 ASCII 二维码，用于在终端直接显示。
+
+    如果 qrcode 库未安装，返回空字符串（调用方回退到 URL 方式）。
+    """
+    try:
+        import io
+        import qrcode
+
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=1,
+            border=2,
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+
+        buf = io.StringIO()
+        qr.print_ascii(out=buf, invert=True)
+        return buf.getvalue().rstrip()
+    except ImportError:
+        return ""
+    except Exception as e:
+        logger.debug(f"ASCII QR code generation failed: {e}")
+        return ""
+
+
 def make_wechat_login_handler(ctx_ref=None):
     """Create the WeChat login skill handler.
 
@@ -126,9 +154,25 @@ def make_wechat_login_handler(ctx_ref=None):
                 if running:
                     return "✅ 微信网关已在运行中\n\n你可以直接在微信上与我对话了"
                 elif qr_url:
-                    return f"""✅ 微信网关启动中...
+                    # 尝试在终端直接显示 ASCII 二维码，避免浏览器加载失败
+                    ascii_qr = _generate_ascii_qrcode(qr_url)
+                    if ascii_qr:
+                        return f"""✅ 微信网关启动中，请用微信扫描下方二维码登录：
 
-请在手机浏览器打开以下链接，用微信扫码登录：
+{ascii_qr}
+
+💡 提示：
+- 二维码有效期约 2 分钟，请尽快扫描
+- 如二维码过期或显示不清，再次输入 /微信 获取新二维码
+- 扫码后在手机上点击确认登录
+- 登录成功后即可在微信上与我对话
+- 登录凭证会自动保存，下次启动无需重新扫码
+
+如终端二维码无法扫描，也可在手机浏览器打开：
+{qr_url}
+"""
+                    else:
+                        return f"""✅ 微信网关启动中，请在手机浏览器打开以下链接用微信扫码登录：
 
 {qr_url}
 
@@ -138,6 +182,8 @@ def make_wechat_login_handler(ctx_ref=None):
 - 扫码后在手机上点击确认登录
 - 登录成功后即可在微信上与我对话
 - 登录凭证会自动保存，下次启动无需重新扫码
+
+（提示：安装 qrcode 库可在终端直接显示二维码：pip install qrcode）
 """
                 else:
                     return "✅ 微信网关启动中，请稍候...\n（二维码链接将在日志中显示，如长时间无响应请重新输入 /微信）"

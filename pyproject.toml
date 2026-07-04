@@ -19,6 +19,10 @@ dependencies = [
     "uvicorn[standard]>=0.27.0,<1.0",
     "APScheduler>=3.10.4,<4.0",
     "cryptography>=41.0.0,<46.0",
+    # qrcode: 在终端直接显示微信登录二维码 ASCII 图，
+    # 避免依赖浏览器打开 liteapp.weixin.qq.com HTML 页面
+    # （某些网络环境加载 JS CDN 会"网络错误"）
+    "qrcode>=7.4,<8.0",
 ]
 
 [project.optional-dependencies]
