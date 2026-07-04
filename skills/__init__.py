@@ -1599,9 +1599,16 @@ def _model_capability_desc(model_id: str) -> str:
 
 
 def _model_cost_desc(model_id: str) -> str:
-    """从 MODEL_COST 查询价格。"""
+    """从 MODEL_COST 查询价格。
+
+    区分「未登记价格」（可能是付费，只是我们不知道）和「明确免费」。
+    原代码用 MODEL_COST.get(model_id, 0)，把所有未登记模型当成 0 → 免费，
+    导致 /显示模型 免费 把一堆付费模型误判为免费。
+    """
     from models.tiers import MODEL_COST
-    cost = MODEL_COST.get(model_id, 0)
+    if model_id not in MODEL_COST:
+        return "未知"
+    cost = MODEL_COST[model_id]
     if cost == 0:
         return "免费"
     if cost < 0.001:

@@ -447,6 +447,13 @@ class MemoryPlugin(Plugin):
         self._auto_create_skills = True
         self._min_usage = 3
         self._hybrid_search = True  # Enable hybrid search (FTS + embedding)
+        # 待创建技能的触发词计数：达到 _min_usage 次后才真正落盘，
+        # 避免一次性任务被误判为可复用技能。
+        self._pending_skills: Dict[str, int] = {}
+        # 长期记忆去重缓存：content_hash → 上次写入时间戳。
+        # 防止 turn_completed 事件重复触发导致 SQLite 膨胀。
+        self._recent_memory_hashes: Dict[str, float] = {}
+        self._dedup_window = 60.0  # 秒
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
@@ -552,43 +559,66 @@ class MemoryPlugin(Plugin):
             return
         if turn.result and not turn.error:
             content = f"Q: {turn.input_text}\nA: {turn.result}"
-            # All operations below are synchronous SQLite / CPU-bound work
-            # (embedding encode is especially heavy). Run them in a worker
-            # thread to avoid blocking the event loop (mirrors _on_user_message).
-            memory_id = await asyncio.to_thread(
-                self._long.add,
-                content=content,
-                source=turn.source,
-                tags="interaction",
-            )
-            # Store embedding vector for semantic search — this was missing,
-            # causing hybrid search to degenerate to FTS-only.
-            # Use the rowid returned by add() instead of a separate
-            # last_insert_rowid() query, which would be racy in a
-            # multi-threaded context.
-            if self._embeddings is not None and memory_id is not None:
-                try:
-                    vec = await asyncio.to_thread(self._embeddings.embed, content)
-                    if vec is not None:
-                        await asyncio.to_thread(
-                            self._embeddings.store, str(memory_id), vec)
-                except Exception as exc:
-                    logger.debug("embedding store failed: %s", exc)
-            # Auto-extract entities into knowledge graph
-            if self._kg is not None:
-                combined = turn.input_text + " " + (turn.result or "")
-                await asyncio.to_thread(
-                    self._kg.extract_from_text, combined, source=turn.source)
+            # 去重：60 秒内相同内容不重复写入，避免 turn_completed 事件
+            # 重复触发或同一 turn 被多路径 publish 时膨胀长期记忆。
+            import hashlib
+            content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+            now_ts = time.time()
+            last_added = self._recent_memory_hashes.get(content_hash, 0)
+            should_persist = (now_ts - last_added) >= self._dedup_window
+            if should_persist:
+                self._recent_memory_hashes[content_hash] = now_ts
+                # 顺手清理过期 hash，避免字典无限增长
+                if len(self._recent_memory_hashes) > 512:
+                    cutoff = now_ts - self._dedup_window
+                    self._recent_memory_hashes = {
+                        h: t for h, t in self._recent_memory_hashes.items()
+                        if t > cutoff
+                    }
+                # All operations below are synchronous SQLite / CPU-bound work
+                # (embedding encode is especially heavy). Run them in a worker
+                # thread to avoid blocking the event loop (mirrors _on_user_message).
+                memory_id = await asyncio.to_thread(
+                    self._long.add,
+                    content=content,
+                    source=turn.source,
+                    tags="interaction",
+                )
+                # Store embedding vector for semantic search — this was missing,
+                # causing hybrid search to degenerate to FTS-only.
+                # Use the rowid returned by add() instead of a separate
+                # last_insert_rowid() query, which would be racy in a
+                # multi-threaded context.
+                if self._embeddings is not None and memory_id is not None:
+                    try:
+                        vec = await asyncio.to_thread(self._embeddings.embed, content)
+                        if vec is not None:
+                            await asyncio.to_thread(
+                                self._embeddings.store, str(memory_id), vec)
+                    except Exception as exc:
+                        logger.debug("embedding store failed: %s", exc)
+                # Auto-extract entities into knowledge graph
+                if self._kg is not None:
+                    combined = turn.input_text + " " + (turn.result or "")
+                    await asyncio.to_thread(
+                        self._kg.extract_from_text, combined, source=turn.source)
         if self._auto_create_skills and self._procedural and self._looks_teachable(turn):
             triggers = [w for w in re.findall(r"\w{4,}", turn.input_text)][:5]
             if triggers:
                 existing = self._procedural.lookup(turn.input_text)
                 if existing is None:
-                    body = f"# Skill: {triggers[0]}\n\n"
-                    body += f"When the user writes something like: *{turn.input_text[:120]}*\n\n"
-                    body += "## Tool Plan\n\n```\n" + (turn.result or "")[:2000] + "\n```\n"
-                    await asyncio.to_thread(
-                        self._procedural.save, triggers[0], triggers, body)
+                    # 达到 _min_usage 次后才创建技能，避免一次性任务被
+                    # 误判为可复用技能。原代码首次就创建，_min_usage 完全失效。
+                    key = triggers[0].lower()
+                    self._pending_skills[key] = self._pending_skills.get(key, 0) + 1
+                    if self._pending_skills[key] >= self._min_usage:
+                        # 达到门槛，创建技能并清理计数
+                        self._pending_skills.pop(key, None)
+                        body = f"# Skill: {triggers[0]}\n\n"
+                        body += f"When the user writes something like: *{turn.input_text[:120]}*\n\n"
+                        body += "## Tool Plan\n\n```\n" + (turn.result or "")[:2000] + "\n```\n"
+                        await asyncio.to_thread(
+                            self._procedural.save, triggers[0], triggers, body)
 
     async def _on_cron(self, event: Event) -> None:
         """Handle scheduled maintenance tasks."""

@@ -221,7 +221,15 @@ class ModelCatalog:
         elif isinstance(pricing_raw, (int, float)):
             pricing["prompt"] = float(pricing_raw)
 
-        is_free = bool(item.get("is_free") or _classify_free(pricing))
+        # is_free 优先取 API 显式声明；仅当 API 未声明时再用 pricing 推断。
+        # 之前的 `bool(item.get("is_free") or _classify_free(pricing))` 写法
+        # 会让 API 明确声明 is_free=False 的付费模型被 pricing 推断覆盖
+        # （因为 False or X 等价于 X）。
+        raw_is_free = item.get("is_free")
+        if raw_is_free is None:
+            is_free = _classify_free(pricing)
+        else:
+            is_free = bool(raw_is_free)
 
         ctx = int(item.get("context_length") or item.get("max_context") or 0)
         max_out = int(item.get("max_output_length") or item.get("max_tokens") or 0)
@@ -493,11 +501,12 @@ def auto_classify_tier(model: ModelInfo) -> str:
         return "expert"
 
     # ---- 2. trivial ----
+    # 只把"免费"小模型归入 trivial；付费 mini/nano（如 gpt-4o-mini）
+    # 能力并不弱，应进 simple。原代码第三条规则不带 is_free 检查，
+    # 会把付费 mini 误判为 trivial。
     if model.is_free and ctx and ctx < 8_000 and not has_vision and not has_tools and not has_reasoning:
         return "trivial"
     if _TRIVIAL_HINTS.search(name) and model.is_free:
-        return "trivial"
-    if _TRIVIAL_HINTS.search(name) and not has_vision and not has_tools:
         return "trivial"
 
     # ---- 3. complex ----

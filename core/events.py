@@ -358,11 +358,15 @@ class EventBus:
                     await result
             except (ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
                 logger.error("handler %s failed on %s: %s", handler, event.type, exc, exc_info=True)
-                handler_errors.append(str(handler))
+                # 记录异常信息而非 handler 函数 repr —— 之前 str(handler)
+                # 只会给出一串 <function ...> 字符串，对调试毫无帮助。
+                hname = getattr(handler, "__name__", None) or str(handler)
+                handler_errors.append(f"{hname}: {exc}")
                 self._metrics["errors"] += 1
             except Exception as exc:
                 logger.error("handler %s failed on %s with unexpected error: %s", handler, event.type, exc, exc_info=True)
-                handler_errors.append(str(handler))
+                hname = getattr(handler, "__name__", None) or str(handler)
+                handler_errors.append(f"{hname}: {exc}")
                 self._metrics["errors"] += 1
 
         # Mark event status based on handler results

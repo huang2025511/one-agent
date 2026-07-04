@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -1062,9 +1063,12 @@ class Coordinator(Plugin):
             if result.get("parallel"):
                 turn.result = result["result"]
                 turn.meta["delegation_used"] = True
-                turn.meta["subtask_count"] = len(result["subtasks"])
-                turn.meta["delegation_total_tokens"] = result["total_tokens"]
-                turn.record_success(result["result"], result.get("total_tokens", 0))
+                # 防御性取值：subtasks / total_tokens 可能缺失，避免 KeyError
+                subtasks = result.get("subtasks") or []
+                total_tokens = result.get("total_tokens", 0)
+                turn.meta["subtask_count"] = len(subtasks)
+                turn.meta["delegation_total_tokens"] = total_tokens
+                turn.record_success(result["result"], total_tokens)
 
                 if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
                     full_text = f"{turn.input_text}\n{result['result']}"
@@ -1077,8 +1081,8 @@ class Coordinator(Plugin):
 
                 self.publish("turn_completed", turn=turn)
                 logger.info("multi-agent completed (%d subtasks, %d tokens)",
-                            result.get("subtask_count", 0),
-                            result.get("total_tokens", 0))
+                            len(subtasks),
+                            total_tokens)
                 return True
 
         except Exception as exc:
@@ -1107,7 +1111,14 @@ class Coordinator(Plugin):
             keep_recent = max(4, len(messages) // 3)
             early = messages[:len(messages) - keep_recent]
             recent = messages[len(messages) - keep_recent:]
+            # 保留原始系统提示词（智能路由逻辑、人格设定等关键指令），
+            # 否则压缩后会丢失，导致 agent 行为退化。
+            original_system = (
+                messages[0] if messages and messages[0].get("role") == "system" else None
+            )
             messages.clear()
+            if original_system is not None:
+                messages.append(original_system)
             messages.append({"role": "system", "content": f"[对话历史摘要]\n{summary}"})
             messages.extend(recent)
             turn.meta["context_compressed"] = True
