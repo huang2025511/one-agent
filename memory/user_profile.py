@@ -41,6 +41,7 @@ class UserProfileStore:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._write_lock = threading.RLock()
         self._init_schema()
 

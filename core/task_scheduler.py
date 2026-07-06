@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
@@ -23,6 +22,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
+
+from core.db import create_sqlite_connection
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +97,7 @@ class TaskStore:
 
     def __init__(self, db_path: str = "data/memory/tasks.db") -> None:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row  # Enable dict-like access
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = create_sqlite_connection(db_path)
         self._write_lock = threading.RLock()
         self._init_schema()
 
@@ -191,6 +190,14 @@ class TaskStore:
             cur = self._conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             self._conn.commit()
             return cur.rowcount > 0
+
+    def close(self) -> None:
+        """Close the database connection."""
+        if hasattr(self, '_conn'):
+            try:
+                self._conn.close()
+            except Exception:
+                pass
 
     def _row_to_task(self, row: sqlite3.Row) -> Task:
         return Task(
@@ -347,6 +354,8 @@ class AsyncTaskScheduler:
         # Cancel running tasks
         for task_id, task_handle in list(self._running_tasks.items()):
             task_handle.cancel()
+        # Close database connection
+        self._store.close()
         logger.info("Task scheduler stopped")
 
     async def _poll_loop(self) -> None:
