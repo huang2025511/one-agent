@@ -1324,6 +1324,12 @@ class LLMProvider(RecommendationMixin, Plugin):
         temperature = self._default_temperature if temperature is None else temperature
         max_tokens = self._default_max_tokens if max_tokens is None else max_tokens
 
+        # 修复：stream 入口加边界校验 (非流式版在 881-882 行有, 之前 stream 缺失)
+        # max_tokens=0 传给某些 provider 会 400; temperature>2.0 触发 422
+        # 流式失败回退非流式时, 非流式 assert 又会让回退失败 → 死循环
+        assert temperature is None or (0.0 <= temperature <= 2.0), "temperature must be between 0 and 2"
+        assert max_tokens is None or max_tokens > 0, "max_tokens must be positive"
+
         # --- Budget check (mirror non-streaming path) ---
         # Without this, streaming callers could bypass the daily/monthly
         # budget cap and keep using expensive models indefinitely.

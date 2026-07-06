@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import contextvars
 from typing import Dict
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,16 @@ logger = logging.getLogger(__name__)
 # Lock for thread-safe access to global state
 _lock = threading.RLock()
 
-# Thread-local storage for per-thread language preference
-_thread_local = threading.local()
+# 修复：用 contextvars.ContextVar 替换 threading.local 存储请求级语言。
+# 之前 threading.local 在线程池复用时不会重置, A 用户 (zh) 处理完后同一线程
+# 被分给 B 用户 (en), B 拿到 zh 文本 → 多租户语言串扰。
+# ContextVar 是 async 友好的: 随 asyncio.Task 自动传播和隔离,
+# 每个 task/coro 有独立的 context 副本, 不会串扰。
+_current_lang_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_current_lang_ctx", default="en"
+)
 
-# Current language (default: English) — global default
+# Current language (default: English) — global default (用于手动 set_language)
 _current_lang = "en"
 
 # Track if language was auto-detected (to avoid repeated switching)
@@ -142,27 +149,32 @@ def set_language(lang: str) -> None:
 
 
 def get_language() -> str:
-    """Get the current language code."""
-    # Check thread-local first, then fall back to global
-    thread_lang = getattr(_thread_local, 'lang', None)
-    if thread_lang:
-        return thread_lang
-    with _lock:
-        return _current_lang
+    """Get the current language code.
+
+    优先读 ContextVar (随 asyncio.Task 自动隔离), 回退到全局 _current_lang。
+    """
+    try:
+        ctx_lang = _current_lang_ctx.get()
+        if ctx_lang and ctx_lang != "en":
+            return ctx_lang
+        # ContextVar 是默认值 "en" 时, 检查全局是否有手动设置
+        with _lock:
+            return _current_lang if _current_lang != "en" else ctx_lang
+    except LookupError:
+        with _lock:
+            return _current_lang
 
 
 def set_thread_language(lang: str) -> None:
-    """Set language for the current thread only.
+    """Set language for the current async context / thread.
 
-    Used by REST API handlers to isolate per-request language without
-    affecting other concurrent requests (the global _current_lang is
-    shared across all threads and would cause multi-tenant language
-    contention).
+    用 ContextVar.set() 替换 threading.local, 在 asyncio.Task 间自动隔离,
+    不会在线程池复用时串扰。
     """
     if lang in _translations:
-        _thread_local.lang = lang
+        _current_lang_ctx.set(lang)
     else:
-        _thread_local.lang = "en"
+        _current_lang_ctx.set("en")
 
 
 def detect_language(text: str) -> str:

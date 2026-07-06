@@ -360,6 +360,34 @@ class OneAgentApp:
         from i18n import set_language
         set_language(self.config.agent.language)
 
+        # 修复：预热所有关键单例, 消除"首次调用"竞态窗口。
+        # 之前 30+ 处 get_xxx() 无锁, 在 sync 多线程入口 (如 webhook 回调)
+        # 并发首次调用时可能重复实例化, 导致持有 SQLite 连接/Lock 的单例
+        # 状态分裂 (两个 AlertManager 各自告警 / 两个 CircuitManager 独立计数)。
+        # 在单线程的 start() 阶段同步预热, 后续 get_xxx() 只读返回, 无竞态。
+        try:
+            from core.alerting import get_alert_manager
+            from core.circuit_breaker import get_circuit_manager
+            from core.rate_limiter import get_rate_limiter
+            from core.failure_recovery import get_failure_recovery
+            from core.tool_cache import get_tool_cache
+            from core.webhook_trigger import get_webhook_trigger
+            from core.chart_gen import get_chart_generator
+            from core.conv_branch import get_branch_manager
+
+            mgr = get_alert_manager()
+            mgr.setup_default_rules()
+            get_circuit_manager()
+            get_rate_limiter()
+            get_failure_recovery()
+            get_tool_cache()
+            get_webhook_trigger()
+            get_chart_generator()
+            get_branch_manager()
+            logger.debug("singletons pre-warmed at startup")
+        except Exception as exc:
+            logger.warning("singleton pre-warm failed (non-fatal): %s", exc)
+
         # 检查重启标记 — 如果刚重启过，记录时间供系统提示词使用
         import json as _json
         import time as _time
@@ -587,6 +615,13 @@ class OneAgentApp:
         return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
 
     async def stop(self) -> None:
+        # 修复：关闭 WebhookTrigger 的 httpx 连接池, 之前 close() 定义了但无调用方
+        # 导致进程退出时 keepalive 连接挂在服务端, 频繁重启场景 fd 泄漏。
+        try:
+            from core.webhook_trigger import get_webhook_trigger
+            await get_webhook_trigger().close()
+        except Exception as exc:
+            logger.warning("webhook trigger close failed: %s", exc)
         await self._pm.stop_all()
         await self.bus.stop()
 

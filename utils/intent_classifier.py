@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -39,12 +40,16 @@ class IntentClassifier:
     4. Fallback: heuristic as safety net
     """
 
-    _cache: Dict[str, tuple] = {}
+    # 修复：改为实例级缓存 (在 __init__ 里初始化), 之前是类级字典跨实例共享
+    # 导致多用户/多 session 的 IntentClassifier 实例互相污染缓存。
+    # 用 OrderedDict 实现 O(1) LRU 淘汰, 之前无淘汰逻辑会无限增长内存泄漏。
     _CACHE_TTL = 3600
     _CACHE_MAX = 500
 
     def __init__(self, llm_provider: Any = None) -> None:
         self._llm = llm_provider
+        # 实例级缓存: key → (complexity, meta, timestamp), OrderedDict 维护 LRU
+        self._cache: "OrderedDict[str, tuple]" = OrderedDict()
         self._fast_path_patterns: Dict[str, re.Pattern] = {
             "greeting": re.compile(r"^(你好|嗨|hi|hello|hey|哈喽|在吗|早上好|下午好)$", re.IGNORECASE),
             "ack": re.compile(r"^(谢谢|thanks|ok|好的|嗯|行|可以|收到)$", re.IGNORECASE),
@@ -135,8 +140,13 @@ class IntentClassifier:
         if cached:
             complexity, meta, ts = cached
             if time.time() - ts < self._CACHE_TTL:
+                # 命中: 移到末尾 (最近使用), O(1)
+                self._cache.move_to_end(cache_key)
                 meta = {**meta, "intent_source": "cache"}
                 return complexity, meta
+            else:
+                # 过期: 删除
+                del self._cache[cache_key]
 
         if self._llm is None:
             return self._fallback_classify(t, mode)
@@ -624,11 +634,12 @@ class IntentClassifier:
         return hashlib.md5(combined.encode()).hexdigest()
 
     def _cache_result(self, key: str, complexity: float, meta: dict) -> None:
-        """Cache classification result."""
+        """Cache classification result with O(1) LRU eviction."""
+        # 容量满: 淘汰最久未用 (头部), O(1)
         if len(self._cache) >= self._CACHE_MAX:
-            oldest = min(self._cache, key=lambda k: self._cache[k][2])
-            del self._cache[oldest]
+            self._cache.popitem(last=False)
         self._cache[key] = (complexity, meta, time.time())
+        self._cache.move_to_end(key)  # 移到末尾 (最近使用)
 
 
 _global_classifier: Optional[IntentClassifier] = None

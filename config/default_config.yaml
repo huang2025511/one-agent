@@ -1,75 +1,32 @@
-# One-Agent 默认配置
-#
-# 敏感值（API Key）通过环境变量注入：在 .env 文件中填入对应变量即可。
-# 配置文件本身不要写明文 key，避免泄漏。
-#
-# 提示：可用 ONE_AGENT_CONFIG 环境变量指定其他配置文件，例如
-#   ONE_AGENT_CONFIG=config/dev_config.yaml one-agent
-#   ONE_AGENT_ENV=dev one-agent  （等价于上一行，_get_config_path 会解析）
-
 agent:
-  name: One-Agent
+  name: One-Agent-Test
+  description: Test configuration for One-Agent
   version: 2.0.0
   data_dir: ./data
-  log_level: INFO
-  language: zh
-  show_suggestions: false
-
+  log_level: WARNING
+  timezone: Asia/Shanghai
+  language: en
 llm:
-  # 主 provider/model：商汤日日新（轻量、低成本）
-  # 修复：之前此文件缺失 primary_provider/primary_model/api_keys，
-  # 导致 Pydantic 用默认值 anthropic/claude-3.5-sonnet，而用户未配
-  # anthropic 的 key → model_for_tier 回退到无 key 的 anthropic →
-  # chat_completion 返回 no_api_key（0 tokens）。补全后默认走商汤。
   primary_provider: sensenova
-  primary_model: sensenova/sensenova-6.7-flash-lite
+  primary_model: sensenova/deepseek-v4-flash
   lightweight_model: sensenova/sensenova-6.7-flash-lite
+  local_endpoint: http://localhost:11434
+  local_model: qwen2.5:7b
+  api_keys:
+    openrouter: null
+    openai: null
+    anthropic: null
+    deepseek: null
+    dashscope: null
+    sensenova: ${SENSENOVA_API_KEY}
   default_temperature: 0.3
   default_max_tokens: 2048
-  timeout: 60
-  retries: 3
-
-  # API Keys —— 从环境变量展开（.env 文件中设置）。
-  # _expand_env 会把 ${VAR} 替换为 os.environ[VAR]。
-  # 留空/null 表示该 provider 未配置，model_for_tier 会跳过它。
-  api_keys:
-    openrouter: ${OPENROUTER_API_KEY}
-    openai: ${OPENAI_API_KEY}
-    anthropic: ${ANTHROPIC_API_KEY}
-    deepseek: ${DEEPSEEK_API_KEY}
-    dashscope: ${DASHSCOPE_API_KEY}
-    sensenova: ${SENSENOVA_API_KEY}
-
-  # Fallback chain：主 provider 不可用时（无 key / 报错 / 熔断）按序尝试。
-  # 这样即使 primary_model 被改成未配置的 provider，也能回退到商汤。
-  fallback_chain:
-    - sensenova/sensenova-6.7-flash-lite
-    - deepseek/deepseek-chat
-    - dashscope/qwen-2.5-7b-instruct
-
-  model_tiers:
-    trivial:
-    - openrouter/meta-llama/llama-3-8b-instruct
-    - anthropic/claude-haiku-latest
-    - deepseek/deepseek-chat
-    - qwen/qwen-2.5-7b-instruct
-    - sensenova/sensenova-6.7-flash-lite  # 商汤实际可用模型（之前误写 sensenova/tiny 调用 404）
-    simple:
-    - anthropic/claude-3.5-haiku-20241022
-    - openai/gpt-4o-mini
-    - google/gemini-2.0-flash
-    - sensenova/sensenova-6.7-flash-lite
-    complex:
-    - anthropic/claude-3.5-sonnet-20241022
-    - openai/gpt-4o
-    - google/gemini-2.5-pro-exp-03-25
-    - sensenova/deepseek-v4-flash  # 商汤托管的 DeepSeek V4 推理模型
-    expert:
-    - anthropic/claude-4.5-sonnet-20250514
-    - openai/o3
-    - google/gemini-2.5-pro-preview-05-15
-    - sensenova/deepseek-v4-flash
-
+  timeout: 30
+  retries: 1
+  cost_tracking:
+    daily_budget: 1.0
+    monthly_budget: 20.0
+    db_path: data/memory/costs.db
 router:
   enabled: true
   task_complexity_thresholds:
@@ -77,30 +34,59 @@ router:
     simple: 0.5
     complex: 0.8
     expert: 1.0
-  # Token-aware 自适应路由：长上下文任务自动升级模型
-  # 当消息总 token 数超过 upgrade_threshold 时，tier 自动升一层
-  # 每超过阈值一倍再多升一层（最多到 expert）
-  token_aware_routing:
-    enabled: true
-    upgrade_threshold: 3000  # tokens，超过此值触发升 tier
-
-gateways:
-  cli:
-    enabled: true
-    prompt: 'one-agent> '
-  web:
-    enabled: true
-    host: 127.0.0.1
-    port: 18791
-  wechat_personal:
+  context_compression:
     enabled: false
-
+  skill_lazy_loading:
+    enabled: false
+  self_evolution:
+    enabled: false
 memory:
   short_term:
     max_turns: 20
     max_tokens: 8000
-
+  long_term:
+    enabled: true
+    storage: sqlite-fts5
+    max_results: 5
+    decay_enabled: true
+  procedural:
+    enabled: true
+    auto_create_skills: true
+    min_usage_before_skill: 3
+    skill_storage: markdown
+skills:
+  enabled: true
+  auto_discover: true
+  search_paths:
+  - ./skills
+gateways:
+  wechat_personal:
+    enabled: false
+    allowed_users: []
+    reply_prefix: ''
+    hot_reload: false
+execution: {}
+scheduler: {}
 security:
-  system_executor_password: ""
-  password_cache_minutes: 5
+  system_executor_password: ''
+  password_cache_minutes: 15
+  max_password_attempts: 3
+  lockout_minutes: 5
   require_password_for_dangerous: true
+  command_timeout_seconds: 30
+  max_output_bytes: 65536
+rest:
+  enabled: true
+  host: 127.0.0.1
+  port: 18792
+  api_key: ''
+  rate_limit_per_minute: 10000
+  max_chat_bytes: 65536
+  cors_origins:
+  - '*'
+monitoring: {}
+multimodal: {}
+marketplace:
+  enabled: true
+  registry_url: ''
+llm_cache: {}
