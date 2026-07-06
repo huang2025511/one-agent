@@ -10,12 +10,11 @@ Provides:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -330,8 +329,8 @@ class AgentMesh:
     def format_result(self, result: MeshResult) -> str:
         """Format a MeshResult for display."""
         lines = [
-            f"多智能体协作完成",
-            f"─────────────────",
+            "多智能体协作完成",
+            "─────────────────",
             f"任务: {result.original_task[:100]}",
             f"Agent 数: {result.agent_count} | 耗时: {result.total_duration:.1f}s",
             "",

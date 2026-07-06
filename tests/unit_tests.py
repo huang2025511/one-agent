@@ -1734,7 +1734,7 @@ def test_dispatch_smart_max_failures():
     result = asyncio.run(run())
     _check("dispatch max failures skipped dispatch", call_count[0] == 0,
            f"dispatch called {call_count[0]} times")
-    _check("dispatch max failures returns 不可用", "不可用" in result, result[:80])
+    _check("dispatch max failures returns 不可用", "不可用" in str(result), str(result)[:80])
 
 
 def test_dispatch_smart_recovery():

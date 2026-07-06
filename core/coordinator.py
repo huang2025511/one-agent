@@ -46,8 +46,8 @@ from core.deep_research import get_deep_researcher
 from core.model_compare import get_model_comparer
 
 # Round 7: production reliability
-from core.circuit_breaker import get_circuit_manager, CircuitConfig, CircuitOpenError
-from core.backoff import ExponentialBackoff, BackoffConfig, llm_backoff, search_backoff
+from core.circuit_breaker import get_circuit_manager, CircuitOpenError
+from core.backoff import llm_backoff
 from core.alerting import get_alert_manager, AlertSeverity
 
 # Round 7: tool ecosystem
@@ -1997,11 +1997,26 @@ class Coordinator(Plugin):
                     body=f"模型 {turn.model} 的熔断器已打开，使用降级回复",
                     severity=AlertSeverity.CRITICAL,
                 )
-                final_text = (
-                    "抱歉，AI 服务暂时不可用，请稍后重试。"
-                    if self._is_zh() else
-                    "Sorry, the AI service is temporarily unavailable. Please try again later."
-                )
+                if self._is_zh():
+                    final_text = (
+                        "⚠️ AI 服务暂时不可用（模型熔断器已触发）\n\n"
+                        "可能原因：短时间内请求失败次数过多，服务已自动保护。\n\n"
+                        "建议操作：\n"
+                        "1. 等待 30-60 秒后重试\n"
+                        "2. 输入 /status 查看系统状态\n"
+                        "3. 输入 /models 切换其他可用模型\n"
+                        "4. 如持续不可用，请联系管理员"
+                    )
+                else:
+                    final_text = (
+                        "⚠️ AI service temporarily unavailable (circuit breaker open)\n\n"
+                        "Possible cause: Too many failed requests recently, service is in protection mode.\n\n"
+                        "Suggestions:\n"
+                        "1. Wait 30-60 seconds and retry\n"
+                        "2. Type /status to check system status\n"
+                        "3. Type /models to switch to another available model\n"
+                        "4. Contact administrator if issue persists"
+                    )
                 turn.result = final_text
                 turn.meta["circuit_open"] = True
                 return
@@ -2215,11 +2230,24 @@ class Coordinator(Plugin):
                     ),
                 )
             except CircuitOpenError:
-                final_text = "抱歉，AI 服务暂时不可用。" if self._is_zh() else "AI service unavailable."
+                if self._is_zh():
+                    final_text = (
+                        "⚠️ AI 服务暂时不可用（模型熔断器已触发）\n\n"
+                        "建议：等待 30-60 秒后重试，或输入 /models 切换其他模型。"
+                    )
+                else:
+                    final_text = (
+                        "⚠️ AI service temporarily unavailable (circuit breaker open)\n\n"
+                        "Suggestion: Wait 30-60 seconds and retry, or type /models to switch."
+                    )
                 turn.result = final_text
                 turn.meta["circuit_open"] = True
                 return
-            final_text = resp.get("text", "") or "(no reply)"
+            final_text = resp.get("text", "") or (
+                "抱歉，AI 未能生成有效回复，请重试或换个方式提问。"
+                if self._is_zh() else
+                "Sorry, the AI couldn't generate a valid response. Please retry or rephrase."
+            )
             tokens_used = int(resp.get("tokens_used") or 0)
             total_tokens += tokens_used
             total_cost += (tokens_used / 1000) * MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002))
@@ -2247,7 +2275,11 @@ class Coordinator(Plugin):
             await self._record_self_improvement_async(turn)
 
         if not final_text:
-            final_text = "(no reply produced)"
+            final_text = (
+                "抱歉，AI 未能生成回复，请重试。"
+                if self._is_zh() else
+                "Sorry, the AI couldn't generate a reply. Please try again."
+            )
 
         # Gap 3 修复：输出安全扫描 — 检测输出中是否泄露 PII
         output_safety = scan_output(final_text)
@@ -3960,7 +3992,16 @@ class Coordinator(Plugin):
         zh = self._is_zh()
         mgr = get_branch_manager()
         ok = mgr.switch_branch(turn.session_id, args_text.strip())
-        turn.result = f"已切换到分支: {args_text.strip()}" if ok else f"分支 '{args_text.strip()}' 不存在"
+        if ok:
+            turn.result = (
+                f"已切换到分支: {args_text.strip()}"
+                if zh else f"Switched to branch: {args_text.strip()}"
+            )
+        else:
+            turn.result = (
+                f"分支 '{args_text.strip()}' 不存在"
+                if zh else f"Branch '{args_text.strip()}' does not exist"
+            )
         turn.record_success(turn.result, 0)
 
     async def _handle_branch_list(self, turn: TurnContext) -> None:
