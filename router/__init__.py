@@ -100,14 +100,37 @@ class SmartRouter(Plugin):
         # 1) classify complexity
         turn.estimated_complexity = self._classify(turn.input_text)
         tier = self._tier_for_complexity(turn.estimated_complexity)
-        model = self._llm.model_for_tier(tier) if self._llm else None
-        turn.model = model  # None is fine — chat_completion falls back to default model
         # 2) build messages + compress history
         turn.messages = self._build_messages(turn)
         # 3) pass context_compression config to coordinator via turn.meta
         compression_cfg = self._cfg.get("context_compression", {}) or {}
         turn.meta["context_compression"] = compression_cfg.get("enabled", True)
-        # 4) cap token budget
+        # 4) token-aware 自适应升 tier：长上下文任务自动升级模型
+        # 长对话历史即使问题简单，也需要更强的模型来处理和综合信息。
+        # 估算消息总 token 数，超过阈值则升一层（最多到 expert）。
+        token_cfg = (self._cfg.get("token_aware_routing", {}) or {})
+        if token_cfg.get("enabled", True):
+            estimated_tokens = self._estimate_tokens(turn.messages)
+            up_threshold = token_cfg.get("upgrade_threshold", 3000)
+            if estimated_tokens >= up_threshold and tier != "expert":
+                old_tier = tier
+                tier_order = ["trivial", "simple", "complex", "expert"]
+                idx = tier_order.index(tier) if tier in tier_order else 1
+                # 每超阈值一倍再升一层（最多到 expert）
+                steps = min(
+                    len(tier_order) - 1 - idx,
+                    max(1, int(estimated_tokens / up_threshold)),
+                )
+                tier = tier_order[idx + steps]
+                turn.meta["token_upgraded_from"] = old_tier
+                turn.meta["estimated_input_tokens"] = estimated_tokens
+                logger.info(
+                    "router: token-aware upgrade %s → %s (estimated %d tokens)",
+                    old_tier, tier, estimated_tokens,
+                )
+        # 5) 选模型 + cap token budget
+        model = self._llm.model_for_tier(tier) if self._llm else None
+        turn.model = model  # None is fine — chat_completion falls back to default model
         turn.token_budget = self._token_budget_for(tier)
         self._tier_stats[tier]["picked"] += 1
         logger.info("router: complexity=%.2f tier=%s model=%s",
@@ -283,6 +306,35 @@ class SmartRouter(Plugin):
 
     def _token_budget_for(self, tier: str) -> int:
         return {"trivial": 512, "simple": 1024, "complex": 2048, "expert": 4096}.get(tier, 2048)
+
+    def _estimate_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        """估算消息列表的 token 总数。
+
+        优先用 tiktoken（如果安装了），否则用中文/非中文混合估算。
+        中文 * 0.6 + 非中文字符 // 4，与 coordinator 的 _trim_messages 保持一致。
+        """
+        # 先试 tiktoken（更准确）
+        try:
+            import tiktoken  # type: ignore
+            enc = tiktoken.get_encoding("cl100k_base")
+            total = 0
+            for msg in messages:
+                content = str(msg.get("content", ""))
+                total += len(enc.encode(content))
+                # 每条消息 +4 tokens（role + 分隔符，GPT 风格估算）
+                total += 4
+            return total
+        except ImportError:
+            pass
+        # fallback：中文/非中文加权估算
+        total = 0
+        for msg in messages:
+            content = str(msg.get("content", ""))
+            chinese = sum(1 for c in content if "\u4e00" <= c <= "\u9fff")
+            non_chinese = len(content) - chinese
+            total += int(chinese * 0.6 + non_chinese / 4)
+            total += 4  # role + separator overhead
+        return total
 
     def _build_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Build compressed prompt: system + recent memories + current input.

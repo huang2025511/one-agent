@@ -168,6 +168,117 @@ def test_router_self_evolution():
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# 2b. Router token-aware routing (升 tier)
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_router_token_aware_upgrade():
+    """长上下文触发 token-aware 升 tier。"""
+    from router import SmartRouter
+    from core.context import TurnContext
+
+    router = SmartRouter()
+    router._cfg = {
+        "task_complexity_thresholds": {"trivial": 0.2, "simple": 0.5, "complex": 0.8},
+        "token_aware_routing": {"enabled": True, "upgrade_threshold": 100},
+    }
+    router._tier_stats = {
+        "trivial": {"picked": 0, "rerouted_up": 0, "rerouted_down": 0},
+        "simple": {"picked": 0, "rerouted_up": 0, "rerouted_down": 0},
+        "complex": {"picked": 0, "rerouted_up": 0, "rerouted_down": 0},
+        "expert": {"picked": 0, "rerouted_up": 0, "rerouted_down": 0},
+    }
+    router._history = []
+    router._session_history = {}
+    # mock _build_messages 返回很长的消息（触发升 tier）
+    long_text = "这是一段很长的中文测试内容。" * 50  # ~500 中文字 ≈ 300 tokens
+    router._build_messages = lambda turn: [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": long_text},
+    ]
+    # mock _llm
+    from unittest.mock import MagicMock
+    mock_llm = MagicMock()
+    mock_llm.model_for_tier = lambda tier: f"test/{tier}-model"
+    router._llm = mock_llm
+    # mock bus publish
+    from unittest.mock import MagicMock as MM
+    router.publish = MM()
+
+    import asyncio
+    from core.events import Event
+    turn = TurnContext(session_id="test", input_text="hi")
+    asyncio.run(router._on_user_message(Event("user_message", {"turn": turn})))
+
+    # 原本 trivial（input_text="hi" 很短），但消息很长 → 应升 tier
+    _check("token-aware upgrades from trivial",
+           turn.meta.get("token_upgraded_from") == "trivial",
+           f"upgraded_from={turn.meta.get('token_upgraded_from')}")
+    _check("token-aware picks higher tier",
+           turn.model != "test/trivial-model",
+           f"model={turn.model}")
+
+
+def test_router_token_aware_disabled():
+    """token_aware_routing.enabled=false 时不升 tier。"""
+    from router import SmartRouter
+    from core.context import TurnContext
+
+    router = SmartRouter()
+    router._cfg = {
+        "task_complexity_thresholds": {"trivial": 0.2, "simple": 0.5, "complex": 0.8},
+        "token_aware_routing": {"enabled": False, "upgrade_threshold": 100},
+    }
+    router._tier_stats = {
+        "trivial": {"picked": 0, "rerouted_up": 0, "rerouted_down": 0},
+        "simple": {"picked": 0, "rerouted_up": 0, "rerouted_down": 0},
+        "complex": {"picked": 0, "rerouted_up": 0, "rerouted_down": 0},
+        "expert": {"picked": 0, "rerouted_up": 0, "rerouted_down": 0},
+    }
+    router._history = []
+    router._session_history = {}
+    long_text = "很长的内容。" * 50
+    router._build_messages = lambda turn: [{"role": "user", "content": long_text}]
+    from unittest.mock import MagicMock
+    mock_llm = MagicMock()
+    mock_llm.model_for_tier = lambda tier: f"test/{tier}-model"
+    router._llm = mock_llm
+    router.publish = MagicMock()
+
+    import asyncio
+    from core.events import Event
+    turn = TurnContext(session_id="test", input_text="hi")
+    asyncio.run(router._on_user_message(Event("user_message", {"turn": turn})))
+
+    _check("token-aware disabled no upgrade",
+           "token_upgraded_from" not in turn.meta,
+           f"meta keys={list(turn.meta.keys())}")
+
+
+def test_router_estimate_tokens_chinese():
+    """_estimate_tokens 中文估算准确度。"""
+    from router import SmartRouter
+
+    router = SmartRouter()
+    # 纯英文
+    msgs_en = [{"role": "user", "content": "hello world"}]
+    tokens_en = router._estimate_tokens(msgs_en)
+    _check("estimate_tokens english > 0", tokens_en > 0, f"tokens={tokens_en}")
+    # 纯中文
+    msgs_zh = [{"role": "user", "content": "你好世界"}]
+    tokens_zh = router._estimate_tokens(msgs_zh)
+    _check("estimate_tokens chinese > 0", tokens_zh > 0, f"tokens={tokens_zh}")
+    # 同字符数下，中文 token 数 > 英文（中文一个字≈0.6 token，
+    # 英文一个字符≈0.25 token，4 个英文字母≈1 token）
+    same_len_en = [{"role": "user", "content": "a" * 100}]
+    same_len_zh = [{"role": "user", "content": "中" * 100}]
+    t_en = router._estimate_tokens(same_len_en)
+    t_zh = router._estimate_tokens(same_len_zh)
+    _check("estimate_tokens chinese more than english (same char count)",
+           t_zh > t_en,
+           f"zh={t_zh} vs en={t_en}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # 3. Long-term memory crud
 # ══════════════════════════════════════════════════════════════════════════
 

@@ -76,6 +76,12 @@ router:
     simple: 0.5
     complex: 0.8
     expert: 1.0
+  # Token-aware 自适应路由：长上下文任务自动升级模型
+  # 当消息总 token 数超过 upgrade_threshold 时，tier 自动升一层
+  # 每超过阈值一倍再多升一层（最多到 expert）
+  token_aware_routing:
+    enabled: true
+    upgrade_threshold: 3000  # tokens，超过此值触发升 tier
 
 gateways:
   cli:
