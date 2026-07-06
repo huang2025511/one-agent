@@ -69,6 +69,8 @@ class AlertManager(Plugin):
         # Metrics getter injected by the monitoring plugin (e.g. MonitoringPlugin).
         # Without this, _check_loop has nothing to evaluate.
         self._metrics_getter: Optional[Callable[[], Dict[str, Any]]] = None
+        # Raw channel configs for syncing to core.alerting singleton
+        self._raw_channel_configs: List[Dict[str, Any]] = []
 
     def set_metrics_getter(self, getter: Callable[[], Dict[str, Any]]) -> None:
         """Inject a metrics getter (called by one_agent.py after monitoring starts)."""
@@ -110,6 +112,7 @@ class AlertManager(Plugin):
 
         # Configure alert channels
         channels_cfg = config.get("alerting", {}).get("channels", [])
+        self._raw_channel_configs = list(channels_cfg)  # Save raw for sync
         for ch_cfg in channels_cfg:
             ch_type = ch_cfg.get("type")
             if ch_type == "webhook":

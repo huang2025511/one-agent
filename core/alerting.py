@@ -412,6 +412,45 @@ class AlertManager:
     def get_stats(self) -> Dict[str, Any]:
         return dict(self._stats)
 
+    def sync_channels_from_plugin(self, plugin_alert_manager) -> None:
+        """Sync channel configuration from the Plugin-based AlertManager.
+
+        This bridges the gap between the core.alerting singleton (used by
+        coordinator) and the alerting.Plugin (configured from YAML).
+        After calling this, the singleton will send alerts to the same
+        channels as the plugin.
+        """
+        try:
+            for channel_cfg in getattr(plugin_alert_manager, "_channels", []):
+                # Plugin channels are callable wrappers; we replicate the config
+                # by reading the plugin's raw config
+                pass
+            # Copy raw channel configs if available
+            raw_cfg = getattr(plugin_alert_manager, "_raw_channel_configs", None)
+            if raw_cfg:
+                for ch in raw_cfg:
+                    ch_type = ch.get("type", "")
+                    if ch_type == "webhook":
+                        self.configure_channel(
+                            AlertChannel.WEBHOOK,
+                            url=ch.get("url", ""),
+                            method=ch.get("method", "POST"),
+                            headers=ch.get("headers", {}),
+                        )
+                    elif ch_type == "slack":
+                        self.configure_channel(
+                            AlertChannel.WECOM,
+                            webhook_url=ch.get("webhook_url", ch.get("url", "")),
+                        )
+                    elif ch_type == "dingtalk":
+                        self.configure_channel(
+                            AlertChannel.DINGTALK,
+                            webhook_url=ch.get("webhook_url", ch.get("url", "")),
+                        )
+            logger.info("alerting: synced channels from plugin")
+        except Exception as exc:
+            logger.warning("alerting: sync_channels failed: %s", exc)
+
 
 # Singleton
 _alert_manager: Optional[AlertManager] = None

@@ -1323,18 +1323,24 @@ class SkillManager(Plugin):
 
     def _seed_tool_ecosystem_skills(self) -> None:
         """Register Round 7 tool ecosystem skills so the LLM can call them as tools."""
-        # Email
-        async def _email_handler(input_text: str, llm=None, **kw):
+        # Email — handler 接收 dict (Skill.run 传 args dict)
+        async def _email_handler(args, llm=None, **kw):
             from skills.email import get_email_skill
             skill = get_email_skill()
-            import shlex
-            parts = shlex.split(input_text.strip())
-            action = parts[0].lower() if parts else "read"
-            args = {"action": action}
-            if action == "send" and len(parts) >= 4:
-                args.update({"to": parts[1], "subject": parts[2], "body": parts[3]})
-            elif action == "search" and len(parts) >= 2:
-                args.update({"query": parts[1]})
+            # args 可能是 dict 或 str
+            if isinstance(args, str):
+                import shlex
+                parts = shlex.split(args.strip())
+                action = parts[0].lower() if parts else "read"
+                args = {"action": action}
+                if action == "send" and len(parts) >= 4:
+                    args.update({"to": parts[1], "subject": parts[2], "body": parts[3]})
+                elif action == "search" and len(parts) >= 2:
+                    args.update({"query": parts[1]})
+            elif isinstance(args, dict):
+                pass  # already a dict
+            else:
+                args = {"action": "read"}
             return await skill.run(args)
 
         self.register(Skill(
@@ -1346,14 +1352,17 @@ class SkillManager(Plugin):
         ))
 
         # Calendar
-        async def _calendar_handler(input_text: str, llm=None, **kw):
+        async def _calendar_handler(args, llm=None, **kw):
             from skills.calendar import get_calendar_skill
             skill = get_calendar_skill()
-            parts = input_text.strip().split(None, 1)
-            action = parts[0].lower() if parts else "list"
-            args = {"action": action}
-            if action == "create" and len(parts) > 1:
-                args["title"] = parts[1]
+            if isinstance(args, str):
+                parts = args.strip().split(None, 1)
+                action = parts[0].lower() if parts else "list"
+                args = {"action": action}
+                if action == "create" and len(parts) > 1:
+                    args["title"] = parts[1]
+            elif not isinstance(args, dict):
+                args = {"action": "list"}
             return await skill.run(args)
 
         self.register(Skill(
@@ -1365,14 +1374,17 @@ class SkillManager(Plugin):
         ))
 
         # Database
-        async def _db_handler(input_text: str, llm=None, **kw):
+        async def _db_handler(args, llm=None, **kw):
             from skills.database import get_database_skill
             skill = get_database_skill()
-            parts = input_text.strip().split(None, 1)
-            action = parts[0].lower() if parts else "tables"
-            args = {"action": action}
-            if action == "query" and len(parts) > 1:
-                args["sql"] = parts[1]
+            if isinstance(args, str):
+                parts = args.strip().split(None, 1)
+                action = parts[0].lower() if parts else "tables"
+                args = {"action": action}
+                if action == "query" and len(parts) > 1:
+                    args["sql"] = parts[1]
+            elif not isinstance(args, dict):
+                args = {"action": "tables"}
             return await skill.run(args)
 
         self.register(Skill(
@@ -1384,14 +1396,17 @@ class SkillManager(Plugin):
         ))
 
         # OpenAPI
-        async def _openapi_handler(input_text: str, llm=None, **kw):
+        async def _openapi_handler(args, llm=None, **kw):
             from skills.openapi import get_openapi_skill
             skill = get_openapi_skill()
-            parts = input_text.strip().split(None, 1)
-            action = parts[0].lower() if parts else "list"
-            args = {"action": action}
-            if action == "load" and len(parts) > 1:
-                args["url"] = parts[1]
+            if isinstance(args, str):
+                parts = args.strip().split(None, 1)
+                action = parts[0].lower() if parts else "list"
+                args = {"action": action}
+                if action == "load" and len(parts) > 1:
+                    args["url"] = parts[1]
+            elif not isinstance(args, dict):
+                args = {"action": "list"}
             return await skill.run(args)
 
         self.register(Skill(
@@ -1403,19 +1418,23 @@ class SkillManager(Plugin):
         ))
 
         # Chart
-        async def _chart_handler(input_text: str, llm=None, **kw):
+        async def _chart_handler(args, llm=None, **kw):
             from core.chart_gen import get_chart_generator
             skill = get_chart_generator()
-            import json
-            parts = input_text.strip().split(None, 1)
-            chart_type = parts[0] if parts else "flowchart"
-            data = {}
-            if len(parts) > 1:
-                try:
-                    data = json.loads(parts[1])
-                except json.JSONDecodeError:
-                    data = {"title": parts[1]}
-            return await skill.run({"chart_type": chart_type, "data": data})
+            if isinstance(args, str):
+                import json
+                parts = args.strip().split(None, 1)
+                chart_type = parts[0] if parts else "flowchart"
+                data = {}
+                if len(parts) > 1:
+                    try:
+                        data = json.loads(parts[1])
+                    except json.JSONDecodeError:
+                        data = {"title": parts[1]}
+                args = {"chart_type": chart_type, "data": data}
+            elif not isinstance(args, dict):
+                args = {"chart_type": "flowchart", "data": {}}
+            return await skill.run(args)
 
         self.register(Skill(
             id="chart",

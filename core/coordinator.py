@@ -924,15 +924,26 @@ class Coordinator(Plugin):
             raise RuntimeError("Model must be set before execution")
 
         # Gap 3+4 修复：输入安全扫描 — PII检测 + 有害内容 + 注入防御
+        # 深度审计 P2-5 修复：之前只存 safety_report 到 meta, 未真正脱敏 / 未注入告警 hint
         safety_report = scan_input(turn.input_text)
+        turn.meta["safety_report"] = safety_report
+
         if safety_report.pii_found:
-            # 注入脱敏后的输入到上下文
-            turn.meta["safety_report"] = safety_report
-            logger.info("safety: detected %d PII types in input", len(safety_report.pii_found))
+            # 关键修复：用脱敏后的文本替换原始输入, 否则 PII 仍会进入 LLM 上下文
+            original_input = turn.input_text
+            turn.input_text = safety_report.sanitized_text
+            turn.meta["safety_original_input"] = original_input  # 保留原始用于审计日志
+            logger.info("safety: detected %d PII types, input sanitized: %s",
+                        len(safety_report.pii_found),
+                        [p["type"] for p in safety_report.pii_found])
+
         if safety_report.injection_found:
-            turn.meta["safety_report"] = safety_report
             logger.warning("safety: detected prompt injection attempt: %s",
                            [i["type"] for i in safety_report.injection_found])
+
+        if safety_report.harmful_found:
+            logger.warning("safety: detected harmful content: %s",
+                           [h["type"] for h in safety_report.harmful_found])
 
         # Gap 10 修复：跨轮次任务状态追踪
         # 从 dialog_summarizer 获取当前活跃任务，注入到 turn.meta
@@ -952,6 +963,20 @@ class Coordinator(Plugin):
 
         messages = await self._prepare_messages(turn)
         tools = self._prepare_tools(turn)
+
+        # 深度审计 P2-5 修复：把安全提示注入 system 消息, 让 LLM 真正看到注入防御指令
+        safety_report = turn.meta.get("safety_report")
+        if safety_report and (safety_report.injection_found or safety_report.harmful_found):
+            hint = safety_report.to_context_hint(zh=self._is_zh())
+            if hint:
+                # 注入到第一条 system 消息末尾, 或新增一条 system 消息
+                if messages and messages[0].get("role") == "system":
+                    messages[0]["content"] = messages[0]["content"] + "\n\n" + hint
+                else:
+                    messages.insert(0, {"role": "system", "content": hint})
+                logger.info("safety: injected context hint (%d injection, %d harmful)",
+                            len(safety_report.injection_found),
+                            len(safety_report.harmful_found))
 
         # Get complexity from router classification
         complexity = getattr(turn, "estimated_complexity", 0.0)
@@ -1048,6 +1073,9 @@ class Coordinator(Plugin):
 
         # 5. Round 7: Conversation branch auto-tracking
         self._record_conversation_branch(turn)
+
+        # 6. Round 7 修复: Task state — 检测并更新活跃任务
+        await self._update_task_state(turn)
 
         self.publish("turn_completed", turn=turn)
         logger.info(
@@ -3271,7 +3299,22 @@ class Coordinator(Plugin):
         - Default: base temperature
         """
         complexity = getattr(turn, "estimated_complexity", 0.5)
-        task_types = turn.meta.get("task_types", [])
+
+        # 深度审计 P2-7 修复：之前只读 turn.meta["task_types"], 而该字段仅
+        # 在 _maybe_inject_cot() 内被赋值, 且 CoT 在低/中复杂度时被跳过 →
+        # 大量轮次 task_types 为空, 温度退化为仅按 complexity 打分。
+        # 修复：直接调用 reasoner.detect_task_type() 自行检测, 同时写回 meta
+        # 供下游 (CoT/规划) 复用, 避免重复检测。
+        task_types = turn.meta.get("task_types") or []
+        if not task_types:
+            try:
+                reasoner = self._get_reasoner()
+                task_types = reasoner.detect_task_type(turn.input_text)
+                if task_types:
+                    turn.meta["task_types"] = task_types
+            except Exception as exc:
+                logger.debug("dynamic_temp: detect_task_type failed: %s", exc)
+                task_types = []
 
         # Creative tasks benefit from higher temperature
         creative_types = {"creative", "writing", "brainstorming", "storytelling", "poetry"}
@@ -3877,13 +3920,121 @@ class Coordinator(Plugin):
         except Exception as exc:
             logger.debug("conv_branch auto-track failed: %s", exc)
 
+    # --------------------------------------------------- Task state tracking (Round 7 fix)
+    async def _update_task_state(self, turn: TurnContext) -> None:
+        """Detect and track multi-step tasks across turns.
+
+        Uses a lightweight heuristic: if the user's input contains task indicators
+        (步骤, 第一步, 先...再, plan, step 1, etc.), set an active task.
+        If there's already an active task, check if it's completed.
+        """
+        try:
+            from memory.dialog_summary import get_dialog_summarizer
+            summarizer = get_dialog_summarizer()
+            session_id = turn.session_id
+            active = summarizer.get_active_task(session_id)
+
+            # Check if current turn completes the active task
+            if active and active.status == "in_progress":
+                completion_keywords = [
+                    "完成", "搞定", "做好了", "结束了", "done", "complete", "finished",
+                    "最后一步", "全部做完", "全部完成",
+                ]
+                input_lower = turn.input_text.lower()
+                if any(kw in input_lower for kw in completion_keywords):
+                    summarizer.complete_task(session_id)
+                    logger.debug("task_state: completed task '%s'", active.name)
+                    return
+
+                # Check if all steps are done
+                if active.steps:
+                    all_done = all(s.get("status") == "done" for s in active.steps)
+                    if all_done:
+                        summarizer.complete_task(session_id)
+                        logger.debug("task_state: all steps done, completed '%s'", active.name)
+                        return
+
+            # Detect new multi-step task from user input
+            task_indicators = [
+                "步骤", "第一步", "第二步", "先...再", "先...然后",
+                "分几步", "step 1", "step 2", "plan", "计划",
+                "流程", "分步",
+            ]
+            input_text = turn.input_text
+            is_multi_step = any(indicator in input_text for indicator in task_indicators)
+
+            if is_multi_step and not active:
+                # Use LLM to extract task name and steps (lightweight, 1 call)
+                if self._llm:
+                    try:
+                        zh = self._is_zh()
+                        # 深度审计 P2-6 修复：使用 response_format JSON 模式, 避免自由文本解析失败
+                        prompt = (
+                            "分析以下用户请求，提取任务名称和步骤。"
+                            "输出 JSON 对象，字段：task_name (string, 简短任务名), "
+                            "steps (array of string, 按顺序的步骤列表, 最多 8 个)。\n\n"
+                            f"请求：{input_text[:500]}\n\n"
+                            "JSON 输出："
+                        ) if zh else (
+                            "Analyze the following user request and extract task name and steps. "
+                            "Output a JSON object with fields: task_name (string, short task name), "
+                            "steps (array of string, ordered steps, max 8).\n\n"
+                            f"Request: {input_text[:500]}\n\n"
+                            "JSON output:"
+                        )
+                        resp = await self._llm.chat_completion(
+                            messages=[{"role": "user", "content": prompt}],
+                            model=turn.model,
+                            max_tokens=400,
+                            tools=None,
+                            temperature=0.2,
+                            response_format={"type": "json_object"},
+                        )
+                        text = (resp.get("text") or "").strip()
+                        task_name = None
+                        steps: List[str] = []
+                        # 优先尝试 JSON 解析; 失败则回退到行解析
+                        try:
+                            import json as _json
+                            # 部分模型会在 JSON 外包 ```json ... ``` 围栏, 需剥离
+                            cleaned = text
+                            if cleaned.startswith("```"):
+                                cleaned = cleaned.split("```", 2)[1]
+                                if cleaned.startswith("json"):
+                                    cleaned = cleaned[4:]
+                            obj = _json.loads(cleaned)
+                            task_name = (obj.get("task_name") or "").strip()[:100]
+                            raw_steps = obj.get("steps") or []
+                            if isinstance(raw_steps, list):
+                                steps = [str(s).strip()[:200] for s in raw_steps if str(s).strip()][:8]
+                        except Exception:
+                            # 回退: 行解析
+                            lines = [l.strip() for l in text.split("\n") if l.strip()]
+                            if lines:
+                                task_name = lines[0][:100]
+                                steps = lines[1:10] if len(lines) > 1 else []
+                        if task_name:
+                            summarizer.set_active_task(session_id, task_name, steps)
+                            logger.info(
+                                "task_state: detected task '%s' with %d steps",
+                                task_name, len(steps),
+                            )
+                    except Exception as exc:
+                        logger.debug("task_state: LLM extraction failed: %s", exc)
+        except Exception as exc:
+            logger.debug("task_state: update failed: %s", exc)
+
     # --------------------------------------------------- Advanced RAG integration (Round 7)
     async def _enhanced_web_search(self, query: str, turn: TurnContext) -> str:
         """Use advanced RAG (HyDE + rerank) to enhance web search results."""
         try:
             if self._llm is None:
                 return ""
-            rag = get_advanced_rag(self._llm, self._memory)
+            # 修复: Coordinator 没有 self._memory, 通过 ctx 获取
+            memory = getattr(self.ctx, "memory", None) if self.ctx else None
+            if memory is None:
+                return ""
+            rag = get_advanced_rag(self._llm, memory)
             results = await rag.full_retrieval(
                 query=query,
                 top_k=5,
