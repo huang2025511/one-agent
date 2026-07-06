@@ -291,30 +291,90 @@ class IntentClassifier:
         return 0.3, {"intent_source": "fallback"}
 
     def _fallback_complexity(self, text: str) -> Tuple[float, Dict[str, Any]]:
-        """Heuristic complexity classification."""
-        score = 0.2
-        t = text.lower()
+        """Heuristic complexity classification.
 
-        for kw in ["设计", "方案", "规划", "分析", "比较", "如何", "怎样",
-                   "build", "create", "develop", "implement", "solve",
-                   "fix", "explain", "analyze", "compare"]:
-            if kw in t:
+        Preserves the same scoring logic as the original router heuristic
+        to ensure consistent behavior when LLM is unavailable.
+        """
+        t = text.strip()
+        if not t:
+            return 0.0, {"intent_source": "empty"}
+        score = 0.1
+        lower = t.lower()
+        length = len(t)
+
+        # Length-based scoring
+        if length > 400:
+            score += 0.25
+        if length > 1500:
+            score += 0.25
+
+        # Expert-level keywords
+        for kw in ("optimize", "performance", "debug", "deadlock", "algorithm",
+                   "审计", "优化", "性能", "死锁", "算法", "数学", "证明",
+                   "deep learning", "neural network", "reinforcement learning",
+                   "深度学习", "神经网络", "强化学习"):
+            if kw in lower:
+                score += 0.35
+                break
+
+        # Complex-level keywords
+        for kw in ("how to", "如何", "怎样", "设计", "方案", "规划", "步骤",
+                   "流程", "分析", "比较", "对比", "build", "create", "develop",
+                   "implement", "solve", "fix", "explain", "analyze", "compare"):
+            if kw in lower:
                 score += 0.2
                 break
 
-        for kw in ["代码", "编程", "实现", "函数", "类", "脚本",
-                   "code", "function", "class", "script"]:
-            if kw in t:
+        # Code keywords
+        for kw in ("python", "javascript", "typescript", "rust", "c++", "java",
+                   "go", "shell", "bash", "docker", "代码", "编程", "写代码"):
+            if kw in lower:
+                score += 0.15
+                break
+
+        # Complexity boost keywords
+        for kw in ("详细", "深入", "完整", "全面", "严谨", "精确", "准确", "具体"):
+            if kw in lower:
+                score += 0.1
+                break
+
+        # Action verbs — need tools, at least simple level
+        for kw in ("对比", "检查", "验证", "测试", "执行", "运行", "安装", "下载",
+                   "部署", "同步", "推送", "提交", "更新", "查看", "读取", "写入",
+                   "修改", "删除", "创建", "生成", "编译", "打包", "搜索",
+                   "开发", "实现", "编写", "搭建", "配置", "调试", "排查", "修复",
+                   "compare", "check", "verify", "test", "run", "execute",
+                   "install", "download", "deploy", "sync", "push", "commit",
+                   "update", "read", "write", "modify", "delete", "create",
+                   "generate", "compile", "build", "pack", "search", "develop",
+                   "implement", "debug", "fix"):
+            if kw in lower:
                 score += 0.2
                 break
 
-        for kw in ["调试", "bug", "错误", "问题", "修复",
-                   "debug", "error", "problem", "issue"]:
-            if kw in t:
-                score += 0.2
+        # System operation keywords — need system_run
+        for kw in ("gitee", "github", "git", "repo", "仓库", "文件", "目录",
+                   "文件夹", "路径", "本地", "远程", "服务器", "终端", "命令行",
+                   "shell", "bash", "config", "配置", ".py", ".js", ".ts",
+                   ".yaml", ".json", ".md"):
+            if kw in lower:
+                score += 0.15
                 break
 
-        score = max(0.0, min(1.0, score + len(t) / 1000))
+        # Trivial keywords — reduce score for short inputs
+        for kw in ("hi", "hello", "hey", "ok", "thanks", "thank you",
+                   "what's", "what is", "when", "where", "who",
+                   "天气", "时间", "日期", "你好", "谢谢", "再见", "help", "?"):
+            if kw in lower and length < 60:
+                score -= 0.3
+                break
+
+        # Paragraph count
+        paragraphs = sum(1 for p in t.split("\n") if p.strip())
+        score += min(0.1, paragraphs * 0.02)
+
+        score = max(0.0, min(1.0, score))
         return score, {
             "needs_tools": False,
             "needs_system": False,
@@ -328,11 +388,11 @@ class IntentClassifier:
         types = []
 
         patterns = {
-            "coding": [r"代码|编程|实现|开发|写一个|函数|类|脚本", r"code|implement|function|class|script"],
-            "analysis": [r"分析|研究|调查|评估|比较|对比", r"analyze|analysis|research|compare"],
-            "planning": [r"计划|方案|设计|步骤|流程|怎么.*做", r"plan|design|steps|how to"],
-            "learning": [r"学习|教程|入门|基础|讲解|解释", r"learn|tutorial|explain"],
-            "debugging": [r"调试|bug|错误|问题|修复", r"debug|error|fix|problem"],
+            "coding": [r"代码|编程|实现|开发|写一个|函数|类|脚本|程序", r"code|implement|function|class|script|program|develop"],
+            "analysis": [r"分析|研究|调查|评估|比较|对比|测试", r"analyze|analysis|research|investigate|evaluate|compare|test"],
+            "planning": [r"计划|方案|设计|步骤|流程|怎么.*做|如何.*实现", r"plan|design|steps|how to|approach|strategy"],
+            "learning": [r"学习|教程|入门|基础|讲解|解释.*原理", r"learn|tutorial|explain|how does|understand"],
+            "debugging": [r"调试|bug|错误|问题|修复|为什么.*不行|解决", r"debug|error|fix|why.*not|problem|issue|resolve"],
         }
 
         for task_type, regexes in patterns.items():
@@ -357,7 +417,7 @@ class IntentClassifier:
             spec["min_context"] = int(m.group(1)) * 1000
         if any(k in t for k in ("vision", "视觉", "image", "图像", "多模态")):
             spec["input_modality"] = "image"
-        if any(k in t for k in ("reasoning", "推理", "思考")):
+        if any(k in t for k in ("reasoning", "推理", "思考", "thinking")):
             spec["feature"] = "reasoning"
         if any(k in t for k in ("tool", "工具", "function")):
             spec["feature"] = spec.get("feature") or "tools"

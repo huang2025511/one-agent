@@ -44,11 +44,10 @@ import hashlib
 import hmac
 import logging
 import os
-import re
 import shlex
 import signal
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from executors.base import BaseExecutor, ExecutorResult, _to_executor_result
 
