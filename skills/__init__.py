@@ -221,8 +221,20 @@ class SkillManager(Plugin):
         """Simple keyword relevance — pick N skills whose title/description
         contain words from the user query.  This avoids loading the entire
         skill catalog into the LLM context.
+
+        Matches: English words (3+ ASCII chars) and Chinese words (2+ CJK chars).
+        Previously \\w{3,} alone matched Chinese characters as well (Python 3
+        Unicode-aware \\w), missing all Chinese input and causing skill
+        relevance to be essentially broken for Chinese-language users.
         """
-        query_words = set(w.lower() for w in re.findall(r"\w{3,}", text))
+        query_words = set()
+        # English / ASCII alphanumeric words (3+ chars) — use [a-zA-Z0-9_]
+        # instead of \\w to avoid matching Chinese/CJK characters
+        for w in re.findall(r"[a-zA-Z0-9_]{3,}", text):
+            query_words.add(w.lower())
+        # Chinese character sequences (2+ chars)
+        for w in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+            query_words.add(w.lower())
         scored: List[tuple] = []
         for skill in self._skills.values():
             # 性能优化：直接读预计算的 _hay_lower, 避免每轮重新拼接+lower
@@ -1240,7 +1252,9 @@ class SkillManager(Plugin):
         self.register(Skill(
             id="python_execute",
             title="Python 代码执行",
-            description="在沙箱环境中执行 Python 代码，用于数学计算、数据处理、文件操作等。"
+            description="在沙箱环境中执行 Python 代码，用于数学计算、数据处理、文件操作、API 调用、"
+                        "网络请求、数据抓取、爬虫、脚本、自动化、编程、运行代码、写代码、"
+                        "代码、Python、编程、运行、执行、脚本、API、请求、抓取、爬虫、数据采集、自动化。"
                         "支持安全的标准库（math, json, datetime, re 等），禁止系统调用和网络访问。",
             schema={
                 "type": "function",

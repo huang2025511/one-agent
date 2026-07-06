@@ -1508,22 +1508,23 @@ class Coordinator(Plugin):
     def _prepare_tools(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Pick relevant skills and prepare tool schemas.
 
-        When OS mode is enabled (via /os-on), system_run is automatically added
-        to the tool list so the LLM can directly call it for system operations.
+        Core tools (web_search, python_execute, calc) are always available
+        regardless of keyword relevance, because they are fundamental
+        capabilities that should never be missing from the LLM's tool set.
 
-        Enhanced: auto-add python_execute for computational tasks, increase limit to 6.
-        Auto-enable system_run when router detects system access needs.
+        When OS mode is enabled (via /os-on) or the router detects system
+        access needs, system_run is also auto-added so the LLM can directly
+        call it for system operations.
         """
 
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
             chosen = self._skills.pick_relevant(turn.input_text, limit=6)
-            web_search = self._skills.get("web_search")
-            if web_search and web_search not in chosen:
-                chosen.insert(0, web_search)
-            python_execute = self._skills.get("python_execute")
-            if python_execute and python_execute not in chosen:
-                chosen.append(python_execute)
+            # Core tools — always available regardless of keyword match
+            for core_id in ("web_search", "python_execute", "calc"):
+                core = self._skills.get(core_id)
+                if core and core not in chosen:
+                    chosen.insert(0, core)
             # OS mode: explicit enable OR auto-detected by router
             needs_sys = self._os_mode_enabled or turn.meta.get("needs_system_access")
             if needs_sys:
