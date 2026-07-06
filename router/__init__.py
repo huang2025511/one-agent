@@ -587,11 +587,54 @@ class SmartRouter(Plugin):
         return messages
 
     def _history_tail(self, session_id: str) -> List[Dict[str, Any]]:
-        # cheap in-memory per-session history — the memory plugin provides
-        # long-term cross-session recall via a separate event.
+        """Return recent messages for a session.
+
+        First checks in-memory cache for speed, then falls back to
+        persistent session store (SQLite) to survive restarts.
+        Returns format: [{"input": "...", "reply": "..."}, ...]
+        """
         if not hasattr(self, "_session_history"):
             self._session_history: Dict[str, List[Dict[str, Any]]] = {}
-        return self._session_history.get(session_id, [])
+
+        # First check in-memory cache
+        if session_id in self._session_history:
+            return self._session_history[session_id]
+
+        # Fall back to persistent session store
+        session_store = getattr(self.ctx, "session_store", None)
+        if session_store is not None:
+            try:
+                session_data = session_store.get_session(session_id)
+                if session_data and "messages" in session_data:
+                    # Convert to the format expected by _build_messages
+                    history = []
+                    i = 0
+                    while i < len(session_data["messages"]):
+                        msg = session_data["messages"][i]
+                        if msg.get("role") == "user":
+                            # Look for the next assistant reply
+                            j = i + 1
+                            reply = ""
+                            while j < len(session_data["messages"]):
+                                next_msg = session_data["messages"][j]
+                                if next_msg.get("role") == "assistant":
+                                    reply = next_msg.get("content", "")
+                                    break
+                                j += 1
+                            history.append({
+                                "input": msg.get("content", ""),
+                                "reply": reply,
+                            })
+                            i = j + 1
+                        else:
+                            i += 1
+                    # Cache in memory for next time
+                    self._session_history[session_id] = history
+                    return history
+            except Exception:
+                logger.exception("_history_tail: failed to load from session_store")
+
+        return []
 
 
 # NOTE: ``HistoryRecorder`` was removed in v2.1 — it duplicated
