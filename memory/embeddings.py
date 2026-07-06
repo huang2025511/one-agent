@@ -108,8 +108,8 @@ class EmbeddingStore(BaseSQLiteStore):
 
             from sentence_transformers import SentenceTransformer
 
-            # Load model with timeout to prevent blocking
-            with concurrent.futures.ThreadPoolExecutor() as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
                 future = executor.submit(SentenceTransformer, MODEL_NAME)
                 try:
                     self._model = future.result(timeout=MODEL_LOAD_TIMEOUT)
@@ -121,6 +121,8 @@ class EmbeddingStore(BaseSQLiteStore):
                         MODEL_LOAD_TIMEOUT
                     )
                     self._model = None
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
         except ImportError:
             logger.warning(
                 "sentence-transformers not installed. "

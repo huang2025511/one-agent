@@ -430,8 +430,9 @@ class Coordinator(Plugin):
             skill_id = self._SLASH_COMMANDS[cmd]
         else:
             # Try partial match (e.g., "/help me" → "/help")
+            # 修复：移除 key.startswith(cmd) 分支，避免 "/h" 匹配 "/help" 的歧义
             for key in self._SLASH_COMMANDS:
-                if cmd.startswith(key) or key.startswith(cmd):
+                if cmd.startswith(key):
                     skill_id = self._SLASH_COMMANDS[key]
                     break
 

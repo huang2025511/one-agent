@@ -1031,8 +1031,8 @@ def _cmd_setup():
     print("  ──────────────────")
     pwd = _ask("  设置系统执行密码（回车跳过）: ", "")
     if pwd:
-        import hashlib
-        pwd_hash = hashlib.sha256(pwd.encode()).hexdigest()
+        from executors.system import SystemExecutor
+        pwd_hash = SystemExecutor.hash_password(pwd)
         _update_config("security.system_executor_password", pwd_hash)
         print("  ✓ 密码已设置")
 
@@ -1209,6 +1209,7 @@ def _write_env(key: str, value: str) -> None:
     if not updated:
         new_lines.append(f"{key}={value}")
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    os.chmod(env_path, 0o600)
 
 
 def _update_config(key_path: str, value: str) -> None:

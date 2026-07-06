@@ -116,7 +116,10 @@ def _save_credentials(account_id: str, token: str, base_url: str, user_id: str =
             "user_id": user_id,
             "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        _account_path(account_id).write_text(json.dumps(data, indent=2), encoding="utf-8")
+        path = _account_path(account_id)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        import os
+        os.chmod(path, 0o600)
     except Exception as exc:
         logger.warning("wechat_personal: failed to save credentials: %s", exc)
 
@@ -775,7 +778,7 @@ class WeChatPersonalGateway(Plugin):
             # 兜底：清理所有超时心跳（>90s 的肯定已经跑完或卡死）
             self._cleanup_stale_heartbeats()
             return
-        if not session_id.startswith("wechat-"):
+        if not session_id.startswith("wechat-") or len(session_id) <= 7:
             logger.debug("wechat_personal: _on_turn_completed: session_id=%s not wechat", session_id)
             return
         chat_id = session_id[7:]
@@ -808,7 +811,7 @@ class WeChatPersonalGateway(Plugin):
     async def _on_turn_progress(self, event) -> None:
         """处理 coordinator 发布的进度事件，自动给用户发反馈。"""
         session_id = event.get("session_id") or ""
-        if not session_id or not session_id.startswith("wechat-"):
+        if not session_id or not session_id.startswith("wechat-") or len(session_id) <= 7:
             return
         chat_id = session_id[7:]
         message = event.get("message") or ""

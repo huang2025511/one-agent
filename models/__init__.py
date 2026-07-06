@@ -1306,7 +1306,18 @@ class LLMProvider(RecommendationMixin, Plugin):
             self._provider_base_urls.get("openrouter", "https://openrouter.ai/api/v1"),
         )
         api_key = self._api_keys.get(provider) or self._api_keys.get("openrouter")
-        bare_model = model.split("/", 1)[1] if "/" in model else model
+
+        # 修复：对于走 openrouter 代理的模型（如 nvidia/xxx），需要保留完整格式，
+        # 否则 openrouter 不知道代理哪个 vendor 的模型。
+        # 只有当第一段就是 provider 本身时才 strip（如 openai/gpt-4o → gpt-4o）。
+        if "/" in model:
+            first_seg = model.split("/", 1)[0]
+            if first_seg == provider:
+                bare_model = model.split("/", 1)[1]
+            else:
+                bare_model = model
+        else:
+            bare_model = model
 
         if not api_key:
             yield {"delta": "", "done": True, "error": f"no API key for provider '{provider}'"}
