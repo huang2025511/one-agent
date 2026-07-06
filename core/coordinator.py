@@ -1203,7 +1203,7 @@ class Coordinator(Plugin):
             if web_search_skill is not None:
                 query = turn.input_text.strip()
                 if not re.search(r"\d{4}", query) and re.search(
-                    r"(今年|本年|本月|这个月|去年|上月|上月|最近|近期|\d{1,2}\s*月|本月|今年)", query
+                    r"(今年|本年|本月|这个月|上个月|去年|上月|下个月|下月|最近|近期|\d{1,2}\s*月)", query
                 ):
                     query = f"{current_year}年 {query}"
 

@@ -51,22 +51,25 @@ class ApprovalRequest:
         }
 
 
+import threading
+
 class ApprovalManager:
     """Manages pending approval requests."""
 
-    # Cap history to prevent unbounded memory growth in long-running sessions.
     _MAX_HISTORY = 1000
 
     def __init__(self):
         self._pending: Dict[str, ApprovalRequest] = {}
         self._history: list = []
         self._on_approval_needed: Optional[Callable] = None
+        self._lock = threading.Lock()
 
     def request_approval(self, operation: str, details: str,
                         risk_level: str = "medium") -> ApprovalRequest:
         """Create a new approval request."""
         req = ApprovalRequest(operation, details, risk_level=risk_level)
-        self._pending[req.id] = req
+        with self._lock:
+            self._pending[req.id] = req
 
         if self._on_approval_needed:
             self._on_approval_needed(req)
@@ -75,28 +78,29 @@ class ApprovalManager:
 
     def get_pending(self) -> list:
         """List all pending requests."""
-        return [r.to_dict() for r in self._pending.values()]
+        with self._lock:
+            return [r.to_dict() for r in self._pending.values()]
 
     def approve(self, request_id: str) -> bool:
         """Approve a pending request."""
-        req = self._pending.pop(request_id, None)
-        if req:
-            req.approve()
-            self._history.append({"id": request_id, "approved": True, "time": time.time()})
-            # Trim history to prevent unbounded growth
-            if len(self._history) > self._MAX_HISTORY:
-                self._history = self._history[-self._MAX_HISTORY:]
-            return True
+        with self._lock:
+            req = self._pending.pop(request_id, None)
+            if req:
+                req.approve()
+                self._history.append({"id": request_id, "approved": True, "time": time.time()})
+                if len(self._history) > self._MAX_HISTORY:
+                    self._history = self._history[-self._MAX_HISTORY:]
+                return True
         return False
 
     def deny(self, request_id: str) -> bool:
         """Deny a pending request."""
-        req = self._pending.pop(request_id, None)
-        if req:
-            req.deny()
-            self._history.append({"id": request_id, "approved": False, "time": time.time()})
-            # Trim history to prevent unbounded growth
-            if len(self._history) > self._MAX_HISTORY:
-                self._history = self._history[-self._MAX_HISTORY:]
-            return True
+        with self._lock:
+            req = self._pending.pop(request_id, None)
+            if req:
+                req.deny()
+                self._history.append({"id": request_id, "approved": False, "time": time.time()})
+                if len(self._history) > self._MAX_HISTORY:
+                    self._history = self._history[-self._MAX_HISTORY:]
+                return True
         return False

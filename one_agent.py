@@ -1124,7 +1124,12 @@ def _cmd_doctor():
             except Exception:
                 pass
         if val:
-            status = "✓" if val.startswith("http") else f"✓ ({val[:4]}...{val[-4:]})"
+            if val.startswith("http"):
+                status = "✓"
+            elif len(val) >= 20:
+                status = f"✓ ({val[:4]}...{val[-4:]})"
+            else:
+                status = "✓ (*** masked ***)"
             print(f"    {status}  {var}")
             found += 1
         else:

@@ -274,7 +274,8 @@ class KnowledgeGraph(BaseSQLiteStore):
         if limit <= 0:
             raise ValueError("limit must be positive")
 
-        # Escape LIKE wildcards to prevent unexpected matches
+        query = query[:200]
+
         escaped_query = query.replace('%', '\\%').replace('_', '\\_')
 
         cur = self._conn.execute(
@@ -601,17 +602,19 @@ class KnowledgeGraph(BaseSQLiteStore):
 
     def stats(self) -> Dict[str, Any]:
         """Get graph statistics."""
-        entity_count = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
-        relation_count = self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
+        try:
+            entity_count = self._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+            relation_count = self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
 
-        # Calculate average degree
-        avg_degree = (relation_count * 2 / entity_count) if entity_count > 0 else 0
+            avg_degree = (relation_count * 2 / entity_count) if entity_count > 0 else 0
 
-        return {
-            "entities": entity_count,
-            "relations": relation_count,
-            "avg_degree": round(avg_degree, 2),
-        }
+            return {
+                "entities": entity_count,
+                "relations": relation_count,
+                "avg_degree": round(avg_degree, 2),
+            }
+        except Exception:
+            return {}
 
 
 # ------------------------------------------------------------------ skill handler factory

@@ -36,9 +36,11 @@ class ToolResult:
         return self.to_message()
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, str):
-            return self.data == other
-        return super().__eq__(other)
+        if isinstance(other, ToolResult):
+            return (self.tool_name, self.status, self.data, self.error) == (
+                other.tool_name, other.status, other.data, other.error
+            )
+        return False
 
     def __hash__(self) -> int:
         return hash((self.tool_name, self.status, str(self.data), self.error))
@@ -47,7 +49,9 @@ class ToolResult:
         return item in self.to_message()
 
     def __getitem__(self, key):
-        return self.to_message()[key]
+        if isinstance(key, int):
+            return self.to_message()[key]
+        raise TypeError(f"ToolResult indexing only supports integers, got {type(key).__name__}")
 
     def lower(self) -> str:
         return self.to_message().lower()
