@@ -348,6 +348,8 @@ class ModelCatalog:
     def classify_intent(self, text: str) -> Dict[str, Any]:
         """Pull a filter spec out of free-form text.
 
+        Uses LLM-based intent classification instead of keyword matching.
+
         Examples::
 
             "free models"           → {"free_only": True}
@@ -357,26 +359,10 @@ class ModelCatalog:
             "free + 100k context"   → {"free_only": True, "min_context": 100_000}
             "expert tier"           → {"tier": "expert"}
         """
-        spec: Dict[str, Any] = {}
-        t = (text or "").lower()
-        if any(k in t for k in ("free", "免费", "试用")):
-            spec["free_only"] = True
-        if any(k in t for k in ("paid", "收费", "付费")):
-            spec["paid_only"] = True
-        m = re.search(r"(\d+)\s*k\b", t)
-        if m:
-            spec["min_context"] = int(m.group(1)) * 1000
-        if any(k in t for k in ("vision", "视觉", "image", "图像", "多模态")):
-            spec["input_modality"] = "image"
-        if any(k in t for k in ("reasoning", "推理", "思考", "thinking")):
-            spec["feature"] = "reasoning"
-        if any(k in t for k in ("tool", "工具", "function")):
-            spec["feature"] = spec.get("feature") or "tools"
-        for tier in ("trivial", "simple", "complex", "expert"):
-            if tier in t or f"{tier} tier" in t or f"{tier}层" in t:
-                spec["tier"] = tier
-                break
-        return spec
+        from utils.intent_classifier import get_classifier
+
+        classifier = get_classifier()
+        return classifier.classify_model_filter(text)
 
     # ---------------------------------------------------------- describe
     def describe(self, model_id: str) -> str:

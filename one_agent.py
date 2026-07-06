@@ -601,65 +601,15 @@ async def _interactive(app: OneAgentApp) -> None:
     print("║  One-Agent v2 — 自然语言即可操作，输入 '帮助'   ║")
     print("╚══════════════════════════════════════════════╝")
 
-    # ---------- 自然语言意图匹配 ----------
-    # 用户无需记住精准命令，用自然语言即可触发内置功能
-    _INTENT_PATTERNS = {
-        "exit": [
-            r"退出|再见|拜拜|结束|关闭|退出程序|再见啦|bye|goodbye|see you",
-        ],
-        "help": [
-            r"帮助|怎么用|使用说明|能做什么|有什么功能|help|命令列表|功能列表|怎么操作|使用方法",
-        ],
-        "skills": [
-            r"技能|会什么|能做什么|有哪些能力|有什么技能|skill|能力列表|你会啥|你会什么",
-        ],
-        "status": [
-            r"状态|运行状态|当前状态|系统状态|运行情况|status|还好吗|活着吗|运行多久",
-        ],
-        "metrics": [
-            r"指标|统计|性能|调用量|token|用量|metrics|stats|统计数据|性能指标|使用量",
-        ],
-        "dlq": [
-            r"死信|失败事件|未处理|错误队列|死信队列|dlq|dead.?letter|失败的消息",
-        ],
-        "bus": [
-            r"事件|总线|event.?bus|事件类型|总线状态|bus",
-        ],
-        "clear": [
-            r"清屏|清除屏幕|清理屏幕|clear|刷新屏幕",
-        ],
-        "settings": [
-            r"设置|配置|修改设置|查看设置|更改|切换模型|改模型|改温度|开启|关闭|启用|禁用|把.*改|set.*to|change|configure",
-        ],
-        "models": [
-            r"\bmodels?\b|模型列表|有哪些模型|看模型|看.*模型|可.*模型|所有模型|免费模型|列出模型|列出.*模型|model.*list",
-        ],
-        # 智能分层：把 provider 的全部模型按 free/paid、context、features 自动分配到 4 层
-        "rebuild_tiers": [
-            r"智能分层|自动分层|自动分配|重新分层|刷新分层|rebuild.?tiers|auto.?tier|"
-            r"分层|分类|分档|auto.?classif|smart.?tier|分配.*模型|模型.*分配",
-        ],
-    }
-
     def _match_intent(text: str) -> Optional[str]:
-        """从自然语言中匹配用户意图，返回命令名或 None。"""
-        import re
-        lower = text.lower().strip()
-        exact_map = {
-            "exit": "exit", "quit": "exit", "q": "exit",
-            "help": "help", "?": "help",
-            "skills": "skills", "status": "status",
-            "metrics": "metrics", "stats": "metrics",
-            "dlq": "dlq", "bus": "bus", "clear": "clear",
-            "settings": "settings", "config": "settings",
-        }
-        if lower in exact_map:
-            return exact_map[lower]
-        for intent, patterns in _INTENT_PATTERNS.items():
-            for pat in patterns:
-                if re.search(pat, lower):
-                    return intent
-        return None
+        """从自然语言中匹配用户意图，返回命令名或 None。
+
+        Uses LLM-based intent classification instead of keyword matching.
+        """
+        from utils.intent_classifier import get_classifier
+
+        classifier = get_classifier()
+        return classifier.classify_cli_command(text)
 
     session_id = "cli-session"
     while True:

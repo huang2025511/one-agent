@@ -58,30 +58,15 @@ def __getattr__(name: str):
 
 
 # ---------- 自然语言意图匹配 ----------
-_CLI_INTENT_PATTERNS = {
-    "exit": [r"退出|再见|拜拜|结束|关闭|退出程序|再见啦|bye|goodbye|see you"],
-    "help": [r"帮助|怎么用|使用说明|能做什么|有什么功能|help|命令列表|功能列表|怎么操作|使用方法"],
-    "status": [r"状态|运行状态|当前状态|系统状态|运行情况|status|还好吗|活着吗|运行多久"],
-    "clear": [r"清屏|清除屏幕|清理屏幕|clear|刷新屏幕"],
-}
-
-
 def _match_cli_intent(text: str) -> Optional[str]:
-    """从自然语言中匹配 CLI 意图。精准命令优先，然后模糊匹配。"""
-    import re
-    lower = text.lower().strip()
-    exact = {
-        "exit": "exit", "quit": "exit", "q": "exit",
-        "help": "help", "?": "help",
-        "status": "status", "clear": "clear",
-    }
-    if lower in exact:
-        return exact[lower]
-    for intent, patterns in _CLI_INTENT_PATTERNS.items():
-        for pat in patterns:
-            if re.search(pat, lower):
-                return intent
-    return None
+    """从自然语言中匹配 CLI 意图。
+
+    Uses LLM-based intent classification instead of keyword matching.
+    """
+    from utils.intent_classifier import get_classifier
+
+    classifier = get_classifier()
+    return classifier.classify_cli_command(text)
 
 
 # ------------- CLI --------------------------------------------------------

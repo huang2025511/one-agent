@@ -14,7 +14,6 @@ calling the LLM and publishing ``turn_completed``.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import Any, Dict, List
 
@@ -23,6 +22,7 @@ from core.events import Event
 from core.plugin import Plugin
 from models import LLMProvider
 from models.tiers import MODEL_TIERS
+from utils.intent_classifier import get_classifier
 
 logger = logging.getLogger(__name__)
 
@@ -31,60 +31,6 @@ DEFAULT_TRIVIAL_THRESHOLD = 0.2
 DEFAULT_SIMPLE_THRESHOLD = 0.5
 DEFAULT_COMPLEX_THRESHOLD = 0.8
 MAX_COMPLEXITY = 100
-
-
-_KEYWORDS_BY_TIER = {
-    "trivial": re.compile(
-        r"(?:hi|hello|hey|ok|thanks|thank you|what's|what is|when|where|who|"
-        r"天气|时间|日期|你好|谢谢|再见|help|\?)",
-        re.IGNORECASE,
-    ),
-    "complex": re.compile(
-        r"(?:how to|如何|怎样|设计|方案|规划|步骤|流程|分析|比较|对比|"
-        r"build|create|develop|implement|solve|fix|explain|analyze|compare|"
-        r"设计方案|实施方案|详细步骤|优缺点|区别|差异)",
-        re.IGNORECASE,
-    ),
-    "expert": re.compile(
-        r"(?:optimize|performance|debug|deadlock|coredump|algorithm|prover|"
-        r"mathematical proof|formal verify|ml training|reverse engineer|"
-        r"审计|优化|性能|死锁|算法|数学|证明|反编译|"
-        r"deep learning|neural network|reinforcement learning|computer vision|"
-        r"深度学习|神经网络|强化学习|计算机视觉)",
-        re.IGNORECASE,
-    ),
-}
-
-_CODE_HINT = re.compile(
-    r"(python|javascript|typescript|rust|c\+\+|java|go|golang|shell|"
-    r"bash|node|docker|kubernetes|代码|编程|代码示例|写代码)",
-    re.IGNORECASE,
-)
-
-_COMPLEXITY_BOOST = re.compile(
-    r"(?:详细|深入|完整|全面|严谨|精确|准确|具体)",
-    re.IGNORECASE,
-)
-
-# 动手类动词 — 需要实际操作（工具/命令/文件），不能纯靠嘴炮回答
-# 注意：\b 不适用于中文字符，所以中文词不用 \b
-_ACTION_VERBS = re.compile(
-    r"(?:对比|检查|验证|测试|执行|运行|安装|下载|部署|同步|推送|提交|"
-    r"更新|查看|读取|写入|修改|删除|创建|生成|编译|打包|计算|搜索|"
-    r"开发|实现|编写|搭建|配置|调试|排查|修复|"
-    r"compare|check|verify|test|run|execute|install|download|deploy|"
-    r"sync|push|commit|update|read|write|modify|delete|create|generate|"
-    r"compile|build|pack|search|develop|implement|debug|fix)",
-    re.IGNORECASE,
-)
-
-# 系统操作关键词 — 需要 system_run 或文件操作
-_SYSTEM_HINT = re.compile(
-    r"(?:gitee|github|git|repo|仓库|文件|目录|文件夹|路径|"
-    r"本地|远程|服务器|终端|命令行|shell|bash|"
-    r"config|配置|\.py|\.js|\.ts|\.yaml|\.json|\.md)",
-    re.IGNORECASE,
-)
 
 
 class SmartRouter(Plugin):
@@ -417,36 +363,11 @@ class SmartRouter(Plugin):
     def _classify_heuristic(self, text: str) -> float:
         """Heuristic fallback — used when LLM is unavailable.
 
-        Kept as a safety net, not the primary classifier.
+        Delegates to the unified IntentClassifier's fallback heuristic.
         """
-        t = text.strip()
-        if not t:
-            return 0.0
-        score = 0.1
-        length = len(t)
-        if length > 400:
-            score += 0.25
-        if length > 1500:
-            score += 0.25
-        if _KEYWORDS_BY_TIER["expert"].search(t):
-            score += 0.35
-        if _KEYWORDS_BY_TIER.get("complex") and _KEYWORDS_BY_TIER["complex"].search(t):
-            score += 0.2
-        if _CODE_HINT.search(t):
-            score += 0.15
-        if _COMPLEXITY_BOOST.search(t):
-            score += 0.1
-        # 动手类动词 — 需要工具调用，至少 simple 级别
-        if _ACTION_VERBS.search(t):
-            score += 0.2
-        # 系统操作关键词 — 需要 system_run，至少 simple 级别
-        if _SYSTEM_HINT.search(t):
-            score += 0.15
-        if _KEYWORDS_BY_TIER["trivial"].search(t) and length < 60:
-            score -= 0.3
-        paragraphs = sum(1 for p in t.split("\n") if p.strip())
-        score += min(0.1, paragraphs * 0.02)
-        return max(0.0, min(1.0, score))
+        classifier = get_classifier(self._llm)
+        complexity, _meta = classifier.classify_complexity(text)
+        return complexity
 
     # Backward-compatible alias for tests
     _classify = _classify_heuristic

@@ -13,35 +13,9 @@ structured reasoning patterns for expert-level tasks.
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
-
-
-# Task decomposition patterns
-_DECOMPOSITION_HINTS = {
-    "coding": [
-        r"代码|编程|实现|开发|写一个|函数|类|脚本|程序",
-        r"code|implement|function|class|script|program|develop",
-    ],
-    "analysis": [
-        r"分析|研究|调查|评估|比较|对比|测试",
-        r"analyze|analysis|research|investigate|evaluate|compare|test",
-    ],
-    "planning": [
-        r"计划|方案|设计|步骤|流程|怎么.*做|如何.*实现",
-        r"plan|design|steps|how to|approach|strategy",
-    ],
-    "learning": [
-        r"学习|教程|入门|基础|讲解|解释.*原理",
-        r"learn|tutorial|explain|how does|understand",
-    ],
-    "debugging": [
-        r"调试|bug|错误|问题|修复|为什么.*不行|解决",
-        r"debug|error|fix|why.*not|problem|issue|resolve",
-    ],
-}
 
 
 class StepByStepReasoner:
@@ -52,21 +26,18 @@ class StepByStepReasoner:
     """
 
     def __init__(self) -> None:
-        self._task_patterns: Dict[str, List[re.Pattern]] = {}
-        for task_type, patterns in _DECOMPOSITION_HINTS.items():
-            self._task_patterns[task_type] = [
-                re.compile(p, re.IGNORECASE) for p in patterns
-            ]
+        pass
 
     def detect_task_type(self, text: str) -> List[str]:
-        """Detect what type(s) of task the user is asking about."""
-        detected = []
-        for task_type, patterns in self._task_patterns.items():
-            for pattern in patterns:
-                if pattern.search(text):
-                    detected.append(task_type)
-                    break
-        return detected if detected else ["general"]
+        """Detect what type(s) of task the user is asking about.
+
+        Uses LLM-based intent classification instead of keyword matching.
+        Falls back to heuristic classification when LLM is unavailable.
+        """
+        from utils.intent_classifier import get_classifier
+
+        classifier = get_classifier()
+        return classifier.classify_task_type(text)
 
     def should_use_cot(self, complexity: float, task_types: List[str]) -> bool:
         """Determine whether Chain-of-Thought reasoning should be used.

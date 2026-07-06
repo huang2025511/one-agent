@@ -90,142 +90,16 @@ def _verify_pbkdf2(plaintext: str, stored: str) -> bool:
 #  Risk classification
 # ============================================================
 
-# Level 0: always allowed, no password
-_SAFE_PATTERNS: List[Tuple[str, str]] = [
-    ("ls", r"^ls(\s+(-[alhRtTr]+|--color=\w+))*(\s+[\w./~_-]+)*$"),
-    ("cat", r"^cat(\s+-[nb])?\s+[\w./~_-]+$"),
-    ("head", r"^head(\s+-n\s+\d+)?\s+[\w./~_-]+$"),
-    ("tail", r"^tail(\s+-[nf]\s*\d*)?\s+[\w./~_-]+$"),
-    ("wc", r"^wc(\s+-[lwc])?\s+[\w./~_-]+$"),
-    ("echo", r"^echo\s+[\w\s./~_-]+$"),
-    ("date", r"^date(\s+[+-].*)?$"),
-    ("uptime", r"^uptime\s*$"),
-    ("free", r"^free(\s+-[hmg])?$"),
-    ("df", r"^df(\s+-[hTt])?(\s+[\w./~_-]+)?$"),
-    ("du", r"^du(\s+-[hs])?(\s+[\w./~_-]+)?$"),
-    ("pwd", r"^pwd(\s+-[LP])?$"),
-    ("whoami", r"^whoami\s*$"),
-    ("id", r"^id(\s+[\w_-]+)?$"),
-    ("uname", r"^uname(\s+-[amnrspvio]+)?$"),
-    ("hostname", r"^hostname(\s+-[is])?$"),
-    ("env", r"^env(\s+-i)?(\s+[\w_]+=.*)?$"),
-    ("which", r"^which\s+[\w_-]+$"),
-    ("type", r"^type\s+[\w_-]+$"),
-    ("man", r"^man\s+[\w_-]+$"),
-    ("find", r"^find\s+[\w./~_-]+\s+(-maxdepth\s+\d+\s+)?(-name\s+[\w.*_-]+| -type\s+[fdl])(\s+( -name\s+[\w.*_-]+| -type\s+[fdl]))*$"),
-    ("grep", r"^grep(\s+-[inrvclqwo]+)*\s+[\w\s./~,_\"'-]+$"),
-    ("ps", r"^ps(\s+-[auxf]+)?(\s+\|)?$"),
-    ("top", r"^top(\s+-[bnHp]+(\s+\d+)?)?$"),
-    ("pgrep", r"^pgrep(\s+-[flx])?\s+[\w_-]+$"),
-    ("stat", r"^stat\s+[\w./~_-]+$"),
-    ("file", r"^file\s+[\w./~_-]+$"),
-]
-
-# Level 1: file write / create / basic git operations (require password once)
-_LOW_PATTERNS: List[Tuple[str, str]] = [
-    ("mkdir", r"^mkdir(\s+-[pv])?\s+[\w./~_-]+$"),
-    ("touch", r"^touch\s+[\w./~_-]+$"),
-    ("cp", r"^cp(\s+-[rf])?\s+[\w./~_-]+\s+[\w./~_-]+$"),
-    ("mv", r"^mv\s+[\w./~_-]+\s+[\w./~_-]+$"),
-    ("git", r"^git\s+(status|log|diff|branch|checkout|pull|clone|add|commit|push)\s+[\w./:@#_\"',~ -]+$"),
-    ("tar", r"^tar\s+-[cx]\w*\s+[\w./~_-]+(\s+[\w./~_-]+)*$"),
-    ("zip", r"^zip\s+[\w./~_-]+\.zip\s+[\w./~_*-]+$"),
-    ("unzip", r"^unzip\s+[\w./~_-]+\.zip$"),
-    ("tee", r"^tee\s+[\w./~_-]+$"),
-]
-
-# Level 2: system modification (require password per command)
-_MEDIUM_PATTERNS: List[Tuple[str, str]] = [
-    ("pip", r"^pip3?\s+install\s+[\w._-]+(\[[\w,]+\])?$"),
-    ("npm", r"^npm\s+install(\s+[\w._@/-]+)?$"),
-    ("apt", r"^apt-get\s+(update|install)\s+[\w._-]+$"),
-    ("brew", r"^brew\s+install\s+[\w._/-]+$"),
-    ("systemctl", r"^systemctl\s+(start|stop|restart|reload|enable|disable|status)\s+[\w._@-]+$"),
-    ("service", r"^service\s+[\w._@-]+\s+(start|stop|restart|status)$"),
-    ("docker", r"^docker\s+(start|stop|restart|ps|logs|pull|run)\s+[\w._/:@=-]+$"),
-    ("chown", r"^chown(\s+-R)?\s+[\w:]+\s+[\w./~_-]+$"),
-    ("kill", r"^kill(\s+-[0-9]+)?\s+\d+$"),
-    ("pkill", r"^pkill(\s+-[0-9]+)?\s+[\w_-]+$"),
-]
-
-# Level 3: dangerous — require password + explicit confirmation
-_DANGEROUS_PATTERNS: List[str] = [
-    r"^rm(\s+-[rf]+)+",           # rm -rf / rm -r
-    r"^sudo\s",                    # sudo anything
-    r"^chmod\s+[0-7]77\s",        # chmod 777
-    r"^shutdown\s",                # shutdown
-    r"^reboot",                    # reboot
-    r"^poweroff",                  # poweroff
-    r"^mkfs\s",                    # format filesystem
-    r"^dd\s+if=",                  # dd (disk destroyer)
-    r"^>",                         # redirect truncate ("> /dev/sda")
-    r">>\s*/dev/",                 # append to device
-    r"^mount\s",                   # mount
-    r"^umount\s",                  # unmount
-    r"^fdisk\s",                   # fdisk
-    r"^parted\s",                  # parted
-    r"^mkfs\.",                    # mkfs.ext4 etc
-    r"^wipefs\s",                  # wipefs
-    r"^crontab\s",                 # crontab
-    r"^iptables\s",                # iptables
-    r"\|\s*sh\b",                  # pipe to sh
-    r"\|\s*bash\b",                # pipe to bash
-    r"&\s*>/dev/null",             # background with redirect
-    # Command chain injection detection — these operators allow
-    # chaining multiple commands, bypassing per-command classification.
-    r";",                          # command separator
-    r"&&",                         # AND operator
-    r"\|\|",                       # OR operator
-    r"`",                          # backtick command substitution
-    r"\$\(",                       # $(...) command substitution
-]
-
-
 def classify_command(command: str) -> Tuple[int, str]:
-    """Classify a command into risk level and return (level, reason)."""
-    stripped = command.strip()
-    if not stripped:
-        return (0, "empty")
+    """Classify a command into risk level and return (level, reason).
 
-    # Check DANGEROUS first (most specific patterns).
-    # Use re.search (not re.match) so patterns like ";", "&&", "$("
-    # are detected anywhere in the command, not just at the start.
-    for pattern in _DANGEROUS_PATTERNS_COMPILED:
-        if pattern.search(stripped):
-            return (3, f"dangerous operations: {stripped[:60]}")
+    Uses the unified IntentClassifier from utils.intent_classifier
+    instead of inline keyword matching.
+    """
+    from utils.intent_classifier import get_classifier
 
-    # Check MEDIUM
-    for cmd, pattern in _MEDIUM_PATTERNS_COMPILED:
-        if pattern.match(stripped):
-            return (2, f"system modification: {cmd}")
-
-    # Check LOW
-    for cmd, pattern in _LOW_PATTERNS_COMPILED:
-        if pattern.match(stripped):
-            return (1, f"file/system operation: {cmd}")
-
-    # Check SAFE
-    for _cmd, pattern in _SAFE_PATTERNS_COMPILED:
-        if pattern.match(stripped):
-            return (0, "safe operation")
-
-    # Unknown command → treat as MEDIUM
-    return (2, f"unknown command type: {stripped[:60]}")
-
-
-# Pre-compile all patterns at module load time (compiled once, reused forever).
-# This avoids re-compiling the same regex on every classify_command() call,
-# which is a hot path executed before every system command.
-_DANGEROUS_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in _DANGEROUS_PATTERNS]
-_MEDIUM_PATTERNS_COMPILED = [
-    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _MEDIUM_PATTERNS
-]
-_LOW_PATTERNS_COMPILED = [
-    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _LOW_PATTERNS
-]
-_SAFE_PATTERNS_COMPILED = [
-    (cmd, re.compile(p, re.IGNORECASE)) for cmd, p in _SAFE_PATTERNS
-]
+    classifier = get_classifier()
+    return classifier.classify_command(command)
 
 
 # ============================================================
