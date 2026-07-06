@@ -581,7 +581,7 @@ class MemoryPlugin(Plugin):
             # 去重：60 秒内相同内容不重复写入，避免 turn_completed 事件
             # 重复触发或同一 turn 被多路径 publish 时膨胀长期记忆。
             import hashlib
-            content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             now_ts = time.time()
             last_added = self._recent_memory_hashes.get(content_hash, 0)
             should_persist = (now_ts - last_added) >= self._dedup_window

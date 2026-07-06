@@ -117,7 +117,7 @@ class DelegationManager:
 
         # Step 2: Execute subtasks in parallel
         agents = [SubAgent(self._llm, self._skills, f"sub-{i}") for i in range(len(subtasks))]
-        tasks_coros = [agent.run(subtask, model) for agent, subtask in zip(agents, subtasks, strict=False)]
+        tasks_coros = [agent.run(subtask, model) for agent, subtask in zip(agents, subtasks, strict=True)]
         results = await asyncio.gather(*tasks_coros, return_exceptions=True)
 
         # Step 3: Collect and summarize

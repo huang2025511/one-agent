@@ -203,7 +203,10 @@ async def _get_updates(
             timeout_ms=timeout_ms,
         )
     except asyncio.TimeoutError:
-        return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf}
+        return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf, "_timeout": True}
+    except Exception as exc:
+        logger.warning("wechat_personal: _get_updates error: %s", exc)
+        return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf, "_error": str(exc)}
 
 
 async def _send_msg(

@@ -121,15 +121,21 @@ class BaseSQLiteStore:
 
     def close(self) -> None:
         """Close the database connection."""
+        if getattr(self, "_closed", False):
+            return
         try:
             if self._conn:
                 self._conn.close()
                 self._conn = None
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("base_store close error: %s", exc)
+        finally:
+            self._closed = True
 
     def __del__(self):
         """Ensure connection is closed on garbage collection."""
+        if getattr(self, "_closed", False):
+            return
         if hasattr(self, "_conn") and self._conn:
             try:
                 self._conn.close()

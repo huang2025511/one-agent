@@ -1086,6 +1086,10 @@ class Coordinator(Plugin):
                             total_tokens)
                 return True
 
+        except asyncio.TimeoutError:
+            logger.warning("multi-agent timeout, falling back to normal flow")
+        except (KeyError, AttributeError) as exc:
+            logger.error("multi-agent logic error (should be fixed): %s", exc)
         except Exception as exc:
             logger.warning("multi-agent failed, falling back to normal flow: %s", exc)
 
@@ -1102,7 +1106,12 @@ class Coordinator(Plugin):
             return
 
         max_tokens = self.ctx.config.get("memory", {}).get("short_term", {}).get("max_tokens", 8000)
-        estimated_tokens = sum(len(str(m.get("content", ""))) // 4 for m in messages)
+        estimated_tokens = 0
+        for m in messages:
+            content = str(m.get("content", ""))
+            chinese_chars = sum(1 for c in content if "\u4e00" <= c <= "\u9fff")
+            non_chinese = len(content) - chinese_chars
+            estimated_tokens += int(chinese_chars * 0.6 + non_chinese // 4)
 
         if estimated_tokens <= max_tokens * 0.8:
             return

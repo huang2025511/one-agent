@@ -165,7 +165,8 @@ def _try_decrypt(value: str, cipher=None) -> str:
         import base64
         token = value[4:]
         return cipher.decrypt(base64.b64decode(token)).decode()
-    except Exception:
+    except Exception as exc:
+        logger.warning("decrypt failed for field, returning raw: %s", type(exc).__name__)
         return value
 
 
