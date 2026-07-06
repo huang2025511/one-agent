@@ -427,8 +427,13 @@ class Coordinator(Plugin):
         检测用户消息是否表达某个 skill 能处理的明确意图（无需 LLM tool-calling），
         若命中则直接 dispatch skill 并返回 True。
 
-        目前覆盖：
+        覆盖的意图：
         - "拉取/添加/刷新模型" → model_manage skill（复用已配置 key）
+        - "搜一下/搜索 X/查一下" → web_search skill
+        - "现在几点/当前时间" → now skill
+        - "算一下 X" / 纯算式 → calc skill
+        - "记一下 X/保存笔记" → save_note skill
+        - "执行命令 X/运行 X" → system_run skill（需密码，仅简单只读命令直通）
 
         设计原因：弱模型（如 flash-lite）不支持 tool calling，自然语言请求
         会被路由到这些模型 → 无法触发 skill → 只能打官腔。直通调度绕过这个限制。
@@ -437,37 +442,121 @@ class Coordinator(Plugin):
         if not text:
             return False
 
-        # ---- 模型拉取意图 ----
+        if self._skills is None:
+            return False
+
+        # 1) 模型拉取意图（最特定，先检查）
         try:
             from skills import _try_natural_language_fetch
         except ImportError:
+            _try_natural_language_fetch = None  # type: ignore
+
+        if _try_natural_language_fetch is not None and self._llm is not None:
+            nl_result = _try_natural_language_fetch(self._llm, text)
+            if nl_result is not None:
+                provider, free_only, all_models_flag = nl_result
+                logger.info(
+                    "coordinator: 自然语言直通 model_manage (provider=%s)", provider,
+                )
+                self._emit_progress(turn, f"正在从 {provider} 拉取模型列表...", "skill_dispatch")
+                try:
+                    result = await self._skills.dispatch("model_manage", {"input": text})
+                    turn.result = str(result) if result else "（无结果）"
+                    turn.meta["direct_skill_dispatch"] = "model_manage"
+                except Exception as exc:
+                    logger.exception("coordinator: 自然语言直通 model_manage 失败: %s", exc)
+                    turn.record_failure(f"模型拉取失败: {exc}")
+                self.publish("turn_completed", turn=turn)
+                return True
+
+        # 2) 其他高频 skill 意图
+        skill_id, skill_args, progress_msg = self._match_nl_skill_intent(text)
+        if skill_id is None:
             return False
 
-        if self._llm is None:
-            return False
-        nl_result = _try_natural_language_fetch(self._llm, text)
-        if nl_result is None:
-            return False
-
-        provider, free_only, all_models_flag = nl_result
-        logger.info(
-            "coordinator: 自然语言直通 model_manage (provider=%s free=%s all=%s)",
-            provider, free_only, all_models_flag,
-        )
-        self._emit_progress(turn, f"正在从 {provider} 拉取模型列表...", "skill_dispatch")
+        logger.info("coordinator: 自然语言直通 %s", skill_id)
+        if progress_msg:
+            self._emit_progress(turn, progress_msg, "skill_dispatch")
         try:
-            skill = self._skills.get("model_manage")  # type: ignore[union-attr]
-            if skill is None:
-                return False
-            # 把原始自然语言作为 input 传给 skill，skill 内部会复用已配置 key
-            result = await self._skills.dispatch("model_manage", {"input": text})  # type: ignore[union-attr]
+            result = await self._skills.dispatch(skill_id, skill_args)
             turn.result = str(result) if result else "（无结果）"
-            turn.meta["direct_skill_dispatch"] = "model_manage"
+            turn.meta["direct_skill_dispatch"] = skill_id
         except Exception as exc:
-            logger.exception("coordinator: 自然语言直通 model_manage 失败: %s", exc)
-            turn.record_failure(f"模型拉取失败: {exc}")
+            logger.exception("coordinator: 自然语言直通 %s 失败: %s", skill_id, exc)
+            turn.record_failure(f"{skill_id} 执行失败: {exc}")
         self.publish("turn_completed", turn=turn)
         return True
+
+    def _match_nl_skill_intent(self, text: str):
+        """识别自然语言意图并映射到 skill。返回 (skill_id, args, progress_msg) 或 (None, None, None)。
+
+        只有意图非常明确时才命中（避免误触发）。模糊请求交给 LLM tool-calling。
+        """
+        t = text.strip().lower()
+        if not t:
+            return None, None, None
+
+        # ---- now：当前时间 ----
+        # 触发：完全匹配或"现在几点/当前时间/今天日期"等
+        now_patterns = (
+            "现在几点", "当前时间", "现在时间", "今天日期", "今天几号",
+            "what time", "current time", "now time", "今天星期",
+        )
+        if t in ("几点了", "时间", "now", "时间?", "时间？", "几点", "/now", "/时间"):
+            return "now", {"input": text}, None
+        for p in now_patterns:
+            if p in t:
+                return "now", {"input": text}, None
+
+        # ---- calc：纯算式或"算一下" ----
+        # 触发：纯算式（只含数字+运算符）或"算一下/计算 X"
+        import re as _re
+        # 纯算式（长度>2，只含数字和运算符）
+        if len(text) > 2 and _re.fullmatch(r"[0-9+\-*/(). ]+", text.strip()):
+            return "calc", {"input": text.strip()}, None
+        calc_patterns = ("算一下", "计算一下", "算算", "帮我算", "calculate", "compute")
+        for p in calc_patterns:
+            if p in t:
+                # 提取算式部分
+                expr = text.split(p, 1)[-1].strip(" ，,。.")
+                if expr and _re.fullmatch(r"[0-9+\-*/(). ]+", expr):
+                    return "calc", {"input": expr}, None
+
+        # ---- web_search：搜索意图 ----
+        # 触发："搜一下 X/搜索 X/查一下 X/帮我查"（需要 X 有实际内容）
+        search_patterns = ("搜一下", "搜索一下", "搜索", "帮我搜", "查一下", "帮我查",
+                           "查找一下", "查一查", "search for", "google一下")
+        for p in search_patterns:
+            if t.startswith(p):
+                query = text[len(p):].strip(" ，,。.?？")
+                if len(query) >= 2:
+                    return "web_search", {"input": query}, f"正在搜索：{query[:30]}..."
+
+        # ---- save_note：记笔记 ----
+        # 触发："记一下 X/记住 X/保存笔记/帮我记"
+        note_patterns = ("记一下", "记住", "帮我记", "保存笔记", "记笔记", "记下")
+        for p in note_patterns:
+            if t.startswith(p):
+                content = text[len(p):].strip(" ，,。.")
+                if len(content) >= 2:
+                    return "save_note", {"input": content}, None
+
+        # ---- system_run：执行命令（仅安全只读命令直通，避免危险操作）----
+        # 触发："执行命令 X/运行命令 X/跑一下 X"（X 是明确的命令）
+        # 安全限制：只对 ls/cat/echo/date/whoami/pwd/df 等只读命令直通
+        sys_patterns = ("执行命令", "运行命令", "跑一下命令", "帮我执行", "运行一下")
+        for p in sys_patterns:
+            if t.startswith(p):
+                cmd = text[len(p):].strip(" ，,。.`")
+                # 只对安全只读命令直通，避免危险操作
+                safe_starts = ("ls", "cat", "echo", "date", "whoami", "pwd",
+                               "df", "du", "free", "uptime", "uname", "head",
+                               "tail", "wc", "find", "grep", "git status",
+                               "git log", "git diff")
+                if cmd and any(cmd.lower().startswith(s) for s in safe_starts):
+                    return "system_run", {"input": cmd}, f"正在执行：{cmd[:30]}..."
+
+        return None, None, None
 
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
         """Handle slash commands like /help, /settings.
@@ -888,8 +977,44 @@ class Coordinator(Plugin):
                 if not any(m.get("role") == "user" for m in messages):
                     messages.append({"role": "user", "content": turn.input_text})
 
+        # Procedural 记忆注入：MemoryPlugin 在 _on_user_message 里查 procedural 技能，
+        # 命中后放入 turn.meta["procedural_skill"]。这里把它作为参考注入 messages，
+        # 让 LLM 能复用之前学到的解决方案模式，避免重复探索。
+        procedural_body = turn.meta.get("procedural_skill")
+        if procedural_body:
+            if self._is_zh():
+                proc_header = "【学到的技能】（从历史对话中自动提炼的可复用方案）\n以下是我之前解决类似问题时学到的有效步骤，请参考但根据当前情况灵活调整：\n\n"
+            else:
+                proc_header = "[Learned Skill] (reusable solution pattern distilled from past conversations)\nThe following is an effective approach I learned from similar past problems. Use it as reference but adapt to the current situation:\n\n"
+            proc_block = {"role": "assistant", "content": proc_header + procedural_body[:2000]}
+            if messages and messages[-1].get("role") == "user":
+                messages.insert(len(messages) - 1, proc_block)
+            else:
+                messages.append(proc_block)
+
         # Inject Chain-of-Thought reasoning for complex tasks
         await self._maybe_inject_cot(messages, turn)
+
+        # 注入持久化的自我改进建议：SelfImprover 把失败→改进写入 DB，
+        # 这里每轮读最近 3 条作为持久化行为指导注入 system prompt。
+        # 之前只写不读 → self-improvement 是开环的，学到的改进从不改变后续行为。
+        if self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+            try:
+                active_improvements = self.ctx.self_improver.get_active_improvements(limit=3)
+                if active_improvements:
+                    imp_text = "\n".join(f"- {s}" for s in active_improvements)
+                    imp_msg = {
+                        "role": "system",
+                        "content": f"[行为改进指南]（基于历史失败自动学习）\n{imp_text}",
+                    }
+                    # 插到第一个 system 消息之后，作为持久化指令
+                    if messages and messages[0].get("role") == "system":
+                        messages.insert(1, imp_msg)
+                    else:
+                        messages.insert(0, imp_msg)
+                    turn.meta["active_improvements"] = len(active_improvements)
+            except Exception as exc:
+                logger.debug("加载持久化改进失败: %s", exc)
 
         # 注入重启感知：如果刚重启过，告诉 LLM 已成功重启
         if self.ctx and getattr(self.ctx, "recent_restart", 0):
@@ -1403,6 +1528,18 @@ class Coordinator(Plugin):
         total_tokens = 0
         _failed_skills: Dict[str, int] = {}
 
+        # Gap 6：思考计划约束执行
+        # 跟踪已调用工具，模型想提前结束时若计划中还有未执行的工具，注入提醒。
+        available_tool_names = {
+            t.get("function", {}).get("name", "")
+            for t in (tools or []) if isinstance(t, dict)
+        }
+        planned_tools = self._parse_planned_tools(
+            turn.meta.get("tool_chain_plan", ""), available_tool_names,
+        )
+        called_tools: set = set()
+        nudged: bool = False  # 只提醒一次，避免无限循环
+
         for i in range(self._max_tool_iterations):
             resp = await self._llm.chat_completion(
                 messages=messages,
@@ -1415,9 +1552,43 @@ class Coordinator(Plugin):
 
             if not tool_calls:
                 final_text = resp.get("text", "") or ""
+
+                # Gap 6：模型想结束，但计划中还有工具没调用 → 提醒继续执行
+                if (
+                    not nudged
+                    and planned_tools
+                    and i < self._max_tool_iterations - 1
+                    and final_text  # 模型确实产出了内容（不是空响应）
+                ):
+                    missing = [t for t in planned_tools if t not in called_tools]
+                    if missing:
+                        zh = self._is_zh()
+                        if zh:
+                            nudge = (
+                                f"[系统提示：你之前的工具链规划里还包括这些工具：{', '.join(missing)}，"
+                                "但尚未调用。如果这些工具对完成任务有必要，请继续调用；"
+                                "如果已不需要，请直接基于现有信息给出最终答复。]"
+                            )
+                        else:
+                            nudge = (
+                                f"[System: Your plan still includes these uncalled tools: {', '.join(missing)}. "
+                                "Call them if needed; otherwise give the final answer based on current info.]"
+                            )
+                        messages.append({"role": "assistant", "content": final_text})
+                        messages.append({"role": "user", "content": nudge})
+                        nudged = True
+                        turn.meta["plan_nudge_triggered"] = True
+                        continue  # 再来一轮，不 break
+
                 if final_text:
                     messages.append({"role": "assistant", "content": final_text})
                 break
+
+            # 记录本轮调用的工具名
+            for tc in tool_calls:
+                nm = tc.get("name") or tc.get("function", {}).get("name", "")
+                if nm:
+                    called_tools.add(nm)
 
             await self._execute_tool_calls(messages, turn, tool_calls, _failed_skills, i)
 
@@ -1443,13 +1614,42 @@ class Coordinator(Plugin):
             final_text = resp.get("text", "") or "(no reply)"
             total_tokens += int(resp.get("tokens_used") or 0)
 
+        # 记录计划完成度（供 self-improvement 分析）
+        if planned_tools:
+            turn.meta["plan_completion"] = {
+                "planned": planned_tools,
+                "called": sorted(called_tools & set(planned_tools)),
+                "missing": sorted(set(planned_tools) - called_tools),
+                "nudged": nudged,
+            }
+
         # Record failure for self-improvement
         if turn.result is None and turn.error:
-            self._record_self_improvement(turn)
+            # 用异步版本：真正闭环（record_failure + LLM 提炼改进 + apply_improvement）
+            await self._record_self_improvement_async(turn)
 
         if not final_text:
             final_text = "(no reply produced)"
         turn.record_success(final_text, total_tokens)
+
+    def _parse_planned_tools(
+        self, plan_text: str, available_tool_names: set,
+    ) -> List[str]:
+        """Gap 6：从工具链规划文本中提取预期的工具调用顺序。
+
+        匹配规则：规划里出现的、且当前确实可用的工具名，按首次出现顺序返回。
+        没有规划或匹配不到时返回空列表（不约束）。
+        """
+        if not plan_text or not available_tool_names:
+            return []
+        ordered: List[str] = []
+        seen: set = set()
+        # 工具名通常是 word-boundary 的标识符（如 web_search、calc、system_run）
+        for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", plan_text):
+            if name in available_tool_names and name not in seen:
+                ordered.append(name)
+                seen.add(name)
+        return ordered
 
     async def _execute_tool_calls(
         self,
@@ -1547,8 +1747,17 @@ class Coordinator(Plugin):
                         if inject_msg not in messages:
                             messages.insert(-2, inject_msg)
 
-    def _record_self_improvement(self, turn: TurnContext) -> None:
-        """Record failure for self-improvement analysis."""
+    async def _record_self_improvement_async(self, turn: TurnContext) -> None:
+        """Record failure + 用 LLM 提炼改进 + 持久化应用（真正闭环）。
+
+        之前 _record_self_improvement 只调 record_failure 写库，
+        generate_improvement / apply_improvement 从不被调用 →
+        失败→学习→改进行为闭环断裂。现在：
+        1. record_failure 写库
+        2. 每 5 次失败触发一次 LLM 改进生成
+        3. apply_improvement 持久化到 DB
+        4. 下一轮 _prepare_messages 通过 get_active_improvements 注入
+        """
         assert turn is not None, "turn cannot be None"
 
         if not (self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver):
@@ -1557,6 +1766,36 @@ class Coordinator(Plugin):
         error_type = turn.error if isinstance(turn.error, str) else turn.error.get("type", "unknown") if isinstance(turn.error, dict) else "unknown"
         error_detail = turn.error if isinstance(turn.error, str) else turn.error.get("detail", str(turn.error)) if isinstance(turn.error, dict) else str(turn.error)
 
+        self.ctx.self_improver.record_failure(
+            user_input=turn.input_text,
+            error_type=error_type,
+            error_detail=error_detail,
+            turn_meta=turn.meta,
+        )
+
+        # 每 5 次失败触发一次 LLM 改进生成（避免每次失败都调 LLM 浪费 token）
+        try:
+            stats = self.ctx.self_improver.get_stats()
+            total_failures = stats.get("total_failures", 0)
+            if total_failures > 0 and total_failures % 5 == 0 and self._llm is not None:
+                suggestion = await self.ctx.self_improver.generate_improvement_async(
+                    self._llm,
+                )
+                if suggestion:
+                    self.ctx.self_improver.apply_improvement("llm_analyzed", suggestion)
+                    logger.info("self-improvement: 已生成并应用改进建议: %s", suggestion[:80])
+        except Exception as exc:
+            logger.debug("self-improvement LLM 生成失败: %s", exc)
+
+    def _record_self_improvement(self, turn: TurnContext) -> None:
+        """Record failure for self-improvement analysis（同步兼容包装）。"""
+        # 委托给异步版本，但不 await（fire-and-forget，避免阻塞调用方）
+        # 真正的闭环逻辑在 _record_self_improvement_async 里
+        assert turn is not None, "turn cannot be None"
+        if not (self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver):
+            return
+        error_type = turn.error if isinstance(turn.error, str) else turn.error.get("type", "unknown") if isinstance(turn.error, dict) else "unknown"
+        error_detail = turn.error if isinstance(turn.error, str) else turn.error.get("detail", str(turn.error)) if isinstance(turn.error, dict) else str(turn.error)
         self.ctx.self_improver.record_failure(
             user_input=turn.input_text,
             error_type=error_type,

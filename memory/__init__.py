@@ -568,6 +568,19 @@ class MemoryPlugin(Plugin):
             snippets = "\n".join(f"- {h['content'][:160]}" for h in hits)
             turn.meta["memory_snippets"] = snippets
 
+        # Procedural 记忆：查是否有自动学到的技能匹配当前输入。
+        # 之前 procedural 只在 _on_turn_completed 里"判断是否已存在以决定要不要新建"，
+        # 完全不查 → 学到的技能永远不会注入到 prompt → 闭环断裂。
+        # 现在查到后把 body 放进 turn.meta，coordinator 的 system prompt 构建会读取。
+        if self._procedural is not None:
+            try:
+                proc_hit = await asyncio.to_thread(self._procedural.lookup, turn.input_text)
+                if proc_hit is not None:
+                    turn.meta["procedural_skill"] = proc_hit.get("body", "")
+                    logger.info("memory: procedural skill hit: %s", proc_hit.get("id", "?"))
+            except Exception as exc:
+                logger.debug("procedural lookup failed: %s", exc)
+
     async def _on_turn_completed(self, event: Event) -> None:
         turn: TurnContext | None = event.get("turn")
         if turn is None or self._long is None:
@@ -633,7 +646,18 @@ class MemoryPlugin(Plugin):
                     if self._pending_skills[key] >= self._min_usage:
                         # 达到门槛，创建技能并清理计数
                         self._pending_skills.pop(key, None)
-                        body = f"# Skill: {triggers[0]}\n\n"
+                        # 用 YAML front-matter 格式保存，让 SkillManager._scan_directory
+                        # 能解析并注册成可调度的 skill。之前 body 是纯 markdown 无
+                        # front-matter，_parse_markdown_skill 直接返回 None → 学到的
+                        # 技能永远不被加载，procedural 记忆闭环断裂。
+                        skill_id_safe = re.sub(r"[^A-Za-z0-9_-]", "_", triggers[0]).strip("_").lower() or "learned"
+                        body = "---\n"
+                        body += f"id: learned-{skill_id_safe}\n"
+                        body += f"title: Learned Skill ({triggers[0]})\n"
+                        body += "description: |\n"
+                        body += f"  Auto-learned skill. Triggers: {', '.join(triggers[:3])}\n"
+                        body += "---\n\n"
+                        body += f"# Skill: {triggers[0]}\n\n"
                         body += f"When the user writes something like: *{turn.input_text[:120]}*\n\n"
                         body += "## Tool Plan\n\n```\n" + (turn.result or "")[:2000] + "\n```\n"
                         await asyncio.to_thread(

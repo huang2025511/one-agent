@@ -50,6 +50,9 @@ class SmartRouter(Plugin):
             t: {"picked": 0, "rerouted_up": 0, "rerouted_down": 0}
             for t in MODEL_TIERS
         }
+        # 真摘要缓存：sessionId -> (已摘要到第几条, 摘要文本)
+        # 修复 Gap 5：之前用 str(reply)[:80] 截断丢失上下文，改用轻量 LLM 真摘要
+        self._session_summaries: Dict[str, tuple] = {}
 
     # -------------------------------------------------------- lifecycle
     async def setup(self, ctx) -> None:
@@ -77,10 +80,18 @@ class SmartRouter(Plugin):
         if turn is None or turn.result is not None:
             return
         # 1) classify complexity — LLM-based with heuristic fast-path
-        turn.estimated_complexity, intent_meta = await self._classify_smart(turn.input_text)
+        #    Gap 7：传入 session_id / user_id，让意图缓存按会话/用户隔离
+        _uid = ""
+        if isinstance(turn.meta, dict):
+            _uid = str(turn.meta.get("user_id", "") or "")
+        turn.estimated_complexity, intent_meta = await self._classify_smart(
+            turn.input_text, session_id=turn.session_id, user_id=_uid,
+        )
         tier = self._tier_for_complexity(turn.estimated_complexity)
         turn.meta.update(intent_meta)
         # 2) build messages + compress history
+        #    先刷新真摘要缓存（Gap 5：替换 [:80] 截断为轻量 LLM 摘要）
+        await self._refresh_session_summary(turn.session_id)
         turn.messages = self._build_messages(turn)
         # 3) pass context_compression config to coordinator via turn.meta
         compression_cfg = self._cfg.get("context_compression", {}) or {}
@@ -235,24 +246,28 @@ class SmartRouter(Plugin):
     # --------------------------------------------------------- internal
 
     # --- LLM-based intent classifier ---
-    # Cache: input_hash → (complexity, meta, timestamp)
+    # Cache: (input + session + user) hash → (complexity, meta, timestamp)
+    # Gap 7 修复：之前只按 text 哈希，相同文本跨 session/user 共用同一分类结果，
+    # 导致一个会话的分类（带上下文含义）污染另一个会话。现在加入 session/user 维度。
     _intent_cache: Dict[str, tuple] = {}
     _INTENT_CACHE_TTL = 3600  # 1 hour
     _INTENT_CACHE_MAX = 500
 
-    async def _classify_smart(self, text: str) -> tuple:
+    async def _classify_smart(self, text: str, session_id: str = "", user_id: str = "") -> tuple:
         """LLM-based intent classification with heuristic fast-path.
 
         Returns (complexity: float, meta: dict) where meta may contain:
         - needs_tools: bool
         - needs_system: bool
         - task_type: str (chat/design/code/analysis/action/system)
-        - intent_source: 'fast_path' | 'llm' | 'fallback'
+        - intent_source: 'fast_path' | 'llm' | 'fallback' | 'cache'
 
         Strategy:
         1. Fast-path: short messages (<15 chars) that look like greetings → 0.05
         2. LLM classification: ask a cheap model to return JSON
         3. Fallback: if LLM fails, use heuristic _classify()
+
+        缓存维度（Gap 7）：text + session_id + user_id，避免跨会话污染。
         """
         t = text.strip()
         if not t:
@@ -275,9 +290,10 @@ class SmartRouter(Plugin):
         if self._llm is None:
             return self._classify_heuristic(t), {"intent_source": "fallback"}
 
-        # Check cache
+        # Check cache — Gap 7: key 包含 session/user 维度
         import hashlib
-        cache_key = hashlib.md5(t.encode()).hexdigest()
+        key_payload = f"{t}\x00{session_id or ''}\x00{user_id or ''}"
+        cache_key = hashlib.md5(key_payload.encode()).hexdigest()
         cached = self._intent_cache.get(cache_key)
         if cached:
             complexity, meta, ts = cached
@@ -491,6 +507,78 @@ class SmartRouter(Plugin):
             total += 4  # role + separator overhead
         return total
 
+    async def _refresh_session_summary(self, session_id: str) -> None:
+        """Gap 5：用轻量 LLM 真摘要替换 [:80] 截断。
+
+        - 历史超过 6 条才需要摘要（与 _build_messages 阈值一致）
+        - 缓存命中且已覆盖到最新 old_turns 时跳过，避免每轮重复调 LLM
+        - LLM 不可用 / 失败时静默返回，_build_messages 会回退到截断
+        - 摘要采用"增量式"：把已有摘要 + 新增 old_turns 一起再摘要，
+          防止信息累积膨胀
+        """
+        compression_cfg = self._cfg.get("context_compression", {}) or {}
+        if not compression_cfg.get("summarize_old_turns", False):
+            return
+        if self._llm is None:
+            return
+
+        history = self._history_tail(session_id)
+        if len(history) <= 6:
+            return
+
+        old_count = len(history) - 6  # 需要被摘要的旧轮次数
+        cached = self._session_summaries.get(session_id)
+        if cached and cached[0] >= old_count:
+            return  # 已摘要到最新，复用缓存
+
+        old_turns = history[:-6]
+        # 构造输入：已有摘要 + 新增轮次
+        prev_summary = cached[1] if cached else ""
+        parts = []
+        if prev_summary:
+            parts.append(f"[已有摘要]\n{prev_summary}")
+        # 只摘要 cached 之后新增的轮次（避免重复处理）
+        start_idx = cached[0] if cached else 0
+        new_turns = old_turns[start_idx:]
+        for h in new_turns:
+            u = str(h.get("input", ""))[:300]
+            r = str(h.get("reply", ""))[:400]
+            parts.append(f"用户: {u}\n助手: {r}")
+        if not new_turns and prev_summary:
+            return  # 没有新增内容
+        dialog_text = "\n---\n".join(parts)
+
+        prompt = [
+            {"role": "system", "content": (
+                "你是对话摘要助手。把以下历史对话浓缩成一段 2-4 句的摘要，"
+                "保留：用户的核心需求/偏好、已确定的结论、未完成的待办。"
+                "只输出摘要正文，不要加标题或前缀。"
+            )},
+            {"role": "user", "content": dialog_text[:5000]},
+        ]
+        # 优先用轻量模型做摘要，省钱省时
+        model = None
+        if self.ctx is not None:
+            lightweight = (self.ctx.config or {}).get("llm", {}).get("lightweight_model")
+            if lightweight:
+                model = lightweight
+        try:
+            resp = await self._llm.chat_completion(
+                messages=prompt,
+                model=model,
+                max_tokens=250,
+                tools=None,
+            )
+            if resp.get("failed"):
+                return
+            text = (resp.get("text", "") or "").strip()
+            if text:
+                self._session_summaries[session_id] = (old_count, text)
+                logger.debug("router: refreshed summary for %s (%d old turns)",
+                             session_id, old_count)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("router summary LLM call failed: %s", exc)
+
     def _build_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Build compressed prompt: system + recent memories + current input.
 
@@ -642,30 +730,31 @@ class SmartRouter(Plugin):
         # Smart compression: keep recent turns + important context
         compression_cfg = self._cfg.get("context_compression", {}) or {}
         if compression_cfg.get("enabled", True) and len(history) > 6:
-            # Keep last 6 turns, but try to preserve important context
-            # by summarizing older turns if available
+            # Keep last 6 turns, summarize older turns into one block.
             recent_history = history[-6:]
+            messages = [{"role": "system", "content": system}]
 
-            # If we have a summary capability, use it
-            if compression_cfg.get("summarize_old_turns", False) and len(history) > 6:
-                old_turns = history[:-6]
-                # Create a summary of old turns — use reply (assistant output)
-                # rather than input (user message) for meaningful context
+            # Gap 5 修复：优先使用真摘要缓存（_refresh_session_summary 写入）。
+            # 缓存缺失时回退到 [:80] 截断（LLM 不可用 / 首次未生成），
+            # 保证不会因摘要失败而丢上下文。
+            cached = self._session_summaries.get(turn.session_id)
+            summary_text = ""
+            if cached and cached[1]:
+                summary_text = cached[1]
+            elif compression_cfg.get("summarize_old_turns", False):
+                # 回退路径：缓存还没生成（LLM 不可用 / 刚启动）
                 summary_parts = []
-                for h in old_turns:
+                for h in history[:-6]:
                     if h.get("reply"):
                         summary_parts.append(f"Earlier reply: {str(h['reply'])[:80]}...")
-
-                # Always preserve the system prompt — it contains core rules
-                messages = [{"role": "system", "content": system}]
                 if summary_parts:
-                    summary_msg = {
-                        "role": "system",
-                        "content": "Previous context summary:\n" + "\n".join(summary_parts[-3:])
-                    }
-                    messages.append(summary_msg)
-            else:
-                messages = [{"role": "system", "content": system}]
+                    summary_text = "\n".join(summary_parts[-3:])
+
+            if summary_text:
+                messages.append({
+                    "role": "system",
+                    "content": "Previous context summary:\n" + summary_text,
+                })
 
             history = recent_history
         else:

@@ -130,8 +130,11 @@ class SelfImprover:
         return patterns
 
     def generate_improvement(self, pattern: str) -> Optional[str]:
-        """Generate a system prompt improvement based on failure patterns."""
-        # Simple template-based improvements
+        """Generate a system prompt improvement based on failure patterns.
+
+        之前是 4 条硬编码模板，完全不分析失败内容。现在保留模板作为兜底，
+        真正的 LLM 分析在 generate_improvement_async 里做。
+        """
         templates = {
             "frequent_error": "当工具返回错误时，不要重复调用同一工具，立即尝试替代方案。",
             "empty_result": "如果搜索结果为空，尝试用不同的关键词重新搜索，或直接基于已有知识回答。",
@@ -139,6 +142,81 @@ class SelfImprover:
             "llm_error": "如果 LLM 调用失败，自动降级到更简单的问题表述重试。",
         }
         return templates.get(pattern)
+
+    async def generate_improvement_async(
+        self, llm, recent_failures: List[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """用 LLM 分析真实失败案例，提炼一条可执行的改进建议。
+
+        之前 generate_improvement 只返回硬编码模板，完全不读失败内容 →
+        学不到任何东西。现在把最近 5-10 条失败案例喂给 LLM，让它提炼出
+        一条具体、可操作的 system prompt 改进（不是泛泛而谈）。
+        """
+        if llm is None:
+            return None
+
+        # 收集最近失败案例
+        if recent_failures is None:
+            recent_failures = self._recent_failures(limit=8)
+        if not recent_failures:
+            return None
+
+        # 构造分析 prompt
+        cases_text = ""
+        for i, f in enumerate(recent_failures[:8], 1):
+            cases_text += (
+                f"\n案例{i}:\n"
+                f"  用户输入: {f.get('user_input', '')[:200]}\n"
+                f"  错误类型: {f.get('error_type', '')}\n"
+                f"  错误详情: {f.get('error_detail', '')[:200]}\n"
+            )
+
+        prompt = (
+            "你是 one-agent 的自我改进模块。分析以下最近失败案例，提炼一条"
+            "具体、可执行的 system prompt 改进建议，让 agent 以后避免类似失败。\n\n"
+            "要求：\n"
+            "1. 只返回一条建议（1-2句话），不要列表不要解释\n"
+            "2. 建议必须具体针对这些失败模式，不要泛泛而谈\n"
+            "3. 用中文\n"
+            "4. 直接返回建议文本，不要包装成 JSON 或 markdown\n\n"
+            f"失败案例：{cases_text}\n\n"
+            "改进建议："
+        )
+
+        try:
+            result = await llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=None,
+                temperature=0.3,
+                max_tokens=150,
+                tools=None,
+                use_cache=False,
+            )
+            suggestion = (result.get("text") or "").strip()
+            # 简单清洗：去掉可能的引号/换行
+            suggestion = suggestion.strip('"\'`').strip()
+            if len(suggestion) < 10:
+                return None
+            return suggestion
+        except Exception as exc:
+            logger.warning("LLM 改进生成失败，回退到模板: %s", exc)
+            # 回退：根据失败类型选模板
+            error_types = {f.get("error_type", "") for f in recent_failures}
+            for et in error_types:
+                t = self.generate_improvement(et)
+                if t:
+                    return t
+            return None
+
+    def _recent_failures(self, limit: int = 8) -> List[Dict[str, Any]]:
+        """从 DB 读取最近的失败案例。"""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "SELECT user_input, error_type, error_detail FROM failures "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            return [dict(row) for row in cur.fetchall()]
 
     def apply_improvement(self, pattern: str, suggestion: str) -> None:
         """Record an applied improvement."""
@@ -162,6 +240,21 @@ class SelfImprover:
                 "SELECT * FROM improvements ORDER BY created_at DESC LIMIT 20"
             )
             return [dict(r) for r in cur.fetchall()]
+
+    def get_active_improvements(self, limit: int = 3) -> List[str]:
+        """获取最近应用的改进建议（用于注入 system prompt）。
+
+        之前 apply_improvement 只往 DB 插行，没有任何代码读这个表去改 system prompt →
+        self-improvement 是开环的。现在提供这个方法，coordinator 每轮构建 prompt 时
+        调用，把最近 3 条改进作为持久化的行为指导注入。
+        """
+        with self._write_lock:
+            cur = self._conn.execute(
+                "SELECT suggestion FROM improvements "
+                "WHERE applied = 1 ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            return [row["suggestion"] for row in cur.fetchall() if row["suggestion"]]
 
     def get_stats(self) -> Dict[str, Any]:
         """Get improvement statistics."""

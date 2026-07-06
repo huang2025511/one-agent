@@ -172,6 +172,7 @@ class SkillManager(Plugin):
         self._user_dir: Optional[str] = None
         self._community_dir: Optional[str] = None
         self._marketplace_dir: Optional[str] = None
+        self._procedural_dir: Optional[str] = None
         self._mcp_servers: List[Dict[str, Any]] = []
         self._max_loaded_per_turn = 6
         self._system_executor = None
@@ -185,13 +186,18 @@ class SkillManager(Plugin):
         self._user_dir = cfg.get("user_skills_dir") or os.path.join(data_dir, "skills/user")
         self._community_dir = cfg.get("community_skills_dir") or os.path.join(data_dir, "skills/community")
         self._marketplace_dir = cfg.get("marketplace_skills_dir") or os.path.join(data_dir, "skills/marketplace")
-        for d in (self._builtin_dir, self._user_dir, self._community_dir, self._marketplace_dir):
+        # procedural 记忆目录：MemoryPlugin 自动学习的技能写到这里，
+        # SkillManager 必须扫这个目录才能让学到的技能真正被注册和调度。
+        self._procedural_dir = os.path.join(data_dir, "memory/skills")
+        for d in (self._builtin_dir, self._user_dir, self._community_dir,
+                  self._marketplace_dir, self._procedural_dir):
             Path(d).mkdir(parents=True, exist_ok=True)
         self._seed_builtins()
         self._scan_directory(self._builtin_dir)
         self._scan_directory(self._user_dir)
         self._scan_directory(self._community_dir)
         self._scan_directory(self._marketplace_dir)
+        self._scan_directory(self._procedural_dir)
         # MCP server list — declared in config; started lazily
         self._mcp_servers = cfg.get("mcp_servers", []) or []
         self._max_loaded_per_turn = cfg.get("max_skills_per_turn", self._max_loaded_per_turn)
@@ -236,6 +242,8 @@ class SkillManager(Plugin):
             self._scan_directory(self._user_dir)
             self._scan_directory(self._community_dir)
             self._scan_directory(self._marketplace_dir)
+            # procedural 记忆目录也要重新扫描：MemoryPlugin 可能新增了自动学习的技能
+            self._scan_directory(self._procedural_dir)
             logger.info("skill pattern mining: %d skills loaded", len(self._skills))
 
     def register(self, skill: Skill) -> None:

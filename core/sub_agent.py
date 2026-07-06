@@ -13,42 +13,127 @@ logger = logging.getLogger(__name__)
 
 
 class SubAgent:
-    """A lightweight agent that executes a single subtask."""
+    """A lightweight agent that executes a single subtask.
+
+    修复：之前 tools=None + max_iterations=2 → 子 agent 不能调任何工具，
+    纯文本补全，无法搜索/执行代码/读写文件。现在如果传了 skills_manager，
+    会构建工具表并跑真正的 tool-calling 循环。
+    """
 
     def __init__(self, llm_provider, skills_manager=None, name: str = ""):
         self._llm = llm_provider
         self._skills = skills_manager
         self.name = name or f"sub-{id(self):x}"[:12]
 
-    async def run(self, task: str, model: Optional[str] = None, max_iterations: int = 2) -> Dict[str, Any]:
-        """Execute a single subtask. Returns {result, tokens_used, duration_ms}."""
+    def _build_tools(self) -> Optional[List[Dict[str, Any]]]:
+        """从 skills_manager 构建工具表。无 skills 或模型不支持工具时返回 None。"""
+        if self._skills is None:
+            return None
+        try:
+            # 只挑与子任务相关的少量 skill，避免工具表过大
+            # 这里简单取全部（子任务通常用 web_search/calc/system_run 等）
+            tool_list = []
+            for sid in self._skills.all_skill_ids():
+                skill = self._skills.get(sid)
+                if skill is None:
+                    continue
+                tool_list.append({
+                    "type": "function",
+                    "function": {
+                        "name": skill.id,
+                        "description": (skill.description or skill.title)[:200],
+                        "parameters": skill.schema.get("parameters", {
+                            "type": "object", "properties": {}
+                        }),
+                    },
+                })
+            return tool_list[:8] if tool_list else None  # 最多 8 个工具
+        except Exception as exc:
+            logger.debug("SubAgent build_tools failed: %s", exc)
+            return None
+
+    async def run(self, task: str, model: Optional[str] = None, max_iterations: int = 3) -> Dict[str, Any]:
+        """Execute a single subtask. Returns {result, tokens_used, duration_ms}.
+
+        如果有 skills_manager，会跑 tool-calling 循环（最多 max_iterations 轮）。
+        """
         start = time.time()
         messages = [
             {"role": "system", "content": (
-                "你是子 Agent，专门执行单一子任务。用 1-2 步完成，直接返回结果。"
+                "你是子 Agent，专门执行单一子任务。用 1-3 步完成，直接返回结果。"
+                "如果需要搜索、计算、执行命令，请调用提供的工具。"
                 "不要问问题，不要解释过程，只输出最终答案。"
             )},
             {"role": "user", "content": task},
         ]
 
+        tools = self._build_tools()
+        total_tokens = 0
+
         try:
+            # Tool-calling 循环（如果有工具且模型支持）
+            for iteration in range(max_iterations):
+                resp = await self._llm.chat_completion(
+                    messages=messages,
+                    model=model,
+                    max_tokens=1500,
+                    tools=tools,
+                )
+                total_tokens += int(resp.get("tokens_used") or 0)
+                text = resp.get("text", "")
+                tool_calls = resp.get("tool_calls") or []
+
+                if not tool_calls:
+                    # 没有工具调用 → 直接返回文本
+                    return {
+                        "result": text or "(no reply)",
+                        "tokens_used": total_tokens,
+                        "duration_ms": (time.time() - start) * 1000,
+                        "error": None,
+                        "tool_iterations": iteration,
+                    }
+
+                # 执行工具调用
+                messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+                for tc in tool_calls:
+                    fn_name = tc.get("function", {}).get("name", "")
+                    fn_args_str = tc.get("function", {}).get("arguments", "{}")
+                    import json as _json
+                    try:
+                        fn_args = _json.loads(fn_args_str) if isinstance(fn_args_str, str) else fn_args_str
+                    except _json.JSONDecodeError:
+                        fn_args = {"input": fn_args_str}
+                    try:
+                        tool_result = await self._skills.dispatch(fn_name, fn_args)
+                    except Exception as exc:
+                        tool_result = f"[工具 {fn_name} 执行失败: {exc}]"
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", fn_name),
+                        "name": fn_name,
+                        "content": str(tool_result)[:2000],
+                    })
+
+            # 达到 max_iterations，做一次无工具的最终总结
             resp = await self._llm.chat_completion(
                 messages=messages,
                 model=model,
                 max_tokens=1000,
                 tools=None,
             )
+            total_tokens += int(resp.get("tokens_used") or 0)
             return {
-                "result": resp.get("text", ""),
-                "tokens_used": resp.get("tokens_used", 0),
+                "result": resp.get("text", "") or "(no reply)",
+                "tokens_used": total_tokens,
                 "duration_ms": (time.time() - start) * 1000,
                 "error": None,
+                "tool_iterations": max_iterations,
             }
         except Exception as exc:
             logger.warning("SubAgent %s failed: %s", self.name, exc)
             return {
                 "result": f"[{self.name} 执行失败: {exc}]",
-                "tokens_used": 0,
+                "tokens_used": total_tokens,
                 "duration_ms": (time.time() - start) * 1000,
                 "error": str(exc),
             }
@@ -128,17 +213,39 @@ class DelegationManager:
             else:
                 all_results.append(r.get("result", ""))
 
-        # Merge results
-        merged = "\n\n".join(
+        # Step 4: 用 LLM 合成最终答案（之前只是字符串 join，没有融合步骤）
+        merged_raw = "\n\n".join(
             f"## 子任务 {i+1}: {subtasks[i]}\n{all_results[i]}"
             for i in range(len(subtasks))
         )
 
+        try:
+            synth_resp = await self._llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": (
+                        "你是合成专家。以下是多个子 Agent 并行执行的结果。"
+                        "请把它们融合成一个连贯、完整的最终答案，"
+                        "去掉重复内容，保留所有关键信息，按逻辑组织。"
+                        "不要提及'子任务'或执行过程，直接给出用户需要的答案。"
+                    )},
+                    {"role": "user", "content": f"原始任务：{task}\n\n子任务结果：\n{merged_raw}"},
+                ],
+                model=model,
+                max_tokens=2000,
+                tools=None,
+            )
+            final_result = synth_resp.get("text", "") or merged_raw
+            synth_tokens = int(synth_resp.get("tokens_used") or 0)
+        except Exception as exc:
+            logger.warning("DelegationManager synthesize failed: %s", exc)
+            final_result = merged_raw  # 合成失败回退到原始拼接
+            synth_tokens = 0
+
         return {
-            "result": merged,
+            "result": final_result,
             "subtask_results": all_results,
             "subtasks": subtasks,
             "parallel": True,
-            "total_tokens": sum(r.get("tokens_used", 0) for r in results if isinstance(r, dict)),
+            "total_tokens": sum(r.get("tokens_used", 0) for r in results if isinstance(r, dict)) + synth_tokens,
             "duration_ms": (time.time() - start) * 1000,
         }
