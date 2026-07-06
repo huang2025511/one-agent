@@ -886,7 +886,7 @@ class WeChatPersonalGateway(Plugin):
 
         # 先发送，成功后才更新计数；失败时保留配额，避免静默消耗完 5 条
         try:
-            await self.send(chat_id, f"⏳ {message}")
+            await self.send(chat_id, f"⏳ {message}", use_context_token=False)
         except Exception as exc:
             logger.debug("wechat_personal: progress send failed: %s", exc)
             return
@@ -934,7 +934,7 @@ class WeChatPersonalGateway(Plugin):
                 return
             # 同 _on_turn_progress：先发后计数，失败不消耗配额
             try:
-                await self.send(chat_id, "⏳ 正在处理中，请稍候...")
+                await self.send(chat_id, "⏳ 正在处理中，请稍候...", use_context_token=False)
             except Exception:
                 pass
             else:
@@ -951,7 +951,7 @@ class WeChatPersonalGateway(Plugin):
             if current is not None and self._heartbeat_tasks.get(chat_id) is current:
                 self._heartbeat_tasks.pop(chat_id, None)
 
-    async def send(self, chat_id: str, text: str) -> bool:
+    async def send(self, chat_id: str, text: str, use_context_token: bool = True) -> bool:
         if not self._running or not self._session:
             logger.warning("wechat_personal: send failed, not running, running=%s session=%s",
                           self._running, self._session is not None)
@@ -961,7 +961,7 @@ class WeChatPersonalGateway(Plugin):
             # 分段发送：每段不超过 1800 字符（留余量），加序号标识。
             MAX_MSG_LENGTH = 1800
             if len(text) <= MAX_MSG_LENGTH:
-                return await self._send_single_message(chat_id, text)
+                return await self._send_single_message(chat_id, text, use_context_token=use_context_token)
 
             chunks = []
             remaining = text
@@ -983,7 +983,7 @@ class WeChatPersonalGateway(Plugin):
             for i, chunk in enumerate(chunks, 1):
                 if i > 1:
                     chunk = f"--- [第{i}/{total}段] ---\n\n" + chunk.strip()
-                if await self._send_single_message(chat_id, chunk):
+                if await self._send_single_message(chat_id, chunk, use_context_token=use_context_token):
                     success_count += 1
                 else:
                     logger.warning("wechat_personal: send chunk %d/%d failed", i, total)
@@ -999,9 +999,14 @@ class WeChatPersonalGateway(Plugin):
             logger.error("wechat_personal: send error: %s", exc)
             return False
 
-    async def _send_single_message(self, chat_id: str, text: str) -> bool:
-        """发送单条消息（内部方法）。"""
-        context_token = self._context_tokens.get(chat_id, "")
+    async def _send_single_message(self, chat_id: str, text: str, use_context_token: bool = True) -> bool:
+        """发送单条消息（内部方法）。
+
+        Args:
+            use_context_token: 是否使用 context_token。心跳/进度消息应设为 False，
+                避免消耗一次性 context_token 导致后续真实回复被静默丢弃。
+        """
+        context_token = self._context_tokens.get(chat_id, "") if use_context_token else ""
         client_id = self._client_ids.get(chat_id, "")
         if not context_token and not client_id:
             logger.warning("wechat_personal: no context_token/client_id for %s, message may not be delivered", chat_id[:20])
