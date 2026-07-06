@@ -1880,16 +1880,17 @@ class Coordinator(Plugin):
         called_tools: set = set()
         nudged: bool = False  # 只提醒一次，避免无限循环
 
+        # Round 7 修复：熔断器 + 退避 — 在循环外初始化，避免 else 块未定义
+        circuit = get_circuit_manager().get(f"llm:{provider}")
+        llm_backoff_strategy = llm_backoff()
+        dyn_temp = self._compute_dynamic_temperature(turn)
+
         for i in range(self._max_tool_iterations):
             # Gap 6 修复：LLM API 调用前先获取令牌（rate limit）
             await rate_limiter.acquire(provider)
 
-            # Gap 7 修复：动态温度 — 根据任务复杂度调整 temperature
+            # Gap 7 修复：动态温度 — 每轮重新计算（可能因上下文变化调整）
             dyn_temp = self._compute_dynamic_temperature(turn)
-
-            # Round 7 修复：熔断器 + 退避 — 包裹 LLM 调用
-            circuit = get_circuit_manager().get(f"llm:{provider}")
-            llm_backoff_strategy = llm_backoff()
 
             async def _do_llm_call():
                 return await self._llm.chat_completion(
@@ -1907,7 +1908,7 @@ class Coordinator(Plugin):
                 )
             except CircuitOpenError:
                 # 熔断器打开 — 触发告警，降级返回
-                get_alert_manager().fire(
+                await get_alert_manager().fire(
                     "circuit_open",
                     title=f"LLM circuit OPEN: {provider}",
                     body=f"模型 {turn.model} 的熔断器已打开，使用降级回复",
@@ -1923,7 +1924,7 @@ class Coordinator(Plugin):
                 return
             except Exception as exc:
                 # 退避也失败了 — 触发告警
-                get_alert_manager().fire(
+                await get_alert_manager().fire(
                     "llm_error",
                     title=f"LLM call failed: {provider}",
                     body=str(exc)[:200],
@@ -2225,13 +2226,24 @@ class Coordinator(Plugin):
         failure_count = 0
 
         if provider == "anthropic":
-            # 并行执行所有工具调用（Gap 5: 先查缓存）
+            # 并行执行所有工具调用（Gap 5: 先查缓存, Round 7: backoff 重试）
+            from core.backoff import tool_backoff
             async def _run_one(tc, name, args):
                 cached = tool_cache.get(name, args)
                 if cached is not None:
                     logger.debug("tool_cache: hit for %s", name)
                     return ToolResult(tool_name=name, status="success", data=cached)
-                result = await self._dispatch_smart(tc, name, args, failed_skills)
+                # Round 7: tool 执行 backoff 重试
+                tb = tool_backoff()
+                async def _do_dispatch():
+                    result = await self._dispatch_smart(tc, name, args, failed_skills)
+                    if result.status == "error":
+                        raise RuntimeError(f"tool {name} error: {result.error}")
+                    return result
+                try:
+                    result = await tb.retry(_do_dispatch)
+                except Exception as exc:
+                    result = ToolResult(tool_name=name, status="error", error=str(exc))
                 if result.status == "success":
                     tool_cache.set(name, args, str(result.data or ""))
                 return result
@@ -2275,13 +2287,24 @@ class Coordinator(Plugin):
                 "content": None,
                 "tool_calls": raw_tool_calls,
             })
-            # 并行执行所有工具调用（Gap 5: 先查缓存）
+            # 并行执行所有工具调用（Gap 5: 先查缓存, Round 7: backoff 重试）
+            from core.backoff import tool_backoff
             async def _run_one(tc, name, args):
                 cached = tool_cache.get(name, args)
                 if cached is not None:
                     logger.debug("tool_cache: hit for %s", name)
                     return ToolResult(tool_name=name, status="success", data=cached)
-                result = await self._dispatch_smart(tc, name, args, failed_skills)
+                # Round 7: tool 执行 backoff 重试
+                tb = tool_backoff()
+                async def _do_dispatch():
+                    result = await self._dispatch_smart(tc, name, args, failed_skills)
+                    if result.status == "error":
+                        raise RuntimeError(f"tool {name} error: {result.error}")
+                    return result
+                try:
+                    result = await tb.retry(_do_dispatch)
+                except Exception as exc:
+                    result = ToolResult(tool_name=name, status="error", error=str(exc))
                 if result.status == "success":
                     tool_cache.set(name, args, str(result.data or ""))
                 return result
