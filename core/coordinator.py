@@ -34,6 +34,10 @@ from core.reasoning import get_step_reasoner
 from core.style_adapter import StyleAdapter
 from core.failure_recovery import get_failure_recovery
 from memory.dialog_summary import get_dialog_summarizer
+from core.safety import scan_input, scan_output
+from core.tool_cache import get_tool_cache
+from core.rate_limiter import get_rate_limiter
+from models.tiers import MODEL_COST
 
 logger = logging.getLogger(__name__)
 
@@ -770,6 +774,33 @@ class Coordinator(Plugin):
         if turn.model is None:
             raise RuntimeError("Model must be set before execution")
 
+        # Gap 3+4 修复：输入安全扫描 — PII检测 + 有害内容 + 注入防御
+        safety_report = scan_input(turn.input_text)
+        if safety_report.pii_found:
+            # 注入脱敏后的输入到上下文
+            turn.meta["safety_report"] = safety_report
+            logger.info("safety: detected %d PII types in input", len(safety_report.pii_found))
+        if safety_report.injection_found:
+            turn.meta["safety_report"] = safety_report
+            logger.warning("safety: detected prompt injection attempt: %s",
+                           [i["type"] for i in safety_report.injection_found])
+
+        # Gap 10 修复：跨轮次任务状态追踪
+        # 从 dialog_summarizer 获取当前活跃任务，注入到 turn.meta
+        try:
+            summarizer = get_dialog_summarizer()
+            active_task = summarizer.get_active_task(turn.session_id)
+            if active_task and active_task.status == "in_progress":
+                turn.meta["active_task"] = {
+                    "name": active_task.name,
+                    "steps": active_task.steps,
+                    "created_at": active_task.created_at,
+                }
+                logger.debug("task_state: active task '%s' with %d steps",
+                           active_task.name, len(active_task.steps))
+        except Exception as exc:
+            logger.debug("task_state: get_active_task skipped: %s", exc)
+
         messages = await self._prepare_messages(turn)
         tools = self._prepare_tools(turn)
 
@@ -1079,6 +1110,34 @@ class Coordinator(Plugin):
                         messages.append(profile_block)
         except Exception as exc:
             logger.debug("user profile injection skipped: %s", exc)
+
+        # Gap 10 修复：注入活跃任务状态，让 LLM 知道"上次做到哪了"
+        active_task = turn.meta.get("active_task")
+        if active_task:
+            steps_text = ""
+            for i, step in enumerate(active_task.get("steps", [])):
+                status_icon = {"pending": "⬜", "in_progress": "🔄", "done": "✅", "failed": "❌"}.get(
+                    step.get("status", "pending"), "⬜")
+                steps_text += f"\n  {status_icon} Step {i+1}: {step.get('step', '')}"
+                if step.get("result"):
+                    steps_text += f" — {step['result'][:80]}"
+            if self._is_zh():
+                task_header = (
+                    f"【继续任务】当前有一个进行中的任务：{active_task.get('name', '')}\n"
+                    f"进度：{steps_text}\n"
+                    "请继续执行此任务，从上次中断的地方接着做。"
+                )
+            else:
+                task_header = (
+                    f"[Continue Task] Active task: {active_task.get('name', '')}\n"
+                    f"Progress: {steps_text}\n"
+                    "Continue from where you left off."
+                )
+            task_block = {"role": "assistant", "content": task_header}
+            if messages and messages[-1].get("role") == "user":
+                messages.insert(len(messages) - 1, task_block)
+            else:
+                messages.append(task_block)
 
         # Inject Chain-of-Thought reasoning for complex tasks
         await self._maybe_inject_cot(messages, turn)
@@ -1616,6 +1675,13 @@ class Coordinator(Plugin):
         total_tokens = 0
         _failed_skills: Dict[str, int] = {}
 
+        # Gap 6 修复：获取 rate limiter 和 provider
+        provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
+        rate_limiter = get_rate_limiter()
+
+        # Gap 8 修复：累计成本追踪
+        total_cost = 0.0
+
         # Gap 6：思考计划约束执行
         # 跟踪已调用工具，模型想提前结束时若计划中还有未执行的工具，注入提醒。
         available_tool_names = {
@@ -1629,17 +1695,52 @@ class Coordinator(Plugin):
         nudged: bool = False  # 只提醒一次，避免无限循环
 
         for i in range(self._max_tool_iterations):
+            # Gap 6 修复：LLM API 调用前先获取令牌（rate limit）
+            await rate_limiter.acquire(provider)
+
             resp = await self._llm.chat_completion(
                 messages=messages,
                 model=turn.model,
                 max_tokens=turn.token_budget if i == 0 else self._max_tokens,
                 tools=tools or None,
             )
-            total_tokens += int(resp.get("tokens_used") or 0)
+            tokens_used = int(resp.get("tokens_used") or 0)
+            total_tokens += tokens_used
+
+            # Gap 8 修复：按模型定价计算成本
+            model_cost_per_1k = MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002))
+            total_cost += (tokens_used / 1000) * model_cost_per_1k
+
             tool_calls = resp.get("tool_calls") or []
 
             if not tool_calls:
+                # Gap 1 修复：流式输出 — 使用 streaming 获取最终回复
+                # 尝试流式调用，降级到非流式
                 final_text = resp.get("text", "") or ""
+                try:
+                    if hasattr(self._llm, 'chat_completion_stream'):
+                        streamed_parts = []
+                        last_emit = 0
+                        async for chunk in self._llm.chat_completion_stream(
+                            messages=messages,
+                            model=turn.model,
+                            max_tokens=turn.token_budget if i == 0 else self._max_tokens,
+                        ):
+                            delta = chunk.get("text", "")
+                            if delta:
+                                streamed_parts.append(delta)
+                                # 每 50 个字符发送一次进度事件
+                                if len("".join(streamed_parts)) - last_emit >= 50:
+                                    last_emit = len("".join(streamed_parts))
+                                    self._emit_progress(
+                                        turn, "".join(streamed_parts), "streaming"
+                                    )
+                        if streamed_parts:
+                            final_text = "".join(streamed_parts)
+                            tokens_used = int(chunk.get("tokens_used", tokens_used))
+                except Exception as stream_err:
+                    logger.debug("streaming failed, using non-streamed response: %s", stream_err)
+                    # fallback to non-streamed response already in final_text
 
                 # Gap 6：模型想结束，但计划中还有工具没调用 → 提醒继续执行
                 if (
@@ -1745,11 +1846,22 @@ class Coordinator(Plugin):
         else:
             # Loop exhausted
             await self._handle_loop_exhaustion(messages, turn)
+            await rate_limiter.acquire(provider)
             resp = await self._llm.chat_completion(
                 messages=messages, model=turn.model, max_tokens=self._max_tokens,
             )
             final_text = resp.get("text", "") or "(no reply)"
-            total_tokens += int(resp.get("tokens_used") or 0)
+            tokens_used = int(resp.get("tokens_used") or 0)
+            total_tokens += tokens_used
+            total_cost += (tokens_used / 1000) * MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002))
+
+        # 记录成本信息（Gap 8）
+        turn.meta["cost"] = {
+            "total_tokens": total_tokens,
+            "total_cost_usd": round(total_cost, 6),
+            "model": turn.model,
+            "cost_per_1k": MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002)),
+        }
 
         # 记录计划完成度（供 self-improvement 分析）
         if planned_tools:
@@ -1767,6 +1879,18 @@ class Coordinator(Plugin):
 
         if not final_text:
             final_text = "(no reply produced)"
+
+        # Gap 3 修复：输出安全扫描 — 检测输出中是否泄露 PII
+        output_safety = scan_output(final_text)
+        if output_safety.pii_found:
+            final_text = output_safety.sanitized_text
+            logger.warning("output safety: redacted %d PII types in output",
+                          len(output_safety.pii_found))
+            turn.meta["output_safety"] = {
+                "pii_redacted": len(output_safety.pii_found),
+                "types": [p["type"] for p in output_safety.pii_found],
+            }
+
         turn.record_success(final_text, total_tokens)
 
     def _parse_planned_tools(
@@ -1811,6 +1935,9 @@ class Coordinator(Plugin):
 
         provider = turn.model.split("/")[0] if turn.model and "/" in turn.model else "openai"
 
+        # Gap 5 修复：获取工具结果缓存
+        tool_cache = get_tool_cache()
+
         # 提取所有工具调用信息
         tc_info = []
         for idx, tc in enumerate(tool_calls):
@@ -1819,10 +1946,21 @@ class Coordinator(Plugin):
             tc_id = tc.get("id") or f"call_{idx}"
             tc_info.append((idx, tc, name, args, tc_id))
 
+        # Gap 9 修复：部分结果追踪
+        success_count = 0
+        failure_count = 0
+
         if provider == "anthropic":
-            # 并行执行所有工具调用
+            # 并行执行所有工具调用（Gap 5: 先查缓存）
             async def _run_one(tc, name, args):
-                return await self._dispatch_smart(tc, name, args, failed_skills)
+                cached = tool_cache.get(name, args)
+                if cached is not None:
+                    logger.debug("tool_cache: hit for %s", name)
+                    return ToolResult(tool_name=name, status="success", data=cached)
+                result = await self._dispatch_smart(tc, name, args, failed_skills)
+                if result.status == "success":
+                    tool_cache.set(name, args, str(result.data or ""))
+                return result
             coros = [_run_one(tc, name, args) for _, tc, name, args, _ in tc_info]
             results = await asyncio.gather(*coros, return_exceptions=True)
 
@@ -1834,6 +1972,11 @@ class Coordinator(Plugin):
                         status="error",
                         error=str(result),
                     )
+                # Gap 9 修复：追踪成功/失败计数
+                if result.status == "success":
+                    success_count += 1
+                else:
+                    failure_count += 1
                 if getattr(turn, "estimated_complexity", 0) >= COMPLEX_COMPLEXITY_THRESHOLD:
                     if iteration > 0:
                         self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
@@ -1858,9 +2001,16 @@ class Coordinator(Plugin):
                 "content": None,
                 "tool_calls": raw_tool_calls,
             })
-            # 并行执行所有工具调用
+            # 并行执行所有工具调用（Gap 5: 先查缓存）
             async def _run_one(tc, name, args):
-                return await self._dispatch_smart(tc, name, args, failed_skills)
+                cached = tool_cache.get(name, args)
+                if cached is not None:
+                    logger.debug("tool_cache: hit for %s", name)
+                    return ToolResult(tool_name=name, status="success", data=cached)
+                result = await self._dispatch_smart(tc, name, args, failed_skills)
+                if result.status == "success":
+                    tool_cache.set(name, args, str(result.data or ""))
+                return result
             coros = [_run_one(tc, name, args) for _, tc, name, args, _ in tc_info]
             results = await asyncio.gather(*coros, return_exceptions=True)
 
@@ -1872,6 +2022,11 @@ class Coordinator(Plugin):
                         status="error",
                         error=str(result),
                     )
+                # Gap 9 修复：追踪成功/失败计数
+                if result.status == "success":
+                    success_count += 1
+                else:
+                    failure_count += 1
                 if getattr(turn, "estimated_complexity", 0) >= COMPLEX_COMPLEXITY_THRESHOLD:
                     if iteration > 0:
                         self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
@@ -1890,6 +2045,31 @@ class Coordinator(Plugin):
                     "name": name,
                     "content": result.to_message(),
                 })
+
+        # Gap 9 修复：部分结果优雅降级 — 当有工具成功和失败时，注入提示
+        total_calls = success_count + failure_count
+        if 0 < success_count < total_calls:
+            zh = self._is_zh()
+            if zh:
+                partial_hint = (
+                    f"[系统提示：本轮 {total_calls} 个工具调用中，{success_count} 个成功，"
+                    f"{failure_count} 个失败。对于成功的工具请基于其结果继续，"
+                    f"对于失败的工具请考虑替代方案或基于已有信息回答。]"
+                )
+            else:
+                partial_hint = (
+                    f"[System: {success_count}/{total_calls} tool calls succeeded, "
+                    f"{failure_count} failed. Use successful results and consider "
+                    f"alternatives for failed ones, or answer based on available info.]"
+                )
+            messages.append({"role": "user", "content": partial_hint})
+            turn.meta.setdefault("partial_results", []).append({
+                "iteration": iteration,
+                "success": success_count,
+                "failure": failure_count,
+            })
+            logger.debug("partial results: %d/%d succeeded in iteration %d",
+                       success_count, total_calls, iteration)
 
     async def _handle_loop_exhaustion(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Handle when tool loop reaches max iterations."""

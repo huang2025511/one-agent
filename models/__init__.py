@@ -866,11 +866,15 @@ class LLMProvider(RecommendationMixin, Plugin):
         tools: Optional[List[Dict[str, Any]]] = None,
         use_cache: bool = True,
         _skip_fallback: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Call the LLM, with optional caching and automatic retries.
 
         Args:
             _skip_fallback: Internal flag to prevent recursive fallback attempts.
+            response_format: Optional structured output format, e.g.
+                {"type": "json_object"} to force JSON output.
+                Only supported by OpenAI-compatible providers.
         """
         assert isinstance(messages, list), "messages must be a list"
         assert len(messages) > 0, "messages cannot be empty"
@@ -1052,6 +1056,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                     base=base, api_key=api_key, model=model,
                     messages=messages, temperature=temperature,
                     max_tokens=max_tokens, tools=tools, provider=provider,
+                    response_format=response_format,
                 )
 
                 # Record success in circuit breaker
@@ -1112,6 +1117,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                                 base=base, api_key=api_key, model=model,
                                 messages=clean_msgs, temperature=temperature,
                                 max_tokens=max_tokens, tools=None, provider=provider,
+                                response_format=response_format,
                             )
                             # Remember: this model doesn't support tools
                             self._no_tools_models.add(bare_model)
@@ -1157,6 +1163,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                                         base=base, api_key=api_key, model=model,
                                         messages=minimal_msgs, temperature=temperature,
                                         max_tokens=max_tokens, tools=None, provider=provider,
+                                        response_format=response_format,
                                     )
                                     # Remember: this model doesn't support tools
                                     self._no_tools_models.add(bare_model)
@@ -1217,6 +1224,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                                     base=base, api_key=api_key, model=model,
                                     messages=messages, temperature=temperature,
                                     max_tokens=max_tokens, tools=tools, provider=provider,
+                                    response_format=response_format,
                                 )
                                 self._record_cost(
                                     model,
@@ -1400,6 +1408,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                             base=base, api_key=api_key, model=model,
                             messages=messages, temperature=temperature,
                             max_tokens=max_tokens, tools=tools, provider=provider,
+                            response_format=None,
                         )
                         yield {"delta": result.get("text", ""), "done": False}
                         yield {"delta": "", "done": True, "tokens_used": result.get("tokens_used", 0)}
@@ -1479,6 +1488,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                             base=base, api_key=api_key, model=model,
                             messages=messages, temperature=temperature,
                             max_tokens=max_tokens, tools=tools, provider=provider,
+                            response_format=None,
                         )
                         yield {"delta": result.get("text", ""), "done": False}
                         yield {"delta": "", "done": True, "tokens_used": result.get("tokens_used", 0)}
@@ -1593,6 +1603,7 @@ class LLMProvider(RecommendationMixin, Plugin):
         max_tokens: int,
         tools: Optional[List[Dict[str, Any]]],
         provider: str,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         # Normalize vision messages: convert {image_base64, mime_type, prompt}
         # dicts into the OpenAI vision API format.
@@ -1668,6 +1679,9 @@ class LLMProvider(RecommendationMixin, Plugin):
         }
         if tools:
             payload["tools"] = tools
+        # Gap 7 修复：结构化输出支持
+        if response_format:
+            payload["response_format"] = response_format
         resp = await self._client.post(  # type: ignore[union-attr]
             f"{base.rstrip('/')}/chat/completions", headers=headers, json=payload
         )

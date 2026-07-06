@@ -235,6 +235,8 @@ async def test_tool_loop_empty_final_text_uses_placeholder():
 
 async def test_execute_tool_calls_appends_tool_messages():
     """_execute_tool_calls appends the assistant tool_calls wrapper + tool results."""
+    from core.tool_cache import get_tool_cache
+    get_tool_cache().clear()  # 避免跨测试缓存污染
     skills = StubSkills(dispatch_result="result-data")
     coord = _make_coordinator(skills=skills)
     turn = _make_turn(model="openai/gpt-4o")  # non-anthropic provider
