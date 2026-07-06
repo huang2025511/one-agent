@@ -51,9 +51,10 @@ COMPLEX_COMPLEXITY_THRESHOLD = DEFAULT_SIMPLE_THRESHOLD     # >= → think + ref
 SIMPLE_COMPLEXITY_THRESHOLD = DEFAULT_TRIVIAL_THRESHOLD     # >= → light self-verification
 # Smart boost feature flags by complexity tier
 # - trivial (<0.2): direct execution, no enhancements (max speed)
-# - simple (0.2-0.5): light self-verification only
+# - simple (0.2-0.5): lightweight thinking + self-verification
 # - complex (0.5-0.8): full pre-thinking + reflection + self-verification + final polish + clarification
 # - expert (>=0.8): everything + post-execution review + tool chain planning
+THINK_MIN_COMPLEXITY = 0.2            # simple and above — lowered from 0.5 for better reasoning
 SELF_VERIFY_MIN_COMPLEXITY = 0.2     # simple and above
 CLARIFICATION_MIN_COMPLEXITY = 0.5      # complex and above
 FINAL_POLISH_MIN_COMPLEXITY = 0.5     # complex and above
@@ -650,7 +651,10 @@ class Coordinator(Plugin):
             self._emit_progress(turn, "正在思考分析...", "thinking")
             await self._think_phase(messages, turn)
             await self._reflect_phase(messages, turn)
-        # else: simple/trivial — skip thinking entirely for speed
+        elif complexity >= THINK_MIN_COMPLEXITY:
+            # Simple level: lightweight thinking for better reasoning
+            await self._think_phase(messages, turn)
+        # else: trivial — skip thinking entirely for speed
 
         # If multi-agent handled the turn, it already published turn_completed.
         # Skip the rest to avoid double-publishing and wasted work.
@@ -682,8 +686,8 @@ class Coordinator(Plugin):
             self._emit_progress(turn, "正在验证结果...", "verification")
             await self._self_verify(messages, turn, complexity)
 
-        if complexity >= POST_REFLECT_MIN_COMPLEXITY and turn.result:
-            # Post-execution reflection: learn from this turn (expert only)
+        if complexity >= FINAL_POLISH_MIN_COMPLEXITY and turn.result:
+            # Post-execution reflection: learn from this turn (complex and above)
             await self._post_reflect(turn)
 
         # Auto-extract entities (offload SQLite writes to worker thread)
@@ -875,15 +879,19 @@ class Coordinator(Plugin):
 
         When OS mode is enabled (via /os-on), system_run is automatically added
         to the tool list so the LLM can directly call it for system operations.
+
+        Enhanced: auto-add python_execute for computational tasks, increase limit to 6.
         """
 
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
-            chosen = self._skills.pick_relevant(turn.input_text, limit=4)
+            chosen = self._skills.pick_relevant(turn.input_text, limit=6)
             web_search = self._skills.get("web_search")
             if web_search and web_search not in chosen:
                 chosen.insert(0, web_search)
-            # OS mode: auto-add system_run so the LLM can call it directly
+            python_execute = self._skills.get("python_execute")
+            if python_execute and python_execute not in chosen:
+                chosen.append(python_execute)
             if self._os_mode_enabled:
                 system_run = self._skills.get("system_run")
                 if system_run and system_run not in chosen:

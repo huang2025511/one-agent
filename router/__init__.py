@@ -39,17 +39,30 @@ _KEYWORDS_BY_TIER = {
         r"天气|时间|日期|你好|谢谢|再见|help|\?)\b",
         re.IGNORECASE,
     ),
+    "complex": re.compile(
+        r"\b(how to|如何|怎样|设计|方案|规划|步骤|流程|分析|比较|对比|"
+        r"build|create|develop|implement|solve|fix|explain|analyze|compare|"
+        r"设计方案|实施方案|详细步骤|优缺点|区别|差异)\b",
+        re.IGNORECASE,
+    ),
     "expert": re.compile(
         r"\b(optimize|performance|debug|deadlock|coredump|algorithm|prover|"
         r"mathematical proof|formal verify|ml training|reverse engineer|"
-        r"审计|优化|性能|死锁|算法|数学|证明|反编译)\b",
+        r"审计|优化|性能|死锁|算法|数学|证明|反编译|"
+        r"deep learning|neural network|reinforcement learning|computer vision|"
+        r"深度学习|神经网络|强化学习|计算机视觉)\b",
         re.IGNORECASE,
     ),
 }
 
 _CODE_HINT = re.compile(
     r"(python|javascript|typescript|rust|c\+\+|java|go|golang|shell|"
-    r"bash|node|docker|kubernetes|代码|编程|代码示例)",
+    r"bash|node|docker|kubernetes|代码|编程|代码示例|写代码)",
+    re.IGNORECASE,
+)
+
+_COMPLEXITY_BOOST = re.compile(
+    r"\b(详细|深入|完整|全面|严谨|精确|准确|具体)\b",
     re.IGNORECASE,
 )
 
@@ -226,11 +239,14 @@ class SmartRouter(Plugin):
             score += 0.25
         if _KEYWORDS_BY_TIER["expert"].search(t):
             score += 0.35
+        if _KEYWORDS_BY_TIER.get("complex") and _KEYWORDS_BY_TIER["complex"].search(t):
+            score += 0.2
         if _CODE_HINT.search(t):
             score += 0.15
+        if _COMPLEXITY_BOOST.search(t):
+            score += 0.1
         if _KEYWORDS_BY_TIER["trivial"].search(t) and length < 60:
             score -= 0.3
-        # multiple sentences / paragraphs → higher
         paragraphs = sum(1 for p in t.split("\n") if p.strip())
         score += min(0.1, paragraphs * 0.02)
         return max(0.0, min(1.0, score))
@@ -380,13 +396,19 @@ class SmartRouter(Plugin):
                 "  Step 6. 可能风险与兜底：如果某一步失败怎么办，有什么替代方案；\n"
                 "  Step 7. 预期最终输出长什么样：心里先预演一遍结果形式（1-2 句描述最终形态）。\n"
                 "思考完成后立即按计划执行工具调用，不要把思考过程直接输出给用户。\n\n"
-                "【工具使用 — 用足用透】\n"
-                "- web_search：有不确定的事实/数据立刻搜；搜不到换关键词再搜；仍无果用自己的知识回答，但要注明\"基于我的知识\"。\n"
-                "- calc：遇到数字计算直接用，不要心算。\n"
+                "【工具使用 — 必须动手，不能嘴炮】\n"
+                "你是一个有动手能力的智能助手，遇到以下情况必须调用工具，绝对不能靠脑子空想：\n"
+                "- web_search：任何事实性问题、最新信息、不确定的数据，立刻搜索！不要凭记忆回答。\n"
+                "- python_execute：遇到数学计算、数据处理、代码验证、公式求解，直接写代码执行！不要心算或猜测。\n"
+                "- calc：简单计算可以用这个工具。\n"
                 "- now：需要当前时间/日期时调用。\n"
                 "- system_run：需要在本地执行命令（谨慎、受控）。\n"
-                "- skills / document_search / mcp_client / 其他动态加载的 skill：按需调用。\n"
-                "工具调用原则：能工具解决就不要问；工具失败就换工具或换关键词；连续失败 3 次再用知识兜底。\n\n"
+                "- skills / document_search / mcp_client / 其他动态加载的 skill：按需调用。\n\n"
+                "工具调用铁律：\n"
+                "1. 能工具解决的，绝对不要自己回答；\n"
+                "2. 工具失败就换工具或换关键词，不要放弃；\n"
+                "3. 连续失败 3 次再用知识兜底，但要明确注明\"基于我的知识\"；\n"
+                "4. 调用工具后，必须根据工具返回的结果给出最终答案，不能忽略工具结果。\n\n"
                 "【回复风格】\n"
                 "- 直接给答案，不啰嗦铺垫。\n"
                 "- 做了再说，不征求意见。\n"
