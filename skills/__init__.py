@@ -95,6 +95,10 @@ class Skill:
         self.changelog = changelog or []  # List of version notes
         self.uses = 0
         self.last_used: Optional[float] = None
+        # 性能优化：预计算 title+description 的小写形式, pick_relevant 每轮调用多次
+        # 之前每次 pick_relevant 都 f"{title} {description}".lower() 重新分配字符串
+        # 现在 register 时一次性算好, pick_relevant 直接读字段
+        self._hay_lower: str = f"{title} {description}".lower()
 
     async def run(self, args: Dict[str, Any]) -> str:
         self.uses += 1
@@ -221,7 +225,8 @@ class SkillManager(Plugin):
         query_words = set(w.lower() for w in re.findall(r"\w{3,}", text))
         scored: List[tuple] = []
         for skill in self._skills.values():
-            hay = f"{skill.title} {skill.description}".lower()
+            # 性能优化：直接读预计算的 _hay_lower, 避免每轮重新拼接+lower
+            hay = skill._hay_lower
             hits = sum(1 for w in query_words if w in hay)
             if hits > 0:
                 scored.append((hits, skill.title, skill))

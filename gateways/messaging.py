@@ -96,9 +96,35 @@ class BaseMessagingGateway(Plugin):
                 await self._task
             except asyncio.CancelledError:
                 pass
-        if self._client:
-            await self._client.aclose()
+        await self._close_client()
         await super().stop()
+
+    async def _close_client(self) -> None:
+        """Close existing HTTP client if open.
+
+        性能/资源修复：setup() 在配置重载等场景可能被调用多次,
+        之前直接 self._client = httpx.AsyncClient(...) 会丢弃旧实例
+        导致连接池 + fd 泄漏。所有子类 setup 应通过 _ensure_client() 创建。
+
+        注意：不在此处置 self._client = None, 让调用方 (stop/tests) 仍能
+        检查对象引用。真正置 None 在 _ensure_client 里, 因为它要创建新实例。
+        """
+        if self._client is not None:
+            try:
+                await self._client.aclose()
+            except Exception as exc:
+                logger.warning("gateway: closing stale client failed: %s", exc)
+
+    async def _ensure_client(self, **kwargs) -> httpx.AsyncClient:
+        """Create a fresh AsyncClient, closing any existing one first.
+
+        All gateway setup() methods should use this instead of directly
+        assigning self._client = httpx.AsyncClient(...) to prevent
+        resource leaks on restart / re-config paths.
+        """
+        await self._close_client()
+        self._client = httpx.AsyncClient(**kwargs)
+        return self._client
 
 
 # ------------- Telegram ---------------------------------------------------
@@ -121,7 +147,7 @@ class TelegramGateway(BaseMessagingGateway):
         if not self._token or not cfg.get("enabled", False):
             logger.info("telegram disabled")
             return
-        self._client = httpx.AsyncClient(timeout=30)
+        await self._ensure_client(timeout=30)
         self.bus.subscribe("turn_completed", self._on_done)
         self._task = asyncio.create_task(self._loop())
 
@@ -232,7 +258,7 @@ class WeComGateway(BaseMessagingGateway):
         self._callback_host = cfg.get("callback_host", self._callback_host)
         self._callback_port = int(cfg.get("callback_port", self._callback_port))
 
-        self._client = httpx.AsyncClient(timeout=30)
+        await self._ensure_client(timeout=30)
 
         if self._mode == "webhook":
             if not self._webhook_key:
@@ -509,7 +535,7 @@ class DingTalkGateway(BaseMessagingGateway):
         self._client_id = cfg.get("client_id") or ""
         self._client_secret = cfg.get("client_secret") or ""
 
-        self._client = httpx.AsyncClient(timeout=30)
+        await self._ensure_client(timeout=30)
 
         if self._mode == "webhook":
             if not self._webhook_url:
@@ -783,7 +809,7 @@ class FeishuGateway(BaseMessagingGateway):
         self._callback_host = cfg.get("callback_host", self._callback_host)
         self._callback_port = int(cfg.get("callback_port", self._callback_port))
 
-        self._client = httpx.AsyncClient(timeout=30)
+        await self._ensure_client(timeout=30)
 
         if self._mode == "webhook":
             if not self._webhook_url:
@@ -1009,7 +1035,7 @@ class DiscordGateway(BaseMessagingGateway):
         if not self._token or not cfg.get("enabled", False):
             logger.info("discord disabled")
             return
-        self._client = httpx.AsyncClient(
+        await self._ensure_client(
             timeout=30,
             headers={"Authorization": f"Bot {self._token}", "Content-Type": "application/json"},
         )
@@ -1130,7 +1156,7 @@ class SlackGateway(BaseMessagingGateway):
         if not self._token or not cfg.get("enabled", False):
             logger.info("slack disabled")
             return
-        self._client = httpx.AsyncClient(
+        await self._ensure_client(
             timeout=30,
             headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"},
         )

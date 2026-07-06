@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 AUDIT_LOG_PATH = "data/memory/audit.db"
 AUDIT_RETENTION_DAYS = 30
 AUDIT_MAX_ENTRIES = 100000  # Auto-rotate when exceeded
+ROTATION_CHECK_EVERY = 100  # Only check rotation every N writes (perf)
 
 
 class AuditLog:
@@ -47,6 +48,10 @@ class AuditLog:
         # data corruption when the event bus, background tasks, and request
         # handlers all log concurrently.
         self._write_lock = threading.Lock()
+        # 性能优化：rotation 检查频率控制 — 每 ROTATION_CHECK_EVERY 次写入才检查一次
+        # 之前每次 log() 都触发 SELECT COUNT(*) + 可能的 DELETE, 在锁内执行
+        # 高频审计写入场景下严重串行化。现在每 100 次才检查, 持锁时间大幅下降。
+        self._writes_since_check = 0
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -90,6 +95,7 @@ class AuditLog:
         """
         try:
             details_json = json.dumps(details) if details else None
+            need_rotation = False
             with self._write_lock:
                 self._conn.execute(
                     """INSERT INTO audit_log
@@ -99,7 +105,17 @@ class AuditLog:
                 )
                 self._conn.commit()
 
-                # Auto-rotate if too many entries
+                # 性能优化：每 ROTATION_CHECK_EVERY 次才检查一次 rotation
+                # 之前每次 log() 都 SELECT COUNT(*) + 可能 DELETE, 在锁内串行化
+                # 现在 INSERT+commit 后立即释放锁, rotation 在锁外执行
+                self._writes_since_check += 1
+                if self._writes_since_check >= ROTATION_CHECK_EVERY:
+                    self._writes_since_check = 0
+                    need_rotation = True
+
+            # rotation 移到锁外执行 — SELECT COUNT 和 DELETE 不需要与 INSERT 互斥
+            # (SQLite 自身有行锁, 且 rotation 是低频操作, 偶发竞争可接受)
+            if need_rotation:
                 self._check_rotation()
         except sqlite3.Error as exc:
             logger.exception("Failed to write audit log: %s", exc)

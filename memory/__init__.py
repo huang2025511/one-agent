@@ -378,9 +378,13 @@ class ProceduralMemory:
         safe = re.sub(r"[^A-Za-z0-9_-]", "_", name).strip("_") or "skill"
         path = self._dir / f"{safe}.md"
         path.write_text(body, encoding="utf-8")
+        # 性能优化：预计算 triggers 的小写形式, lookup 时直接用, 避免每次重新 lower
+        # 之前 lookup 每个 skill 每个 trigger 都 t.lower(), 重复计算
+        triggers_lower = [t.lower() for t in triggers if t]
         with self._lock:
             self._index["skills"][safe] = {
                 "triggers": triggers,
+                "triggers_lower": triggers_lower,  # 预计算缓存
                 "path": str(path),
                 "created_at": time.time(),
                 "uses": 0,
@@ -401,12 +405,18 @@ class ProceduralMemory:
                 self._persist_index()
 
     def lookup(self, text: str) -> Optional[Dict[str, Any]]:
+        # 性能优化：text.lower() 提到循环外, 之前每个 skill 都重新算一次
+        text_lower = text.lower()
         with self._lock:
             best: Optional[Dict[str, Any]] = None
             best_id: Optional[str] = None
             best_hits = 0
             for skill_id, meta in self._index["skills"].items():
-                hits = sum(1 for t in meta["triggers"] if t and t.lower() in text.lower())
+                # 优先用预计算的 triggers_lower, 兼容旧数据回退到 triggers
+                triggers_lower = meta.get("triggers_lower")
+                if triggers_lower is None:
+                    triggers_lower = [t.lower() for t in meta["triggers"] if t]
+                hits = sum(1 for t in triggers_lower if t in text_lower)
                 if hits > best_hits:
                     best_hits = hits
                     best = meta
@@ -437,7 +447,13 @@ class ProceduralMemory:
             self._persist_index()
 
     def _persist_index(self) -> None:
-        self._index_path.write_text(json.dumps(self._index, indent=2), encoding="utf-8")
+        # 性能优化：持久化时剥离 triggers_lower 缓存字段, 避免磁盘文件膨胀
+        # 加载时 lookup 会自动回退计算, 无功能影响
+        to_persist = {"skills": {}}
+        for skill_id, meta in self._index.get("skills", {}).items():
+            clean_meta = {k: v for k, v in meta.items() if k != "triggers_lower"}
+            to_persist["skills"][skill_id] = clean_meta
+        self._index_path.write_text(json.dumps(to_persist, indent=2), encoding="utf-8")
         self._dirty_count = 0
 
 
