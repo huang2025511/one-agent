@@ -1003,13 +1003,19 @@ class WeChatPersonalGateway(Plugin):
         """发送单条消息（内部方法）。
 
         Args:
-            use_context_token: 是否使用 context_token。心跳/进度消息应设为 False，
-                避免消耗一次性 context_token 导致后续真实回复被静默丢弃。
+            use_context_token: 是否使用 context_token 和 client_id。
+                心跳/进度消息应设为 False，避免消耗一次性 iLink 令牌
+                导致后续真实回复被静默丢弃。
         """
-        context_token = self._context_tokens.get(chat_id, "") if use_context_token else ""
-        client_id = self._client_ids.get(chat_id, "")
+        if use_context_token:
+            context_token = self._context_tokens.get(chat_id, "")
+            client_id = self._client_ids.get(chat_id, "")
+        else:
+            # 心跳/进度消息不消耗任何 iLink 令牌，作为独立消息发送
+            context_token = ""
+            client_id = ""
         if not context_token and not client_id:
-            logger.warning("wechat_personal: no context_token/client_id for %s, message may not be delivered", chat_id[:20])
+            logger.debug("wechat_personal: no context_token/client_id for %s, sending as standalone message", chat_id[:20])
         logger.info(
             "wechat_personal: sending to=%s, content=%s, ctx_token=%s(len=%d), client_id=%s(len=%d)",
             chat_id[:20],
