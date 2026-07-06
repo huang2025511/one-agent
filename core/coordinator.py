@@ -48,7 +48,7 @@ from core.model_compare import get_model_comparer
 # Round 7: production reliability
 from core.circuit_breaker import get_circuit_manager, CircuitConfig, CircuitOpenError
 from core.backoff import ExponentialBackoff, BackoffConfig, llm_backoff, search_backoff
-from core.alerting import get_alert_manager
+from core.alerting import get_alert_manager, AlertSeverity
 
 # Round 7: tool ecosystem
 from skills.email import get_email_skill
@@ -1046,6 +1046,9 @@ class Coordinator(Plugin):
         # 4. Round 6: Multi-turn proactive planning — predict next steps
         await self._proactive_plan(turn)
 
+        # 5. Round 7: Conversation branch auto-tracking
+        self._record_conversation_branch(turn)
+
         self.publish("turn_completed", turn=turn)
         logger.info(
             "reply produced (%s mode, %d tokens, %.2fs)",
@@ -1793,6 +1796,16 @@ class Coordinator(Plugin):
                         search_performed = True
                         turn.meta["auto_searched"] = True
                         logger.info("auto-search completed, results injected")
+
+                        # Round 7: 尝试用高级 RAG 增强搜索结果
+                        try:
+                            enhanced = await self._enhanced_web_search(query, turn)
+                            if enhanced and len(enhanced) > 50:
+                                search_result_text = enhanced + "\n\n---\n" + search_result_text[:2000]
+                                turn.meta["rag_enhanced"] = True
+                                logger.debug("auto-search enhanced with RAG (HyDE+rerank)")
+                        except Exception:
+                            pass
                     else:
                         logger.debug("auto-search returned no usable results: %s", str(result)[:200])
                 except Exception as exc:
@@ -1874,13 +1887,48 @@ class Coordinator(Plugin):
             # Gap 7 修复：动态温度 — 根据任务复杂度调整 temperature
             dyn_temp = self._compute_dynamic_temperature(turn)
 
-            resp = await self._llm.chat_completion(
-                messages=messages,
-                model=turn.model,
-                max_tokens=turn.token_budget if i == 0 else self._max_tokens,
-                tools=tools or None,
-                temperature=dyn_temp,
-            )
+            # Round 7 修复：熔断器 + 退避 — 包裹 LLM 调用
+            circuit = get_circuit_manager().get(f"llm:{provider}")
+            llm_backoff_strategy = llm_backoff()
+
+            async def _do_llm_call():
+                return await self._llm.chat_completion(
+                    messages=messages,
+                    model=turn.model,
+                    max_tokens=turn.token_budget if i == 0 else self._max_tokens,
+                    tools=tools or None,
+                    temperature=dyn_temp,
+                )
+
+            try:
+                # 先尝试熔断器 + 退避
+                resp = await circuit.acall(
+                    lambda: llm_backoff_strategy.retry(_do_llm_call),
+                )
+            except CircuitOpenError:
+                # 熔断器打开 — 触发告警，降级返回
+                get_alert_manager().fire(
+                    "circuit_open",
+                    title=f"LLM circuit OPEN: {provider}",
+                    body=f"模型 {turn.model} 的熔断器已打开，使用降级回复",
+                    severity=AlertSeverity.CRITICAL,
+                )
+                final_text = (
+                    "抱歉，AI 服务暂时不可用，请稍后重试。"
+                    if self._is_zh() else
+                    "Sorry, the AI service is temporarily unavailable. Please try again later."
+                )
+                turn.result = final_text
+                turn.meta["circuit_open"] = True
+                return
+            except Exception as exc:
+                # 退避也失败了 — 触发告警
+                get_alert_manager().fire(
+                    "llm_error",
+                    title=f"LLM call failed: {provider}",
+                    body=str(exc)[:200],
+                )
+                raise
             tokens_used = int(resp.get("tokens_used") or 0)
             total_tokens += tokens_used
 
@@ -2062,10 +2110,20 @@ class Coordinator(Plugin):
             # Loop exhausted
             await self._handle_loop_exhaustion(messages, turn)
             await rate_limiter.acquire(provider)
-            resp = await self._llm.chat_completion(
-                messages=messages, model=turn.model, max_tokens=self._max_tokens,
-                temperature=dyn_temp,
-            )
+            try:
+                resp = await circuit.acall(
+                    lambda: llm_backoff_strategy.retry(
+                        lambda: self._llm.chat_completion(
+                            messages=messages, model=turn.model, max_tokens=self._max_tokens,
+                            temperature=dyn_temp,
+                        )
+                    ),
+                )
+            except CircuitOpenError:
+                final_text = "抱歉，AI 服务暂时不可用。" if self._is_zh() else "AI service unavailable."
+                turn.result = final_text
+                turn.meta["circuit_open"] = True
+                return
             final_text = resp.get("text", "") or "(no reply)"
             tokens_used = int(resp.get("tokens_used") or 0)
             total_tokens += tokens_used
@@ -3783,3 +3841,39 @@ class Coordinator(Plugin):
                 for b in branches
             )
         turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- Branch auto-tracking (Round 7)
+    def _record_conversation_branch(self, turn: TurnContext) -> None:
+        """Automatically record every conversation turn in the branch tree."""
+        try:
+            mgr = get_branch_manager()
+            tree = mgr.get_tree(turn.session_id)
+            tree.add_message("user", turn.input_text[:500])
+            if turn.result:
+                tree.add_message("assistant", turn.result[:500])
+        except Exception as exc:
+            logger.debug("conv_branch auto-track failed: %s", exc)
+
+    # --------------------------------------------------- Advanced RAG integration (Round 7)
+    async def _enhanced_web_search(self, query: str, turn: TurnContext) -> str:
+        """Use advanced RAG (HyDE + rerank) to enhance web search results."""
+        try:
+            if self._llm is None:
+                return ""
+            rag = get_advanced_rag(self._llm, self._memory)
+            results = await rag.full_retrieval(
+                query=query,
+                top_k=5,
+                use_hyde=True,
+                use_rerank=True,
+                model=turn.model,
+            )
+            if results:
+                enhanced = []
+                for i, r in enumerate(results[:5]):
+                    content = str(r.get("content", r.get("text", "")))[:200]
+                    enhanced.append(f"[{i+1}] {content}")
+                return "\n".join(enhanced)
+        except Exception as exc:
+            logger.debug("advanced_rag enhanced search failed: %s", exc)
+        return ""
