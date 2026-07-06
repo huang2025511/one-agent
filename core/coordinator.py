@@ -39,6 +39,12 @@ from core.tool_cache import get_tool_cache
 from core.rate_limiter import get_rate_limiter
 from models.tiers import MODEL_COST
 
+# Round 6: new intelligent features
+from core.eval import get_eval_harness
+from core.batch import get_batch_processor
+from core.deep_research import get_deep_researcher
+from core.model_compare import get_model_comparer
+
 logger = logging.getLogger(__name__)
 
 # Coordinator configuration constants
@@ -64,6 +70,14 @@ CLARIFICATION_MIN_COMPLEXITY = 0.5      # complex and above
 FINAL_POLISH_MIN_COMPLEXITY = 0.5     # complex and above
 POST_REFLECT_MIN_COMPLEXITY = 0.8       # expert only
 TOOL_CHAIN_PLANNING_MIN_COMPLEXITY = 0.8  # expert only
+
+# Round 6: new feature constants
+MAX_TOOL_RETRIES = 2                    # auto-retry failed tool calls with corrected args
+REGENERATION_MAX = 3                    # max rewrite_turn regenerations per turn
+DYNAMIC_TEMP_BASE = 0.7                 # base temperature for dynamic adjustment
+DYNAMIC_TEMP_FACTUAL = 0.1              # low temp for factual tasks
+DYNAMIC_TEMP_CREATIVE = 0.9             # high temp for creative tasks
+DEEP_RESEARCH_MIN_COMPLEXITY = 0.7      # auto-trigger deep research at this complexity
 
 
 class Coordinator(Plugin):
@@ -91,6 +105,15 @@ class Coordinator(Plugin):
         self._style_adapter: Optional[StyleAdapter] = None
         self._failure_recovery: Optional[Any] = None
         self._dialog_summarizer: Optional[Any] = None
+        # Round 6: new feature instances
+        self._eval: Optional[Any] = None
+        self._batch: Optional[Any] = None
+        self._deep_researcher: Optional[Any] = None
+        self._model_comparer: Optional[Any] = None
+        # Track regeneration count per session
+        self._regeneration_count: Dict[str, int] = {}
+        # Track proactive plans per session
+        self._proactive_plans: Dict[str, List[str]] = {}
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -424,6 +447,15 @@ class Coordinator(Plugin):
         "os-mode": "_os_mode", "osmode": "_os_mode", "os": "_os_mode",
         "enable-os": "_os_on", "disable-os": "_os_off",
         "开启os": "_os_on", "关闭os": "_os_off", "开启系统权限": "_os_on", "关闭系统权限": "_os_off",
+        # ---------- Round 6: 新功能 ----------
+        "retry": "_rewrite", "重试": "_rewrite", "重新生成": "_rewrite", "换个说法": "_rewrite",
+        "regenerate": "_rewrite", "redo": "_rewrite", "再来一次": "_rewrite",
+        "deep": "_deep_research", "深度研究": "_deep_research", "深入研究": "_deep_research",
+        "deep-research": "_deep_research", "research": "_deep_research",
+        "batch": "_batch", "批量": "_batch", "批量处理": "_batch", "批量任务": "_batch",
+        "compare": "_model_compare", "对比": "_model_compare", "模型对比": "_model_compare",
+        "compare-models": "_model_compare", "ab": "_model_compare",
+        "eval": "_eval", "评估": "_eval", "evaluate": "_eval", "评分": "_eval",
     }
 
     async def _maybe_direct_skill_dispatch(self, turn: TurnContext) -> bool:
@@ -600,6 +632,28 @@ class Coordinator(Plugin):
         # ---- OS mode commands (handled directly, not via skill dispatch) ----
         if skill_id in ("_os_on", "_os_off", "_os_mode"):
             await self._handle_os_mode(turn, skill_id, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+
+        # ---- Round 6: new feature commands (handled directly) ----
+        if skill_id == "_rewrite":
+            await self._handle_rewrite(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_deep_research":
+            await self._handle_deep_research(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_batch":
+            await self._handle_batch(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_model_compare":
+            await self._handle_model_compare(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_eval":
+            await self._handle_eval(turn, args_text)
             self.publish("turn_completed", turn=turn)
             return True
 
@@ -894,6 +948,9 @@ class Coordinator(Plugin):
         # 3. Metacognition — analyze response quality
         await self._analyze_response_quality(turn)
 
+        # 4. Round 6: Multi-turn proactive planning — predict next steps
+        await self._proactive_plan(turn)
+
         self.publish("turn_completed", turn=turn)
         logger.info(
             "reply produced (%s mode, %d tokens, %.2fs)",
@@ -1138,6 +1195,27 @@ class Coordinator(Plugin):
                 messages.insert(len(messages) - 1, task_block)
             else:
                 messages.append(task_block)
+
+        # Gap 5 修复：注入上一轮生成的主动规划，让 LLM 预判用户下一步
+        proactive_plan = self._get_proactive_plan(turn.session_id)
+        if proactive_plan:
+            plan_text = "\n".join(f"- {p}" for p in proactive_plan)
+            if self._is_zh():
+                plan_header = (
+                    "【下一步预判】（系统预测用户接下来可能追问的问题）\n"
+                    "请在心里准备好这些问题的答案，但不要主动输出：\n"
+                )
+            else:
+                plan_header = (
+                    "[Next-Step Prediction] (system predicted follow-up questions)\n"
+                    "Prepare answers for these mentally, but don't output them proactively:\n"
+                )
+            plan_block = {"role": "assistant", "content": plan_header + plan_text}
+            if messages and messages[-1].get("role") == "user":
+                messages.insert(len(messages) - 1, plan_block)
+            else:
+                messages.append(plan_block)
+            turn.meta["proactive_plan_injected"] = True
 
         # Inject Chain-of-Thought reasoning for complex tasks
         await self._maybe_inject_cot(messages, turn)
@@ -1698,11 +1776,15 @@ class Coordinator(Plugin):
             # Gap 6 修复：LLM API 调用前先获取令牌（rate limit）
             await rate_limiter.acquire(provider)
 
+            # Gap 7 修复：动态温度 — 根据任务复杂度调整 temperature
+            dyn_temp = self._compute_dynamic_temperature(turn)
+
             resp = await self._llm.chat_completion(
                 messages=messages,
                 model=turn.model,
                 max_tokens=turn.token_budget if i == 0 else self._max_tokens,
                 tools=tools or None,
+                temperature=dyn_temp,
             )
             tokens_used = int(resp.get("tokens_used") or 0)
             total_tokens += tokens_used
@@ -1725,6 +1807,7 @@ class Coordinator(Plugin):
                             messages=messages,
                             model=turn.model,
                             max_tokens=turn.token_budget if i == 0 else self._max_tokens,
+                            temperature=dyn_temp,
                         ):
                             delta = chunk.get("text", "")
                             if delta:
@@ -1804,6 +1887,43 @@ class Coordinator(Plugin):
             if deduped_calls:
                 await self._execute_tool_calls(messages, turn, deduped_calls, _failed_skills, i)
 
+            # Gap 3 修复：函数调用自修正 — 对失败的工具调用，让 LLM 修正参数后重试
+            if i < self._max_tool_iterations - 1:
+                retry_count = turn.meta.get("auto_retry_count", 0)
+                if retry_count < MAX_TOOL_RETRIES:
+                    failed_in_round = [
+                        tc for tc in tool_calls
+                        if _failed_skills.get(
+                            tc.get("name") or tc.get("function", {}).get("name", ""), 0
+                        ) > 0
+                    ]
+                    if failed_in_round:
+                        # 构造自修正提示：把失败的工具调用和错误信息发给 LLM
+                        failed_info = ""
+                        for tc in failed_in_round[:3]:
+                            nm = tc.get("name") or tc.get("function", {}).get("name", "")
+                            args = tc.get("args") or tc.get("function", {}).get("arguments", "{}")
+                            failed_info += f"\n- {nm}({args}) → 失败"
+                        zh = self._is_zh()
+                        if zh:
+                            retry_prompt = (
+                                f"[系统提示：以下工具调用失败了，请修正参数后重试：{failed_info}\n"
+                                "如果是参数格式问题，请修正格式；如果是参数值不对，请调整值；"
+                                "如果确定该工具无法完成此任务，请换用其他工具或直接回答。]"
+                            )
+                        else:
+                            retry_prompt = (
+                                f"[System: The following tool calls failed, fix the arguments and retry: {failed_info}\n"
+                                "If it's a format issue, fix the format; if the value is wrong, adjust it; "
+                                "if this tool truly can't handle this task, switch tools or answer directly.]"
+                            )
+                        messages.append({"role": "user", "content": retry_prompt})
+                        turn.meta["auto_retry_count"] = retry_count + 1
+                        turn.meta["auto_retry_triggered"] = True
+                        logger.debug("auto-retry: triggered for %d failed tools (attempt %d)",
+                                   len(failed_in_round), retry_count + 1)
+                        continue  # 让 LLM 修正后重试同一轮
+
             # Gap 3：动态重规划 — 检测本轮工具失败，注入重规划提示
             # 之前工具失败只是记录在 messages 里，模型不一定主动调整策略。
             # 现在检测到失败后注入明确的"请换方案"提示，让模型重新规划后续步骤。
@@ -1849,6 +1969,7 @@ class Coordinator(Plugin):
             await rate_limiter.acquire(provider)
             resp = await self._llm.chat_completion(
                 messages=messages, model=turn.model, max_tokens=self._max_tokens,
+                temperature=dyn_temp,
             )
             final_text = resp.get("text", "") or "(no reply)"
             tokens_used = int(resp.get("tokens_used") or 0)
@@ -2960,3 +3081,399 @@ class Coordinator(Plugin):
             logger.debug("CoT reasoning enabled for task types: %s", task_types)
         except Exception as exc:
             logger.debug("CoT injection failed: %s", exc)
+
+    # ================================================================
+    # Round 6: New intelligent features
+    # ================================================================
+
+    # --------------------------------------------------- Gap 7: Dynamic temperature
+    def _compute_dynamic_temperature(self, turn: TurnContext) -> float:
+        """Adjust temperature based on task complexity and type.
+
+        - Factual/analytical tasks → lower temperature (more deterministic)
+        - Creative/generative tasks → higher temperature (more variety)
+        - Default: base temperature
+        """
+        complexity = getattr(turn, "estimated_complexity", 0.5)
+        task_types = turn.meta.get("task_types", [])
+
+        # Creative tasks benefit from higher temperature
+        creative_types = {"creative", "writing", "brainstorming", "storytelling", "poetry"}
+        if any(t in creative_types for t in task_types):
+            return DYNAMIC_TEMP_CREATIVE
+
+        # Factual/analytical tasks need lower temperature
+        factual_types = {"factual", "analysis", "coding", "debugging", "math", "calculation"}
+        if any(t in factual_types for t in task_types):
+            return DYNAMIC_TEMP_FACTUAL
+
+        # Graduated: more complex = slightly lower temperature (precision)
+        if complexity >= EXPERT_COMPLEXITY_THRESHOLD:
+            return 0.15
+        elif complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
+            return 0.3
+        elif complexity >= SIMPLE_COMPLEXITY_THRESHOLD:
+            return 0.5
+
+        return DYNAMIC_TEMP_BASE
+
+    # --------------------------------------------------- Gap 2: Response regeneration
+    async def _handle_rewrite(self, turn: TurnContext, args_text: str) -> None:
+        """Handle /retry or /重新生成 — regenerate the last response.
+
+        Takes the last turn's context and re-runs with a different temperature
+        or approach to produce a fresh answer.
+        """
+        zh = self._is_zh()
+        session_id = turn.session_id
+
+        # Check regeneration limit
+        count = self._regeneration_count.get(session_id, 0)
+        if count >= REGENERATION_MAX:
+            turn.result = (
+                f"已达到最大重新生成次数（{REGENERATION_MAX}次）。请提出新的问题。"
+                if zh else f"Max regeneration limit reached ({REGENERATION_MAX}). Please ask a new question."
+            )
+            return
+
+        # Get history from turn meta
+        history = turn.meta.get("history", [])
+        if not history:
+            turn.result = "没有历史记录可供重新生成。" if zh else "No history available for regeneration."
+            return
+
+        # Get the last user input
+        last_turn = history[-1] if history else {}
+        last_input = str(last_turn.get("input", ""))
+        if not last_input:
+            turn.result = "无法找到上一轮用户输入。" if zh else "Cannot find previous user input."
+            return
+
+        self._regeneration_count[session_id] = count + 1
+
+        if self._llm is None:
+            turn.result = "[LLM 未初始化]" if zh else "[LLM not initialized]"
+            return
+
+        # Use a different temperature for variety
+        alt_temp = 0.9 if count % 2 == 0 else 0.3
+
+        # Build minimal context from history
+        messages = []
+        sys_prompt = turn.meta.get("system_prompt", "")
+        if sys_prompt:
+            messages.append({"role": "system", "content": sys_prompt})
+        else:
+            messages.append({"role": "system", "content": "请用不同的角度和方式重新回答以下问题，生成一个全新的回答。" if zh else "Please re-answer the following question from a different angle and style."})
+
+        messages.append({"role": "user", "content": last_input})
+
+        self._emit_progress(turn, f"正在重新生成（第{count+1}次），温度={alt_temp}...", "rewrite")
+
+        try:
+            resp = await self._llm.chat_completion(
+                messages=messages,
+                model=turn.model,
+                temperature=alt_temp,
+                max_tokens=DEFAULT_MAX_TOKENS,
+                tools=None,
+            )
+            result = (resp.get("text") or "").strip()
+            tokens = int(resp.get("tokens_used") or 0)
+            turn.result = result
+            turn.record_success(result, tokens)
+            turn.meta["regenerated"] = True
+            turn.meta["regeneration_count"] = count + 1
+            turn.meta["regeneration_temp"] = alt_temp
+            logger.info("rewrite_turn: regenerated response (attempt %d, temp=%.1f)", count + 1, alt_temp)
+        except Exception as exc:
+            turn.record_failure(f"regeneration failed: {exc}")
+            turn.result = f"重新生成失败: {exc}" if zh else f"Regeneration failed: {exc}"
+
+    # --------------------------------------------------- Gap 6: Deep research handler
+    async def _handle_deep_research(self, turn: TurnContext, args_text: str) -> None:
+        """Handle /deep or /深度研究 — deep research mode."""
+        zh = self._is_zh()
+        question = args_text.strip() if args_text else turn.input_text
+
+        if not question or len(question) < 10:
+            turn.result = (
+                "请提供要研究的问题。用法: /deep <问题>\n示例: /deep 量子计算的最新进展"
+                if zh else "Please provide a research question. Usage: /deep <question>\nExample: /deep Latest advances in quantum computing"
+            )
+            return
+
+        if self._llm is None:
+            turn.result = "[LLM 未初始化]" if zh else "[LLM not initialized]"
+            return
+
+        try:
+            researcher = get_deep_researcher(self._llm, self._skills)
+
+            def on_progress(phase: str, msg: str) -> None:
+                self._emit_progress(turn, msg, f"deep_research/{phase}")
+
+            report = await researcher.research(
+                question=question,
+                model=turn.model,
+                depth=2,
+                on_progress=on_progress,
+            )
+
+            turn.result = researcher.format_report(report)
+            turn.meta["deep_research"] = {
+                "sub_questions": len(report.sub_questions),
+                "sources": len(report.sources),
+                "searches": report.total_searches,
+                "duration": round(report.duration_seconds, 1),
+            }
+            turn.record_success(turn.result, 0)
+            logger.info("deep_research: completed in %.1fs, %d sources",
+                       report.duration_seconds, len(report.sources))
+        except Exception as exc:
+            turn.record_failure(f"deep research failed: {exc}")
+            turn.result = f"深度研究失败: {exc}" if zh else f"Deep research failed: {exc}"
+
+    # --------------------------------------------------- Gap 4: Batch processing handler
+    async def _handle_batch(self, turn: TurnContext, args_text: str) -> None:
+        """Handle /batch or /批量 — batch processing."""
+        zh = self._is_zh()
+        text = args_text.strip() if args_text else turn.input_text
+
+        if not text or len(text) < 10:
+            turn.result = (
+                "请提供要批量处理的内容。用法: /batch <任务类型> <内容>\n"
+                "任务类型: translate, summarize, classify, extract\n"
+                "示例: /batch translate\n1. Hello World\n2. Good morning\n3. How are you?"
+                if zh else "Usage: /batch <task_type> <content>\n"
+                "Task types: translate, summarize, classify, extract\n"
+                "Example: /batch translate\n1. Hello World\n2. Good morning"
+            )
+            return
+
+        if self._llm is None:
+            turn.result = "[LLM 未初始化]" if zh else "[LLM not initialized]"
+            return
+
+        # Parse task type and content
+        lines = text.split("\n", 1)
+        task_type = "general"
+        content = text
+
+        if len(lines) >= 2:
+            first_word = lines[0].strip().lower()
+            if first_word in ("translate", "翻译", "summarize", "总结", "摘要",
+                            "classify", "分类", "extract", "提取", "general"):
+                task_type_map = {
+                    "translate": "translate", "翻译": "translate",
+                    "summarize": "summarize", "总结": "summarize", "摘要": "summarize",
+                    "classify": "classify", "分类": "classify",
+                    "extract": "extract", "提取": "extract",
+                }
+                task_type = task_type_map.get(first_word, "general")
+                content = lines[1].strip() if len(lines) > 1 else ""
+
+        try:
+            processor = get_batch_processor(self._llm, self._skills)
+            items = processor.split_items(content)
+
+            if len(items) < 2:
+                turn.result = (
+                    "批量处理需要至少 2 个项目。请用换行或数字列表分隔。"
+                    if zh else "Batch processing requires at least 2 items. Separate by newlines or numbers."
+                )
+                return
+
+            def on_progress(done: int, total: int, item: str) -> None:
+                self._emit_progress(turn, f"批量处理中 ({done}/{total})...", "batch")
+
+            self._emit_progress(turn, f"开始批量处理 {len(items)} 个项目...", "batch")
+            result = await processor.process(
+                items=items,
+                model=turn.model,
+                task_type=task_type,
+                on_progress=on_progress,
+            )
+
+            turn.result = processor.format_result(result)
+            turn.meta["batch"] = {
+                "total": result.total,
+                "succeeded": result.succeeded,
+                "failed": result.failed,
+                "task_type": task_type,
+            }
+            turn.record_success(turn.result, 0)
+            logger.info("batch: %d/%d succeeded", result.succeeded, result.total)
+        except Exception as exc:
+            turn.record_failure(f"batch processing failed: {exc}")
+            turn.result = f"批量处理失败: {exc}" if zh else f"Batch processing failed: {exc}"
+
+    # --------------------------------------------------- Gap 8: Model comparison handler
+    async def _handle_model_compare(self, turn: TurnContext, args_text: str) -> None:
+        """Handle /compare or /模型对比 — A/B model comparison."""
+        zh = self._is_zh()
+        text = args_text.strip() if args_text else turn.input_text
+
+        if not text:
+            turn.result = (
+                "用法: /compare <模型A> <模型B> <问题>\n"
+                "示例: /compare openai/gpt-4o anthropic/claude-3.5-sonnet 量子计算是什么？"
+                if zh else "Usage: /compare <modelA> <modelB> <question>\n"
+                "Example: /compare openai/gpt-4o anthropic/claude-3.5-sonnet What is quantum computing?"
+            )
+            return
+
+        if self._llm is None:
+            turn.result = "[LLM 未初始化]" if zh else "[LLM not initialized]"
+            return
+
+        # Parse: model_a model_b question
+        parts = text.split(None, 2)
+        if len(parts) < 3:
+            # Try to use last question from history
+            history = turn.meta.get("history", [])
+            if history and len(parts) >= 2:
+                last_input = str(history[-1].get("input", ""))
+                if last_input:
+                    parts = [parts[0], parts[1], last_input]
+                else:
+                    turn.result = (
+                        "请提供: <模型A> <模型B> <问题>"
+                        if zh else "Please provide: <modelA> <modelB> <question>"
+                    )
+                    return
+            else:
+                turn.result = (
+                    "请提供: <模型A> <模型B> <问题>"
+                    if zh else "Please provide: <modelA> <modelB> <question>"
+                )
+                return
+
+        model_a, model_b, question = parts[0], parts[1], parts[2]
+
+        self._emit_progress(turn, f"正在对比 {model_a} vs {model_b}...", "model_compare")
+
+        try:
+            comparer = get_model_comparer(self._llm, self._skills)
+            result = await comparer.compare(
+                question=question,
+                model_a=model_a,
+                model_b=model_b,
+            )
+
+            turn.result = comparer.format_comparison(result)
+            turn.meta["model_compare"] = result.to_dict()
+            turn.record_success(turn.result, 0)
+            logger.info("model_compare: %s vs %s → %s", model_a, model_b, result.winner)
+        except Exception as exc:
+            turn.record_failure(f"model comparison failed: {exc}")
+            turn.result = f"模型对比失败: {exc}" if zh else f"Model comparison failed: {exc}"
+
+    # --------------------------------------------------- Gap 1: Eval handler
+    async def _handle_eval(self, turn: TurnContext, args_text: str) -> None:
+        """Handle /eval or /评估 — evaluate answer quality."""
+        zh = self._is_zh()
+
+        if self._llm is None:
+            turn.result = "[LLM 未初始化]" if zh else "[LLM not initialized]"
+            return
+
+        harness = get_eval_harness()
+
+        # If args provided, evaluate that. Otherwise, evaluate last answer.
+        if args_text.strip():
+            question = "评估目标"
+            answer = args_text.strip()
+        else:
+            history = turn.meta.get("history", [])
+            if history:
+                last = history[-1]
+                question = str(last.get("input", "评估目标"))
+                answer = str(last.get("reply", ""))
+            else:
+                turn.result = (
+                    "请提供要评估的文本，或先进行一次对话后再评估。用法: /eval <文本>"
+                    if zh else "Please provide text to evaluate, or chat first. Usage: /eval <text>"
+                )
+                return
+
+        self._emit_progress(turn, "正在评估回答质量...", "eval")
+
+        try:
+            eval_result = await harness.evaluate(
+                llm=self._llm,
+                question=question,
+                answer=answer,
+                judge_model=turn.model,
+            )
+
+            dim_lines = "\n".join(f"  {d}: {s:.1f}/10" for d, s in eval_result.scores.items())
+            turn.result = (
+                f"评估结果\n"
+                f"────────────────\n"
+                f"总分: {eval_result.overall:.1f}/10\n\n"
+                f"各维度评分:\n{dim_lines}\n\n"
+                f"评价: {eval_result.judge_reasoning}"
+            )
+            turn.meta["eval"] = eval_result.to_dict()
+            turn.record_success(turn.result, 0)
+            logger.info("eval: overall=%.1f", eval_result.overall)
+        except Exception as exc:
+            turn.record_failure(f"eval failed: {exc}")
+            turn.result = f"评估失败: {exc}" if zh else f"Evaluation failed: {exc}"
+
+    # --------------------------------------------------- Gap 5: Multi-turn proactive planning
+    async def _proactive_plan(self, turn: TurnContext) -> None:
+        """After a turn completes, generate proactive next-step suggestions.
+
+        These are injected into the next turn's context so the LLM can
+        anticipate what the user might ask next and prepare accordingly.
+        """
+        if not self._llm or not turn.result:
+            return
+
+        zh = self._is_zh()
+        session_id = turn.session_id
+
+        # Only generate plan for complex+ tasks to avoid overhead
+        complexity = getattr(turn, "estimated_complexity", 0.0)
+        if complexity < COMPLEX_COMPLEXITY_THRESHOLD:
+            return
+
+        try:
+            prompt = (
+                f"用户刚才问了：{turn.input_text[:300]}\n"
+                f"你回答的核心内容：{turn.result[:500]}\n\n"
+                + (
+                    "基于以上对话，预测用户接下来最可能追问的 1-3 个问题或需要的下一步操作。"
+                    "每个一行，以 '- ' 开头。只输出预测，不要解释。"
+                    if zh else
+                    "Based on the above conversation, predict 1-3 follow-up questions or next steps "
+                    "the user is most likely to ask. One per line, starting with '- '. Only predictions."
+                )
+            )
+
+            resp = await self._llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=self._lightweight_model(turn),
+                temperature=0.3,
+                max_tokens=200,
+                tools=None,
+            )
+            plan_text = (resp.get("text") or "").strip()
+
+            if plan_text:
+                # Parse lines starting with '- '
+                import re
+                items = re.findall(r'[-*]\s*(.+)', plan_text)
+                if items:
+                    self._proactive_plans[session_id] = items[:3]
+                    turn.meta["proactive_plan"] = items[:3]
+                    logger.debug("proactive_plan: generated %d next-step predictions", len(items))
+        except Exception as exc:
+            logger.debug("proactive_plan failed: %s", exc)
+
+    def _get_proactive_plan(self, session_id: str) -> Optional[List[str]]:
+        """Get the proactive plan for the next turn, then clear it."""
+        plan = self._proactive_plans.pop(session_id, None)
+        return plan
