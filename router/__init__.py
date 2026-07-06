@@ -35,22 +35,22 @@ MAX_COMPLEXITY = 100
 
 _KEYWORDS_BY_TIER = {
     "trivial": re.compile(
-        r"\b(hi|hello|hey|ok|thanks|thank you|what's|what is|when|where|who|"
-        r"天气|时间|日期|你好|谢谢|再见|help|\?)\b",
+        r"(?:hi|hello|hey|ok|thanks|thank you|what's|what is|when|where|who|"
+        r"天气|时间|日期|你好|谢谢|再见|help|\?)",
         re.IGNORECASE,
     ),
     "complex": re.compile(
-        r"\b(how to|如何|怎样|设计|方案|规划|步骤|流程|分析|比较|对比|"
+        r"(?:how to|如何|怎样|设计|方案|规划|步骤|流程|分析|比较|对比|"
         r"build|create|develop|implement|solve|fix|explain|analyze|compare|"
-        r"设计方案|实施方案|详细步骤|优缺点|区别|差异)\b",
+        r"设计方案|实施方案|详细步骤|优缺点|区别|差异)",
         re.IGNORECASE,
     ),
     "expert": re.compile(
-        r"\b(optimize|performance|debug|deadlock|coredump|algorithm|prover|"
+        r"(?:optimize|performance|debug|deadlock|coredump|algorithm|prover|"
         r"mathematical proof|formal verify|ml training|reverse engineer|"
         r"审计|优化|性能|死锁|算法|数学|证明|反编译|"
         r"deep learning|neural network|reinforcement learning|computer vision|"
-        r"深度学习|神经网络|强化学习|计算机视觉)\b",
+        r"深度学习|神经网络|强化学习|计算机视觉)",
         re.IGNORECASE,
     ),
 }
@@ -167,20 +167,44 @@ class SmartRouter(Plugin):
         needs_tools = _ACTION_VERBS.search(turn.input_text) or _SYSTEM_HINT.search(turn.input_text)
         if needs_tools and model and self._llm and not self._llm.model_supports_tools(model):
             old_tier = tier
+            old_model = model
             tier_order = ["trivial", "simple", "complex", "expert"]
             idx = tier_order.index(tier) if tier in tier_order else 1
-            # 逐级升级直到找到支持工具的模型
+            # 逐级升级，遍历该 tier 所有模型，找到第一个支持工具的
+            from models.tiers import MODEL_TIERS
+            upgraded = False
             for new_idx in range(idx + 1, len(tier_order)):
-                candidate = self._llm.model_for_tier(tier_order[new_idx])
+                new_tier = tier_order[new_idx]
+                # 先尝试 model_for_tier 选的模型
+                candidate = self._llm.model_for_tier(new_tier)
                 if candidate and self._llm.model_supports_tools(candidate):
-                    tier = tier_order[new_idx]
+                    tier = new_tier
                     model = candidate
-                    turn.meta["tool_support_upgraded_from"] = old_tier
-                    logger.info(
-                        "router: tool-support upgrade %s → %s (model %s doesn't support tools)",
-                        old_tier, tier, turn.model,
-                    )
+                    upgraded = True
                     break
+                # 再遍历该 tier 所有模型
+                for alt_model in MODEL_TIERS.get(new_tier, []):
+                    if self._llm.model_supports_tools(alt_model):
+                        provider = alt_model.split("/")[0] if "/" in alt_model else ""
+                        if provider and self._llm._has_usable_key(provider):
+                            tier = new_tier
+                            model = alt_model
+                            upgraded = True
+                            break
+                if upgraded:
+                    break
+            if upgraded:
+                turn.meta["tool_support_upgraded_from"] = old_tier
+                logger.info(
+                    "router: tool-support upgrade %s→%s, model %s→%s",
+                    old_tier, tier, old_model, model,
+                )
+            else:
+                logger.warning(
+                    "router: no tool-capable model available for '%s', using %s (text-only mode)",
+                    turn.input_text[:40], model,
+                )
+                turn.meta["no_tool_model"] = True
         turn.model = model  # None is fine — chat_completion falls back to default model
         turn.token_budget = self._token_budget_for(tier)
         # 6) 检测系统操作需求，自动标记需要 OS 模式

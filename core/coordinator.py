@@ -693,6 +693,12 @@ class Coordinator(Plugin):
         # Auto-extract entities (offload SQLite writes to worker thread)
         await asyncio.to_thread(self._extract_entities, turn)
 
+        # === Clean up result ===
+        # Filter out XML tool-call tags that weak models may emit
+        # (e.g. <invoke name="web_search">...</invoke>)
+        if turn.result:
+            turn.result = self._sanitize_model_output(turn.result)
+
         # === Intelligent features integration ===
         # 1. Record user preferences and patterns
         await self._record_intelligence(turn)
@@ -716,6 +722,49 @@ class Coordinator(Plugin):
             turn.tokens_used,
             turn.duration_seconds or 0,
         )
+
+    def _sanitize_model_output(self, text: str) -> str:
+        """Remove XML tool-call tags that weak models may emit as text.
+
+        Some models (especially flash/lite variants) output tool-call XML
+        like <invoke name="web_search">...</invoke> or <tool_call ...>...
+        directly in their text response instead of using the proper API.
+        This strips those tags so users never see raw XML.
+        """
+        import re
+        # Remove <invoke ...>...</invoke> blocks
+        text = re.sub(
+            r'<invoke\s+name="[^"]*">.*?</invoke>',
+            '',
+            text,
+            flags=re.DOTALL,
+        )
+        # Remove <parameter ...>...</parameter> blocks
+        text = re.sub(
+            r'<parameter\s+name="[^"]*">.*?</parameter>',
+            '',
+            text,
+            flags=re.DOTALL,
+        )
+        # Remove standalone <invoke ...> tags (unclosed)
+        text = re.sub(r'<invoke\s+name="[^"]*"[^>]*/?\s*>', '', text)
+        # Remove <tool_call ...>...</tool_call > blocks
+        text = re.sub(
+            r'<tool_call[^>]*>.*?</tool_call\s*>',
+            '',
+            text,
+            flags=re.DOTALL,
+        )
+        # Remove <function_call ...>...</function_call> blocks
+        text = re.sub(
+            r'<function_call[^>]*>.*?</function_call\s*>',
+            '',
+            text,
+            flags=re.DOTALL,
+        )
+        # Clean up excessive blank lines left behind
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip()
 
     def _needs_clarification_check(self, turn: TurnContext) -> bool:
         """Heuristic: should we even bother asking the LLM if input is ambiguous?
