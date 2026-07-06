@@ -594,6 +594,10 @@ class Coordinator(Plugin):
             # Mark the turn so _on_routed skips it if it hasn't started yet.
             if turn.result is None and turn.error is None:
                 turn.record_failure("turn completion timeout")
+                # 通知网关 turn 已失败（带 error），让用户收到超时提示而非一直等。
+                # 之前只 record_failure 不 publish，导致网关永远收不到
+                # turn_completed，心跳不停、用户干等。
+                self.publish("turn_completed", turn=turn, session_id=session_id)
         finally:
             self.bus.unsubscribe("turn_completed", _on_turn_completed)
 

@@ -323,7 +323,7 @@ class SmartRouter(Plugin):
             messages=[{"role": "user", "content": prompt}],
             model=None,  # use default (cheapest available)
             temperature=0.0,
-            max_tokens=80,
+            max_tokens=256,  # 80 太小，嵌套/带说明的 JSON 容易被截断
             tools=None,
             use_cache=True,
         )
@@ -331,25 +331,43 @@ class SmartRouter(Plugin):
         raw = (result.get("text") or "").strip()
         # Parse JSON from response
         import json as _json
+        import re as _re
 
-        # Try to extract JSON from the response (model may wrap in markdown)
-        json_str = raw
-        if "```" in raw:
-            # Extract from code block
-            import re as _re
-            m = _re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, _re.DOTALL)
-            if m:
-                json_str = m.group(1)
-        # Find first { ... } if surrounded by other text
-        if not json_str.startswith("{"):
-            start = json_str.find("{")
-            end = json_str.rfind("}")
-            if start >= 0 and end > start:
-                json_str = json_str[start:end + 1]
+        data: dict = {}
+        try:
+            # Try to extract JSON from the response (model may wrap in markdown)
+            json_str = raw
+            if "```" in raw:
+                # Extract from code block — 贪婪匹配，避免嵌套 JSON 被截断
+                m = _re.search(r'```(?:json)?\s*(\{.*\})\s*```', raw, _re.DOTALL)
+                if m:
+                    json_str = m.group(1)
+            # Find first { ... last } if surrounded by other text
+            if not json_str.startswith("{"):
+                start = json_str.find("{")
+                end = json_str.rfind("}")
+                if start >= 0 and end > start:
+                    json_str = json_str[start:end + 1]
 
-        data = _json.loads(json_str)
+            data = _json.loads(json_str)
+        except (_json.JSONDecodeError, ValueError) as e:
+            logger.warning(
+                "router: LLM 意图 JSON 解析失败 (%s)，回退到启发式。raw=%s",
+                e, raw[:200],
+            )
+            # 解析失败：回退到启发式分类，不让一次坏响应拖垮整个 turn
+            complexity = self._classify_heuristic(text)
+            return complexity, {
+                "needs_tools": False,
+                "needs_system": False,
+                "task_type": "unknown",
+                "intent_source": "fallback",
+            }
 
-        complexity = float(data.get("complexity", 0.3))
+        try:
+            complexity = float(data.get("complexity", 0.3))
+        except (TypeError, ValueError):
+            complexity = 0.3
         complexity = max(0.0, min(1.0, complexity))
 
         meta = {

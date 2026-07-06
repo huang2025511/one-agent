@@ -276,6 +276,9 @@ class WeChatPersonalGateway(Plugin):
         self._progress_last_sent: Dict[str, float] = {}   # chat_id → 上次进度消息时间
         self._progress_count: Dict[str, int] = {}           # chat_id → 本次 turn 已发进度条数
         self._heartbeat_tasks: Dict[str, asyncio.Task] = {}  # chat_id → 心跳任务
+        # chat_id → turn 完成时间戳。turn_completed 后到达的 turn_progress
+        # 事件（竞态）通过该标记丢弃，避免"结果已发后又冒出一条⏳进度"。
+        self._turn_done_at: Dict[str, float] = {}
         # 与全仓库其它 gateway/executor 约定一致（WebGateway / RESTAPIGateway /
         # SystemExecutor / DockerExecutor / BrowserExecutor 都用 _enabled 表示
         # 「配置层是否启用」。_running 表示「已连接并正在轮询」是另一层语义，
@@ -657,8 +660,16 @@ class WeChatPersonalGateway(Plugin):
                     logger.warning("wechat_personal: get_updates ret=%s errcode=%s", ret, errcode)
                     consecutive_errors += 1
                     if consecutive_errors > 5:
-                        logger.error("wechat_personal: too many errors, reconnecting...")
+                        logger.error("wechat_personal: too many errors, recreating session...")
                         await asyncio.sleep(5)
+                        # 重建 aiohttp session：连接中断（Errno 103/ECONNRESET）
+                        # 后旧 session 的连接池可能已失效，继续用会反复报错。
+                        try:
+                            if self._session and not self._session.closed:
+                                await self._session.close()
+                        except Exception:
+                            pass
+                        self._session = aiohttp.ClientSession(trust_env=True)
                         consecutive_errors = 0
                     continue
 
@@ -690,6 +701,23 @@ class WeChatPersonalGateway(Plugin):
             except Exception as exc:
                 logger.error("wechat_personal: poll loop error: %s", exc, exc_info=True)
                 consecutive_errors += 1
+                # 连接中断类错误（Errno 103/ECONNRESET/ConnectionResetError）：
+                # 重建 session，旧连接池已失效继续用只会反复报同样的错。
+                exc_str = str(exc).lower()
+                is_conn_err = (
+                    isinstance(exc, (ConnectionError, OSError))
+                    or "errno 103" in exc_str
+                    or "econnreset" in exc_str
+                    or "connection abort" in exc_str
+                    or "connection reset" in exc_str
+                )
+                if is_conn_err and self._session and not self._session.closed:
+                    try:
+                        await self._session.close()
+                    except Exception:
+                        pass
+                    self._session = aiohttp.ClientSession(trust_env=True)
+                    logger.info("wechat_personal: recreated session after connection error")
                 await asyncio.sleep(min(2 ** consecutive_errors, 30))
 
         logger.info("wechat_personal: poll loop exited")
@@ -793,12 +821,25 @@ class WeChatPersonalGateway(Plugin):
             result = getattr(turn, "result", "") or getattr(turn, "text", "") or getattr(turn, "output", "")
         else:
             result = ""
+        turn_error = getattr(turn, "error", None) if turn is not None else None
         logger.info("wechat_personal: _on_turn_completed: chat_id=%s, result=%s, has_result=%s",
                    chat_id[:8], bool(result), hasattr(turn, "result") if turn else False)
         if result:
             logger.info("wechat_personal: turn_completed for %s, result_len=%d",
                        chat_id[:8], len(str(result)))
             await self.send(chat_id, str(result))
+        elif turn_error:
+            # turn 失败（如超时）且无结果：给用户一个明确提示，而非沉默。
+            # 之前只停心跳不发消息，用户会一直等回复。
+            msg = "⚠️ 处理超时或失败，请稍后重试。"
+            if "timeout" in str(turn_error).lower():
+                msg = "⚠️ 处理超时（超过 120 秒），请稍后重试或简化问题。"
+            logger.info("wechat_personal: turn failed for %s, error=%s",
+                       chat_id[:8], turn_error)
+            try:
+                await self.send(chat_id, msg)
+            except Exception as exc:
+                logger.warning("wechat_personal: failed to send timeout notice: %s", exc)
 
     def _cleanup_stale_heartbeats(self) -> None:
         """清理已完成或超时的心跳任务（避免字典残留 + 异常路径泄漏）。"""
@@ -809,6 +850,11 @@ class WeChatPersonalGateway(Plugin):
             self._heartbeat_tasks.pop(k, None)
             self._progress_last_sent.pop(k, None)
             self._progress_count.pop(k, None)
+        # 清理过期的 turn_done 标记（>120s 的肯定已过期）
+        now = time.time()
+        stale_done = [k for k, t in self._turn_done_at.items() if now - t > 120]
+        for k in stale_done:
+            self._turn_done_at.pop(k, None)
 
     # -------------------------------------------------- 实时进度反馈
     async def _on_turn_progress(self, event) -> None:
@@ -819,6 +865,13 @@ class WeChatPersonalGateway(Plugin):
         chat_id = session_id[7:]
         message = event.get("message") or ""
         if not message:
+            return
+
+        # turn 已完成（结果已发）后到达的进度事件直接丢弃，避免
+        # "结果已发又冒一条⏳进度"。窗口 120s，超过后清理避免内存泄漏。
+        done_at = self._turn_done_at.get(chat_id)
+        if done_at and time.time() - done_at < 120:
+            logger.debug("wechat_personal: drop late progress for %s (turn done)", chat_id[:8])
             return
 
         now = time.time()
@@ -841,44 +894,52 @@ class WeChatPersonalGateway(Plugin):
         self._progress_count[chat_id] = count + 1
 
     def _start_heartbeat(self, chat_id: str) -> None:
-        """启动心跳任务：10 秒后还没回复就发"正在处理"，之后每 20 秒一次。"""
+        """启动心跳任务：10 秒后还没回复就发一次"正在处理"。"""
         self._stop_heartbeat(chat_id)
+        # 新 turn 开始：清除上一轮的 done 标记和进度状态
+        self._turn_done_at.pop(chat_id, None)
         self._progress_last_sent.pop(chat_id, None)
         self._progress_count.pop(chat_id, None)
         task = asyncio.create_task(self._heartbeat_loop(chat_id))
         self._heartbeat_tasks[chat_id] = task
 
     def _stop_heartbeat(self, chat_id: str) -> None:
-        """停止心跳任务并清理状态。"""
+        """停止心跳任务并清理状态。标记 turn 已完成以拒绝迟到的进度事件。"""
         task = self._heartbeat_tasks.pop(chat_id, None)
         if task and not task.done():
             task.cancel()
-        self._progress_last_sent.pop(chat_id, None)
-        self._progress_count.pop(chat_id, None)
+        # 标记 turn 已完成：之后到达的 turn_progress 会被 _on_turn_progress 丢弃
+        self._turn_done_at[chat_id] = time.time()
+        # 计数器保留不清除，让迟到的进度事件也能被 count>=5 / 间隔检查挡住。
+        # 真正的清理交给下一轮 _start_heartbeat 或 _cleanup_stale_heartbeats。
 
     async def _heartbeat_loop(self, chat_id: str) -> None:
-        """心跳循环：10 秒后首次提醒，之后每 20 秒一次，最多 3 次。"""
+        """心跳循环：10 秒后若仍未回复，发一次兜底"正在处理中"。
+
+        只发 1 次（不再发 3 次），避免对用户造成刷屏。后续进度由
+        coordinator 的 turn_progress 事件驱动。
+        """
         try:
             await asyncio.sleep(10)
-            for i in range(3):
-                count = self._progress_count.get(chat_id, 0)
-                if count >= 5:
-                    return
-                now = time.time()
-                last_sent = self._progress_last_sent.get(chat_id, 0)
-                if now - last_sent < 8:
-                    # 刚发过进度消息，跳过这次心跳
-                    pass
-                else:
-                    # 同 _on_turn_progress：先发后计数，失败不消耗配额
-                    try:
-                        await self.send(chat_id, "⏳ 正在处理中，请稍候...")
-                    except Exception:
-                        pass
-                    else:
-                        self._progress_last_sent[chat_id] = now
-                        self._progress_count[chat_id] = count + 1
-                await asyncio.sleep(20)
+            # turn 可能已完成（_stop_heartbeat 已置 done 标记）
+            if chat_id in self._turn_done_at:
+                return
+            count = self._progress_count.get(chat_id, 0)
+            if count >= 5:
+                return
+            now = time.time()
+            last_sent = self._progress_last_sent.get(chat_id, 0)
+            if now - last_sent < 8:
+                # 刚发过进度消息，跳过这次心跳
+                return
+            # 同 _on_turn_progress：先发后计数，失败不消耗配额
+            try:
+                await self.send(chat_id, "⏳ 正在处理中，请稍候...")
+            except Exception:
+                pass
+            else:
+                self._progress_last_sent[chat_id] = now
+                self._progress_count[chat_id] = count + 1
         except asyncio.CancelledError:
             pass
         except Exception as exc:

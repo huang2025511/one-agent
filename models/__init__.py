@@ -149,6 +149,10 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._fallback_count: Dict[str, int] = {}
         # Circuit breakers per provider: {provider: CircuitBreaker}
         self._circuit_breakers: Dict[str, CircuitBreaker] = {}
+        # 已被 401 拒绝的 provider 集合（key 失效/无权限）。
+        # 避免每次请求都拿坏 key 去试一遍 → 浪费往返 + 拖慢响应。
+        # set_api_key() 更新 key 后会清除对应 provider。
+        self._invalid_keys: Set[str] = set()
         # 已验证存在的模型集合（由 auto_classify 后台任务填充）。
         # 用途：model_for_tier() 选中模型后，用它验证模型是否真实存在，
         # 避免选中硬编码在 default_config.yaml 但 provider 已下线/改名的模型
@@ -285,11 +289,21 @@ class LLMProvider(RecommendationMixin, Plugin):
         # a provider's keep-alive slots when several plugins call in
         # parallel.  ``max_connections=20`` is enough for typical workloads
         # (router + memory + monitor + rest) without starving any one.
+        #
+        # 分阶段超时：connect 短（快速发现不可达），read 长（LLM 生成慢）。
+        # 之前用单一 60s 标量，连接阶段也要等满 60s 才报错 →
+        # 网络中断时整个 turn 卡死。
         self._client = httpx.AsyncClient(
-            timeout=self._timeout,
+            timeout=httpx.Timeout(
+                connect=10.0,       # 连接阶段 10s：不可达主机快速失败
+                read=float(self._timeout),  # 读取阶段：容忍慢响应
+                write=15.0,         # 写入阶段 15s：发送请求体
+                pool=5.0,           # 连接池等待 5s
+            ),
             limits=httpx.Limits(
                 max_connections=MAX_CONNECTIONS,
                 max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
+                keepalive_expiry=30.0,  # 空闲连接 30s 后回收，避免用已断开的 keep-alive 连接（Errno 103）
             ),
         )
         logger.info("LLM provider ready, default model=%s, cache=%s",
@@ -399,13 +413,18 @@ class LLMProvider(RecommendationMixin, Plugin):
 
         Also returns True if the provider routes through OpenRouter (i.e. no
         dedicated base URL) and OpenRouter itself has a usable key.
+        已被 401 拒绝的 provider（key 失效）返回 False，避免重复试坏 key。
         """
+        if provider in self._invalid_keys:
+            return False
         v = self._api_keys.get(provider)
         if v and v.strip() and "${" not in v:
             return True
         base = self._provider_base_urls.get(provider)
         openrouter_base = self._provider_base_urls.get("openrouter")
         if base and openrouter_base and base.rstrip("/") == openrouter_base.rstrip("/"):
+            if "openrouter" in self._invalid_keys:
+                return False
             or_v = self._api_keys.get("openrouter")
             if or_v and or_v.strip() and "${" not in or_v:
                 return True
@@ -417,6 +436,8 @@ class LLMProvider(RecommendationMixin, Plugin):
         requiring a restart."""
         key = (key or "").strip()
         self._api_keys[provider] = key
+        # 用户更新了 key，清除之前的 401 失效标记
+        self._invalid_keys.discard(provider)
         # Make sure we have a base URL we can talk to
         if provider not in self._provider_base_urls:
             # Use the resolver if available, otherwise just leave it —
@@ -1209,6 +1230,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                                 return result
                             except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
                                 logger.error("fallback retry failed: %s", exc, exc_info=True)
+                    # --- 401: 记忆 key 失效，避免后续请求重复拿坏 key 试 ---
+                    if status == 401:
+                        self._invalid_keys.add(provider)
+                        logger.warning(
+                            "llm: provider %s key 返回 401，已标记失效 "
+                            "（set_api_key 更新后恢复）", provider,
+                        )
                     logger.warning("llm call non-retryable error (status=%s): %s", status, exc)
                     break
                 if attempt < self._retry_count:
