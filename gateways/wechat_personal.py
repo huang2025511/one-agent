@@ -896,41 +896,78 @@ class WeChatPersonalGateway(Plugin):
                           self._running, self._session is not None)
             return False
         try:
-            # 从缓存获取 context_token 和 client_id（回复时必须回传）
-            context_token = self._context_tokens.get(chat_id, "")
-            client_id = self._client_ids.get(chat_id, "")
-            if not context_token and not client_id:
-                logger.warning("wechat_personal: no context_token/client_id for %s, message may not be delivered", chat_id[:20])
-            # 诊断日志：打印发送关键字字段（token 脱敏只显示前 20 字符 + 长度）
-            logger.info(
-                "wechat_personal: sending to=%s, content=%s, ctx_token=%s(len=%d), client_id=%s(len=%d)",
-                chat_id[:20],
-                (text[:50] + "...") if len(text) > 50 else text,
-                (context_token[:20] + "...") if context_token else "EMPTY",
-                len(context_token),
-                (client_id[:20] + "...") if client_id else "EMPTY",
-                len(client_id),
-            )
-            result = await _send_msg(
-                self._session,
-                base_url=self._base_url,
-                token=self._token,
-                chat_id=chat_id,
-                content=text,
-                context_token=context_token,
-                client_id=client_id,
-            )
-            ret = result.get("ret", 0)
-            errcode = result.get("errcode", 0)
-            # iLink sendmessage 成功响应通常是 {} 空对象（无 ret 字段）
-            # 或 ret=0。errcode != 0 表示错误。
-            success = (ret in (0, None)) and (errcode in (0, None))
-            logger.info("wechat_personal: send result=%s (ret=%s, errcode=%s, response=%s)",
-                       success, ret, errcode, json.dumps(result, ensure_ascii=False)[:200])
+            # iLink 消息长度限制：中文约 2000-2500 字符，超过会被静默截断。
+            # 分段发送：每段不超过 1800 字符（留余量），加序号标识。
+            MAX_MSG_LENGTH = 1800
+            if len(text) <= MAX_MSG_LENGTH:
+                return await self._send_single_message(chat_id, text)
+
+            chunks = []
+            remaining = text
+            while remaining:
+                if len(remaining) <= MAX_MSG_LENGTH:
+                    chunks.append(remaining)
+                    break
+                # 优先在段落边界处分割，避免中间截断
+                split_pos = remaining.rfind("\n\n", 0, MAX_MSG_LENGTH)
+                if split_pos == -1:
+                    split_pos = remaining.rfind("\n", 0, MAX_MSG_LENGTH)
+                if split_pos == -1:
+                    split_pos = MAX_MSG_LENGTH
+                chunks.append(remaining[:split_pos])
+                remaining = remaining[split_pos:]
+
+            total = len(chunks)
+            success_count = 0
+            for i, chunk in enumerate(chunks, 1):
+                if i > 1:
+                    chunk = f"--- [第{i}/{total}段] ---\n\n" + chunk.strip()
+                if await self._send_single_message(chat_id, chunk):
+                    success_count += 1
+                else:
+                    logger.warning("wechat_personal: send chunk %d/%d failed", i, total)
+                if i < total:
+                    await asyncio.sleep(0.5)
+
+            success = success_count == total
+            logger.info("wechat_personal: send %d/%d chunks, overall=%s",
+                        success_count, total, success)
             return success
+
         except Exception as exc:
             logger.error("wechat_personal: send error: %s", exc)
             return False
+
+    async def _send_single_message(self, chat_id: str, text: str) -> bool:
+        """发送单条消息（内部方法）。"""
+        context_token = self._context_tokens.get(chat_id, "")
+        client_id = self._client_ids.get(chat_id, "")
+        if not context_token and not client_id:
+            logger.warning("wechat_personal: no context_token/client_id for %s, message may not be delivered", chat_id[:20])
+        logger.info(
+            "wechat_personal: sending to=%s, content=%s, ctx_token=%s(len=%d), client_id=%s(len=%d)",
+            chat_id[:20],
+            (text[:50] + "...") if len(text) > 50 else text,
+            (context_token[:20] + "...") if context_token else "EMPTY",
+            len(context_token),
+            (client_id[:20] + "...") if client_id else "EMPTY",
+            len(client_id),
+        )
+        result = await _send_msg(
+            self._session,
+            base_url=self._base_url,
+            token=self._token,
+            chat_id=chat_id,
+            content=text,
+            context_token=context_token,
+            client_id=client_id,
+        )
+        ret = result.get("ret", 0)
+        errcode = result.get("errcode", 0)
+        success = (ret in (0, None)) and (errcode in (0, None))
+        logger.info("wechat_personal: send result=%s (ret=%s, errcode=%s, response=%s)",
+                   success, ret, errcode, json.dumps(result, ensure_ascii=False)[:200])
+        return success
 
     @property
     def qr_url(self) -> str:

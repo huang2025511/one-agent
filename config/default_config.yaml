@@ -13,6 +13,7 @@ agent:
   data_dir: ./data
   log_level: INFO
   language: zh
+  show_suggestions: false
 
 llm:
   # 主 provider/model：商汤日日新（轻量、低成本）

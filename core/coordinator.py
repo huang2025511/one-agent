@@ -42,6 +42,7 @@ MAX_TOOL_ITERATIONS = 5
 DEFAULT_MAX_TOKENS = 2048
 MAX_SKILL_FAILURES = 3
 TURN_COMPLETION_TIMEOUT = 120.0
+SKILL_EXECUTION_TIMEOUT = 60.0
 # Complexity tier thresholds (determine execution strategy).
 # Imported from router to keep a single source of truth — router owns
 # task classification, coordinator consumes the same thresholds.
@@ -132,8 +133,10 @@ class Coordinator(Plugin):
         start = time.time()
         try:
             if self._skills is not None:
-                result = await self._skills.dispatch(name, args)
-                # dispatch may return a ToolResult or a plain string
+                result = await asyncio.wait_for(
+                    self._skills.dispatch(name, args),
+                    timeout=SKILL_EXECUTION_TIMEOUT,
+                )
                 if isinstance(result, ToolResult):
                     result_str = str(result.data) if result.data is not None else str(result)
                     is_error = result.status in ("error", "unavailable")
@@ -143,6 +146,16 @@ class Coordinator(Plugin):
             else:
                 result_str = "[no skill manager bound]"
                 is_error = False
+        except asyncio.TimeoutError:
+            logger.error("skill dispatch timeout: %s(%s)", name, args)
+            duration_ms = (time.time() - start) * 1000
+            failed_skills[name] = failed_skills.get(name, 0) + 1
+            return ToolResult(
+                tool_name=name,
+                status="error",
+                error=f"工具调用超时（{int(SKILL_EXECUTION_TIMEOUT)}秒），请稍后重试或直接用已有知识回答。",
+                duration_ms=duration_ms,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("skill dispatch failed: %s(%s)", name, args)
             duration_ms = (time.time() - start) * 1000
