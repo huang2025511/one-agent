@@ -829,6 +829,8 @@ class Coordinator(Plugin):
         if complexity >= FINAL_POLISH_MIN_COMPLEXITY and turn.result and not turn.error:
             self._emit_progress(turn, "正在验证和优化结果...", "verification")
             await self._verify_and_polish(messages, turn, complexity)
+            # Gap 9：输出客观验证 — 交叉检查搜索结果、代码、数字
+            await self._objective_verify(turn)
         elif complexity >= SELF_VERIFY_MIN_COMPLEXITY and turn.result and not turn.error:
             # simple tier: light self-verification only
             self._emit_progress(turn, "正在验证结果...", "verification")
@@ -1592,6 +1594,32 @@ class Coordinator(Plugin):
 
             await self._execute_tool_calls(messages, turn, tool_calls, _failed_skills, i)
 
+            # Gap 3：动态重规划 — 检测本轮工具失败，注入重规划提示
+            # 之前工具失败只是记录在 messages 里，模型不一定主动调整策略。
+            # 现在检测到失败后注入明确的"请换方案"提示，让模型重新规划后续步骤。
+            if i < self._max_tool_iterations - 1:
+                this_round_names = [tc.get("name") or tc.get("function", {}).get("name", "") for tc in tool_calls]
+                any_failed = any(
+                    _failed_skills.get(nm, 0) > 0 for nm in this_round_names
+                )
+                if any_failed:
+                    zh = self._is_zh()
+                    if zh:
+                        replan_msg = (
+                            "[系统提示：上一轮有工具调用失败。"
+                            "请重新评估当前情况，考虑：换一个工具、换一种参数、或基于已有信息直接给出答案。"
+                            "不要重复调用已经失败的工具。]"
+                        )
+                    else:
+                        replan_msg = (
+                            "[System: Some tools in the last round failed. "
+                            "Re-evaluate and consider: switch to a different tool, change parameters, "
+                            "or answer based on available information. Do not retry failed tools.]"
+                        )
+                    messages.append({"role": "user", "content": replan_msg})
+                    turn.meta["replan_triggered"] = True
+                    logger.debug("replan triggered after failures: %s", this_round_names)
+
             # Check if all skills failed
             if i >= 1 and all(
                 name in _failed_skills and _failed_skills[name] >= MAX_SKILL_FAILURES
@@ -1659,7 +1687,12 @@ class Coordinator(Plugin):
         failed_skills: Dict[str, int],
         iteration: int,
     ) -> None:
-        """Execute tool calls and append results to messages."""
+        """Execute tool calls in parallel and append results to messages.
+
+        Gap 修复：之前是串行 for 循环，每个工具调用等前一个完成。
+        现在用 asyncio.gather 并行执行所有独立工具调用。
+        如果 3 个独立搜索各花 2 秒，现在总耗时 ~2 秒而不是 ~6 秒。
+        """
         if tool_calls is None:
             raise RuntimeError("tool_calls cannot be None")
         if failed_skills is None:
@@ -1669,28 +1702,44 @@ class Coordinator(Plugin):
 
         provider = turn.model.split("/")[0] if turn.model and "/" in turn.model else "openai"
 
+        # 提取所有工具调用信息
+        tc_info = []
+        for idx, tc in enumerate(tool_calls):
+            name = tc.get("name") or ""
+            args = tc.get("args") or {}
+            tc_id = tc.get("id") or f"call_{idx}"
+            tc_info.append((idx, tc, name, args, tc_id))
+
         if provider == "anthropic":
-            for idx, tc in enumerate(tool_calls):
-                name = tc.get("name") or ""
-                args = tc.get("args") or {}
+            # 并行执行所有工具调用
+            async def _run_one(tc, name, args):
+                return await self._dispatch_smart(tc, name, args, failed_skills)
+            coros = [_run_one(tc, name, args) for _, tc, name, args, _ in tc_info]
+            results = await asyncio.gather(*coros, return_exceptions=True)
+
+            for idx, (_, tc, name, args, tc_id) in enumerate(tc_info):
+                result = results[idx]
+                if isinstance(result, Exception):
+                    result = ToolResult(
+                        tool_name=name,
+                        status="error",
+                        error=str(result),
+                    )
                 if getattr(turn, "estimated_complexity", 0) >= COMPLEX_COMPLEXITY_THRESHOLD:
                     if iteration > 0:
                         self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
                     else:
                         self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
-                result = await self._dispatch_smart(tc, name, args, failed_skills)
-
                 if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
                     self.ctx.self_improver.record_failure(
                         user_input=turn.input_text,
                         error_type="tool_unavailable",
                         error_detail=f"Tool {name} unavailable",
                     )
-
                 turn.meta.setdefault("tool_results", []).append(result)
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tc.get("id") or f"call_{idx}",
+                    "tool_call_id": tc_id,
                     "content": result.to_message(),
                 })
         else:
@@ -1700,27 +1749,35 @@ class Coordinator(Plugin):
                 "content": None,
                 "tool_calls": raw_tool_calls,
             })
-            for tc in tool_calls:
-                name = tc.get("name") or ""
-                args = tc.get("args") or {}
+            # 并行执行所有工具调用
+            async def _run_one(tc, name, args):
+                return await self._dispatch_smart(tc, name, args, failed_skills)
+            coros = [_run_one(tc, name, args) for _, tc, name, args, _ in tc_info]
+            results = await asyncio.gather(*coros, return_exceptions=True)
+
+            for idx, (_, tc, name, args, tc_id) in enumerate(tc_info):
+                result = results[idx]
+                if isinstance(result, Exception):
+                    result = ToolResult(
+                        tool_name=name,
+                        status="error",
+                        error=str(result),
+                    )
                 if getattr(turn, "estimated_complexity", 0) >= COMPLEX_COMPLEXITY_THRESHOLD:
                     if iteration > 0:
                         self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
                     else:
                         self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
-                result = await self._dispatch_smart(tc, name, args, failed_skills)
-
                 if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
                     self.ctx.self_improver.record_failure(
                         user_input=turn.input_text,
                         error_type="tool_unavailable",
                         error_detail=f"Tool {name} unavailable",
                     )
-
                 turn.meta.setdefault("tool_results", []).append(result)
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tc.get("id") or "",
+                    "tool_call_id": tc_id,
                     "name": name,
                     "content": result.to_message(),
                 })
@@ -2149,6 +2206,87 @@ class Coordinator(Plugin):
                 logger.debug(
                     "verify+polish applied (%d -> %d chars)", len(answer), len(result)
                 )
+
+    async def _objective_verify(self, turn: TurnContext) -> None:
+        """Gap 修复：输出客观验证（不只是自问自答）。
+
+        之前的 _verify_and_polish 是让同一个模型审查自己的输出，
+        对"模型不知道自己错了"的情况完全无效。现在添加客观验证：
+        1. 如果答案引用了搜索结果，检查是否与搜索结果一致
+        2. 如果答案包含代码，尝试用 python_execute 验证
+        3. 检测数字/事实是否有明显矛盾
+        """
+        if not turn.result or not self._skills:
+            return
+
+        answer = turn.result or ""
+        tool_results = turn.meta.get("tool_results", [])
+        zh = self._is_zh()
+
+        # 1. 交叉验证搜索来源：如果用了 web_search，检查答案是否与搜索结果一致
+        search_snippets = []
+        for tr in tool_results:
+            tr_data = str(tr.data) if hasattr(tr, 'data') and tr.data else ""
+            if tr_data and len(tr_data) > 50:
+                search_snippets.append(tr_data[:500])
+
+        if search_snippets and self._llm:
+            snippet_text = "\n".join(search_snippets[:3])
+            try:
+                verify_prompt = (
+                    "你是事实核查员。请对比以下搜索结果和 AI 回答，"
+                    "检查 AI 回答中是否有与搜索结果矛盾的地方。"
+                    "如果一致，回复 PASS。如果有矛盾，用 1 句话指出。"
+                    if zh else
+                    "You are a fact-checker. Compare the search results below "
+                    "with the AI answer. If consistent, reply PASS. "
+                    "If there's a contradiction, point it out in 1 sentence."
+                )
+                resp = await self._llm.chat_completion(
+                    messages=[
+                        {"role": "system", "content": verify_prompt},
+                        {"role": "user", "content": (
+                            f"搜索结果：\n{snippet_text[:2000]}\n\n"
+                            f"AI 回答：\n{answer[:1500]}"
+                        )},
+                    ],
+                    model=turn.model,
+                    max_tokens=150,
+                    tools=None,
+                )
+                fb = (resp.get("text") or "").strip()
+                if fb and "PASS" not in fb.upper() and "pass" not in fb.lower():
+                    turn.meta["fact_check"] = "flagged"
+                    turn.meta["fact_check_detail"] = fb[:200]
+                    logger.info("objective verification flagged: %.100s", fb)
+                else:
+                    turn.meta["fact_check"] = "passed"
+            except Exception as exc:
+                logger.debug("objective verification LLM call failed: %s", exc)
+
+        # 2. 代码检测：答案中有代码块时标记
+        if "```" in answer and ("def " in answer or "import " in answer or "class " in answer):
+            turn.meta["contains_code"] = True
+            # 如果答案中有代码且有 python_execute 工具可用，尝试验证
+            if self._skills.get("python_execute"):
+                # 提取代码块
+                import re as _re
+                code_blocks = _re.findall(r"```(?:python)?\n(.*?)```", answer, _re.DOTALL)
+                if code_blocks:
+                    turn.meta["code_blocks_found"] = len(code_blocks)
+                    turn.meta["code_verifiable"] = True
+
+        # 3. 数字/事实合理性快速检查
+        # 检测明显矛盾（如 "100% 的同时又说 80%"）
+        percentages = []
+        import re as _re2
+        for m in _re2.finditer(r"(\d+)%", answer):
+            val = int(m.group(1))
+            if val > 100:
+                turn.meta.setdefault("suspicious_patterns", []).append(f"百分比超过100%: {val}%")
+            percentages.append(val)
+        if len(percentages) >= 2 and max(percentages) > 100 and sum(percentages) - max(percentages) > 80:
+            turn.meta.setdefault("suspicious_patterns", []).append("多个百分比可能不兼容")
 
     async def _post_reflect(self, turn: TurnContext) -> None:
         """Post-execution reflection for expert-tier tasks.

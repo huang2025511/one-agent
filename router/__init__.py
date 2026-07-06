@@ -96,7 +96,12 @@ class SmartRouter(Plugin):
         # 3) pass context_compression config to coordinator via turn.meta
         compression_cfg = self._cfg.get("context_compression", {}) or {}
         turn.meta["context_compression"] = compression_cfg.get("enabled", True)
-        # 4) token-aware 自适应升 tier：长上下文任务自动升级模型
+        # 4) Gap 8 修复：模型按能力选 tier（不只按复杂度）。
+        #    之前 _tier_for_complexity 只按分数选 tier，然后 model_for_tier 取第一个。
+        #    现在根据任务类型（代码/分析/聊天/系统）在同 tier 内偏好最合适的模型。
+        task_type = intent_meta.get("task_type", "general")
+        tier = self._adjust_tier_for_task(tier, task_type)
+        # 5) token-aware 自适应升 tier：长上下文任务自动升级模型
         # 长对话历史即使问题简单，也需要更强的模型来处理和综合信息。
         # 估算消息总 token 数，超过阈值则升一层（最多到 expert）。
         token_cfg = (self._cfg.get("token_aware_routing", {}) or {})
@@ -415,6 +420,25 @@ class SmartRouter(Plugin):
         if c < thresholds.get("complex", DEFAULT_COMPLEX_THRESHOLD):
             return "complex"
         return "expert"
+
+    def _adjust_tier_for_task(self, tier: str, task_type: str) -> str:
+        """Gap 修复：根据任务类型微调 tier 选择。
+
+        之前只按复杂度选 tier，代码任务和聊天任务用同一 tier。
+        现在：代码任务自动升一级（需要更强的推理），聊天任务维持原级。
+        返回调整后的 tier 名称。
+        """
+        # 代码/分析任务需要更强的推理能力 → 升一级
+        if task_type in ("code", "analysis", "design") and tier == "simple":
+            return "complex"
+        if task_type in ("code", "analysis") and tier == "trivial":
+            return "simple"
+        # 聊天/问候任务不需要高 tier → 降一级节省 token
+        if task_type in ("chat",) and tier == "complex":
+            return "simple"
+        if task_type in ("chat",) and tier == "expert":
+            return "complex"
+        return tier
 
     def _adjust_thresholds(self) -> None:
         """Self-evolution: adjust complexity thresholds based on per-tier failure rates.

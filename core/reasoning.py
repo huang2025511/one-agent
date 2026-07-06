@@ -76,84 +76,123 @@ class StepByStepReasoner:
     def _generate_prompt_zh(
         self, task: str, task_types: List[str], tools: List[str]
     ) -> str:
-        parts = ["【深度思考模式】\n"]
-        parts.append(f"用户任务：{task}\n")
+        """Gap 修复：自适应 CoT，根据任务类型使用完全不同的推理模板。
 
-        parts.append("请按以下步骤思考（思考过程不需要输出给用户，你自己内部推演）：\n")
+        之前是固定模板 + 可选步骤插入，核心步骤（问题理解→验证→答案）
+        对所有任务都一样。现在按任务类型匹配最合适的推理深度：
+        - chat/简单问答：2 步（省 token）
+        - code/analysis：深入推理（5 步）
+        - action/system：执行导向（工具优先）
+        - design：方案对比（多候选）
+        """
+        # 简短问答/闲聊 → 最小推理模式
+        if all(t in ("chat", "general") for t in task_types):
+            return (
+                "【快速思考】\n"
+                f"用户：{task[:200]}\n"
+                "简洁直接地回答，不需要复杂推理。"
+            )
 
-        step_num = 1
+        # 执行类任务 → 工具优先
+        if any(t in task_types for t in ("action", "system")):
+            parts = ["【执行规划】\n"]
+            parts.append(f"任务：{task[:300]}\n")
+            if tools:
+                parts.append(f"可用工具：{', '.join(tools[:8])}\n")
+            parts.append("请按以下步骤执行：\n")
+            parts.append("1. **目标确认** — 要完成什么？\n")
+            parts.append("2. **工具链设计** — 需要哪些工具？调用顺序？\n")
+            if tools:
+                parts.append("3. **调用工具** — 立即调用需要的工具\n")
+            parts.append("4. **结果验证** — 工具返回结果是否满足需求？\n")
+            parts.append("5. **最终输出** — 整理结果回复用户\n")
+            return "\n".join(parts)
 
-        # Step 1: Understand the problem
-        parts.append(f"{step_num}. **问题理解** — 明确用户的核心需求是什么？有哪些约束条件？")
-        step_num += 1
+        # 设计类任务 → 方案对比
+        if "design" in task_types:
+            parts = ["【方案设计】\n"]
+            parts.append(f"需求：{task[:300]}\n")
+            parts.append("请按以下步骤思考：\n")
+            parts.append("1. **需求分析** — 用户真正需要什么？有什么约束？\n")
+            parts.append("2. **候选方案** — 提出 2-3 个可行的技术方案\n")
+            parts.append("3. **方案对比** — 每个方案的优劣、适用场景\n")
+            parts.append("4. **推荐方案** — 选择最佳方案并说明理由\n")
+            parts.append("5. **实现要点** — 关键注意事项\n")
+            return "\n".join(parts)
 
-        # Step 2: Task decomposition
-        if any(t in task_types for t in ("coding", "analysis", "planning")):
-            parts.append(f"{step_num}. **任务分解** — 将大任务拆分为3-5个小步骤，每个步骤做什么？")
-            step_num += 1
-
-        # Step 3: Tool/resource assessment
+        # 代码/分析/调试 → 深度推理（默认）
+        parts = ["【深度思考】\n"]
+        parts.append(f"任务：{task[:300]}\n")
         if tools:
-            parts.append(f"{step_num}. **工具选择** — 检查可用工具：{', '.join(tools)}。哪些工具可以帮助完成这个任务？如何组合使用？")
-            step_num += 1
-
-        # Step 4: Edge cases
+            parts.append(f"可用工具：{', '.join(tools[:8])}\n")
+        parts.append("请按以下步骤推理：\n")
+        parts.append("1. **问题理解** — 明确用户需求，识别约束条件\n")
+        parts.append("2. **任务分解** — 将任务拆分为 3-5 个可执行步骤\n")
+        if tools:
+            parts.append("3. **工具选择** — 确定每个步骤需要哪些工具\n")
         if "debugging" in task_types:
-            parts.append(f"{step_num}. **常见问题预判** — 可能会遇到什么错误或边界情况？如何排查？")
-            step_num += 1
-
-        # Step 5: Implementation plan
+            parts.append("3. **常见问题预判** — 可能遇到什么错误？如何排查？\n")
         if "coding" in task_types:
-            parts.append(f"{step_num}. **实现方案** — 选择什么技术方案？整体架构是什么？关键函数如何设计？")
-            step_num += 1
-
-        # Step 6: Verification
-        parts.append(f"{step_num}. **验证方法** — 完成后如何验证结果是否正确？有哪些检查点？")
-        step_num += 1
-
-        # Step 7: Final answer
-        parts.append(f"{step_num}. **组织答案** — 以清晰、有条理的方式输出最终结果。\n")
-
-        parts.append("思考完成后，直接给出最终答案。如果需要调用工具，在思考完工具调用方案后立即调用。")
-
+            parts.append("4. **实现方案** — 技术方案、架构设计、关键函数\n")
+        parts.append("5. **验证方法** — 如何确认结果正确？\n")
+        parts.append("6. **最终答案** — 清晰完整地输出\n")
+        if tools:
+            parts.append("\n思考完成后，如果需要工具，立即调用。")
         return "\n".join(parts)
 
     def _generate_prompt_en(
         self, task: str, task_types: List[str], tools: List[str]
     ) -> str:
-        parts = ["【Deep Thinking Mode】\n"]
-        parts.append(f"User task: {task}\n")
+        """Adaptive CoT: task-type-specific reasoning templates (English)."""
+        if all(t in ("chat", "general") for t in task_types):
+            return (
+                "[Quick Thinking]\n"
+                f"User: {task[:200]}\n"
+                "Answer concisely and directly. No complex reasoning needed."
+            )
 
-        parts.append("Think step by step (internal reasoning, don't show to user):\n")
+        if any(t in task_types for t in ("action", "system")):
+            parts = ["[Execution Planning]\n"]
+            parts.append(f"Task: {task[:300]}\n")
+            if tools:
+                parts.append(f"Available tools: {', '.join(tools[:8])}\n")
+            parts.append("Execute step by step:\n")
+            parts.append("1. **Goal** — What needs to be done?\n")
+            parts.append("2. **Tool chain** — Which tools? What order?\n")
+            if tools:
+                parts.append("3. **Call tools** — Call the needed tools now\n")
+            parts.append("4. **Verify** — Do results meet the goal?\n")
+            parts.append("5. **Output** — Final answer to user\n")
+            return "\n".join(parts)
 
-        step_num = 1
+        if "design" in task_types:
+            parts = ["[Design Thinking]\n"]
+            parts.append(f"Requirements: {task[:300]}\n")
+            parts.append("Think step by step:\n")
+            parts.append("1. **Requirements** — What does the user need? Constraints?\n")
+            parts.append("2. **Candidates** — Propose 2-3 feasible solutions\n")
+            parts.append("3. **Comparison** — Pros and cons of each\n")
+            parts.append("4. **Recommendation** — Best option with rationale\n")
+            parts.append("5. **Implementation** — Key considerations\n")
+            return "\n".join(parts)
 
-        parts.append(f"{step_num}. **Problem Understanding** — What's the core requirement? What constraints exist?")
-        step_num += 1
-
-        if any(t in task_types for t in ("coding", "analysis", "planning")):
-            parts.append(f"{step_num}. **Task Decomposition** — Break into 3-5 subtasks. What does each step do?")
-            step_num += 1
-
+        parts = ["[Deep Thinking]\n"]
+        parts.append(f"Task: {task[:300]}\n")
         if tools:
-            parts.append(f"{step_num}. **Tool Selection** — Available tools: {', '.join(tools)}. Which ones help? How to combine them?")
-            step_num += 1
-
+            parts.append(f"Available tools: {', '.join(tools[:8])}\n")
+        parts.append("Think step by step:\n")
+        parts.append("1. **Problem Understanding** — Core requirement and constraints\n")
+        parts.append("2. **Task Decomposition** — Break into 3-5 executable steps\n")
+        if tools:
+            parts.append("3. **Tool Selection** — Which tools for each step?\n")
         if "debugging" in task_types:
-            parts.append(f"{step_num}. **Edge Case Anticipation** — What errors might occur? How to troubleshoot?")
-            step_num += 1
-
+            parts.append("3. **Edge Cases** — What errors? How to troubleshoot?\n")
         if "coding" in task_types:
-            parts.append(f"{step_num}. **Implementation Plan** — What approach? Architecture? Key functions?")
-            step_num += 1
-
-        parts.append(f"{step_num}. **Verification Method** — How to validate the result? Checkpoints?")
-        step_num += 1
-
-        parts.append(f"{step_num}. **Final Answer** — Organize and output the final result clearly.\n")
-
-        parts.append("After thinking, give the final answer directly. If tools are needed, call them after planning.")
-
+            parts.append("4. **Implementation** — Approach, architecture, key functions\n")
+        parts.append("5. **Verification** — How to validate correctness?\n")
+        parts.append("6. **Final Answer** — Clear, complete output\n")
+        if tools:
+            parts.append("\nCall tools immediately after planning if needed.")
         return "\n".join(parts)
 
     def extract_steps_from_response(self, response: str) -> List[str]:

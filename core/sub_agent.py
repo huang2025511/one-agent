@@ -241,6 +241,39 @@ class DelegationManager:
             final_result = merged_raw  # 合成失败回退到原始拼接
             synth_tokens = 0
 
+        # Step 5 (Critic): 用独立 LLM 调用来审查合成结果
+        # Gap 修复：之前只有 planner→executor→synthesizer，没有 critic 审查。
+        # 合成器可能放行错误、遗漏或幻觉。Critic 独立评估并给出修正建议。
+        critic_tokens = 0
+        critic_feedback = ""
+        try:
+            critic_resp = await self._llm.chat_completion(
+                messages=[
+                    {"role": "system", "content": (
+                        "你是质量审查专家。请审阅以下 AI 生成的答案，"
+                        "检查：1) 是否有事实错误 2) 是否遗漏了关键信息 "
+                        "3) 是否有逻辑矛盾。如果答案质量良好，回复 PASS。"
+                        "如果有问题，用 1-2 句话指出具体问题。"
+                    )},
+                    {"role": "user", "content": f"原始任务：{task}\n\n答案：{final_result[:3000]}"},
+                ],
+                model=model,
+                max_tokens=200,
+                tools=None,
+            )
+            critic_feedback = (critic_resp.get("text") or "").strip()
+            critic_tokens = int(critic_resp.get("tokens_used") or 0)
+            if critic_feedback and critic_feedback.upper() != "PASS" and "pass" not in critic_feedback.lower():
+                # 将批评意见追加到最终答案末尾
+                final_result = (
+                    final_result
+                    + "\n\n---\n[质量审查] "
+                    + critic_feedback
+                )
+                logger.info("DelegationManager critic flagged issues: %.100s", critic_feedback)
+        except Exception as exc:
+            logger.debug("DelegationManager critic failed: %s", exc)
+
         return {
             "result": final_result,
             "subtask_results": all_results,

@@ -568,6 +568,30 @@ class MemoryPlugin(Plugin):
             snippets = "\n".join(f"- {h['content'][:160]}" for h in hits)
             turn.meta["memory_snippets"] = snippets
 
+        # 知识图谱查询：之前 KG 只在 _on_turn_completed 里提取实体/关系，
+        # _on_user_message 完全不查 → KG 是"只写不读"的哑仓库。
+        # 现在根据用户输入搜索相关实体，注入到 memory_snippets 尾部。
+        if self._kg is not None:
+            try:
+                kg_hits = await asyncio.to_thread(
+                    self._kg.search, turn.input_text, limit=5
+                )
+                if kg_hits:
+                    kg_parts = []
+                    for ent in kg_hits:
+                        ent_name = ent.get("name", "")
+                        ent_type = ent.get("type", "")
+                        ent_desc = ent.get("description", "")[:100]
+                        kg_parts.append(f"- [实体] {ent_name}" + (f" ({ent_type})" if ent_type else "") + (f": {ent_desc}" if ent_desc else ""))
+                    if kg_parts:
+                        kg_snippet = "【知识图谱】\n" + "\n".join(kg_parts)
+                        existing = turn.meta.get("memory_snippets", "")
+                        turn.meta["memory_snippets"] = (existing + "\n" + kg_snippet) if existing else kg_snippet
+                        turn.meta["kg_hits"] = len(kg_hits)
+                        logger.debug("memory: kg search returned %d entities", len(kg_hits))
+            except Exception as exc:
+                logger.debug("kg search failed: %s", exc)
+
         # Procedural 记忆：查是否有自动学到的技能匹配当前输入。
         # 之前 procedural 只在 _on_turn_completed 里"判断是否已存在以决定要不要新建"，
         # 完全不查 → 学到的技能永远不会注入到 prompt → 闭环断裂。

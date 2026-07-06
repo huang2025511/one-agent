@@ -241,6 +241,88 @@ class FailureRecovery:
         self._last_failure.clear()
         self._circuit_breakers.clear()
 
+    # ---- Gap 修复：自适应错误恢复策略 ----
+
+    @staticmethod
+    def classify_error(error: Exception) -> str:
+        """根据异常类型和消息推断错误类别。
+
+        之前所有错误都走同一套重试→熔断流程，不管错误原因。
+        现在分类后可以针对性选择恢复策略。
+        """
+        msg = str(error).lower()
+        error_type = type(error).__name__.lower()
+
+        if "timeout" in msg or "timeout" in error_type:
+            return "timeout"
+        if "rate" in msg and ("limit" in msg or "exceed" in msg):
+            return "rate_limit"
+        if "401" in msg or "unauthorized" in msg or "auth" in msg:
+            return "auth_error"
+        if "404" in msg or "not found" in msg:
+            return "not_found"
+        if "5" in msg[:6] and ("server" in msg or "error" in msg):
+            return "server_error"
+        if "connect" in msg or "refused" in msg or "dns" in msg:
+            return "connect_error"
+        if "context" in msg and ("length" in msg or "exceed" in msg or "token" in msg):
+            return "context_overflow"
+        return "unknown"
+
+    def get_recovery_strategy(self, error_type: str) -> Dict[str, Any]:
+        """根据错误类型返回针对性恢复策略。
+
+        返回：
+        {
+            "action": "retry" | "switch_model" | "simplify" | "degrade" | "skip",
+            "retry_delay": seconds,
+            "suggestion": "给调用者的提示"
+        }
+        """
+        strategies = {
+            "timeout": {
+                "action": "retry",
+                "retry_delay": self._base_delay * 4,
+                "suggestion": "请求超时，增加等待时间后重试",
+            },
+            "rate_limit": {
+                "action": "retry",
+                "retry_delay": self._max_delay,
+                "suggestion": "达到速率限制，等待后重试",
+            },
+            "auth_error": {
+                "action": "switch_model",
+                "retry_delay": 0,
+                "suggestion": "认证失败，切换到备用模型",
+            },
+            "not_found": {
+                "action": "switch_model",
+                "retry_delay": 0,
+                "suggestion": "模型/端点不存在，切换到备用模型",
+            },
+            "server_error": {
+                "action": "retry",
+                "retry_delay": self._base_delay * 2,
+                "suggestion": "服务器错误，短暂等待后重试",
+            },
+            "connect_error": {
+                "action": "switch_model",
+                "retry_delay": 0,
+                "suggestion": "连接失败，切换到备用模型",
+            },
+            "context_overflow": {
+                "action": "simplify",
+                "retry_delay": 0,
+                "suggestion": "上下文过长，压缩后重试",
+            },
+            "unknown": {
+                "action": "retry",
+                "retry_delay": self._base_delay,
+                "suggestion": "未知错误，默认重试",
+            },
+        }
+        return strategies.get(error_type, strategies["unknown"])
+
 
 # Singleton
 _failure_recovery: Optional[FailureRecovery] = None

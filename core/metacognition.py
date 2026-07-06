@@ -345,6 +345,82 @@ class MetacognitionEngine:
                 parts.append("Sensitive topic — consult a professional.")
             return " ".join(parts)
 
+    async def evaluate_with_llm(
+        self,
+        llm,
+        response_text: str,
+        question_text: str = "",
+        sources_used: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Gap 修复：用 LLM 做真正的置信度评估，替换纯正则匹配。
+
+        之前的 _calculate_confidence 基于关键词统计（"我不确定"→扣分），
+        LLM 可以流利地编造虚假答案而不触发任何关键词。现在让轻量 LLM
+        真正读一遍回答内容，判断是否可信。
+
+        返回：{"confidence": 0.0-1.0, "reason": "...", "flags": [...]}
+        """
+        if llm is None:
+            return self._fallback_llm_eval(response_text, sources_used)
+
+        src_info = ""
+        if sources_used:
+            src_info = f"使用了以下来源：{', '.join(sources_used[:5])}"
+
+        prompt = (
+            "你是答案质量评估专家。请评估以下 AI 回答的可靠性，给出 0-10 的置信度分数。\n\n"
+            f"用户问题：{question_text[:300]}\n"
+            f"{src_info}\n"
+            f"AI 回答：{response_text[:1500]}\n\n"
+            "评估标准：\n"
+            "- 10分：有明确来源支撑，逻辑严密，无推测\n"
+            "- 7分：合理推理，但未引用具体来源\n"
+            "- 5分：回答基本合理但缺少关键细节\n"
+            "- 3分：有明显推测或不确定语言\n"
+            "- 1分：完全是猜测，无事实依据\n\n"
+            "请只返回一个 JSON：{\"score\": 数字, \"reason\": \"简短理由\", \"flags\": [\"风险标签\"]}\n"
+            "不要输出其他内容。"
+        )
+        try:
+            resp = await llm.chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model=None,
+                max_tokens=150,
+                temperature=0.1,
+                tools=None,
+                use_cache=False,
+            )
+            text = (resp.get("text") or "{}").strip()
+            # 提取 JSON
+            import json as _json
+            m = re.search(r'\{[^}]+\}', text)
+            if m:
+                data = _json.loads(m.group())
+                score = float(data.get("score", 5)) / 10.0
+                return {
+                    "confidence": max(0.0, min(1.0, score)),
+                    "reason": data.get("reason", ""),
+                    "flags": data.get("flags", []),
+                    "source": "llm",
+                }
+        except Exception as exc:
+            logger.debug("LLM metacognition eval failed: %s", exc)
+        return self._fallback_llm_eval(response_text, sources_used)
+
+    def _fallback_llm_eval(
+        self, response_text: str, sources_used: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """LLM 不可用时的回退评估（基于正则+来源）。"""
+        analysis = self.analyze_response(
+            response_text, sources_used=sources_used or [],
+        )
+        return {
+            "confidence": analysis["confidence"],
+            "reason": analysis.get("recommendation", "正则评估"),
+            "flags": analysis.get("hallucination_flags", []),
+            "source": "regex_fallback",
+        }
+
 
 # Singleton
 _metacognition_engine: Optional[MetacognitionEngine] = None
