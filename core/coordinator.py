@@ -21,6 +21,7 @@ from core.context import TurnContext
 from core.events import Event
 from core.plugin import Plugin
 from core.tool_result import ToolResult
+from i18n import get_language
 from models import LLMProvider
 from router import DEFAULT_COMPLEX_THRESHOLD, DEFAULT_SIMPLE_THRESHOLD, DEFAULT_TRIVIAL_THRESHOLD
 from skills import SkillManager
@@ -2516,6 +2517,21 @@ class Coordinator(Plugin):
                         if inject_msg not in messages:
                             messages.insert(-2, inject_msg)
 
+    @staticmethod
+    def _parse_error(turn_error) -> tuple:
+        """Parse turn.error into (error_type, error_detail) tuple.
+
+        turn.error can be str, dict, or None. Returns normalized strings.
+        """
+        if isinstance(turn_error, str):
+            return turn_error, turn_error
+        if isinstance(turn_error, dict):
+            return (
+                turn_error.get("type", "unknown"),
+                turn_error.get("detail", str(turn_error)),
+            )
+        return "unknown", str(turn_error or "unknown")
+
     async def _record_self_improvement_async(self, turn: TurnContext) -> None:
         """Record failure + 用 LLM 提炼改进 + 持久化应用（真正闭环）。
 
@@ -2532,8 +2548,7 @@ class Coordinator(Plugin):
         if not (self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver):
             return
 
-        error_type = turn.error if isinstance(turn.error, str) else turn.error.get("type", "unknown") if isinstance(turn.error, dict) else "unknown"
-        error_detail = turn.error if isinstance(turn.error, str) else turn.error.get("detail", str(turn.error)) if isinstance(turn.error, dict) else str(turn.error)
+        error_type, error_detail = self._parse_error(turn.error)
 
         self.ctx.self_improver.record_failure(
             user_input=turn.input_text,
@@ -2557,20 +2572,25 @@ class Coordinator(Plugin):
             logger.debug("self-improvement LLM 生成失败: %s", exc)
 
     def _record_self_improvement(self, turn: TurnContext) -> None:
-        """Record failure for self-improvement analysis（同步兼容包装）。"""
-        # 委托给异步版本，但不 await（fire-and-forget，避免阻塞调用方）
-        # 真正的闭环逻辑在 _record_self_improvement_async 里
+        """Record failure for self-improvement analysis（同步兼容包装）。
+
+        Fire-and-forget: 启动异步版本，不等待结果，避免阻塞调用方。
+        真正的闭环逻辑在 _record_self_improvement_async 里。
+        """
         assert turn is not None, "turn cannot be None"
         if not (self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver):
             return
-        error_type = turn.error if isinstance(turn.error, str) else turn.error.get("type", "unknown") if isinstance(turn.error, dict) else "unknown"
-        error_detail = turn.error if isinstance(turn.error, str) else turn.error.get("detail", str(turn.error)) if isinstance(turn.error, dict) else str(turn.error)
-        self.ctx.self_improver.record_failure(
-            user_input=turn.input_text,
-            error_type=error_type,
-            error_detail=error_detail,
-            turn_meta=turn.meta,
-        )
+        try:
+            asyncio.create_task(self._record_self_improvement_async(turn))
+        except RuntimeError:
+            # 没有运行中的事件循环时，退化到同步 record_failure
+            error_type, error_detail = self._parse_error(turn.error)
+            self.ctx.self_improver.record_failure(
+                user_input=turn.input_text,
+                error_type=error_type,
+                error_detail=error_detail,
+                turn_meta=turn.meta,
+            )
 
     def _extract_entities(self, turn: TurnContext) -> None:
         """Auto-extract entities from turn for knowledge graph.
@@ -2646,7 +2666,6 @@ class Coordinator(Plugin):
     @staticmethod
     def _is_zh() -> bool:
         """Cached language check (zh vs en) for prompt selection."""
-        from i18n import get_language
         return (get_language() or "zh").lower().startswith("zh")
 
     async def _try_clarification(

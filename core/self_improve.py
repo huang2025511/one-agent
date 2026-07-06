@@ -16,6 +16,31 @@ from core.db import create_sqlite_connection
 logger = logging.getLogger(__name__)
 
 
+def _safe_json_default(obj: Any) -> Any:
+    """Fallback serializer for objects that aren't natively JSON-serializable.
+
+    Used when serializing turn_meta which may contain ToolResult, SafetyReport,
+    or other dataclass objects from various subsystems.
+    """
+    if hasattr(obj, "to_dict") and callable(obj.to_dict):
+        return obj.to_dict()
+    if hasattr(obj, "__dict__"):
+        return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+    return str(obj)
+
+
+def _safe_json_dumps(obj: Any, **kwargs) -> str:
+    """Safely serialize to JSON, falling back gracefully for non-serializable objects."""
+    try:
+        return json.dumps(obj, ensure_ascii=kwargs.pop("ensure_ascii", False),
+                          default=_safe_json_default, **kwargs)
+    except Exception:
+        try:
+            return json.dumps({"_raw": str(obj)[:500]}, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+
 class FailureCase:
     """A recorded failure case for analysis."""
     def __init__(self, user_input: str, error_type: str,
@@ -86,7 +111,7 @@ class SelfImprover:
             self._conn.execute(
                 "INSERT INTO failures (user_input, error_type, error_detail, turn_meta, created_at) VALUES (?, ?, ?, ?, ?)",
                 (user_input[:500], error_type, error_detail[:500],
-                 json.dumps(turn_meta or {}, ensure_ascii=False), time.time())
+                 _safe_json_dumps(turn_meta or {}), time.time())
             )
             self._conn.commit()
 
