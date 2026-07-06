@@ -149,6 +149,13 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._fallback_count: Dict[str, int] = {}
         # Circuit breakers per provider: {provider: CircuitBreaker}
         self._circuit_breakers: Dict[str, CircuitBreaker] = {}
+        # 已验证存在的模型集合（由 auto_classify 后台任务填充）。
+        # 用途：model_for_tier() 选中模型后，用它验证模型是否真实存在，
+        # 避免选中硬编码在 default_config.yaml 但 provider 已下线/改名的模型
+        # （如 sensenova/tiny 是虚构模型名，调用必返回 404）。
+        # 结构：{provider: {model_id_lower, ...}}。auto_classify 还没跑时为空，
+        # 此时 model_for_tier 不做验证（向后兼容）。
+        self._verified_models: Dict[str, Set[str]] = {}
         # Models known to NOT support tool calling (cached after first 400)
         # so we don't waste a failed request every time.  Key is bare model name.
         self._no_tools_models: Set[str] = set()

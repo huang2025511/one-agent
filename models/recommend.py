@@ -25,6 +25,9 @@ class RecommendationMixin:
         但 _default_model 在 complex），这种情况下 tier 路由被破坏。
         修复：跨层 fallback 时记录 warning，方便定位；同时优先尝试相邻
         tier 的可用模型，避免直接跳到 _default_model。
+
+        方案 C：模型存在性验证。auto_classify 后填充 _verified_models，
+        遍历模型时验证是否真实存在，避免选中虚构模型（如 sensenova/tiny）。
         """
         default_provider = (
             self._default_model.split("/", 1)[0]
@@ -32,15 +35,31 @@ class RecommendationMixin:
             else None
         )
         candidates = MODEL_TIERS.get(tier, [])
+
+        def _is_real_model(model: str) -> bool:
+            """验证模型是否真实存在。
+            如果 _verified_models 没有该 provider 的记录（auto_classify
+            还没跑或失败），返回 True（不验证，向后兼容）。
+            否则检查 bare_model.lower() 是否在真实模型集合里。
+            """
+            provider, _, bare = model.partition("/")
+            verified = self._verified_models.get(provider)
+            if not verified:
+                return True  # 还没验证过，不阻断
+            return bare.lower() in verified
+
+        # 第一优先：default provider 的可用且真实的模型
         if default_provider:
             for model in candidates:
                 provider = model.split("/", 1)[0]
-                if provider == default_provider and self._has_usable_key(provider):
+                if (provider == default_provider
+                        and self._has_usable_key(provider)
+                        and _is_real_model(model)):
                     return model
-        # 第二优先：tier 内任意 provider 的可用模型
+        # 第二优先：tier 内任意 provider 的可用且真实的模型
         for model in candidates:
             provider = model.split("/", 1)[0]
-            if self._has_usable_key(provider):
+            if (self._has_usable_key(provider) and _is_real_model(model)):
                 return model
         # 仅当 _default_model 的 provider 有可用 key 时才 fallback 到它，
         # 否则返回 None 让上游（router）感知路由失败，而非用跨层模型
@@ -256,6 +275,16 @@ class RecommendationMixin:
             # Mutate the module-level MODEL_TIERS so model_for_tier() picks it up
             for k, v in new.items():
                 MODEL_TIERS[k] = list(v)
+            # 填充 _verified_models：把该 provider 真实存在的模型 ID 集合
+            # 缓存起来，供 model_for_tier() 验证硬编码模型是否真实存在。
+            try:
+                real_ids = {m.id.lower() for m in cat.all() if m.id}
+                if real_ids:
+                    self._verified_models[prov] = real_ids
+                    logger.debug("rebuild_tiers: verified %d model IDs for %s",
+                                 len(real_ids), prov)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("rebuild_tiers: failed to populate _verified_models: %s", exc)
             if persist:
                 try:
                     # 之前 self._config 在 LLMProvider 上从未初始化（已在
