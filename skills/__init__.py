@@ -1249,6 +1249,12 @@ class SkillManager(Plugin):
               /添加模型 someai key:xxx              — 未知 provider，自动探测+搜索
               /显示模型                              — 显示所有层级模型及能力
               /显示模型 免费                         — 只显示免费模型
+
+            自然语言触发（无需斜杠命令，无需 key）：
+              "商汤科技有新增加的免费模型，你拉取一下"
+              → 自动识别 provider=商汤→sensenova，复用已配置 key，拉取免费模型
+              "把 deepseek 的新模型添加进来"
+              "刷新一下 nvidia 的模型列表"
             """
             input_text = str(args.get("input", "")).strip()
             ctx_ref = getattr(self, "_ctx_ref", None)
@@ -1264,16 +1270,32 @@ class SkillManager(Plugin):
                 return await _show_models(llm, input_text)
 
             # ---- /添加模型 ----
-            # 如果没有 key 参数，显示用法
             import re as _re
-            if not _re.search(r'key[:\s]+\S+', input_text, _re.IGNORECASE):
-                return _add_models_usage()
+            has_explicit_key = bool(_re.search(r'key[:\s]+\S+', input_text, _re.IGNORECASE))
 
-            return await _add_models(llm, input_text)
+            if has_explicit_key:
+                # 显式带 key 的斜杠命令路径
+                return await _add_models(llm, input_text)
+
+            # ---- 自然语言路径：没有 key: 参数 ----
+            # 尝试从自然语言里识别 provider，复用已配置的 key
+            nl_result = _try_natural_language_fetch(llm, input_text)
+            if nl_result is not None:
+                provider, free_only, all_models_flag = nl_result
+                return await _fetch_models_with_existing_key(
+                    llm, provider, free_only, all_models_flag,
+                )
+
+            # 既没 key 也不是可识别的自然语言请求 → 显示用法
+            return _add_models_usage()
 
         self.register(Skill(
             id="model_manage", title="Model Manager",
-            description="/添加模型 或 /显示模型：管理智能路由模型",
+            description=(
+                "/添加模型 或 /显示模型：管理智能路由模型。"
+                "支持自然语言触发：拉取模型、添加模型、刷新模型、获取模型、"
+                "导入模型、更新模型、商汤、deepseek、nvidia、ollama 等provider模型管理。"
+            ),
             schema=_schema("model_manage", "manage models and routing", []),
             handler=model_manage_handler,
         ))
@@ -1835,6 +1857,171 @@ async def _show_models(llm, input_text: str) -> str:
     lines.append("  • /添加模型 <provider> key:<key> 免费  — 只添加免费模型")
     lines.append("  • /添加模型 <provider> key:<key> url:<地址> — 手动指定 API 地址")
     lines.append("  • /显示模型 免费  — 只显示免费模型")
+
+    return "\n".join(lines)
+
+
+# ---- 自然语言触发模型拉取 ----
+# 触发动词：用户说这些词时，认为是"拉取/添加模型"意图
+_NL_FETCH_VERBS = (
+    "拉取", "添加", "刷新", "获取", "导入", "更新", "重新拉", "同步",
+    "fetch", "pull", "refresh", "add", "import", "update", "sync",
+)
+# 模型相关名词（任一命中即认为与模型管理相关）
+_NL_MODEL_NOUNS = ("模型", "model", "models", "新模型", "免费模型")
+
+
+def _try_natural_language_fetch(llm, text: str):
+    """检测自然语言是否表达"拉取/添加某 provider 模型"意图。
+
+    返回 (provider, free_only, all_models_flag) 或 None。
+    provider 已规范化为 canonical 名（如 商汤→sensenova）。
+    只有当：① 命中触发动词 + ② 能识别出 provider + ③ 该 provider 有已配置 key
+    三者都满足才返回结果，否则返回 None（让上层显示用法）。
+    """
+    if not text:
+        return None
+    t = text.lower()
+
+    # 1) 必须命中触发动词
+    if not any(v in t for v in _NL_FETCH_VERBS):
+        return None
+
+    # 2) 最好提到"模型"（宽松：动词+provider 也算，避免"商汤拉一下"被漏掉）
+    has_model_noun = any(n in t for n in _NL_MODEL_NOUNS)
+
+    # 3) 识别 provider：用 resolver 的别名表
+    from models.resolver import _PROVIDER_ALIASES, _extract_provider_hint
+    provider = _extract_provider_hint(text)
+    if provider is None:
+        # 回退：直接扫描别名表，找文本里出现的别名
+        for alias in sorted(_PROVIDER_ALIASES.keys(), key=len, reverse=True):
+            if alias in t:
+                provider = _PROVIDER_ALIASES[alias]
+                break
+    if provider is None:
+        return None
+
+    # 4) 该 provider 必须有已配置的 key（否则没法拉）
+    if not llm._has_usable_key(provider):
+        return None
+
+    # 5) 解析修饰词
+    free_only = ("免费" in t) or ("free" in t)
+    all_models_flag = ("全部" in t) or ("all models" in t) or ("所有模型" in t)
+
+    # 没提到模型名词也没关系，只要动词+provider+key 都在，就认为是拉取意图
+    # （has_model_noun 只用于评分，不强制）
+    return provider, free_only, all_models_flag
+
+
+async def _fetch_models_with_existing_key(
+    llm, provider: str, free_only: bool, all_models_flag: bool,
+) -> str:
+    """用已配置的 key 拉取指定 provider 的模型列表并加入路由。
+
+    与 _add_models 的区别：不需要用户在消息里带 key，直接复用 llm._api_keys。
+    """
+    import asyncio as _aio
+    import time as _time
+
+    api_key = llm._api_keys.get(provider, "")
+    if not api_key:
+        return (
+            f"❌ provider '{provider}' 没有配置 API key。\n"
+            f"请用 /添加模型 {provider} key:<你的key> 来添加。"
+        )
+
+    # 确定 base_url
+    base_url = llm._provider_base_urls.get(provider, "")
+    if not base_url:
+        from models.resolver import KNOWN_PROVIDERS
+        base_url = KNOWN_PROVIDERS.get(provider, "")
+        if base_url:
+            llm._provider_base_urls[provider] = base_url
+
+    if not base_url:
+        return (
+            f"❌ 找不到 provider '{provider}' 的 API 地址。\n"
+            f"请用 /添加模型 {provider} key:{api_key[:8]}... url:<API地址> 手动指定。"
+        )
+
+    # 拉取模型列表
+    from models.catalog import ModelCatalog
+    cat = ModelCatalog(base_url=base_url, api_key=api_key, provider=provider)
+    try:
+        n = await cat.refresh(force=True)
+    except Exception as exc:
+        await cat.aclose()
+        return f"❌ 拉取 {provider} 模型列表失败: {exc}\nbase_url: {base_url}"
+
+    if n == 0:
+        await cat.aclose()
+        return (
+            f"❌ 从 {provider} ({base_url}) 未获取到任何模型。\n"
+            f"请检查 API Key 是否正确，或 provider 是否有可用模型。"
+        )
+
+    all_models_list = cat.all()
+
+    # 筛选
+    if all_models_flag:
+        filtered = all_models_list
+        filter_desc = "全部"
+    elif free_only:
+        filtered = [m for m in all_models_list if m.is_free]
+        filter_desc = "免费"
+    else:
+        # 自然语言默认拉全部（用户说"新增加的模型"通常想看全貌）
+        filtered = all_models_list
+        filter_desc = "全部（默认）"
+
+    if not filtered:
+        filtered = all_models_list
+        filter_desc = "全部（筛选无结果）"
+
+    await cat.aclose()
+
+    # 展示
+    lines = [
+        f"✅ 从 {provider} 拉取到 {n} 个模型（{filter_desc}筛选后 {len(filtered)} 个）",
+        f"   API 地址: {base_url}",
+        "",
+        "📋 模型列表（已按能力自动分类到 4 层路由）：",
+        "",
+    ]
+
+    for tier in _TIER_ORDER:
+        tier_models = [m for m in filtered if m.tier == tier]
+        if not tier_models:
+            continue
+        info = _TIER_INFO[tier]
+        lines.append(f"{info['icon']} {info['name']} — {info['desc']}")
+        for i, m in enumerate(tier_models):
+            full_id = f"{provider}/{m.id}" if not m.id.startswith(f"{provider}/") else m.id
+            caps = _model_capability_desc(full_id)
+            ctx = f"{m.context_length:,}" if m.context_length else "?"
+            free_tag = "🆓" if m.is_free else "💰"
+            lines.append(f"   {i+1}. {free_tag} {m.id}")
+            lines.append(f"      层级: {tier} | 上下文: {ctx} | 能力: {caps}")
+        lines.append("")
+
+    lines.append("=" * 50)
+    lines.append("💡 这些模型已自动添加到智能路由的对应层级。")
+    lines.append("   输入 /显示模型 可查看当前所有层级模型。")
+
+    # 自动执行 rebuild_tiers
+    try:
+        from models.tiers import MODEL_TIERS
+        for m in filtered:
+            full_id = f"{provider}/{m.id}" if not m.id.startswith(f"{provider}/") else m.id
+            tier_list = MODEL_TIERS.setdefault(m.tier, [])
+            if full_id not in tier_list:
+                tier_list.append(full_id)
+        logger.info("自然语言拉取：已把 %d 个 %s 模型加入 MODEL_TIERS",
+                    len(filtered), provider)
+    except Exception as exc:
+        logger.warning("自然语言拉取：加入 MODEL_TIERS 失败: %s", exc)
 
     return "\n".join(lines)
 

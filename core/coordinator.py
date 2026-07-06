@@ -421,6 +421,54 @@ class Coordinator(Plugin):
         "开启os": "_os_on", "关闭os": "_os_off", "开启系统权限": "_os_on", "关闭系统权限": "_os_off",
     }
 
+    async def _maybe_direct_skill_dispatch(self, turn: TurnContext) -> bool:
+        """自然语言→skill 直通调度。
+
+        检测用户消息是否表达某个 skill 能处理的明确意图（无需 LLM tool-calling），
+        若命中则直接 dispatch skill 并返回 True。
+
+        目前覆盖：
+        - "拉取/添加/刷新模型" → model_manage skill（复用已配置 key）
+
+        设计原因：弱模型（如 flash-lite）不支持 tool calling，自然语言请求
+        会被路由到这些模型 → 无法触发 skill → 只能打官腔。直通调度绕过这个限制。
+        """
+        text = (turn.input_text or "").strip()
+        if not text:
+            return False
+
+        # ---- 模型拉取意图 ----
+        try:
+            from skills import _try_natural_language_fetch
+        except ImportError:
+            return False
+
+        if self._llm is None:
+            return False
+        nl_result = _try_natural_language_fetch(self._llm, text)
+        if nl_result is None:
+            return False
+
+        provider, free_only, all_models_flag = nl_result
+        logger.info(
+            "coordinator: 自然语言直通 model_manage (provider=%s free=%s all=%s)",
+            provider, free_only, all_models_flag,
+        )
+        self._emit_progress(turn, f"正在从 {provider} 拉取模型列表...", "skill_dispatch")
+        try:
+            skill = self._skills.get("model_manage")  # type: ignore[union-attr]
+            if skill is None:
+                return False
+            # 把原始自然语言作为 input 传给 skill，skill 内部会复用已配置 key
+            result = await self._skills.dispatch("model_manage", {"input": text})  # type: ignore[union-attr]
+            turn.result = str(result) if result else "（无结果）"
+            turn.meta["direct_skill_dispatch"] = "model_manage"
+        except Exception as exc:
+            logger.exception("coordinator: 自然语言直通 model_manage 失败: %s", exc)
+            turn.record_failure(f"模型拉取失败: {exc}")
+        self.publish("turn_completed", turn=turn)
+        return True
+
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
         """Handle slash commands like /help, /settings.
 
@@ -519,6 +567,13 @@ class Coordinator(Plugin):
         # Handle slash commands first
         if turn.input_text and turn.input_text.strip().startswith("/"):
             if await self._handle_slash_command(turn):
+                return
+
+        # 自然语言→skill 直通：检测"拉取/添加/刷新模型"类自然语言意图，
+        # 直接调度 model_manage skill，绕过弱模型的 tool-calling 限制。
+        # 这让用户说"商汤有新免费模型，拉取一下"就能触发，无需 /添加模型。
+        if turn.input_text and self._skills is not None:
+            if await self._maybe_direct_skill_dispatch(turn):
                 return
 
         # Auto-detect language from user input

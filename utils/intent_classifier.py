@@ -344,11 +344,14 @@ class IntentClassifier:
                    "部署", "同步", "推送", "提交", "更新", "查看", "读取", "写入",
                    "修改", "删除", "创建", "生成", "编译", "打包", "搜索",
                    "开发", "实现", "编写", "搭建", "配置", "调试", "排查", "修复",
+                   "拉取", "添加", "获取", "导入", "刷新", "重新拉", "拉一下",
+                   "加进来", "添加进来", "添加进来", "加进去",
                    "compare", "check", "verify", "test", "run", "execute",
                    "install", "download", "deploy", "sync", "push", "commit",
                    "update", "read", "write", "modify", "delete", "create",
                    "generate", "compile", "build", "pack", "search", "develop",
-                   "implement", "debug", "fix"):
+                   "implement", "debug", "fix",
+                   "fetch", "pull", "refresh", "import", "add"):
             if kw in lower:
                 score += 0.2
                 break
@@ -360,6 +363,14 @@ class IntentClassifier:
                    ".yaml", ".json", ".md"):
             if kw in lower:
                 score += 0.15
+                break
+
+        # 模型管理意图：拉取/添加/刷新模型 — 需要 skill，至少 simple
+        for kw in ("拉取模型", "添加模型", "刷新模型", "获取模型", "导入模型",
+                   "更新模型", "重新拉取", "拉取一下", "添加进来", "新模型",
+                   "免费模型", "fetch model", "add model", "refresh model"):
+            if kw in lower:
+                score += 0.2
                 break
 
         # Trivial keywords — reduce score for short inputs
