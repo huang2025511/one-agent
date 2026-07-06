@@ -971,7 +971,7 @@ class Coordinator(Plugin):
             if hint:
                 # 注入到第一条 system 消息末尾, 或新增一条 system 消息
                 if messages and messages[0].get("role") == "system":
-                    messages[0]["content"] = messages[0]["content"] + "\n\n" + hint
+                    messages[0]["content"] = self._append_to_content(messages[0]["content"], hint)
                 else:
                     messages.insert(0, {"role": "system", "content": hint})
                 logger.info("safety: injected context hint (%d injection, %d harmful)",
@@ -1056,26 +1056,44 @@ class Coordinator(Plugin):
             turn.result = self._sanitize_model_output(turn.result)
 
         # === Intelligent features integration ===
+        # 关键修复：之前 6 步后处理任意一步抛异常都会让 turn_completed 永不发布,
+        # 用户得不到回复 + 会话历史断裂 + 自演化统计失真。
+        # 修复：每步独立 try/except, 异常只记日志不阻断主流程。
+        # turn_completed 必须发出 (它是用户拿到回复的唯一信号)。
+        async def _safe_step(name, coro):
+            try:
+                return await coro
+            except Exception as exc:
+                logger.warning("post-process step '%s' failed (non-fatal): %s", name, exc)
+                return None
+
+        def _safe_step_sync(name, fn):
+            try:
+                return fn()
+            except Exception as exc:
+                logger.warning("post-process step '%s' failed (non-fatal): %s", name, exc)
+                return None
+
         # 1. Record user preferences and patterns
-        await self._record_intelligence(turn)
+        await _safe_step("record_intelligence", self._record_intelligence(turn))
 
         # 2. Generate proactive suggestions (inject into result if enabled)
-        suggestions = await self._generate_suggestions(turn)
+        suggestions = await _safe_step("generate_suggestions", self._generate_suggestions(turn))
         if suggestions and self._should_show_suggestions():
             suggestion_text = self._suggestions.format_suggestions_for_display(suggestions)
             turn.result = turn.result + suggestion_text
 
         # 3. Metacognition — analyze response quality
-        await self._analyze_response_quality(turn)
+        await _safe_step("analyze_response_quality", self._analyze_response_quality(turn))
 
         # 4. Round 6: Multi-turn proactive planning — predict next steps
-        await self._proactive_plan(turn)
+        await _safe_step("proactive_plan", self._proactive_plan(turn))
 
         # 5. Round 7: Conversation branch auto-tracking
-        self._record_conversation_branch(turn)
+        _safe_step_sync("record_conversation_branch", lambda: self._record_conversation_branch(turn))
 
         # 6. Round 7 修复: Task state — 检测并更新活跃任务
-        await self._update_task_state(turn)
+        await _safe_step("update_task_state", self._update_task_state(turn))
 
         self.publish("turn_completed", turn=turn)
         logger.info(
@@ -1087,6 +1105,34 @@ class Coordinator(Plugin):
             turn.tokens_used,
             turn.duration_seconds or 0,
         )
+
+    @staticmethod
+    def _append_to_content(content: Any, suffix: str) -> Any:
+        """Append text to a message content field, compatible with both
+        str and list (vision/multimodal) content formats.
+
+        修复：之前直接 content + "\n\n" + hint 假设 content 是 str,
+        但 OpenAI/Anthropic 多模态格式 content 是 list (如
+        [{"type":"text","text":"..."},{"type":"image_url",...}]),
+        str + list 抛 TypeError。
+        """
+        if isinstance(content, str):
+            return content + "\n\n" + suffix
+        if isinstance(content, list):
+            # 多模态：追加一个 text 块
+            return content + [{"type": "text", "text": suffix}]
+        # content 为 None 或其他类型：直接返回 suffix 作为字符串
+        return suffix
+
+    @staticmethod
+    def _prepend_to_content(content: Any, prefix: str) -> Any:
+        """Prepend text to a message content field (compatible with str/list)."""
+        if isinstance(content, str):
+            return prefix + "\n\n" + content
+        if isinstance(content, list):
+            # 多模态：在开头插入一个 text 块
+            return [{"type": "text", "text": prefix}] + content
+        return prefix
 
     def _sanitize_model_output(self, text: str) -> str:
         """Remove XML tool-call tags that weak models may emit as text.
@@ -1985,13 +2031,19 @@ class Coordinator(Plugin):
                         streamed_parts = []
                         last_emit = 0
                         current_len = 0  # 累积长度计数器, 避免 O(n²) join
+                        # 关键 bug 修复：生产端 chat_completion_stream yield 的字段名是
+                        # "delta" (见 models/__init__.py 所有 yield 语句), 之前消费端
+                        # 写 chunk.get("text", "") 永远取不到值 → 流式静默失效,
+                        # 用户看不到打字机效果, _emit_progress 永不触发。
+                        # 同时初始化 chunk 防 async for 不执行时 UnboundLocalError。
+                        chunk = {}
                         async for chunk in self._llm.chat_completion_stream(
                             messages=messages,
                             model=turn.model,
                             max_tokens=turn.token_budget if i == 0 else self._max_tokens,
                             temperature=dyn_temp,
                         ):
-                            delta = chunk.get("text", "")
+                            delta = chunk.get("delta", "")
                             if delta:
                                 streamed_parts.append(delta)
                                 current_len += len(delta)
@@ -2002,9 +2054,11 @@ class Coordinator(Plugin):
                                     self._emit_progress(
                                         turn, "".join(streamed_parts), "streaming"
                                     )
+                            # done 帧携带 tokens_used, 取最终值
+                            if chunk.get("done") and chunk.get("tokens_used"):
+                                tokens_used = int(chunk["tokens_used"])
                         if streamed_parts:
                             final_text = "".join(streamed_parts)
-                            tokens_used = int(chunk.get("tokens_used", tokens_used))
                 except Exception as stream_err:
                     logger.debug("streaming failed, using non-streamed response: %s", stream_err)
                     # fallback to non-streamed response already in final_text
@@ -3288,9 +3342,11 @@ class Coordinator(Plugin):
             )
 
             # Inject CoT prompt before the last user message
+            # 修复：兼容多模态 list content (vision), 之前 str+list 抛 TypeError
             if messages and messages[-1].get("role") == "user":
-                original_user_msg = messages[-1]["content"]
-                messages[-1]["content"] = cot_prompt + "\n\n" + original_user_msg
+                messages[-1]["content"] = self._prepend_to_content(
+                    messages[-1]["content"], cot_prompt
+                )
 
             turn.meta["task_types"] = task_types
             turn.meta["cot_enabled"] = True

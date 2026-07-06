@@ -39,25 +39,35 @@ class TokenBucket:
         self._last_refill = now
 
     async def acquire(self) -> bool:
-        """Acquire one token. Blocks until available."""
-        async with self._lock:
-            self._refill()
-            if self._tokens >= 1.0:
-                self._tokens -= 1.0
-                return True
+        """Acquire one token. Blocks until available.
 
-            # Not enough tokens — wait for refill
-            wait_time = (1.0 - self._tokens) / self._rate
-            self._waiters += 1
+        修复：之前多 waiter 同时唤醒 (wait_time 几乎相同) 后无条件 self._tokens -= 1.0,
+        导致 tokens 变负、限流被穿透 (配置 1 token/sec 可能同时放行 10 个)。
+        修复：醒来后重新检查 token 是否足够, 不足则继续等待 (循环直到拿到)。
+        """
+        while True:
+            async with self._lock:
+                self._refill()
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return True
 
-        # Release lock before sleeping
-        await asyncio.sleep(wait_time)
+                # Not enough tokens — wait for refill
+                wait_time = (1.0 - self._tokens) / self._rate
+                self._waiters += 1
 
-        async with self._lock:
-            self._waiters -= 1
-            self._refill()
-            self._tokens -= 1.0
-            return True
+            # Release lock before sleeping
+            await asyncio.sleep(wait_time)
+
+            async with self._lock:
+                self._waiters -= 1
+                self._refill()
+                if self._tokens >= 1.0:
+                    # 醒来后 token 已足够, 扣除并返回
+                    self._tokens -= 1.0
+                    return True
+                # token 仍不足 (其他 waiter 先抢到了) — 继续循环等待
+                wait_time = (1.0 - self._tokens) / self._rate
 
     async def try_acquire(self) -> bool:
         """Try to acquire without blocking. Returns False if not available."""

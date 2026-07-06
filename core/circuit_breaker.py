@@ -127,23 +127,36 @@ class CircuitBreaker:
             raise
 
     async def acall(self, func, *args, **kwargs) -> Any:
-        """Async version of call()."""
+        """Async version of call().
+
+        性能/并发修复：之前在 `with self._lock:` 块内 `await self._fallback()`,
+        threading.Lock 是线程级阻塞原语, 持有期间 await 会让事件循环线程
+        本身被卡住 (整个 loop 冻结, 所有 IO/定时器/其他协程停摆)。
+        修复：锁内只读状态 + 决策, 锁外执行 await。
+        """
+        # 锁内：只做状态检查与决策, 不 await
+        need_fallback = False
         with self._lock:
             self._maybe_transition()
 
             if self._state == CircuitState.OPEN:
                 if self._fallback:
                     logger.debug("circuit %s is OPEN, using async fallback", self._name)
-                    result = self._fallback()
-                    import asyncio
-                    if asyncio.iscoroutine(result):
-                        return await result
-                    return result
-                raise CircuitOpenError(
-                    f"Circuit '{self._name}' is OPEN"
-                )
+                    need_fallback = True
+                else:
+                    raise CircuitOpenError(
+                        f"Circuit '{self._name}' is OPEN"
+                    )
+            else:
+                self._total_requests += 1
 
-            self._total_requests += 1
+        # 锁外：执行 fallback (可能是协程)
+        if need_fallback:
+            result = self._fallback()
+            import asyncio
+            if asyncio.iscoroutine(result):
+                return await result
+            return result
 
         try:
             result = await func(*args, **kwargs)

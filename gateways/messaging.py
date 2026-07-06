@@ -79,12 +79,24 @@ class BaseMessagingGateway(Plugin):
             self._replies.pop(msg_key, None)
 
     def _spawn(self, coro, **kwargs) -> asyncio.Task:
-        """Spawn a background task with error logging on failure."""
+        """Spawn a background task with error logging on failure.
+
+        关键修复：保存强引用到 self._bg_tasks 集合, 否则 CPython 文档明确警告
+        Task 可能被 GC 中途取消 ("Task was destroyed but it is pending!")。
+        调用方多数丢弃返回值 (fire-and-forget), add_done_callback 不构成强引用。
+        """
         task = asyncio.create_task(coro(**kwargs))
         msg_key = kwargs.get("msg_key", "")
+        # 维护强引用集合, 任务完成时自动移除
+        if not hasattr(self, "_bg_tasks"):
+            self._bg_tasks: set = set()
+        self._bg_tasks.add(task)
         task.add_done_callback(
-            lambda t: logger.exception("gateway background task failed for %s", msg_key)
-            if t.exception() else None
+            lambda t: (
+                self._bg_tasks.discard(t),
+                logger.exception("gateway background task failed for %s", msg_key)
+                if t.exception() else None,
+            )
         )
         return task
 
@@ -95,6 +107,16 @@ class BaseMessagingGateway(Plugin):
             try:
                 await self._task
             except asyncio.CancelledError:
+                pass
+        # 取消所有 fire-and-forget 后台任务 (强引用保存在 _bg_tasks)
+        bg_tasks = list(getattr(self, "_bg_tasks", set()))
+        for t in bg_tasks:
+            if not t.done():
+                t.cancel()
+        for t in bg_tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
                 pass
         await self._close_client()
         await super().stop()

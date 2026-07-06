@@ -329,11 +329,21 @@ class AsyncTaskScheduler:
         """Start the scheduler (call once)."""
         self._shutdown = False
         logger.info("Task scheduler started (max concurrent: %d)", self._max_concurrent)
-        asyncio.create_task(self._poll_loop())
+        # 关键修复：保存强引用, 否则 asyncio.create_task 返回的 Task 可能被 GC
+        # 中途取消 ("Task was destroyed but it is pending!") → 后台调度静默停摆。
+        self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
         """Stop the scheduler gracefully."""
         self._shutdown = True
+        # Cancel the poll loop task (saved as strong ref in start())
+        poll_task = getattr(self, "_poll_task", None)
+        if poll_task is not None and not poll_task.done():
+            poll_task.cancel()
+            try:
+                await poll_task
+            except asyncio.CancelledError:
+                pass
         # Cancel running tasks
         for task_id, task_handle in list(self._running_tasks.items()):
             task_handle.cancel()
