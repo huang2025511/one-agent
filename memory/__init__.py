@@ -634,11 +634,21 @@ class MemoryPlugin(Plugin):
                 # All operations below are synchronous SQLite / CPU-bound work
                 # (embedding encode is especially heavy). Run them in a worker
                 # thread to avoid blocking the event loop (mirrors _on_user_message).
+                # Gap 3 修复：重要性评分。根据内容类型分配不同初始权重，
+                # 重要记忆（偏好/技能）衰减更慢，搜索结果等临时信息权重低。
+                imp_weight = 1.0
+                if "```" in turn.result and len(turn.result) > 200:
+                    imp_weight = 1.5  # 代码/技能 → 高重要性
+                elif any(kw in turn.input_text.lower() for kw in ("偏好", "喜欢", "常用", "prefer", "like", "always")):
+                    imp_weight = 2.0  # 用户偏好 → 最高重要性
+                elif len(turn.result) < 100:
+                    imp_weight = 0.5  # 简短回复 → 低重要性
                 memory_id = await asyncio.to_thread(
                     self._long.add,
                     content=content,
                     source=turn.source,
                     tags="interaction",
+                    weight=imp_weight,
                 )
                 # Store embedding vector for semantic search — this was missing,
                 # causing hybrid search to degenerate to FTS-only.
@@ -704,9 +714,18 @@ class MemoryPlugin(Plugin):
         return False
 
     # --------------------------------------------------------- public
-    def add_fact(self, text: str, source: str = "manual", tags: str = "") -> None:
+    def add_fact(self, text: str, source: str = "manual", tags: str = "", weight: float = 1.0) -> None:
+        """Add a fact to long-term memory with optional importance weight.
+
+        Gap 修复：之前所有记忆都默认 weight=1.0，导致重要记忆（用户偏好、技能）
+        和普通记忆（搜索片段）同等对待。现在可指定重要性权重：
+        - 2.0: 用户偏好/身份信息（高重要性，衰减慢）
+        - 1.5: 学到的技能/工具使用模式
+        - 1.0: 一般事实（默认）
+        - 0.5: 临时/低价值信息
+        """
         if self._long is not None:
-            self._long.add(text, source=source, tags=tags)
+            self._long.add(text, source=source, tags=tags, weight=weight)
 
     def search_facts(self, query: str, limit: int = 5, offset: int = 0) -> List[Dict[str, Any]]:
         if self._long is None:

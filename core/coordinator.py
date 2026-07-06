@@ -192,6 +192,7 @@ class Coordinator(Plugin):
             status="success",
             data=result_str,
             duration_ms=duration_ms,
+            truncated=len(result_str) > 3000,
         )
 
     def _persist_language(self, lang: str) -> None:
@@ -979,6 +980,44 @@ class Coordinator(Plugin):
                 if not any(m.get("role") == "user" for m in messages):
                     messages.append({"role": "user", "content": turn.input_text})
 
+        # Gap 2 修复：指代消解。检测用户输入中的指代词，
+        # 从上一轮对话中提取实体信息注入上下文，帮助 LLM 解析指代。
+        if self._is_zh():
+            referential_words = {"那个", "这个", "它", "他", "她", "它们", "他们", "她们", "其", "该"}
+        else:
+            referential_words = {"that", "this", "it", "they", "them", "he", "she", "those", "these"}
+        input_words = set(re.findall(r"[\w\u4e00-\u9fff]+", turn.input_text.lower()))
+        if input_words & referential_words:
+            # 从历史中提取上一轮的关键实体
+            history = turn.meta.get("history", [])
+            if history:
+                last_turn = history[-1] if history else {}
+                last_input = str(last_turn.get("input", ""))[:200]
+                last_reply = str(last_turn.get("reply", ""))[:200]
+                if last_input or last_reply:
+                    zh = self._is_zh()
+                    if zh:
+                        ref_hint = (
+                            "【指代解析提示】当前用户输入包含指代词（如'那个/这个/它'）。"
+                            "上一轮对话的上下文：\n"
+                            f"上一轮用户输入：{last_input}\n"
+                            f"上一轮你的回复：{last_reply[:200]}\n"
+                            "请根据这段上下文解析用户当前指代的具体对象，不要再反问用户。"
+                        )
+                    else:
+                        ref_hint = (
+                            "[Reference Resolution] The current input contains referential words. "
+                            "Previous turn context:\n"
+                            f"Previous user input: {last_input}\n"
+                            f"Previous your reply: {last_reply[:200]}\n"
+                            "Resolve what the user is referring to based on this context."
+                        )
+                    ref_block = {"role": "assistant", "content": ref_hint}
+                    if messages and messages[-1].get("role") == "user":
+                        messages.insert(len(messages) - 1, ref_block)
+                    else:
+                        messages.append(ref_block)
+
         # Procedural 记忆注入：MemoryPlugin 在 _on_user_message 里查 procedural 技能，
         # 命中后放入 turn.meta["procedural_skill"]。这里把它作为参考注入 messages，
         # 让 LLM 能复用之前学到的解决方案模式，避免重复探索。
@@ -993,6 +1032,53 @@ class Coordinator(Plugin):
                 messages.insert(len(messages) - 1, proc_block)
             else:
                 messages.append(proc_block)
+
+        # Gap 8 修复：跨会话知识迁移。将用户偏好、常用技能、关注话题
+        # 等持久化画像注入上下文，让 LLM 跨会话保持一致的个性化体验。
+        try:
+            profile = self._get_profile()
+            profile_summary = profile.get_profile_summary()
+            if profile_summary and any(profile_summary.values()):
+                parts = []
+                prefs = profile_summary.get("preferences", {})
+                if prefs:
+                    pref_items = []
+                    for k, v in list(prefs.items())[:8]:
+                        pref_items.append(f"  - {k}: {v}")
+                    if pref_items:
+                        parts.append("偏好:\n" + "\n".join(pref_items))
+                top_skills = profile_summary.get("top_skills", [])
+                if top_skills:
+                    skill_str = ", ".join(f"{s[0]}({s[1]}次)" for s in top_skills[:5])
+                    parts.append(f"常用技能: {skill_str}")
+                top_topics = profile_summary.get("top_topics", [])
+                if top_topics:
+                    topic_str = ", ".join(t[0] for t in top_topics[:5])
+                    parts.append(f"关注话题: {topic_str}")
+                active_hours = profile_summary.get("active_hours", [])
+                if active_hours:
+                    parts.append(f"活跃时段: {active_hours} 点")
+                if parts:
+                    if self._is_zh():
+                        profile_header = (
+                            "【用户画像】（跨会话持久化的个性化信息）\n"
+                            "以下是系统从历史对话中学习到的用户偏好和习惯，"
+                            "请在回复时参考但不要刻意提及：\n\n"
+                        )
+                    else:
+                        profile_header = (
+                            "[User Profile] (cross-session personalized information)\n"
+                            "The following are user preferences and patterns learned from "
+                            "past conversations. Use them naturally in your response "
+                            "but don't mention them explicitly:\n\n"
+                        )
+                    profile_block = {"role": "assistant", "content": profile_header + "\n".join(parts)}
+                    if messages and messages[-1].get("role") == "user":
+                        messages.insert(len(messages) - 1, profile_block)
+                    else:
+                        messages.append(profile_block)
+        except Exception as exc:
+            logger.debug("user profile injection skipped: %s", exc)
 
         # Inject Chain-of-Thought reasoning for complex tasks
         await self._maybe_inject_cot(messages, turn)
@@ -1592,7 +1678,30 @@ class Coordinator(Plugin):
                 if nm:
                     called_tools.add(nm)
 
-            await self._execute_tool_calls(messages, turn, tool_calls, _failed_skills, i)
+            # Gap 5 修复：语义去重。检测与历史调用完全相同的工具+参数组合，
+            # 跳过重复调用，直接注入缓存结果提示。
+            deduped_calls = []
+            for tc in tool_calls:
+                nm = tc.get("name") or tc.get("function", {}).get("name", "")
+                args_str = tc.get("args") or tc.get("function", {}).get("arguments", "{}")
+                if isinstance(args_str, dict):
+                    args_str = str(args_str)
+                dedup_key = f"{nm}:{args_str[:200]}"
+                if dedup_key in called_tools:
+                    # 重复调用 → 注入提示而不是执行
+                    zh = self._is_zh()
+                    if zh:
+                        hint = f"[系统提示：工具 {nm} 已用相同参数调用过，请勿重复。]"
+                    else:
+                        hint = f"[System: Tool {nm} was already called with the same args. Do not repeat.]"
+                    messages.append({"role": "tool", "tool_call_id": tc.get("id", nm), "name": nm, "content": hint})
+                    turn.meta.setdefault("dedup_skipped", []).append(nm)
+                else:
+                    deduped_calls.append(tc)
+                    called_tools.add(dedup_key)
+
+            if deduped_calls:
+                await self._execute_tool_calls(messages, turn, deduped_calls, _failed_skills, i)
 
             # Gap 3：动态重规划 — 检测本轮工具失败，注入重规划提示
             # 之前工具失败只是记录在 messages 里，模型不一定主动调整策略。
@@ -2112,6 +2221,26 @@ class Coordinator(Plugin):
         if not turn.result or len(turn.result) < len(prev_result or "") // 2:
             turn.result = prev_result
 
+    def _detect_output_format(self, answer: str) -> str:
+        """Gap 修复：检测回复类型，返回格式提示。
+
+        之前 verify_and_polish 的 prompt 只说"优化结构"，LLM 可能把代码块
+        优化成纯文本描述、把表格优化成段落。现在先检测格式类型，注入提示保格式。
+        """
+        if "```" in answer and ("def " in answer or "class " in answer or "import " in answer):
+            return "代码块格式（保留 ``` 代码块）"
+        if "```" in answer:
+            return "代码块格式"
+        if "|" in answer and "---" in answer:
+            return "表格格式"
+        if re.search(r"^\d+\.\s", answer, re.MULTILINE) or re.search(r"^-\s", answer, re.MULTILINE):
+            if len(answer) > 500:
+                return "列表+要点总结格式"
+            return "列表格式"
+        if "http" in answer and len(answer) > 300:
+            return "保留链接和引用"
+        return ""
+
     async def _verify_and_polish(
         self, messages: List[Dict[str, Any]], turn: TurnContext, complexity: float,
     ) -> None:
@@ -2131,6 +2260,15 @@ class Coordinator(Plugin):
         zh = self._is_zh()
         answer = turn.result or ""
         question = turn.input_text or ""
+
+        # Gap 4 修复：输出格式智能。检测回复类型，在优化 prompt 中注入格式要求。
+        fmt_hint = self._detect_output_format(answer)
+        if fmt_hint and zh:
+            fmt_hint = f"请保持以下格式：{fmt_hint}。\n"
+        elif fmt_hint:
+            fmt_hint = f"Preserve this format: {fmt_hint}.\n"
+        else:
+            fmt_hint = ""
 
         # Short answers: only verify, skip polish (saves tokens)
         skip_polish = len(answer) < 200
@@ -2153,6 +2291,7 @@ class Coordinator(Plugin):
                     "精炼语言、突出重点、长答案加要点总结。\n\n"
                     f"用户问题：{question[:300]}\n\n"
                     f"原始回答：\n{answer[:2000]}\n\n"
+                    f"{fmt_hint}"
                     "请直接输出优化后的完整回答。如果原回答有明显错误，请在优化时一并修正。"
                 )
         else:
@@ -2175,6 +2314,7 @@ class Coordinator(Plugin):
                     "add a brief summary for long answers.\n\n"
                     f"User question: {question[:300]}\n\n"
                     f"Original answer:\n{answer[:2000]}\n\n"
+                    f"{fmt_hint}"
                     "Output the full polished answer directly. Fix any obvious errors while polishing."
                 )
 

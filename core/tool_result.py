@@ -58,7 +58,11 @@ class ToolResult:
     # --------------------------------------------------------------------
 
     def to_message(self) -> str:
-        """Format as a structured message for LLM consumption."""
+        """Format as a structured message for LLM consumption.
+
+        Gap 修复：当 truncated=True 时，截断 body 到 3000 字符，
+        避免把 10KB 的 web_search 结果原样喂给 LLM 浪费 token。
+        """
         if self.status == "success":
             header = f"[{self.tool_name} 执行成功"
             if self.duration_ms > 0:
@@ -68,7 +72,7 @@ class ToolResult:
             header += "]"
             body = str(self.data) if self.data else "(empty result)"
             if self.truncated:
-                body += "\n[... 结果已截断]"
+                body = body[:3000] + "\n[... 结果已截断，完整内容 {:.0f} 字符]".format(len(str(self.data or "")))
             return f"{header}\n{body}"
         elif self.status == "error":
             return f"[{self.tool_name} 执行失败] {self.error or '未知错误'}"
