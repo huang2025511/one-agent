@@ -443,7 +443,8 @@ class SystemExecutor(BaseExecutor):
 
         简化后的策略：
         - Level 0 (SAFE): 免密码，始终允许
-        - Level 1+ (LOW/MEDIUM/DANGEROUS): 需要密码，验证通过后缓存 60 分钟
+        - Level 1 (LOW): 当未配置密码时自动允许（git status/log/diff 等只读操作）
+        - Level 2+ (MEDIUM/DANGEROUS): 需要密码，验证通过后缓存 60 分钟
           （只要对话框不关闭，60 分钟内不需要再次输入）
         """
         mgr = self._pwd_manager
@@ -452,7 +453,12 @@ class SystemExecutor(BaseExecutor):
         if risk_level == 0:
             return (True, False)
 
-        # No password manager configured → block non-safe
+        # LOW level: allow without password when no password is configured
+        if risk_level == 1:
+            if mgr is None or not mgr._password_hash:
+                return (True, False)
+
+        # No password manager configured → block medium/dangerous
         if mgr is None:
             return (False, True)
 

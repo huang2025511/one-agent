@@ -62,7 +62,27 @@ _CODE_HINT = re.compile(
 )
 
 _COMPLEXITY_BOOST = re.compile(
-    r"\b(详细|深入|完整|全面|严谨|精确|准确|具体)\b",
+    r"(?:详细|深入|完整|全面|严谨|精确|准确|具体)",
+    re.IGNORECASE,
+)
+
+# 动手类动词 — 需要实际操作（工具/命令/文件），不能纯靠嘴炮回答
+# 注意：\b 不适用于中文字符，所以中文词不用 \b
+_ACTION_VERBS = re.compile(
+    r"(?:对比|检查|验证|测试|执行|运行|安装|下载|部署|同步|推送|提交|"
+    r"更新|查看|读取|写入|修改|删除|创建|生成|编译|打包|计算|搜索|"
+    r"开发|实现|编写|搭建|配置|调试|排查|修复|"
+    r"compare|check|verify|test|run|execute|install|download|deploy|"
+    r"sync|push|commit|update|read|write|modify|delete|create|generate|"
+    r"compile|build|pack|search|develop|implement|debug|fix)",
+    re.IGNORECASE,
+)
+
+# 系统操作关键词 — 需要 system_run 或文件操作
+_SYSTEM_HINT = re.compile(
+    r"(?:gitee|github|git|repo|仓库|文件|目录|文件夹|路径|"
+    r"本地|远程|服务器|终端|命令行|shell|bash|"
+    r"config|配置|\.py|\.js|\.ts|\.yaml|\.json|\.md)",
     re.IGNORECASE,
 )
 
@@ -143,8 +163,29 @@ class SmartRouter(Plugin):
                 )
         # 5) 选模型 + cap token budget
         model = self._llm.model_for_tier(tier) if self._llm else None
+        # 5.1) 工具支持检测：如果任务需要工具但模型不支持，自动升级 tier
+        needs_tools = _ACTION_VERBS.search(turn.input_text) or _SYSTEM_HINT.search(turn.input_text)
+        if needs_tools and model and self._llm and not self._llm.model_supports_tools(model):
+            old_tier = tier
+            tier_order = ["trivial", "simple", "complex", "expert"]
+            idx = tier_order.index(tier) if tier in tier_order else 1
+            # 逐级升级直到找到支持工具的模型
+            for new_idx in range(idx + 1, len(tier_order)):
+                candidate = self._llm.model_for_tier(tier_order[new_idx])
+                if candidate and self._llm.model_supports_tools(candidate):
+                    tier = tier_order[new_idx]
+                    model = candidate
+                    turn.meta["tool_support_upgraded_from"] = old_tier
+                    logger.info(
+                        "router: tool-support upgrade %s → %s (model %s doesn't support tools)",
+                        old_tier, tier, turn.model,
+                    )
+                    break
         turn.model = model  # None is fine — chat_completion falls back to default model
         turn.token_budget = self._token_budget_for(tier)
+        # 6) 检测系统操作需求，自动标记需要 OS 模式
+        if _SYSTEM_HINT.search(turn.input_text):
+            turn.meta["needs_system_access"] = True
         self._tier_stats[tier]["picked"] += 1
         logger.info("router: complexity=%.2f tier=%s model=%s",
                     turn.estimated_complexity, tier, turn.model)
@@ -245,6 +286,12 @@ class SmartRouter(Plugin):
             score += 0.15
         if _COMPLEXITY_BOOST.search(t):
             score += 0.1
+        # 动手类动词 — 需要工具调用，至少 simple 级别
+        if _ACTION_VERBS.search(t):
+            score += 0.2
+        # 系统操作关键词 — 需要 system_run，至少 simple 级别
+        if _SYSTEM_HINT.search(t):
+            score += 0.15
         if _KEYWORDS_BY_TIER["trivial"].search(t) and length < 60:
             score -= 0.3
         paragraphs = sum(1 for p in t.split("\n") if p.strip())

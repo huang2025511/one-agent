@@ -881,6 +881,7 @@ class Coordinator(Plugin):
         to the tool list so the LLM can directly call it for system operations.
 
         Enhanced: auto-add python_execute for computational tasks, increase limit to 6.
+        Auto-enable system_run when router detects system access needs.
         """
 
         tools: List[Dict[str, Any]] = []
@@ -892,7 +893,9 @@ class Coordinator(Plugin):
             python_execute = self._skills.get("python_execute")
             if python_execute and python_execute not in chosen:
                 chosen.append(python_execute)
-            if self._os_mode_enabled:
+            # OS mode: explicit enable OR auto-detected by router
+            needs_sys = self._os_mode_enabled or turn.meta.get("needs_system_access")
+            if needs_sys:
                 system_run = self._skills.get("system_run")
                 if system_run and system_run not in chosen:
                     chosen.append(system_run)
