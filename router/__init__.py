@@ -130,9 +130,10 @@ class SmartRouter(Plugin):
         turn: TurnContext | None = event.get("turn")
         if turn is None or turn.result is not None:
             return
-        # 1) classify complexity
-        turn.estimated_complexity = self._classify(turn.input_text)
+        # 1) classify complexity — LLM-based with heuristic fast-path
+        turn.estimated_complexity, intent_meta = await self._classify_smart(turn.input_text)
         tier = self._tier_for_complexity(turn.estimated_complexity)
+        turn.meta.update(intent_meta)
         # 2) build messages + compress history
         turn.messages = self._build_messages(turn)
         # 3) pass context_compression config to coordinator via turn.meta
@@ -164,7 +165,7 @@ class SmartRouter(Plugin):
         # 5) 选模型 + cap token budget
         model = self._llm.model_for_tier(tier) if self._llm else None
         # 5.1) 工具支持检测：如果任务需要工具但模型不支持，自动升级 tier
-        needs_tools = _ACTION_VERBS.search(turn.input_text) or _SYSTEM_HINT.search(turn.input_text)
+        needs_tools = intent_meta.get("needs_tools", False)
         if needs_tools and model and self._llm and not self._llm.model_supports_tools(model):
             old_tier = tier
             old_model = model
@@ -208,7 +209,7 @@ class SmartRouter(Plugin):
         turn.model = model  # None is fine — chat_completion falls back to default model
         turn.token_budget = self._token_budget_for(tier)
         # 6) 检测系统操作需求，自动标记需要 OS 模式
-        if _SYSTEM_HINT.search(turn.input_text):
+        if intent_meta.get("needs_system", False):
             turn.meta["needs_system_access"] = True
         self._tier_stats[tier]["picked"] += 1
         logger.info("router: complexity=%.2f tier=%s model=%s",
@@ -286,12 +287,137 @@ class SmartRouter(Plugin):
             logger.info("router statistics: tier distribution=%s", self._tier_stats)
 
     # --------------------------------------------------------- internal
-    def _classify(self, text: str) -> float:
-        """Heuristic 0..1 complexity score.
 
-        Keyword-only classifier — cheap, deterministic, and good enough for
-        the common case.  We intentionally keep it tiny so router overhead
-        never dominates the LLM bill.
+    # --- LLM-based intent classifier ---
+    # Cache: input_hash → (complexity, meta, timestamp)
+    _intent_cache: Dict[str, tuple] = {}
+    _INTENT_CACHE_TTL = 3600  # 1 hour
+    _INTENT_CACHE_MAX = 500
+
+    async def _classify_smart(self, text: str) -> tuple:
+        """LLM-based intent classification with heuristic fast-path.
+
+        Returns (complexity: float, meta: dict) where meta may contain:
+        - needs_tools: bool
+        - needs_system: bool
+        - task_type: str (chat/design/code/analysis/action/system)
+        - intent_source: 'fast_path' | 'llm' | 'fallback'
+
+        Strategy:
+        1. Fast-path: short messages (<15 chars) that look like greetings → 0.05
+        2. LLM classification: ask a cheap model to return JSON
+        3. Fallback: if LLM fails, use heuristic _classify()
+        """
+        t = text.strip()
+        if not t:
+            return 0.0, {"intent_source": "empty"}
+
+        # --- Fast path: ultra-short messages ---
+        if len(t) <= 15 and not any(c in t for c in "？?！!。.，,\n"):
+            # Greetings, acknowledgements — skip LLM entirely
+            greetings = ("你好", "嗨", "hi", "hello", "hey", "谢谢", "thanks",
+                         "ok", "好的", "嗯", "再见", "bye", "哈喽", "在吗")
+            if t.lower() in greetings or any(t.startswith(g) for g in greetings):
+                return 0.05, {
+                    "needs_tools": False,
+                    "needs_system": False,
+                    "task_type": "chat",
+                    "intent_source": "fast_path",
+                }
+
+        # --- LLM classification ---
+        if self._llm is None:
+            return self._classify_heuristic(t), {"intent_source": "fallback"}
+
+        # Check cache
+        import hashlib
+        cache_key = hashlib.md5(t.encode()).hexdigest()
+        cached = self._intent_cache.get(cache_key)
+        if cached:
+            complexity, meta, ts = cached
+            if time.time() - ts < self._INTENT_CACHE_TTL:
+                meta = {**meta, "intent_source": "cache"}
+                return complexity, meta
+
+        # Call LLM for classification
+        try:
+            complexity, meta = await self._llm_classify_intent(t)
+        except Exception:
+            logger.exception("LLM intent classification failed, falling back to heuristic")
+            complexity = self._classify_heuristic(t)
+            meta = {"needs_tools": False, "needs_system": False,
+                    "task_type": "unknown", "intent_source": "fallback"}
+
+        # Cache result
+        if len(self._intent_cache) >= self._INTENT_CACHE_MAX:
+            # Evict oldest entry
+            oldest = min(self._intent_cache, key=lambda k: self._intent_cache[k][2])
+            del self._intent_cache[oldest]
+        self._intent_cache[cache_key] = (complexity, meta, time.time())
+
+        return complexity, meta
+
+    async def _llm_classify_intent(self, text: str) -> tuple:
+        """Use a cheap LLM to classify user intent.
+
+        Returns (complexity: float, meta: dict).
+        """
+        prompt = (
+            "分析用户输入的意图，返回JSON格式（不要其他内容）。\n"
+            "字段说明：\n"
+            '- complexity: 0.0-1.0 复杂度（0=闲聊, 0.3=简单问答, 0.5=需要思考/设计/分析, 0.8=专家级复杂任务）\n'
+            '- needs_tools: 是否需要调用工具（搜索/计算/执行命令/读写文件）\n'
+            '- needs_system: 是否需要操作系统（git/文件/命令行/服务器）\n'
+            '- task_type: chat/design/code/analysis/action/system\n\n'
+            f"用户输入：{text[:500]}\n\n"
+            '只返回JSON，示例：{"complexity": 0.7, "needs_tools": true, "needs_system": false, "task_type": "design"}'
+        )
+
+        result = await self._llm.chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=None,  # use default (cheapest available)
+            temperature=0.0,
+            max_tokens=80,
+            tools=None,
+            use_cache=True,
+        )
+
+        raw = (result.get("text") or "").strip()
+        # Parse JSON from response
+        import json as _json
+
+        # Try to extract JSON from the response (model may wrap in markdown)
+        json_str = raw
+        if "```" in raw:
+            # Extract from code block
+            import re as _re
+            m = _re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, _re.DOTALL)
+            if m:
+                json_str = m.group(1)
+        # Find first { ... } if surrounded by other text
+        if not json_str.startswith("{"):
+            start = json_str.find("{")
+            end = json_str.rfind("}")
+            if start >= 0 and end > start:
+                json_str = json_str[start:end + 1]
+
+        data = _json.loads(json_str)
+
+        complexity = float(data.get("complexity", 0.3))
+        complexity = max(0.0, min(1.0, complexity))
+
+        meta = {
+            "needs_tools": bool(data.get("needs_tools", False)),
+            "needs_system": bool(data.get("needs_system", False)),
+            "task_type": str(data.get("task_type", "unknown")),
+            "intent_source": "llm",
+        }
+        return complexity, meta
+
+    def _classify_heuristic(self, text: str) -> float:
+        """Heuristic fallback — used when LLM is unavailable.
+
+        Kept as a safety net, not the primary classifier.
         """
         t = text.strip()
         if not t:
@@ -321,6 +447,9 @@ class SmartRouter(Plugin):
         paragraphs = sum(1 for p in t.split("\n") if p.strip())
         score += min(0.1, paragraphs * 0.02)
         return max(0.0, min(1.0, score))
+
+    # Backward-compatible alias for tests
+    _classify = _classify_heuristic
 
     def _tier_for_complexity(self, c: float) -> str:
         thresholds = self._cfg.get("task_complexity_thresholds", {}) or {}
