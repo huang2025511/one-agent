@@ -45,6 +45,25 @@ from core.batch import get_batch_processor
 from core.deep_research import get_deep_researcher
 from core.model_compare import get_model_comparer
 
+# Round 7: production reliability
+from core.circuit_breaker import get_circuit_manager, CircuitConfig, CircuitOpenError
+from core.backoff import ExponentialBackoff, BackoffConfig, llm_backoff, search_backoff
+from core.alerting import get_alert_manager
+
+# Round 7: tool ecosystem
+from skills.email import get_email_skill
+from skills.calendar import get_calendar_skill
+from skills.database import get_database_skill
+from skills.mcp_server import get_mcp_server
+from skills.openapi import get_openapi_skill
+
+# Round 7: intelligence depth
+from core.rag_advanced import get_advanced_rag
+from core.agent_mesh import get_agent_mesh
+from core.workflow_engine import get_workflow_engine
+from core.chart_gen import get_chart_generator
+from core.conv_branch import get_branch_manager
+
 logger = logging.getLogger(__name__)
 
 # Coordinator configuration constants
@@ -114,6 +133,19 @@ class Coordinator(Plugin):
         self._regeneration_count: Dict[str, int] = {}
         # Track proactive plans per session
         self._proactive_plans: Dict[str, List[str]] = {}
+        # Round 7: new feature instances
+        self._circuit_mgr: Optional[Any] = None
+        self._alert_mgr: Optional[Any] = None
+        self._email_skill: Optional[Any] = None
+        self._calendar_skill: Optional[Any] = None
+        self._database_skill: Optional[Any] = None
+        self._mcp_server: Optional[Any] = None
+        self._openapi_skill: Optional[Any] = None
+        self._advanced_rag: Optional[Any] = None
+        self._agent_mesh: Optional[Any] = None
+        self._workflow_engine: Optional[Any] = None
+        self._chart_gen: Optional[Any] = None
+        self._branch_mgr: Optional[Any] = None
 
     # ------------------------------------------------------------ setup
     async def setup(self, ctx) -> None:
@@ -456,6 +488,23 @@ class Coordinator(Plugin):
         "compare": "_model_compare", "对比": "_model_compare", "模型对比": "_model_compare",
         "compare-models": "_model_compare", "ab": "_model_compare",
         "eval": "_eval", "评估": "_eval", "evaluate": "_eval", "评分": "_eval",
+        # ---------- Round 7: 新功能命令 ----------
+        # Email & Calendar
+        "email": "_email", "邮件": "_email", "mail": "_email",
+        "calendar": "_calendar", "日历": "_calendar", "日程": "_calendar",
+        # Database
+        "db": "_db", "database": "_db", "数据库": "_db", "sql": "_db",
+        # MCP & OpenAPI
+        "mcp": "_mcp", "mcp_server": "_mcp",
+        "openapi": "_openapi", "api": "_openapi",
+        # Agent mesh & workflow
+        "mesh": "_agent_mesh", "agent_mesh": "_agent_mesh", "multi_agent": "_agent_mesh",
+        "workflow": "_workflow", "wfl": "_workflow", "流程": "_workflow",
+        # Charts & branching
+        "chart": "_chart", "图表": "_chart", "diagram": "_chart", "mermaid": "_chart",
+        "branch": "_branch", "分支": "_branch", "fork": "_branch",
+        "branch_switch": "_branch_switch", "切换分支": "_branch_switch",
+        "branch_list": "_branch_list", "分支列表": "_branch_list",
     }
 
     async def _maybe_direct_skill_dispatch(self, turn: TurnContext) -> bool:
@@ -654,6 +703,52 @@ class Coordinator(Plugin):
             return True
         if skill_id == "_eval":
             await self._handle_eval(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+
+        # ---- Round 7: new feature commands ----
+        if skill_id == "_email":
+            await self._handle_email(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_calendar":
+            await self._handle_calendar(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_db":
+            await self._handle_db(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_mcp":
+            await self._handle_mcp(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_openapi":
+            await self._handle_openapi(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_agent_mesh":
+            await self._handle_agent_mesh(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_workflow":
+            await self._handle_workflow(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_chart":
+            await self._handle_chart(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_branch":
+            await self._handle_branch(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_branch_switch":
+            await self._handle_branch_switch(turn, args_text)
+            self.publish("turn_completed", turn=turn)
+            return True
+        if skill_id == "_branch_list":
+            await self._handle_branch_list(turn)
             self.publish("turn_completed", turn=turn)
             return True
 
@@ -3477,3 +3572,214 @@ class Coordinator(Plugin):
         """Get the proactive plan for the next turn, then clear it."""
         plan = self._proactive_plans.pop(session_id, None)
         return plan
+
+    # ================================================================
+    # Round 7: Production Reliability + Tool Ecosystem + Intelligence Depth
+    # ================================================================
+
+    # --------------------------------------------------- Email handler
+    async def _handle_email(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        skill = get_email_skill()
+        parts = args_text.strip().split(None, 1)
+        action = parts[0].lower() if parts else "read"
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if action == "read":
+            msgs = await skill.read_inbox(limit=10)
+            if not msgs:
+                turn.result = "收件箱为空" if zh else "Inbox is empty"
+            else:
+                turn.result = "\n\n---\n\n".join(
+                    f"[{m.date}] {m.sender} → {m.subject}\n{m.body[:200]}"
+                    for m in msgs
+                )
+        elif action == "send":
+            turn.result = "用法: /email send <收件人> <主题> <正文>" if zh else "Usage: /email send <to> <subject> <body>"
+        elif action == "search":
+            msgs = await skill.search(rest)
+            turn.result = "\n\n---\n\n".join(
+                f"[{m.date}] {m.sender} → {m.subject}" for m in msgs
+            ) if msgs else "未找到" if zh else "Not found"
+        else:
+            turn.result = "用法: /email read|send|search" if zh else "Usage: /email read|send|search"
+        turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- Calendar handler
+    async def _handle_calendar(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        skill = get_calendar_skill()
+        parts = args_text.strip().split(None, 1)
+        action = parts[0].lower() if parts else "list"
+
+        if action == "list" or action == "today":
+            events = await skill.list_today()
+            turn.result = "今日日程:\n" + skill.format_events(events)
+        elif action == "week":
+            events = await skill.list_this_week()
+            turn.result = "本周日程:\n" + skill.format_events(events)
+        elif action == "create":
+            turn.result = "用法: /calendar create <标题> <开始时间> [结束时间]" if zh else "Usage: /calendar create <title> <start> [end]"
+        else:
+            turn.result = "用法: /calendar list|today|week|create" if zh else "Usage: /calendar list|today|week|create"
+        turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- Database handler
+    async def _handle_db(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        skill = get_database_skill()
+        parts = args_text.strip().split(None, 1)
+        action = parts[0].lower() if parts else "tables"
+        rest = parts[1] if len(parts) > 1 else ""
+
+        if action == "tables":
+            result = await skill.list_tables()
+            if result.get("ok"):
+                tables = [r[0] for r in result.get("rows", [])]
+                turn.result = "数据库表:\n" + "\n".join(f"  - {t}" for t in tables)
+            else:
+                turn.result = f"获取失败: {result.get('error')}"
+        elif action == "query":
+            result = await skill.query(sql=rest)
+            turn.result = skill._format_result(result) if result.get("ok") else f"查询失败: {result.get('error')}"
+        else:
+            turn.result = "用法: /db tables|query <sql>" if zh else "Usage: /db tables|query <sql>"
+        turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- MCP handler
+    async def _handle_mcp(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        server = get_mcp_server()
+        # Register current skills
+        if self._skills:
+            for name, skill in self._skills._skills.items():
+                server.register_skill(name, skill)
+        turn.result = (
+            f"MCP Server 就绪。已注册 {len(server._skills)} 个工具。\n"
+            f"使用: /mcp start 启动服务器"
+            if zh else
+            f"MCP Server ready. {len(server._skills)} tools registered.\n"
+            f"Use: /mcp start to start the server"
+        )
+        turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- OpenAPI handler
+    async def _handle_openapi(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        skill = get_openapi_skill()
+        parts = args_text.strip().split(None, 2)
+        action = parts[0].lower() if parts else "list"
+
+        if action == "load" and len(parts) >= 2:
+            result = await skill.load_from_url(name=parts[1] if len(parts) > 1 else "default", url=parts[-1])
+            if result.get("ok"):
+                turn.result = f"已加载: {result['title']} ({result['endpoints_count']} 端点)"
+            else:
+                turn.result = f"加载失败: {result.get('error')}"
+        elif action == "list":
+            endpoints = skill.list_endpoints("default")
+            if endpoints:
+                turn.result = "\n".join(f"  {e['method']} {e['path']}" for e in endpoints[:20])
+            else:
+                turn.result = "未加载 API。用法: /openapi load <url>" if zh else "No API loaded. Usage: /openapi load <url>"
+        else:
+            turn.result = "用法: /openapi load <url> | list | search <keyword>" if zh else "Usage: /openapi load <url> | list | search <keyword>"
+        turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- Agent mesh handler
+    async def _handle_agent_mesh(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        if not args_text.strip():
+            turn.result = (
+                "用法: /mesh <复杂任务描述>\n使用多个专业Agent协作完成任务"
+                if zh else "Usage: /mesh <complex task description>"
+            )
+            return
+        if self._llm is None:
+            turn.result = "[LLM not initialized]"
+            return
+        mesh = get_agent_mesh(self._llm, self._skills)
+        self._emit_progress(turn, "多智能体协作中...", "agent_mesh")
+        result = await mesh.solve(args_text.strip(), model=turn.model)
+        turn.result = mesh.format_result(result)
+        turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- Workflow handler
+    async def _handle_workflow(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        if not args_text.strip():
+            turn.result = (
+                "用法: /workflow <JSON工作流定义>\n"
+                "示例: {\"name\":\"test\",\"steps\":[{\"id\":\"s1\",\"type\":\"llm_call\",\"prompt\":\"Hello\"}]}"
+                if zh else "Usage: /workflow <JSON workflow definition>"
+            )
+            return
+        if self._llm is None:
+            turn.result = "[LLM not initialized]"
+            return
+        import json
+        try:
+            workflow = json.loads(args_text.strip())
+        except json.JSONDecodeError:
+            turn.result = "无效的JSON格式" if zh else "Invalid JSON format"
+            return
+        engine = get_workflow_engine(self._llm, self._skills)
+        self._emit_progress(turn, "执行工作流...", "workflow")
+        result = await engine.execute(workflow)
+        turn.result = f"工作流完成: {result.status.value}\n耗时: {result.total_duration_ms:.0f}ms\n步骤: {len(result.steps)}"
+        turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- Chart handler
+    async def _handle_chart(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        gen = get_chart_generator()
+        if not args_text.strip():
+            turn.result = (
+                "用法: /chart <类型> <JSON数据>\n"
+                "类型: flowchart, sequence, pie, gantt, timeline, mindmap, bar, line"
+                if zh else "Usage: /chart <type> <JSON data>"
+            )
+            return
+        parts = args_text.strip().split(None, 1)
+        chart_type = parts[0]
+        data = {}
+        if len(parts) > 1:
+            import json
+            try:
+                data = json.loads(parts[1])
+            except json.JSONDecodeError:
+                pass
+        turn.result = gen.generate_mermaid(chart_type, data) if chart_type in ("flowchart", "sequence", "pie", "gantt", "timeline", "mindmap") else "不支持的图表类型"
+        turn.record_success(turn.result, 0)
+
+    # --------------------------------------------------- Branch handlers
+    async def _handle_branch(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        mgr = get_branch_manager()
+        branch_id = mgr.branch(turn.session_id, "", args_text.strip() or "branch")
+        tree = mgr.get_tree(turn.session_id)
+        turn.result = (
+            f"已创建分支: {branch_id}\n" + tree.visualize()
+            if zh else f"Branch created: {branch_id}\n" + tree.visualize()
+        )
+        turn.record_success(turn.result, 0)
+
+    async def _handle_branch_switch(self, turn: TurnContext, args_text: str) -> None:
+        zh = self._is_zh()
+        mgr = get_branch_manager()
+        ok = mgr.switch_branch(turn.session_id, args_text.strip())
+        turn.result = f"已切换到分支: {args_text.strip()}" if ok else f"分支 '{args_text.strip()}' 不存在"
+        turn.record_success(turn.result, 0)
+
+    async def _handle_branch_list(self, turn: TurnContext) -> None:
+        mgr = get_branch_manager()
+        tree = mgr.get_tree(turn.session_id)
+        branches = tree.list_branches()
+        if not branches:
+            turn.result = "暂无分支"
+        else:
+            turn.result = "分支列表:\n" + "\n".join(
+                f"  {'→ ' if b['is_active'] else '  '}{b['name']}: {b['messages']} 条消息"
+                for b in branches
+            )
+        turn.record_success(turn.result, 0)
