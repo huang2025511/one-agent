@@ -401,11 +401,29 @@ class Coordinator(Plugin):
         turn.result = msg
 
     async def _enable_os_mode(self, turn: TurnContext, password: str) -> bool:
-        """Verify password and enable OS mode for this session."""
+        """Verify password and enable OS mode for this session.
+
+        When no password is configured (security.system_executor_password is empty),
+        OS mode is automatically enabled since SAFE commands don't require password.
+        This allows the system to automatically enter OS mode when the router
+        detects system operation needs, without requiring user password input.
+        """
         if self._skills is None:
             return False
         try:
-            # 通过 system_unlock 技能验证密码（会缓存授权）
+            # Check if password is configured
+            has_password = False
+            if self.ctx and hasattr(self.ctx, "config"):
+                sec_cfg = getattr(self.ctx.config, "get", lambda k, d: d)("security", {})
+                stored_hash = str(sec_cfg.get("system_executor_password", "") or "")
+                has_password = bool(stored_hash) and (
+                    len(stored_hash) == 64 or stored_hash.startswith("pbkdf2_sha256$")
+                )
+
+            if not has_password:
+                logger.info("OS mode auto-enabled (no password configured)")
+                return True
+
             result = await self._skills.dispatch("system_unlock", {"password": password})
             ok = "成功" in str(result) or "success" in str(result).lower() or "✅" in str(result)
             if ok:
@@ -964,6 +982,17 @@ class Coordinator(Plugin):
 
         messages = await self._prepare_messages(turn)
         tools = self._prepare_tools(turn)
+
+        # --- Auto-enable OS mode when router detects system operation needs ---
+        # If the router classified this turn as needing system access,
+        # automatically enable OS mode (password is optional if not configured)
+        if not self._os_mode_enabled and turn.meta.get("needs_system"):
+            os_enabled = await self._enable_os_mode(turn, "")
+            if os_enabled:
+                self._os_mode_enabled = True
+                logger.info("OS mode auto-enabled based on router intent classification")
+                # Re-prepare tools now that OS mode is enabled
+                tools = self._prepare_tools(turn)
 
         # 深度审计 P2-5 修复：把安全提示注入 system 消息, 让 LLM 真正看到注入防御指令
         safety_report = turn.meta.get("safety_report")
