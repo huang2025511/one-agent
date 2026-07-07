@@ -899,6 +899,102 @@ class SkillManager(Plugin):
             handler=system_lock_handler,
         ))
 
+        # ---------- 主动消息推送技能 ----------
+        async def send_message_handler(args: Dict[str, Any]) -> str:
+            """主动发送消息到当前对话的用户。使用方式: 作为工具被LLM调用
+
+            当 Agent 需要主动通知用户任务完成、发送提醒、或推送消息时，
+            调用此工具即可。消息会通过用户当前使用的网关（微信、Telegram等）发送。
+            """
+            text = str(args.get("text", "")).strip()
+            chat_id = str(args.get("chat_id", "")).strip()
+            gateway = str(args.get("gateway", "")).strip()
+
+            if not text:
+                return "错误: text 参数不能为空"
+
+            # 从 contextvars 中获取当前 turn 的 session_id 来推断 chat_id 和 gateway
+            if not chat_id:
+                try:
+                    from core.context import current_turn_var
+                    current_turn = current_turn_var.get()
+                    if current_turn is not None:
+                        session_id = getattr(current_turn, "session_id", "")
+                        # session_id 格式通常是 "gateway-chat_id"，比如 "wechat-xxx"
+                        parts = session_id.split("-", 1)
+                        if len(parts) == 2:
+                            if not gateway:
+                                # 从 session_id 前缀推断网关
+                                gw_prefix = parts[0]
+                                gateway_map = {
+                                    "wechat": "wechat_personal",
+                                    "telegram": "telegram",
+                                    "wecom": "wecom",
+                                    "feishu": "feishu",
+                                    "dingtalk": "dingtalk",
+                                    "discord": "discord",
+                                    "slack": "slack",
+                                }
+                                gateway = gateway_map.get(gw_prefix, "")
+                            if not chat_id:
+                                chat_id = parts[1]
+                except Exception:
+                    pass
+
+            if not chat_id:
+                return "错误: 无法确定目标 chat_id，请显式指定 chat_id 参数"
+
+            # 发布事件到事件总线，由对应网关处理发送
+            ctx_ref = getattr(self, "_ctx_ref", None)
+            if ctx_ref is not None and hasattr(ctx_ref, "bus"):
+                try:
+                    ctx_ref.bus.publish({
+                        "type": "bot_send_message",
+                        "chat_id": chat_id,
+                        "text": text,
+                        "gateway": gateway,
+                        "source": "skill:send_message",
+                    })
+                    return f"✅ 消息已发送（chat_id: {chat_id[:8]}...)"
+                except Exception as exc:
+                    return f"发送失败: {exc}"
+
+            return "发送失败: 事件总线不可用"
+
+        self.register(Skill(
+            id="send_message", title="主动发消息",
+            description="主动向用户发送消息/通知/提醒，无需等待用户提问。"
+                        "适用于：任务完成通知、定时提醒、异步结果推送、"
+                        "主动告知进度、发送警示信息等场景。"
+                        "调用此工具会立即通过当前对话渠道发送消息。",
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "description": "主动向用户发送消息（通知、提醒、任务完成等）",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "要发送的消息内容",
+                            },
+                            "chat_id": {
+                                "type": "string",
+                                "description": "目标用户/群组ID（可选，默认发给当前对话者）",
+                            },
+                            "gateway": {
+                                "type": "string",
+                                "description": "目标网关（可选，如 wechat_personal、telegram 等）",
+                            },
+                        },
+                        "required": ["text"],
+                    },
+                },
+            },
+            handler=send_message_handler,
+        ))
+
     def _seed_lifecycle_skills(self) -> None:
         # ---------- 更新技能 ----------
         async def updater_handler(args: Dict[str, Any]) -> str:

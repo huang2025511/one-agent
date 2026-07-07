@@ -147,6 +147,7 @@ class EventBus:
         "user_message",
         # Gateway / external messages
         "external_message",
+        "bot_send_message",
     }
 
     @classmethod

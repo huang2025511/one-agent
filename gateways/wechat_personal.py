@@ -313,6 +313,7 @@ class WeChatPersonalGateway(Plugin):
 
         self.bus.subscribe("turn_completed", self._on_turn_completed)
         self.bus.subscribe("turn_progress", self._on_turn_progress)
+        self.bus.subscribe("bot_send_message", self._on_bot_send_message)
 
     def _find_saved_account(self) -> Optional[Dict[str, Any]]:
         logger.info("wechat_personal: _find_saved_account, dir=%s, exists=%s", DATA_DIR, DATA_DIR.exists())
@@ -892,6 +893,33 @@ class WeChatPersonalGateway(Plugin):
             return
         self._progress_last_sent[chat_id] = now
         self._progress_count[chat_id] = count + 1
+
+    async def _on_bot_send_message(self, event) -> None:
+        """Handle proactive bot-send-message events from skills/tools.
+
+        Any skill or component can publish a ``bot_send_message`` event
+        to the event bus, and the gateway will deliver it to the target
+        chat.  This enables proactive notifications, task completion
+        alerts, scheduled reminders, etc.
+
+        Event payload:
+            chat_id (str): target user / group identifier
+            text (str): message content
+            gateway (str, optional): target gateway name ("wechat_personal" etc.)
+        """
+        target_gateway = event.get("gateway") or ""
+        if target_gateway and target_gateway != "wechat_personal":
+            return
+        chat_id = event.get("chat_id") or ""
+        text = event.get("text") or ""
+        if not chat_id or not text:
+            logger.debug("wechat_personal: bot_send_message missing chat_id or text")
+            return
+        try:
+            ok = await self.send(chat_id, text, use_context_token=False)
+            logger.info("wechat_personal: proactive message sent to %s, ok=%s", chat_id[:8], ok)
+        except Exception as exc:
+            logger.warning("wechat_personal: proactive message failed: %s", exc)
 
     def _start_heartbeat(self, chat_id: str) -> None:
         """启动心跳任务：10 秒后还没回复就发一次"正在处理"。"""

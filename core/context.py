@@ -8,12 +8,17 @@ separate prevents a single turn from polluting global state.
 
 from __future__ import annotations
 
+import contextvars
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .events import EventBus
+
+current_turn_var: contextvars.ContextVar[Optional["TurnContext"]] = contextvars.ContextVar(
+    "current_turn", default=None
+)
 
 
 @dataclass

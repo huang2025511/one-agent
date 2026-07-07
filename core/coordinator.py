@@ -931,6 +931,14 @@ class Coordinator(Plugin):
         This is orthogonal to model tier selection — both work together:
         e.g., an expert task gets both the strongest model AND multi-agent execution.
         """
+        from core.context import current_turn_var
+        token = current_turn_var.set(turn)
+        try:
+            await self._run_turn_inner(turn)
+        finally:
+            current_turn_var.reset(token)
+
+    async def _run_turn_inner(self, turn: TurnContext) -> None:
         if turn.input_text is None:
             raise RuntimeError("turn.input_text cannot be None")
 
@@ -1554,7 +1562,7 @@ class Coordinator(Plugin):
         if self._skills is not None:
             chosen = self._skills.pick_relevant(turn.input_text, limit=6)
             # Core tools — always available regardless of keyword match
-            for core_id in ("web_search", "python_execute", "calc"):
+            for core_id in ("web_search", "python_execute", "calc", "send_message"):
                 core = self._skills.get(core_id)
                 if core and core not in chosen:
                     chosen.insert(0, core)
