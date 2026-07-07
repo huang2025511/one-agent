@@ -291,6 +291,17 @@ class SmartRouter(Plugin):
                     "intent_source": "fast_path",
                 }
 
+        # --- Fast path: OS mode requests ---
+        os_mode_triggers = ("os", "os模式", "os-mode", "系统权限", "系统操作",
+                            "开 os", "开启os", "开启系统", "开启权限")
+        if any(trigger in t for trigger in os_mode_triggers):
+            return 0.3, {
+                "needs_tools": True,
+                "needs_system": True,
+                "task_type": "system",
+                "intent_source": "fast_path_os",
+            }
+
         # --- LLM classification ---
         if self._llm is None:
             return self._classify_heuristic(t), {"intent_source": "fallback"}
@@ -692,6 +703,11 @@ class SmartRouter(Plugin):
                 "4. 评估体系：系统内置 LLM 裁判，可对回答进行多维度评分（准确性、完整性、相关性、安全性、清晰度）。\n"
                 "5. 用户可以使用 /retry（重新生成回答）、/deep（深度研究）、/batch（批量处理）、\n"
                 "   /compare（模型对比）、/eval（评估回答质量）等命令。\n\n"
+                "【OS 模式 — 操作系统权限】\n"
+                "要执行系统命令（pip install、apt-get、curl、脚本运行等），需要先开启 OS 模式。\n"
+                "用法: /os-on <密码>（密码在 config/default_config.yaml 的 security 段配置）\n"
+                "开启后，你可以直接调用 system_run 工具执行系统命令。\n"
+                "使用 /os-off 关闭，/os-mode 查看当前状态。\n\n"
                 "【智能路由 — 4 层模型选择】\n"
                 "系统使用 4 层智能路由，根据任务复杂度选择模型：\n"
                 "  trivial（极简单）→ 轻量模型（快、省）\n"
@@ -785,6 +801,12 @@ class SmartRouter(Plugin):
                 "   (accuracy, completeness, relevance, safety, clarity).\n"
                 "5. Users can use /retry (regenerate), /deep (deep research), /batch (batch processing),\n"
                 "   /compare (model comparison), /eval (evaluate answer quality) commands.\n\n"
+                "【OS Mode — System Operation Permissions】\n"
+                "To execute system commands (pip install, apt-get, curl, script running, etc.),\n"
+                "you need to enable OS mode first. Usage: /os-on <password> (password is configured\n"
+                "in config/default_config.yaml under the security section). After enabling,\n"
+                "you can directly call the system_run tool to execute system commands.\n"
+                "Use /os-off to disable, /os-mode to check current status.\n\n"
                 "【Smart Router — 4-Layer Model Selection】\n"
                 "The system uses a 4-layer smart router that selects models based on task complexity:\n"
                 "  trivial → lightweight model (fast, cheap)\n"
