@@ -298,8 +298,22 @@ class SmartRouter(Plugin):
             return 0.3, {
                 "needs_tools": True,
                 "needs_system": True,
+                "needs_settings": False,
                 "task_type": "system",
                 "intent_source": "fast_path_os",
+            }
+
+        # --- Fast path: settings requests ---
+        settings_triggers = ("设置", "配置", "温度", "模型", "缓存", "参数",
+                             "调整", "改成", "改为", "设为", "修改", "查看配置",
+                             "查看设置", "temperature", "model", "cache", "api_key")
+        if any(trigger in t for trigger in settings_triggers):
+            return 0.3, {
+                "needs_tools": True,
+                "needs_system": False,
+                "needs_settings": True,
+                "task_type": "settings",
+                "intent_source": "fast_path_settings",
             }
 
         # --- LLM classification ---
@@ -346,9 +360,10 @@ class SmartRouter(Plugin):
             '- complexity: 0.0-1.0 复杂度（0=闲聊, 0.3=简单问答, 0.5=需要思考/设计/分析, 0.8=专家级复杂任务）\n'
             '- needs_tools: 是否需要调用工具（搜索/计算/执行命令/读写文件）\n'
             '- needs_system: 是否需要操作系统（git/文件/命令行/服务器）\n'
-            '- task_type: chat/design/code/analysis/action/system\n\n'
+            '- needs_settings: 是否需要修改或查看Agent配置（模型、温度、缓存、API Key等设置）\n'
+            '- task_type: chat/design/code/analysis/action/system/settings\n\n'
             f"用户输入：{text[:500]}\n\n"
-            '只返回JSON，示例：{"complexity": 0.7, "needs_tools": true, "needs_system": false, "task_type": "design"}'
+            '只返回JSON，示例：{"complexity": 0.7, "needs_tools": true, "needs_system": false, "needs_settings": false, "task_type": "design"}'
         )
 
         result = await self._llm.chat_completion(
@@ -392,6 +407,7 @@ class SmartRouter(Plugin):
             return complexity, {
                 "needs_tools": False,
                 "needs_system": False,
+                "needs_settings": False,
                 "task_type": "unknown",
                 "intent_source": "fallback",
             }
@@ -405,6 +421,7 @@ class SmartRouter(Plugin):
         meta = {
             "needs_tools": bool(data.get("needs_tools", False)),
             "needs_system": bool(data.get("needs_system", False)),
+            "needs_settings": bool(data.get("needs_settings", False)),
             "task_type": str(data.get("task_type", "unknown")),
             "intent_source": "llm",
         }

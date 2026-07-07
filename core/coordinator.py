@@ -1515,6 +1515,10 @@ class Coordinator(Plugin):
         When OS mode is enabled (via /os-on) or the router detects system
         access needs, system_run is also auto-added so the LLM can directly
         call it for system operations.
+
+        When the router detects settings intent (needs_settings), the settings
+        tool is auto-added so the LLM can modify/view Agent configuration
+        via natural language commands.
         """
 
         tools: List[Dict[str, Any]] = []
@@ -1531,6 +1535,11 @@ class Coordinator(Plugin):
                 system_run = self._skills.get("system_run")
                 if system_run and system_run not in chosen:
                     chosen.append(system_run)
+            # Settings: auto-add when router detects settings intent
+            if turn.meta.get("needs_settings"):
+                settings = self._skills.get("settings")
+                if settings and settings not in chosen:
+                    chosen.append(settings)
             turn.skills = [s.id for s in chosen]
             tools = [s.schema for s in chosen]
         else:

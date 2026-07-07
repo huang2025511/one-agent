@@ -987,7 +987,10 @@ class SkillManager(Plugin):
 
         self.register(Skill(
             id="settings", title="Settings Manager",
-            description="/settings 或 /设置：读取或修改 Agent 配置（模型、温度、网关开关等）",
+            description="读取或修改 Agent 配置设置，包括模型、温度、网关开关、API Key、缓存等。"
+                        "支持自然语言操作：查看模型、把温度改为0.7、设置默认模型、开启缓存、"
+                        "关闭网关、配置API密钥、修改配置、调整参数、查看配置、查看设置、"
+                        "temperature、model、cache、gateway、api_key、config、设置、配置、参数、调整",
             schema={
                 "type": "function",
                 "function": {
