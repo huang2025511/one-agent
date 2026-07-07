@@ -248,8 +248,9 @@ class LLMProvider(RecommendationMixin, Plugin):
 
         # Pre-seed models known to NOT support tool calling (based on model name).
         # This avoids wasting a failed request on the first turn.
+        # Note: deepseek-v4-flash IS in the whitelist (_tools_models) because it supports tools.
         _KNOWN_NO_TOOLS = [
-            "deepseek-v4-flash", "sensenova-6.7-flash-lite",
+            "sensenova-6.7-flash-lite",
             "sensenova-6.7-flash", "sensenova-default",
         ]
         for m in _KNOWN_NO_TOOLS:
@@ -380,6 +381,7 @@ class LLMProvider(RecommendationMixin, Plugin):
 
         Also includes a whitelist (_tools_models) for models that contain
         "-flash" or "-lite" but actually do support tools (e.g. deepseek-v4-flash).
+        The whitelist is checked FIRST to override any previous negative cache.
 
         Args:
             model: Full model string like "sensenova/deepseek-v4-flash"
@@ -390,10 +392,10 @@ class LLMProvider(RecommendationMixin, Plugin):
             False if it probably doesn't.
         """
         bare = model.split("/", 1)[1] if "/" in model else model
-        if bare in self._no_tools_models:
-            return False
         if bare in getattr(self, "_tools_models", set()):
             return True
+        if bare in self._no_tools_models:
+            return False
         for pat in self._no_tools_patterns:
             if pat.search(bare):
                 return False
@@ -1130,7 +1132,9 @@ class LLMProvider(RecommendationMixin, Plugin):
                                 response_format=response_format,
                             )
                             # Remember: this model doesn't support tools
-                            self._no_tools_models.add(bare_model)
+                            # Skip if in whitelist (don't cache false negatives)
+                            if bare_model not in getattr(self, "_tools_models", set()):
+                                self._no_tools_models.add(bare_model)
                             self._record_cost(
                                 model,
                                 result.get("tokens_used", 0),
@@ -1176,7 +1180,9 @@ class LLMProvider(RecommendationMixin, Plugin):
                                         response_format=response_format,
                                     )
                                     # Remember: this model doesn't support tools
-                                    self._no_tools_models.add(bare_model)
+                                    # Skip if in whitelist (don't cache false negatives)
+                                    if bare_model not in getattr(self, "_tools_models", set()):
+                                        self._no_tools_models.add(bare_model)
                                     self._record_cost(
                                         model,
                                         result.get("tokens_used", 0),
