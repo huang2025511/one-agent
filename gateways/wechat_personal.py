@@ -916,6 +916,9 @@ class WeChatPersonalGateway(Plugin):
             logger.debug("wechat_personal: bot_send_message missing chat_id or text")
             return
         try:
+            # use_context_token=False：iLink 的 context_token 是一次性的，
+            # 如果主动消息消耗了它，后续 _on_turn_completed 发送最终结果
+            # 时会被 iLink 静默丢弃。与心跳/进度消息保持一致策略。
             ok = await self.send(chat_id, text, use_context_token=False)
             logger.info("wechat_personal: proactive message sent to %s, ok=%s", chat_id[:8], ok)
         except Exception as exc:
