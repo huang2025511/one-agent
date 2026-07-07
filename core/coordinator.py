@@ -956,11 +956,11 @@ class Coordinator(Plugin):
         turn.meta["safety_report"] = safety_report
 
         if safety_report.pii_found:
-            # 关键修复：用脱敏后的文本替换原始输入, 否则 PII 仍会进入 LLM 上下文
-            original_input = turn.input_text
-            turn.input_text = safety_report.sanitized_text
-            turn.meta["safety_original_input"] = original_input  # 保留原始用于审计日志
-            logger.info("safety: detected %d PII types, input sanitized: %s",
+            # 保留原始输入不替换 —— PII 脱敏只在日志层做（log_sanitizer）。
+            # 用户可能主动分享 API key 给 Agent 使用，替换输入文本会导致
+            # LLM 拿到的 key 变成 sk-***，从而 API 调用失败。
+            turn.meta["safety_original_input"] = turn.input_text  # 保留原始用于审计日志
+            logger.info("safety: detected %d PII types in input: %s",
                         len(safety_report.pii_found),
                         [p["type"] for p in safety_report.pii_found])
 
@@ -1004,7 +1004,7 @@ class Coordinator(Plugin):
 
         # 深度审计 P2-5 修复：把安全提示注入 system 消息, 让 LLM 真正看到注入防御指令
         safety_report = turn.meta.get("safety_report")
-        if safety_report and (safety_report.injection_found or safety_report.harmful_found):
+        if safety_report and (safety_report.injection_found or safety_report.harmful_found or safety_report.pii_found):
             hint = safety_report.to_context_hint(zh=self._is_zh())
             if hint:
                 # 注入到第一条 system 消息末尾, 或新增一条 system 消息
@@ -1012,9 +1012,10 @@ class Coordinator(Plugin):
                     messages[0]["content"] = self._append_to_content(messages[0]["content"], hint)
                 else:
                     messages.insert(0, {"role": "system", "content": hint})
-                logger.info("safety: injected context hint (%d injection, %d harmful)",
+                logger.info("safety: injected context hint (%d injection, %d harmful, %d PII)",
                             len(safety_report.injection_found),
-                            len(safety_report.harmful_found))
+                            len(safety_report.harmful_found),
+                            len(safety_report.pii_found))
 
         # Get complexity from router classification
         complexity = getattr(turn, "estimated_complexity", 0.0)

@@ -99,11 +99,11 @@ class SafetyReport:
             if zh:
                 parts.append(f"[安全提示] 检测到 {len(self.pii_found)} 处个人信息（"
                              + ", ".join(p["type"] for p in self.pii_found[:3])
-                             + "），已在上下文中脱敏处理。请勿在回复中输出原始敏感信息。")
+                             + "）。请勿在回复中输出原始敏感信息。")
             else:
                 parts.append(f"[Safety] {len(self.pii_found)} PII items detected ("
                              + ", ".join(p["type"] for p in self.pii_found[:3])
-                             + "), sanitized. Do not output raw sensitive info.")
+                             + "). Do not output raw sensitive info in your reply.")
         if self.harmful_found:
             if zh:
                 parts.append(f"[安全提示] 检测到可能的有害内容，请谨慎回复。")
