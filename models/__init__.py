@@ -1418,6 +1418,19 @@ class LLMProvider(RecommendationMixin, Plugin):
                 "temperature": temperature,
                 "stream": True,
             }
+            # Anthropic 要求 system prompt 作为顶层参数传入。
+            system_parts = []
+            non_system_messages = []
+            for msg in messages:
+                if msg.get("role") == "system":
+                    content = msg.get("content", "")
+                    if content:
+                        system_parts.append(content)
+                else:
+                    non_system_messages.append(msg)
+            if system_parts:
+                payload["system"] = "\n\n".join(system_parts)
+                payload["messages"] = non_system_messages
             if tools:
                 payload["tools"] = tools
             url = f"{base.rstrip('/')}/messages"
@@ -1644,6 +1657,20 @@ class LLMProvider(RecommendationMixin, Plugin):
                 "messages": messages,
                 "temperature": temperature,
             }
+            # Anthropic 要求 system prompt 作为顶层参数传入，不能放在 messages 数组里。
+            # 从 messages 中提取 role=system 的消息内容，合并后移到顶层 system 参数。
+            system_parts = []
+            non_system_messages = []
+            for msg in messages:
+                if msg.get("role") == "system":
+                    content = msg.get("content", "")
+                    if content:
+                        system_parts.append(content)
+                else:
+                    non_system_messages.append(msg)
+            if system_parts:
+                payload["system"] = "\n\n".join(system_parts)
+                payload["messages"] = non_system_messages
             if tools:
                 payload["tools"] = tools
             resp = await self._client.post(  # type: ignore[union-attr]

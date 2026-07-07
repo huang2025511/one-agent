@@ -37,7 +37,12 @@ MODEL_TIERS: Dict[str, List[str]] = {
         "anthropic/claude-4.5-sonnet-20250514",
         "openai/o3",
         "google/gemini-2.5-pro-preview-05-15",
-        "sensenova/deepseek-v4-flash",
+        # deepseek-v4-flash 已在 complex tier，不重复放入 expert。
+        # 如果用户只配了 SenseNova key，expert 任务会 fallback 到 complex tier
+        # 的 deepseek-v4-flash，这是当前可用的最强 SenseNova 模型。
+        # 当用户配置了 anthropic/openai/google 的 key 时，expert 任务会
+        # 优先使用 claude-4.5-sonnet / o3 / gemini-2.5-pro 等顶级模型。
+        "kimi/kimi-k2-0711-preview",
     ],
 }
 

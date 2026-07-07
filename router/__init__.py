@@ -232,6 +232,24 @@ class SmartRouter(Plugin):
             # the user→assistant alternation required by most providers.
             reply = "(无响应)"
         hist.append({"input": turn.input_text, "reply": reply})
+        # Gap 修复：跨轮保留工具调用摘要。
+        # 之前只存 input/reply，LLM 下一轮看不到上轮调了什么工具、拿到了什么结果，
+        # 导致多轮工具链任务上下文断裂。现在把工具结果摘要追加到 reply 中。
+        tool_results = turn.meta.get("tool_results", [])
+        if tool_results:
+            tool_summary_parts = []
+            for tr in tool_results:
+                tname = getattr(tr, "tool_name", "")
+                tstatus = getattr(tr, "status", "")
+                if tstatus == "success":
+                    tdata = str(getattr(tr, "data", ""))[:200]
+                    tool_summary_parts.append(f"  - {tname}: {tdata}")
+                else:
+                    terr = str(getattr(tr, "error", ""))[:100]
+                    tool_summary_parts.append(f"  - {tname}: [失败] {terr}")
+            if tool_summary_parts:
+                tool_summary = "\n[工具调用记录]\n" + "\n".join(tool_summary_parts)
+                hist[-1]["reply"] = (hist[-1]["reply"] or "") + tool_summary
         # Bounds check: ensure we don't keep more than 20 entries
         if len(hist) > 20:
             self._session_history[sid] = hist[-20:]
@@ -292,9 +310,11 @@ class SmartRouter(Plugin):
                 }
 
         # --- Fast path: OS mode requests ---
+        # 只对短消息走 fast-path，长消息可能包含复杂任务（如"设计一个多租户缓存参数架构"）
+        # 需要交给 LLM 分类，避免复杂任务被误降到 simple tier。
         os_mode_triggers = ("os", "os模式", "os-mode", "系统权限", "系统操作",
                             "开 os", "开启os", "开启系统", "开启权限")
-        if any(trigger in t for trigger in os_mode_triggers):
+        if len(t) <= 30 and any(trigger in t for trigger in os_mode_triggers):
             return 0.3, {
                 "needs_tools": True,
                 "needs_system": True,
@@ -304,10 +324,11 @@ class SmartRouter(Plugin):
             }
 
         # --- Fast path: settings requests ---
+        # 同样只对短消息走 fast-path
         settings_triggers = ("设置", "配置", "温度", "模型", "缓存", "参数",
                              "调整", "改成", "改为", "设为", "修改", "查看配置",
                              "查看设置", "temperature", "model", "cache", "api_key")
-        if any(trigger in t for trigger in settings_triggers):
+        if len(t) <= 30 and any(trigger in t for trigger in settings_triggers):
             return 0.3, {
                 "needs_tools": True,
                 "needs_system": False,

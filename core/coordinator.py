@@ -1407,6 +1407,22 @@ class Coordinator(Plugin):
             else:
                 messages.append(task_block)
 
+        # 注入对话摘要：长对话超过 N 轮后，早期上下文会被 router 截断。
+        # 对话摘要提供了早期对话的回顾，让 agent 不会"失忆"。
+        try:
+            summarizer = self._get_dialog_summarizer()
+            lang = "zh" if self._is_zh() else "en"
+            summary_text = summarizer.format_summary_for_context(turn.session_id, lang)
+            if summary_text:
+                summary_block = {"role": "assistant", "content": summary_text}
+                if messages and messages[-1].get("role") == "user":
+                    messages.insert(len(messages) - 1, summary_block)
+                else:
+                    messages.append(summary_block)
+                turn.meta["dialog_summary_injected"] = True
+        except Exception:
+            pass
+
         # Gap 5 修复：注入上一轮生成的主动规划，让 LLM 预判用户下一步
         proactive_plan = self._get_proactive_plan(turn.session_id)
         if proactive_plan:
@@ -2201,11 +2217,24 @@ class Coordinator(Plugin):
                     ]
                     if failed_in_round:
                         # 构造自修正提示：把失败的工具调用和错误信息发给 LLM
+                        # 从 turn.meta["tool_results"] 中提取最新的失败结果，获取错误原因
+                        recent_results = turn.meta.get("tool_results", [])
                         failed_info = ""
                         for tc in failed_in_round[:3]:
                             nm = tc.get("name") or tc.get("function", {}).get("name", "")
                             args = tc.get("args") or tc.get("function", {}).get("arguments", "{}")
-                            failed_info += f"\n- {nm}({args}) → 失败"
+                            # 查找该工具最近的错误信息
+                            err_msg = ""
+                            for r in reversed(recent_results):
+                                if getattr(r, "tool_name", "") == nm and getattr(r, "status", "") in ("error", "unavailable"):
+                                    err_msg = getattr(r, "error", "") or getattr(r, "data", "")
+                                    if err_msg:
+                                        err_msg = err_msg[:200]  # 截断过长的错误信息
+                                    break
+                            if err_msg:
+                                failed_info += f"\n- {nm}({args}) → 失败，原因: {err_msg}"
+                            else:
+                                failed_info += f"\n- {nm}({args}) → 失败"
                         zh = self._is_zh()
                         if zh:
                             retry_prompt = (
@@ -3307,6 +3336,40 @@ class Coordinator(Plugin):
             summarizer = self._get_dialog_summarizer()
             turn_count = summarizer.increment_turn(turn.session_id)
             turn.meta["turn_count"] = turn_count
+
+            # 7. 对话摘要 — 每 N 轮生成一次摘要，下轮注入上下文
+            if summarizer.should_summarize(turn.session_id):
+                try:
+                    # 从 turn.messages 中提取 user/assistant 对话对
+                    history_for_summary = []
+                    for msg in turn.messages:
+                        role = msg.get("role", "")
+                        content = msg.get("content", "")
+                        if role == "user" and content and not content.startswith("["):
+                            history_for_summary.append({"input": content, "reply": ""})
+                        elif role == "assistant" and content and history_for_summary:
+                            history_for_summary[-1]["reply"] = content
+
+                    if history_for_summary:
+                        existing = (summarizer.get_summary(turn.session_id) or {}).get("summary", "")
+                        lang = "zh" if self._is_zh() else "en"
+                        prompt = summarizer.generate_summary_prompt(
+                            history_for_summary[-10:], existing, lang
+                        )
+                        summary_resp = await self._llm.chat_completion(
+                            messages=[{"role": "user", "content": prompt}],
+                            model=self._lightweight_model(turn),
+                            temperature=0.2,
+                            max_tokens=400,
+                            use_cache=False,
+                        )
+                        summary_text = summary_resp.get("text", "").strip()
+                        if summary_text:
+                            summarizer.store_summary(turn.session_id, summary_text, turn_count)
+                            logger.debug("dialog summary generated for session %s (%d turns)",
+                                        turn.session_id, turn_count)
+                except Exception as exc:
+                    logger.debug("dialog summary generation failed: %s", exc)
 
         except Exception as exc:
             logger.debug("intelligence recording failed: %s", exc)
