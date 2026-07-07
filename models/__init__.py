@@ -163,6 +163,11 @@ class LLMProvider(RecommendationMixin, Plugin):
         # Models known to NOT support tool calling (cached after first 400)
         # so we don't waste a failed request every time.  Key is bare model name.
         self._no_tools_models: Set[str] = set()
+        # Models known to SUPPORT tool calling (exceptions to pattern-based rules).
+        # Some models like deepseek-v4-flash contain "-flash" but do support tools.
+        self._tools_models: Set[str] = {
+            "deepseek-v4-flash",
+        }
         # Heuristic patterns for models that likely don't support tools.
         # These are checked in addition to the explicit _no_tools_models set.
         self._no_tools_patterns = [
@@ -373,6 +378,9 @@ class LLMProvider(RecommendationMixin, Plugin):
         pattern matching so flash/lite/small models are detected on the
         very first turn — no wasted failed round-trip needed.
 
+        Also includes a whitelist (_tools_models) for models that contain
+        "-flash" or "-lite" but actually do support tools (e.g. deepseek-v4-flash).
+
         Args:
             model: Full model string like "sensenova/deepseek-v4-flash"
                    or bare model name like "deepseek-v4-flash".
@@ -384,6 +392,8 @@ class LLMProvider(RecommendationMixin, Plugin):
         bare = model.split("/", 1)[1] if "/" in model else model
         if bare in self._no_tools_models:
             return False
+        if bare in getattr(self, "_tools_models", set()):
+            return True
         for pat in self._no_tools_patterns:
             if pat.search(bare):
                 return False
