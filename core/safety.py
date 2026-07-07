@@ -32,9 +32,13 @@ _PII_PATTERNS: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'), "邮箱", "***@***"),
     # IP addresses
     (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'), "IP地址", "x.x.x.x"),
-    # API keys / tokens in text
-    (re.compile(r'sk-[a-zA-Z0-9]{20,}'), "API Key", "sk-***"),
-    (re.compile(r'Bearer\s+[a-zA-Z0-9\-_.]+'), "Bearer Token", "Bearer ***"),
+    # API keys / tokens — 仅检测记录，不做文本替换。
+    # 输入检测：告知 LLM 输入中有 key，提醒不要输出。
+    # 输出脱敏：不替换，用户主动分享的 key 不应掩码（用户看到
+    #   sk-*** 会误以为 key 传错导致无限重试）。
+    # 日志脱敏：由 log_sanitizer.py 独立负责。
+    (re.compile(r'sk-[a-zA-Z0-9]{20,}'), "API Key", None),
+    (re.compile(r'Bearer\s+[a-zA-Z0-9\-_.]+'), "Bearer Token", None),
 ]
 
 # ============================================================
@@ -132,7 +136,8 @@ def scan_input(text: str) -> SafetyReport:
         if matches:
             for _ in matches:
                 report.pii_found.append({"type": pii_type, "count": str(len(matches))})
-            report.sanitized_text = pattern.sub(replacement, report.sanitized_text)
+            if replacement is not None:
+                report.sanitized_text = pattern.sub(replacement, report.sanitized_text)
 
     # Deduplicate PII types
     seen_types = set()
@@ -174,6 +179,8 @@ def scan_output(text: str) -> SafetyReport:
     report.sanitized_text = text
 
     for pattern, pii_type, replacement in _PII_PATTERNS:
+        if replacement is None:
+            continue  # API keys 等仅检测不脱敏的类型，输出扫描中跳过
         matches = pattern.findall(text)
         if matches:
             for _ in matches:
@@ -200,5 +207,6 @@ def sanitize_for_log(text: str) -> str:
     """Sanitize text for logging (PII redaction only)."""
     result = text
     for pattern, _pii_type, replacement in _PII_PATTERNS:
-        result = pattern.sub(replacement, result)
+        if replacement is not None:
+            result = pattern.sub(replacement, result)
     return result

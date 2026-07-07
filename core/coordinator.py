@@ -2334,7 +2334,7 @@ class Coordinator(Plugin):
         output_safety = scan_output(final_text)
         if output_safety.pii_found:
             final_text = output_safety.sanitized_text
-            logger.warning("output safety: redacted %d PII types in output",
+            logger.warning("output safety: detected %d PII type(s) in output, sanitized",
                           len(output_safety.pii_found))
             turn.meta["output_safety"] = {
                 "pii_redacted": len(output_safety.pii_found),
