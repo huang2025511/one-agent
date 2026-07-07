@@ -840,10 +840,18 @@ class SkillManager(Plugin):
             id="system_run", title="系统命令",
             description="/shell 或 /sh：执行系统命令。危险操作需要密码。\n安全命令(ls/cat/echo/date 等)免密码，其他命令需密码验证(60分钟缓存)。",
             schema={
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "要执行的系统命令"},
-                    "password": {"type": "string", "description": "密码(可选，用于解锁会话)"},
+                "type": "function",
+                "function": {
+                    "name": "system_run",
+                    "description": "执行系统命令。危险操作需要密码。安全命令免密码，其他命令需密码验证。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "要执行的系统命令"},
+                            "password": {"type": "string", "description": "密码(可选，用于解锁会话)"},
+                        },
+                        "required": ["command"],
+                    },
                 },
             },
             handler=system_run_handler,
@@ -871,9 +879,17 @@ class SkillManager(Plugin):
             id="system_unlock", title="解锁系统",
             description="/unlock 或 /解锁：输入密码解锁会话(60分钟有效)",
             schema={
-                "type": "object",
-                "properties": {
-                    "password": {"type": "string", "description": "密码"},
+                "type": "function",
+                "function": {
+                    "name": "system_unlock",
+                    "description": "输入密码解锁会话(60分钟有效)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "password": {"type": "string", "description": "密码"},
+                        },
+                        "required": ["password"],
+                    },
                 },
             },
             handler=system_unlock_handler,
@@ -893,8 +909,15 @@ class SkillManager(Plugin):
             id="system_lock", title="锁定系统",
             description="/lock 或 /锁定：撤销密码授权，再次执行危险命令需要重新输入密码",
             schema={
-                "type": "object",
-                "properties": {},
+                "type": "function",
+                "function": {
+                    "name": "system_lock",
+                    "description": "撤销密码授权，再次执行危险命令需要重新输入密码",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
             },
             handler=system_lock_handler,
         ))
@@ -1005,14 +1028,21 @@ class SkillManager(Plugin):
             id="updater", title="更新",
             description="/update 或 /更新：从 GitHub 更新 One-Agent 到最新版本，支持 Git 和 curl 两种更新方式",
             schema={
-                "type": "object",
-                "properties": {
-                    "branch": {
-                        "type": "string",
-                        "description": "分支名称，默认 main",
-                        "default": "main"
-                    }
-                }
+                "type": "function",
+                "function": {
+                    "name": "updater",
+                    "description": "从 GitHub 更新 One-Agent 到最新版本，支持 Git 和 curl 两种更新方式",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "branch": {
+                                "type": "string",
+                                "description": "分支名称，默认 main",
+                                "default": "main"
+                            }
+                        }
+                    },
+                },
             },
             handler=updater_handler,
         ))
@@ -1029,8 +1059,15 @@ class SkillManager(Plugin):
             id="wechat_login", title="微信登录",
             description="/wechat 或 /微信：启动微信网关并显示登录二维码（按需启动）",
             schema={
-                "type": "object",
-                "properties": {}
+                "type": "function",
+                "function": {
+                    "name": "wechat_login",
+                    "description": "启动微信网关并显示登录二维码（按需启动）",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                },
             },
             handler=wechat_login_handler,
         ))
@@ -1054,8 +1091,15 @@ class SkillManager(Plugin):
             id="quit", title="退出",
             description="/quit 或 /退出：退出 One-Agent 程序",
             schema={
-                "type": "object",
-                "properties": {}
+                "type": "function",
+                "function": {
+                    "name": "quit",
+                    "description": "退出 One-Agent 程序",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                },
             },
             handler=quit_handler,
         ))
