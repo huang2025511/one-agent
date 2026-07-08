@@ -1850,50 +1850,60 @@ class Coordinator(Plugin):
     async def _multi_agent_phase(self, messages: List[Dict[str, Any]], turn: TurnContext) -> bool:
         """Execute multi-agent pattern for expert-level tasks (complexity >= 0.8).
 
-        This implements a Planner-Executor pattern:
-        1. Planner agent: deep analysis of the problem, breaking it into sub-tasks
-        2. Executor agent: executes each sub-task sequentially
+        Uses AgentMesh with specialized agent roles (researcher, coder, reviewer,
+        writer, analyst) to solve complex tasks collaboratively. Each sub-task is
+        routed to the most appropriate specialist based on the content.
 
         Returns True if delegation was successful (no need for further processing),
         False otherwise (fall back to normal flow).
         """
 
         try:
-            from core.sub_agent import DelegationManager
-            delegator = DelegationManager(self._llm, self._skills)
-            result = await delegator.execute(turn.input_text, turn.model)
+            mesh = get_agent_mesh(self._llm, self._skills)
 
-            if result.get("parallel"):
-                turn.result = result["result"]
+            def on_progress(phase: str, desc: str) -> None:
+                self._emit_progress(turn, desc, "agent_mesh")
+
+            result = await mesh.solve(
+                turn.input_text,
+                model=turn.model,
+                max_agents=5,
+                on_progress=on_progress,
+            )
+
+            if result.tasks:
+                turn.result = result.final_answer
                 turn.meta["delegation_used"] = True
-                # 防御性取值：subtasks / total_tokens 可能缺失，避免 KeyError
-                subtasks = result.get("subtasks") or []
-                total_tokens = result.get("total_tokens", 0)
-                turn.meta["subtask_count"] = len(subtasks)
+                turn.meta["agent_mesh_used"] = True
+                turn.meta["subtask_count"] = len(result.tasks)
+                # Estimate tokens from task durations (approximate)
+                total_tokens = sum(
+                    len(t.result) for t in result.tasks
+                ) // 4  # rough estimate: ~4 chars/token
                 turn.meta["delegation_total_tokens"] = total_tokens
-                turn.record_success(result["result"], total_tokens)
+                turn.record_success(result.final_answer, total_tokens)
 
                 if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
-                    full_text = f"{turn.input_text}\n{result['result']}"
+                    full_text = f"{turn.input_text}\n{result.final_answer}"
                     try:
                         count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
                         if count > 0:
-                            logger.debug("Extracted %d entities from multi-agent turn %s", count, turn.session_id)
+                            logger.debug("Extracted %d entities from agent-mesh turn %s", count, turn.session_id)
                     except Exception as exc:
-                        logger.debug("KG extraction failed in multi-agent: %s", exc)
+                        logger.debug("KG extraction failed in agent-mesh: %s", exc)
 
                 self.publish("turn_completed", turn=turn)
-                logger.info("multi-agent completed (%d subtasks, %d tokens)",
-                            len(subtasks),
-                            total_tokens)
+                logger.info("agent-mesh completed (%d agents, %.1fs)",
+                            len(result.tasks),
+                            result.total_duration)
                 return True
 
         except asyncio.TimeoutError:
-            logger.warning("multi-agent timeout, falling back to normal flow")
+            logger.warning("agent-mesh timeout, falling back to normal flow")
         except (KeyError, AttributeError) as exc:
-            logger.error("multi-agent logic error (should be fixed): %s", exc)
+            logger.error("agent-mesh logic error (should be fixed): %s", exc)
         except Exception as exc:
-            logger.warning("multi-agent failed, falling back to normal flow: %s", exc)
+            logger.warning("agent-mesh failed, falling back to normal flow: %s", exc)
 
         return False
 
