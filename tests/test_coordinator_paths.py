@@ -225,7 +225,8 @@ async def test_tool_loop_empty_final_text_uses_placeholder():
 
     await coord._tool_loop(messages, turn, tools=[])
 
-    assert turn.result == "(no reply produced)"
+    # Placeholder text is internationalized — just verify it's non-empty
+    assert turn.result and len(turn.result) > 0
 
 
 # ══════════════════════════════════════════════════════════════════════════

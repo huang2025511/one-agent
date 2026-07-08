@@ -2897,7 +2897,7 @@ class Coordinator(Plugin):
             raw_tool_calls = turn.meta.get("tool_calls_raw") or tool_calls
             messages.append({
                 "role": "assistant",
-                "content": "",
+                "content": None,
                 "tool_calls": raw_tool_calls,
             })
             # 并行执行所有工具调用（Gap 5: 先查缓存, Round 7: backoff 重试）

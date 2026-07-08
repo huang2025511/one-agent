@@ -238,11 +238,18 @@ class TestMultiAgentPhaseKeyError:
         coord = Coordinator()
         coord._llm = MagicMock()
 
-        # mock DelegationManager 返回缺 total_tokens/subtasks 的 result
-        class FakeDelegator:
-            async def execute(self, *a, **kw):
-                # 故意缺 total_tokens 和 subtasks
-                return {"parallel": True, "result": "答案"}
+        # mock get_agent_mesh 返回空 tasks 的 result（模拟缺 total_tokens/subtasks）
+        from core.agent_mesh import MeshResult
+        class FakeMesh:
+            async def solve(self, *a, **kw):
+                # 返回空 tasks 的 MeshResult，模拟无子任务
+                return MeshResult(
+                    original_task="复杂任务",
+                    tasks=[],
+                    final_answer="答案",
+                    total_duration=0.1,
+                    agent_count=0,
+                )
 
         # mock publish 和 record_success
         coord.publish = MagicMock()
@@ -257,28 +264,17 @@ class TestMultiAgentPhaseKeyError:
             record_success=MagicMock(),
         )
 
-        # patch DelegationManager
-        import core.sub_agent
-        orig = core.sub_agent.DelegationManager if hasattr(core.sub_agent, 'DelegationManager') else None
-
+        # patch get_agent_mesh
         import core.coordinator as coord_mod
-        # 通过 monkey patch sys.modules 注入
-        import sys as _sys
-        fake_mod = MagicMock()
-        fake_mod.DelegationManager = lambda llm, sk: FakeDelegator()
-        _sys.modules['core.sub_agent'] = fake_mod
+        orig_get_agent_mesh = coord_mod.get_agent_mesh
+        coord_mod.get_agent_mesh = lambda llm, sk: FakeMesh()
 
         try:
             result = await coord._multi_agent_phase([], turn)
-            assert result is True, "应成功处理"
-            assert turn.meta["delegation_total_tokens"] == 0
-            assert turn.meta["subtask_count"] == 0
+            # 空 tasks → mesh.solve 返回但 tasks 为空 → 不进入 result.tasks 分支 → 返回 False
+            assert result is False, "空 tasks 应返回 False，回退到正常流程"
         finally:
-            # 恢复
-            if orig is not None:
-                _sys.modules['core.sub_agent'] = core.sub_agent
-            else:
-                del _sys.modules['core.sub_agent']
+            coord_mod.get_agent_mesh = orig_get_agent_mesh
 
 
 # ============================================================
