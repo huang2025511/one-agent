@@ -1380,32 +1380,45 @@ class Coordinator(Plugin):
             logger.debug("user profile injection skipped: %s", exc)
 
         # Gap 10 修复：注入活跃任务状态，让 LLM 知道"上次做到哪了"
+        # 但如果用户问的是新问题（如"你能做什么"、"介绍一下"等），
+        # 不要注入 active_task，让 LLM 回答新问题而不是继续之前的任务。
         active_task = turn.meta.get("active_task")
         if active_task:
-            steps_text = ""
-            for i, step in enumerate(active_task.get("steps", [])):
-                status_icon = {"pending": "⬜", "in_progress": "🔄", "done": "✅", "failed": "❌"}.get(
-                    step.get("status", "pending"), "⬜")
-                steps_text += f"\n  {status_icon} Step {i+1}: {step.get('step', '')}"
-                if step.get("result"):
-                    steps_text += f" — {step['result'][:80]}"
-            if self._is_zh():
-                task_header = (
-                    f"【继续任务】当前有一个进行中的任务：{active_task.get('name', '')}\n"
-                    f"进度：{steps_text}\n"
-                    "请继续执行此任务，从上次中断的地方接着做。"
-                )
+            input_lower = turn.input_text.lower()
+            new_question_signals = [
+                "你能做什么", "你会什么", "你现在能做什么", "你有什么能力",
+                "介绍一下", "说明一下", "展示一下", "演示一下",
+                "新任务", "另一个任务", "别的任务", "新问题",
+                "换一个", "重新开始", "从头开始", "reset", "clear",
+                "能力", "功能", "帮助", "help",
+            ]
+            if any(signal in input_lower for signal in new_question_signals):
+                logger.debug("skipping active_task injection: user asked new question")
             else:
-                task_header = (
-                    f"[Continue Task] Active task: {active_task.get('name', '')}\n"
-                    f"Progress: {steps_text}\n"
-                    "Continue from where you left off."
-                )
-            task_block = {"role": "assistant", "content": task_header}
-            if messages and messages[-1].get("role") == "user":
-                messages.insert(len(messages) - 1, task_block)
-            else:
-                messages.append(task_block)
+                steps_text = ""
+                for i, step in enumerate(active_task.get("steps", [])):
+                    status_icon = {"pending": "⬜", "in_progress": "🔄", "done": "✅", "failed": "❌"}.get(
+                        step.get("status", "pending"), "⬜")
+                    steps_text += f"\n  {status_icon} Step {i+1}: {step.get('step', '')}"
+                    if step.get("result"):
+                        steps_text += f" — {step['result'][:80]}"
+                if self._is_zh():
+                    task_header = (
+                        f"【继续任务】当前有一个进行中的任务：{active_task.get('name', '')}\n"
+                        f"进度：{steps_text}\n"
+                        "请继续执行此任务，从上次中断的地方接着做。"
+                    )
+                else:
+                    task_header = (
+                        f"[Continue Task] Active task: {active_task.get('name', '')}\n"
+                        f"Progress: {steps_text}\n"
+                        "Continue from where you left off."
+                    )
+                task_block = {"role": "assistant", "content": task_header}
+                if messages and messages[-1].get("role") == "user":
+                    messages.insert(len(messages) - 1, task_block)
+                else:
+                    messages.append(task_block)
 
         # 注入对话摘要：长对话超过 N 轮后，早期上下文会被 router 截断。
         # 对话摘要提供了早期对话的回顾，让 agent 不会"失忆"。
