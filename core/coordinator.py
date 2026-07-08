@@ -754,6 +754,96 @@ class Coordinator(Plugin):
                     except Exception as exc:
                         logger.debug("auto compare failed, falling back: %s", exc)
 
+        # ---- 图表生成自动检测 ----
+        # 触发条件：含"画/生成/做一个 + 图表类型关键词"，用 LLM 解析用户意图
+        # 自动生成 Mermaid 图表。之前 /chart 只能手动输入 JSON 数据，
+        # 用户不知道也不会用。现在自然语言即可触发。
+        chart_verbs = ("画一个", "画个", "画", "生成一个", "生成个", "生成", "做一个",
+                       "创建", "create", "draw", "generate", "make a")
+        chart_types_cn = {
+            "流程图": "flowchart", "流程": "flowchart",
+            "时序图": "sequence", "序列图": "sequence",
+            "饼图": "pie", "饼状图": "pie",
+            "甘特图": "gantt",
+            "时间线": "timeline", "时间轴": "timeline",
+            "思维导图": "mindmap", "脑图": "mindmap",
+            "柱状图": "bar", "条形图": "bar",
+            "折线图": "line",
+        }
+        chart_types_en = {
+            "flowchart": "flowchart", "sequence diagram": "sequence",
+            "pie chart": "pie", "pie": "pie",
+            "gantt chart": "gantt", "gantt": "gantt",
+            "timeline": "timeline",
+            "mind map": "mindmap", "mindmap": "mindmap",
+            "bar chart": "bar", "bar": "bar",
+            "line chart": "line", "line": "line",
+        }
+        has_verb = any(v in text_lower for v in chart_verbs)
+        if has_verb:
+            chart_type = None
+            for kw, ct in chart_types_cn.items():
+                if kw in text:
+                    chart_type = ct
+                    break
+            if not chart_type:
+                for kw, ct in chart_types_en.items():
+                    if kw in text_lower:
+                        chart_type = ct
+                        break
+            if chart_type and self._llm is not None:
+                self._emit_progress(turn, f"检测到图表生成意图（{chart_type}），自动生成...", "chart")
+                try:
+                    # 用 LLM 从用户自然语言中提取图表数据
+                    zh = self._is_zh()
+                    extract_prompt = (
+                        f"用户请求生成一个{chart_type}图表。请从以下描述中提取图表数据，"
+                        f"输出 JSON 对象，字段名根据图表类型而定：\n"
+                        f"flowchart → nodes(list of {{id,label,shape}}), edges(list of {{from,to,label}})\n"
+                        f"sequence → actors(list), messages(list of {{from,to,text,type}})\n"
+                        f"pie → title, items(list of {{label,value}})\n"
+                        f"gantt → title, tasks(list of {{name,start,end}})\n"
+                        f"timeline → title, events(list of {{date,description}})\n"
+                        f"mindmap → title, children(list of {{name,children}} or string)\n\n"
+                        f"用户描述：{text[:800]}\n\n"
+                        f"只输出 JSON，不要其他内容："
+                    ) if zh else (
+                        f"Extract chart data from this description. Output JSON only.\n"
+                        f"Chart type: {chart_type}\nDescription: {text[:800]}"
+                    )
+                    extract_result = await self._llm.chat_completion(
+                        messages=[{"role": "user", "content": extract_prompt}],
+                        model=turn.model,
+                        temperature=0.2,
+                        max_tokens=800,
+                        tools=None,
+                        use_cache=False,
+                        response_format={"type": "json_object"},
+                    )
+                    data_text = (extract_result.get("text") or "{}").strip()
+                    key_update = {}
+                    if data_text:
+                        import json as _json
+                        try:
+                            cleaned = data_text
+                            if cleaned.startswith("```"):
+                                cleaned = cleaned.split("```", 2)[1]
+                                if cleaned.startswith("json"):
+                                    cleaned = cleaned[4:]
+                            data = _json.loads(cleaned)
+                            if isinstance(data, dict):
+                                key_update = data
+                        except Exception:
+                            pass
+                    gen = get_chart_generator()
+                    turn.result = gen.generate_mermaid(chart_type, key_update)
+                    turn.meta["auto_chart_triggered"] = True
+                    turn.record_success(turn.result, 0)
+                    self.publish("turn_completed", turn=turn)
+                    return True
+                except Exception as exc:
+                    logger.debug("auto chart failed, falling back: %s", exc)
+
         return False
 
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
@@ -3774,32 +3864,84 @@ class Coordinator(Plugin):
             metacog = self._get_metacognition()
             skills_used = turn.meta.get("skills_used", [])
 
-            analysis = await asyncio.to_thread(
-                metacog.analyze_response,
+            # 优先用 LLM 做真正的置信度评估（之前 evaluate_with_llm 定义了
+            # 但从未被调用，一直用纯正则匹配统计关键词——容易被 LLM 的
+            # 流利编造绕过）。LLM 可用时用它，不可用时回退到正则。
+            l_analysis = await metacog.evaluate_with_llm(
+                self._llm,
                 turn.result,
-                [],  # sources_used
-                skills_used,
                 turn.input_text,
+                [],  # sources_used
             )
+            # evaluate_with_llm 返回 {confidence, reason, flags, source}
+            # 不同于 analyze_response 返回 {confidence, hallucination_risk, ...}
+            # 需要统一字段
+            confidence = l_analysis.get("confidence", 0.5)
+            flags = l_analysis.get("flags", [])
+            if isinstance(flags, str):
+                flags = [flags]
+            if confidence < 0.3:
+                hallucination_risk = "high"
+            elif confidence < 0.5:
+                hallucination_risk = "medium"
+            else:
+                hallucination_risk = "low"
+            analysis = {
+                "confidence": confidence,
+                "hallucination_risk": hallucination_risk,
+                "flags": flags,
+                "reason": l_analysis.get("reason", ""),
+                "source": l_analysis.get("source", "llm"),
+                "caution_topics": [],
+            }
             turn.meta["metacognition"] = analysis
 
-            # Add confidence disclaimer if needed (configurable)
-            if self.ctx and self.ctx.config:
-                show_disclaimer = self.ctx.config.get("agent", {}).get(
-                    "show_confidence_note", False
+            # 置信度极低或高幻觉风险 → 自动重试一次，换不同的 prompt 策略
+            # 之前只存 metadata 不行动，低质量回答直接发给用户。
+            # 现在闭环：检测到问题 → 自动重答 → 给用户更好的答案。
+            _should_retry = (
+                confidence < 0.35
+                or hallucination_risk == "high"
+                or (confidence < 0.5 and hallucination_risk == "medium")
+            )
+            if _should_retry and self._llm is not None:
+                logger.info(
+                    "metacognition: low confidence (%.2f), auto-retrying...",
+                    confidence,
                 )
-            else:
-                show_disclaimer = False
+                try:
+                    # 用更高温度 + 明确要求引用来源的 prompt 重试一次
+                    zh = self._is_zh()
+                    retry_prompt = f"重新回答以下问题，确保准确、有据可查：\n\n{turn.input_text[:500]}" if zh else f"Re-answer the following question, ensuring accuracy and citing sources:\n\n{turn.input_text[:500]}"
+                    retry_messages = [{"role": "user", "content": retry_prompt}]
+                    retry_result = await self._llm.chat_completion(
+                        messages=retry_messages,
+                        model=turn.model,
+                        temperature=0.1,  # 更低的温度提高准确性
+                        max_tokens=getattr(self, "_max_tokens", 2048) or 2048,
+                        tools=None,
+                        use_cache=False,
+                    )
+                    retry_text = (retry_result.get("text") or "").strip()
+                    if retry_text and len(retry_text) > 20:
+                        turn.result = (
+                            f"[自动重答 — 原回答置信度 {confidence:.0%}]\n\n{retry_text}"
+                        )
+                        turn.meta["auto_retry_from_metacognition"] = True
+                        turn.meta["original_confidence"] = confidence
+                        logger.info("metacognition: auto-retry succeeded")
+                except Exception as retry_exc:
+                    logger.debug("metacognition auto-retry failed: %s", retry_exc)
 
-            if show_disclaimer:
-                note = metacog.format_confidence_note(analysis)
-                if note:
-                    turn.result = turn.result + note
+            # 置信度仍然不高时，加 disclaimer 提醒用户
+            conf_note = metacog.format_confidence_note(analysis)
+            if conf_note:
+                turn.result = (turn.result or "") + conf_note
 
             logger.debug(
-                "metacognition: confidence=%.2f risk=%s",
-                analysis["confidence"],
-                analysis["hallucination_risk"],
+                "metacognition: confidence=%.2f risk=%s retried=%s",
+                confidence, hallucination_risk,
+                turn.meta.get("auto_retry_from_metacognition", False),
             )
         except Exception as exc:
             logger.debug("metacognition analysis failed: %s", exc)
