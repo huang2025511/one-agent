@@ -1283,7 +1283,12 @@ class Coordinator(Plugin):
         # Context compression (always, but cheap when not needed)
         await self._compress_context(messages, turn)
 
-        # --- Step 2.5: Auto web-search fallback for models without tool calling ---
+        # --- Step 2.5: 本地服务商解析（先查本地再搜） ---
+        # 用户提到服务商名称+key 时，先查本地 KNOWN_PROVIDERS 注册表，
+        # 找不到再用 API key 探测，全失败才走 web_search。
+        await self._maybe_resolve_provider_locally(messages, turn)
+
+        # --- Step 2.6: Auto web-search fallback for models without tool calling ---
         # If the model doesn't support function calling, try to detect
         # search intent and inject results before the main LLM call.
         await self._auto_web_search_if_needed(messages, turn)
@@ -2355,6 +2360,99 @@ class Coordinator(Plugin):
             messages.extend(recent)
             turn.meta["context_compressed"] = True
             turn.meta["compressed_messages"] = len(early)
+
+    async def _maybe_resolve_provider_locally(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
+        """先查本地服务商注册表，再探测，最后才搜索。
+
+        当用户输入包含服务商名称和 API key 模式时，按以下顺序查找：
+        1. 本地 KNOWN_PROVIDERS 注册表（50+ 已知服务商，毫秒级）
+        2. 用 resolver 探测候选 URL（5 秒超时，并行探测）
+        3. 全失败 → 不做任何事，让后续 web_search 兜底
+
+        找到后把结果注入 messages，LLM 就不需要再搜索了。
+        """
+        import re
+        from models.resolver import KNOWN_PROVIDERS, lookup, _candidate_hosts
+
+        text = (turn.input_text or "").strip()
+        if not text:
+            return
+
+        # 检测用户是否提供了提供商名称 + key 模式
+        # 匹配: "服务商：dmxapi" / "provider: dmxapi" / "服务商 dmxapi" / "dmxapi key:sk-xxx"
+        provider_match = re.search(
+            r'(?:服务商|提供商|provider|api\s*服务商)\s*[：:]\s*(\S+)'
+            r'|(\S+)\s*(?:key|api\s*key|密钥)\s*[：:]\s*(sk-\S+)',
+            text, re.IGNORECASE,
+        )
+        if not provider_match:
+            return
+
+        provider_name = provider_match.group(1) or provider_match.group(2)
+        if not provider_name:
+            return
+
+        # 清理 provider 名称
+        provider_name = re.sub(r'[^\w.-]', '', provider_name.strip().lower())
+        if not provider_name or len(provider_name) < 2:
+            return
+
+        # 提取 API key
+        key_match = re.search(r'(sk-\S+)', text)
+        api_key = key_match.group(1) if key_match else ""
+
+        zh = self._is_zh()
+
+        # --- Step 1: 查本地注册表 ---
+        url = lookup(provider_name)
+        if url:
+            msg = (
+                f"[系统提示：本地注册表已知服务商 '{provider_name}' → API 地址 {url}。"
+                f"请直接使用此地址拉取模型列表，无需搜索。]"
+                if zh else
+                f"[System: Provider '{provider_name}' found in local registry → {url}. "
+                f"Use this URL directly to fetch models, no need to search.]"
+            )
+            messages.append({"role": "user", "content": msg})
+            turn.meta["provider_resolved_locally"] = True
+            turn.meta["provider_resolved_via"] = "registry"
+            logger.info("provider_resolver: %s found in registry → %s", provider_name, url)
+            return
+
+        # --- Step 2: 用 API key 探测候选 URL ---
+        if not api_key:
+            # 没有 key 无法探测，让 web_search 兜底
+            return
+
+        self._emit_progress(turn, f"正在探测 {provider_name} 的 API 地址...", "provider_resolve")
+        try:
+            from models.resolver import resolve as resolver_resolve
+            resolved = await resolver_resolve(provider_name, api_key, timeout=5.0)
+        except Exception as exc:
+            logger.debug("provider_resolver: probe failed for %s: %s", provider_name, exc)
+            return
+
+        if resolved.found:
+            msg = (
+                f"[系统提示：已自动探测到服务商 '{provider_name}' 的 API 地址：{resolved.base_url} "
+                f"（通过{resolved.via}）。请直接使用此地址拉取模型列表，无需搜索。]"
+                if zh else
+                f"[System: Auto-detected API URL for '{provider_name}': {resolved.base_url} "
+                f"(via {resolved.via}). Use this URL directly to fetch models, no need to search.]"
+            )
+            messages.append({"role": "user", "content": msg})
+            turn.meta["provider_resolved_locally"] = True
+            turn.meta["provider_resolved_via"] = resolved.via
+            logger.info(
+                "provider_resolver: %s resolved via %s → %s",
+                provider_name, resolved.via, resolved.base_url,
+            )
+        else:
+            # 探测失败，不做任何事，让后续 web_search 兜底
+            logger.info(
+                "provider_resolver: %s not found in registry or probe, falling through to web_search",
+                provider_name,
+            )
 
     def _needs_web_search(self, text: str) -> bool:
         """Heuristic check whether the user's request requires web search.
