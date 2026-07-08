@@ -455,10 +455,19 @@ class OneAgentApp:
             _store.add_message(sid, "user", turn.input_text,
                                meta={"source": turn.source, "turn_id": turn.turn_id},
                                tokens=turn.tokens_used)
-            # Save assistant response
+            # Save assistant response — 失败时也要保存占位回复，
+            # 否则只存 user 不存 assistant 会导致后续历史配对错位
+            # （router 的 _history_tail 按 user→assistant 顺序配对，
+            #  缺失的 assistant 会让下一轮的 reply 错配到本轮的 input）
             if turn.result:
                 _store.add_message(sid, "assistant", turn.result,
                                    meta={"model": turn.model or "", "turn_id": turn.turn_id},
+                                   tokens=turn.tokens_used)
+            elif turn.error:
+                _reply = f"[处理失败] {turn.error}" if turn.error else "[处理失败]"
+                _store.add_message(sid, "assistant", _reply,
+                                   meta={"model": turn.model or "", "turn_id": turn.turn_id,
+                                         "error": True},
                                    tokens=turn.tokens_used)
         self.bus.subscribe("turn_completed", _persist_turn)
 

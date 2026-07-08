@@ -3937,10 +3937,18 @@ class Coordinator(Plugin):
                     confidence,
                 )
                 try:
-                    # 用更高温度 + 明确要求引用来源的 prompt 重试一次
+                    # 用原始上下文（system + 历史 + 当前输入）重试，而非单条消息
+                    # 之前 retry_messages 只有一条 user 消息，丢失全部上下文导致重答质量更差
                     zh = self._is_zh()
-                    retry_prompt = f"重新回答以下问题，确保准确、有据可查：\n\n{turn.input_text[:500]}" if zh else f"Re-answer the following question, ensuring accuracy and citing sources:\n\n{turn.input_text[:500]}"
-                    retry_messages = [{"role": "user", "content": retry_prompt}]
+                    retry_hint = (
+                        "请重新回答上述问题，确保准确、有据可查。如果不确定，请明确说明。"
+                        if zh else
+                        "Please re-answer the above question, ensuring accuracy and citing sources. If unsure, say so."
+                    )
+                    retry_messages = list(turn.messages) + [
+                        {"role": "assistant", "content": turn.result or ""},
+                        {"role": "user", "content": retry_hint},
+                    ]
                     retry_result = await self._llm.chat_completion(
                         messages=retry_messages,
                         model=turn.model,

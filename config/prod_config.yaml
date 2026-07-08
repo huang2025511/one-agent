@@ -14,6 +14,9 @@ llm:
   lightweight_model: sensenova/sensenova-6.7-flash-lite
   timeout: 30
   retries: 1                 # 生产环境快速失败
+  cost_tracking:
+    daily_budget: 10.0       # 生产环境更严格的日预算
+    monthly_budget: 100.0
 
 router:
   enabled: true
@@ -24,12 +27,6 @@ router:
     expert: 1.0
   context_compression: true   # 生产环境启用上下文压缩
   self_evolution: false
-
-# 生产环境严格成本控制
-llm:
-  cost_tracking:
-    daily_budget: 10.0       # 生产环境更严格的日预算
-    monthly_budget: 100.0
 
 # 修复：之前用 `monitor:` 但代码读 `monitoring:`（FullConfig.monitoring），
 # 导致监控配置被 Pydantic 静默忽略。
