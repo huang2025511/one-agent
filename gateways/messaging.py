@@ -490,8 +490,11 @@ class WeComGateway(BaseMessagingGateway):
 
             # Respond immediately so WeCom doesn't retry the callback.
             # The reply is sent asynchronously via a background task.
-            asyncio.create_task(
-                gateway._wait_and_reply(msg_key, user_id, gateway._send_app_message)
+            gateway._spawn(
+                gateway._wait_and_reply,
+                msg_key=msg_key,
+                chat_id=user_id,
+                send_fn=gateway._send_app_message,
             )
 
             return Response(content="ok")
@@ -1023,8 +1026,11 @@ class FeishuGateway(BaseMessagingGateway):
                 })
 
             # Respond immediately; reply sent via background task
-            asyncio.create_task(
-                gateway._wait_and_reply(msg_key, message_id, gateway._reply_message)
+            gateway._spawn(
+                gateway._wait_and_reply,
+                msg_key=msg_key,
+                chat_id=message_id,
+                send_fn=gateway._reply_message,
             )
 
             return {"ok": True}
@@ -1245,8 +1251,11 @@ class SlackGateway(BaseMessagingGateway):
                                 "chat_id": ch_id,
                             })
                         # Non-blocking: spawn background task to wait + reply
-                        asyncio.create_task(
-                            self._wait_and_reply(msg_key, ch_id, self._send_message)
+                        self._spawn(
+                            self._wait_and_reply,
+                            msg_key=msg_key,
+                            chat_id=ch_id,
+                            send_fn=self._send_message,
                         )
                     if messages:
                         last_ts[ch_id] = messages[-1].get("ts", last_ts.get(ch_id, ""))

@@ -287,6 +287,7 @@ class DataExporter:
         if not db_path.exists():
             return {}
 
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
@@ -298,8 +299,6 @@ class DataExporter:
             )
             sessions = [dict(row) for row in cur.fetchall()]
 
-            conn.close()
-
             return {
                 "session_count": len(sessions),
                 "sessions": sessions,
@@ -307,6 +306,9 @@ class DataExporter:
         except Exception as exc:
             logger.warning("Failed to export sessions: %s", exc)
             return {}
+        finally:
+            if conn:
+                conn.close()
 
     def _export_memory(self, output_path: str) -> int:
         """Export memory to JSON file."""
@@ -321,6 +323,7 @@ class DataExporter:
         if not db_path.exists():
             return {}
 
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
@@ -330,8 +333,6 @@ class DataExporter:
             )
             entries = [dict(row) for row in cur.fetchall()]
 
-            conn.close()
-
             return {
                 "total_entries": len(entries),
                 "entries": entries,
@@ -339,6 +340,9 @@ class DataExporter:
         except Exception as exc:
             logger.warning("Failed to export memory: %s", exc)
             return {}
+        finally:
+            if conn:
+                conn.close()
 
     def _export_kg(self, output_path: str) -> int:
         """Export knowledge graph to JSON file."""
@@ -353,6 +357,7 @@ class DataExporter:
         if not db_path.exists():
             return {}
 
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
@@ -367,8 +372,6 @@ class DataExporter:
             )
             relations = [dict(row) for row in cur.fetchall()]
 
-            conn.close()
-
             return {
                 "entity_count": len(entities),
                 "relation_count": len(relations),
@@ -378,6 +381,9 @@ class DataExporter:
         except Exception as exc:
             logger.warning("Failed to export knowledge graph: %s", exc)
             return {}
+        finally:
+            if conn:
+                conn.close()
 
     def _export_config(self, output_path: str) -> int:
         """Export config to JSON file."""
@@ -500,6 +506,7 @@ class DataImporter:
             return 0
 
         count = 0
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path))
             for session in data["sessions"]:
@@ -519,9 +526,11 @@ class DataImporter:
                     )
                 count += 1
             conn.commit()
-            conn.close()
         except Exception as exc:
             logger.warning("Failed to import sessions: %s", exc)
+        finally:
+            if conn:
+                conn.close()
 
         return count
 
@@ -535,6 +544,7 @@ class DataImporter:
             return 0
 
         count = 0
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path))
             for entry in data["entries"]:
@@ -544,9 +554,11 @@ class DataImporter:
                 )
                 count += 1
             conn.commit()
-            conn.close()
         except Exception as exc:
             logger.warning("Failed to import memory: %s", exc)
+        finally:
+            if conn:
+                conn.close()
 
         return count
 
@@ -560,6 +572,7 @@ class DataImporter:
             return 0
 
         count = 0
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path))
             for entity in data["entities"]:
@@ -569,9 +582,11 @@ class DataImporter:
                 )
                 count += 1
             conn.commit()
-            conn.close()
         except Exception as exc:
             logger.warning("Failed to import knowledge graph: %s", exc)
+        finally:
+            if conn:
+                conn.close()
 
         return count
 
