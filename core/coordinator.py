@@ -3108,11 +3108,23 @@ class Coordinator(Plugin):
                     success_count += 1
                 else:
                     failure_count += 1
-                if getattr(turn, "estimated_complexity", 0) >= COMPLEX_COMPLEXITY_THRESHOLD:
-                    if iteration > 0:
-                        self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
-                    else:
-                        self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
+                # 工具执行结果实时反馈：让用户知道工具执行成功还是失败
+                # 之前只在 complex 任务发"正在调用"，不告知结果，用户觉得"卡住了"
+                zh = self._is_zh()
+                if result.status == "success":
+                    data_preview = str(result.data or "")[:80]
+                    self._emit_progress(
+                        turn,
+                        f"✅ {name} 执行成功" + (f": {data_preview}" if data_preview else ""),
+                        "tool_result",
+                    )
+                else:
+                    err_msg = (result.error or "未知错误")[:80]
+                    self._emit_progress(
+                        turn,
+                        f"❌ {name} 失败: {err_msg}",
+                        "tool_result",
+                    )
                 if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
                     self.ctx.self_improver.record_failure(
                         user_input=turn.input_text,
@@ -3179,11 +3191,23 @@ class Coordinator(Plugin):
                     success_count += 1
                 else:
                     failure_count += 1
-                if getattr(turn, "estimated_complexity", 0) >= COMPLEX_COMPLEXITY_THRESHOLD:
-                    if iteration > 0:
-                        self._emit_progress(turn, f"正在调用工具（第{iteration+1}轮）: {name}", "tool_call")
-                    else:
-                        self._emit_progress(turn, f"正在调用工具: {name}", "tool_call")
+                # 工具执行结果实时反馈：让用户知道工具执行成功还是失败
+                # 之前只在 complex 任务发"正在调用"，不告知结果，用户觉得"卡住了"
+                zh = self._is_zh()
+                if result.status == "success":
+                    data_preview = str(result.data or "")[:80]
+                    self._emit_progress(
+                        turn,
+                        f"✅ {name} 执行成功" + (f": {data_preview}" if data_preview else ""),
+                        "tool_result",
+                    )
+                else:
+                    err_msg = (result.error or "未知错误")[:80]
+                    self._emit_progress(
+                        turn,
+                        f"❌ {name} 失败: {err_msg}",
+                        "tool_result",
+                    )
                 if result.status == "unavailable" and self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
                     self.ctx.self_improver.record_failure(
                         user_input=turn.input_text,
