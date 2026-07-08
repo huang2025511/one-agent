@@ -1624,6 +1624,77 @@ class SkillManager(Plugin):
             handler=_chart_handler,
         ))
 
+        # Round 8: MCP client — 连接外部 MCP 服务器的工具
+        # 之前 mcp_client.py 完全没注册，现在通过 mcp_call 工具暴露
+        async def _mcp_call_handler(args, llm=None, **kw):
+            from skills.mcp_client import MCPClient
+            client = MCPClient()
+            if isinstance(args, str):
+                args = {"input": args}
+            input_str = args.get("input", "") or args.get("server", "")
+            # 简单解析：server_name | tool_name | arguments
+            parts = [p.strip() for p in input_str.split("|", 2)]
+            if len(parts) < 2:
+                return "[MCP call 需要格式: server_name | tool_name | args_json]"
+            server_name, tool_name = parts[0], parts[1]
+            tool_args = {}
+            if len(parts) >= 3 and parts[2]:
+                import json
+                try:
+                    tool_args = json.loads(parts[2])
+                except json.JSONDecodeError:
+                    tool_args = {"input": parts[2]}
+            try:
+                # 从 config 读取 MCP 服务器列表
+                mcp_servers = (self._mcp_servers or [])
+                server_cfg = next((s for s in mcp_servers if s.get("name") == server_name), None)
+                if not server_cfg:
+                    return f"[MCP 服务器 {server_name} 未配置。请在 config 中设置 mcp_servers]"
+                if server_name not in client.servers:
+                    await client.add_server(
+                        name=server_name,
+                        url=server_cfg.get("url", ""),
+                        api_key=server_cfg.get("api_key"),
+                    )
+                result = await client.call_tool(server_name, tool_name, tool_args)
+                return str(result)[:2000] if result else "[MCP 调用无返回]"
+            except Exception as exc:
+                return f"[MCP call 失败: {exc}]"
+
+        self.register(Skill(
+            id="mcp_call",
+            title="MCP Tool Caller",
+            description="/mcp_call <server> | <tool> | <args> — 调用已配置的 MCP 服务器工具。需要在 config mcp.servers 中预先配置服务器。",
+            schema=_schema("mcp_call", "Call a tool on a configured MCP server. Format: 'server_name | tool_name | args_json'", ["input"]),
+            handler=_mcp_call_handler,
+        ))
+
+        # Round 8: MCP server — 启动/停止本地 MCP 服务器
+        async def _mcp_server_handler(args, llm=None, **kw):
+            from skills.mcp_server import get_mcp_server
+            server = get_mcp_server()
+            if isinstance(args, str):
+                args = {"input": args}
+            action = args.get("action", "status")
+            input_str = args.get("input", action)
+            if "start" in input_str or "启动" in input_str:
+                port = int(args.get("port", 8765))
+                await server.start(port=port)
+                return f"[MCP 服务器已启动，端口 {port}]"
+            elif "stop" in input_str or "停止" in input_str:
+                await server.stop()
+                return "[MCP 服务器已停止]"
+            else:
+                return f"[MCP 服务器状态: {'运行中' if server._running else '未启动'}]"
+
+        self.register(Skill(
+            id="mcp_server",
+            title="MCP Server Manager",
+            description="/mcp_server start|stop|status — 启动/停止/查看本地 MCP 服务器。",
+            schema=_schema("mcp_server", "Manage the local MCP server lifecycle", []),
+            handler=_mcp_server_handler,
+        ))
+
 
 def _schema(name: str, description: str, required: List[str]) -> Dict[str, Any]:
     return {

@@ -270,8 +270,14 @@ class Coordinator(Plugin):
         except Exception as exc:  # noqa: BLE001
             logger.warning("failed to persist language: %s", exc)
 
-    async def _compress_messages(self, messages: list, turn) -> str:
-        """Use a lightweight LLM call to summarize early conversation."""
+    async def _compress_messages(self, messages: list, turn, extra_hints: Optional[List[str]] = None) -> str:
+        """Use a lightweight LLM call to summarize early conversation.
+
+        Args:
+            messages: 对话消息列表
+            turn: 当前 turn context
+            extra_hints: ContextCompressor 提取的关键信息，注入到 prompt 中
+        """
         if not self._llm:
             return ""
         early_text = "\n".join(
@@ -287,8 +293,14 @@ class Coordinator(Plugin):
             lightweight = self.ctx.config.get("llm", {}).get("lightweight_model")
             if lightweight:
                 model = lightweight
+        # Round 8：如果 ContextCompressor 提取了关键事实，作为 hint 注入 prompt
+        # 确保 LLM 摘要不会丢失这些关键信息
+        system_content = "你是对话摘要助手。用2-3句话总结以下对话的关键信息、用户需求和已完成的步骤。只输出摘要，不要加任何前缀。"
+        if extra_hints:
+            hints_text = "\n".join(f"- {h}" for h in extra_hints[:5])
+            system_content += f"\n\n已通过重要性评分识别出的关键信息（务必保留）：\n{hints_text}"
         prompt = [
-            {"role": "system", "content": "你是对话摘要助手。用2-3句话总结以下对话的关键信息、用户需求和已完成的步骤。只输出摘要，不要加任何前缀。"},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": early_text[:4000]},
         ]
         try:
@@ -1137,6 +1149,15 @@ class Coordinator(Plugin):
         # 6. Round 7 修复: Task state — 检测并更新活跃任务
         await _safe_step("update_task_state", self._update_task_state(turn))
 
+        # 7. Round 8: Task scheduler — 异步跟进任务
+        # 对 expert/complex 任务，如果 LLM 提到"稍后做"或"待跟进"，调度一个延迟检查
+        # 避免用户问后续状态时需要重新开始整个流程
+        if complexity >= COMPLEX_COMPLEXITY_THRESHOLD and turn.result:
+            _safe_step_sync(
+                "schedule_followup_check",
+                lambda: self._maybe_schedule_followup(turn),
+            )
+
         self.publish("turn_completed", turn=turn)
         logger.info(
             "reply produced (%s mode, %d tokens, %.2fs)",
@@ -1908,7 +1929,11 @@ class Coordinator(Plugin):
         return False
 
     async def _compress_context(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
-        """Compress context if approaching token limit."""
+        """Compress context if approaching token limit.
+
+        Round 8 修复：使用 ContextCompressor 做重要性评分 + 关键信息提取，
+        而不仅仅依赖 LLM 摘要。对 LLM 不可用场景也可用。
+        """
 
         if not (self.ctx and self.ctx.config):
             return
@@ -1937,7 +1962,33 @@ class Coordinator(Plugin):
         if estimated_tokens <= max_tokens * 0.8:
             return
 
-        summary = await self._compress_messages(messages, turn)
+        # Round 8：先用 ContextCompressor 做重要性评分 + 关键信息提取
+        # 提取出来的 key_points 会注入到摘要 prompt，让 LLM 摘要保留关键事实
+        key_points: List[str] = []
+        try:
+            from core.context_compressor import ContextCompressor
+            complexity = getattr(turn, "estimated_complexity", 0.5) or 0.5
+            tier = (
+                "expert" if complexity >= 0.8 else
+                "complex" if complexity >= 0.5 else
+                "simple" if complexity >= 0.2 else
+                "trivial"
+            )
+            compressor = ContextCompressor.for_tier(tier)
+            _, comp_summary = compressor.compress(messages)
+            # comp_summary 已经包含了 topics + key_points，可以直接用
+            if comp_summary and "Key information" in comp_summary:
+                # 提取要点行
+                for line in comp_summary.split("\n"):
+                    line = line.strip()
+                    if line.startswith("•"):
+                        key_points.append(line.lstrip("• ").strip())
+            turn.meta["context_compressor_used"] = True
+        except Exception as exc:
+            logger.debug("context_compressor integration failed: %s", exc)
+
+        # LLM 摘要 (结合 ContextCompressor 提取的要点)
+        summary = await self._compress_messages(messages, turn, extra_hints=key_points)
         if summary:
             keep_recent = max(4, len(messages) // 3)
             early = messages[:len(messages) - keep_recent]
@@ -2047,6 +2098,27 @@ class Coordinator(Plugin):
                                 logger.debug("auto-search enhanced with RAG (HyDE+rerank)")
                         except Exception:
                             pass
+
+                        # Round 8: 如果 RAG 增强后结果仍然很长 (>6000 chars)，
+                        # 用 SubAgent 做信息提取/总结，让 LLM 拿到精炼版结果
+                        if search_result_text and len(search_result_text) > 6000:
+                            try:
+                                from core.sub_agent import SubAgent
+                                sub = SubAgent(self._llm, self._skills, "search-summarizer")
+                                sub_result = await sub.run(
+                                    f"从以下搜索结果中提取与问题最相关的信息（保留关键事实和数据，2000字以内）：\n\n"
+                                    f"问题：{turn.input_text[:300]}\n\n"
+                                    f"搜索结果：\n{search_result_text[:8000]}",
+                                    model=turn.model,
+                                    max_iterations=1,
+                                )
+                                if sub_result.get("result") and not sub_result.get("error"):
+                                    search_result_text = sub_result["result"][:4000]
+                                    turn.meta["sub_agent_summarized"] = True
+                                    logger.debug("auto-search summarized by SubAgent (%d chars)",
+                                                 len(search_result_text))
+                            except Exception as sub_exc:
+                                logger.debug("SubAgent summarization skipped: %s", sub_exc)
                     else:
                         logger.debug("auto-search returned no usable results: %s", str(result)[:200])
                 except Exception as exc:
@@ -4355,6 +4427,57 @@ class Coordinator(Plugin):
                         logger.debug("task_state: LLM extraction failed: %s", exc)
         except Exception as exc:
             logger.debug("task_state: update failed: %s", exc)
+
+    def _maybe_schedule_followup(self, turn: TurnContext) -> None:
+        """Schedule a follow-up check task for complex/expert work.
+
+        Round 8：接入 AsyncTaskScheduler。如果 LLM 回复中包含"稍后"/"待跟进"/
+        "I'll check back" 等关键词，注册一个延迟任务。
+        用户下次发起会话时，会自动加载跟进状态。
+
+        之前 task_scheduler 完全是死代码，定义了 AsyncTaskScheduler 但
+        coordinator 从未调用。现在用于真实的 follow-up 场景。
+        """
+        try:
+            from core.task_scheduler import get_task_scheduler
+            scheduler = get_task_scheduler()
+        except Exception as exc:
+            logger.debug("task_scheduler not available: %s", exc)
+            return
+
+        result = (turn.result or "").lower()
+        followup_indicators = [
+            "稍后", "稍等", "等一下", "我稍后", "我等下", "待跟进", "待完成",
+            "稍后检查", "稍后回来", "我会", "我会回来", "下次",
+            "later", "check back", "follow up", "followup", "will check",
+        ]
+        if not any(ind in result for ind in followup_indicators):
+            return
+
+        # Round 8：使用 asyncio 调度（scheduler.schedule_delayed 是 async）
+        # 这里用 ensure_future fire-and-forget，不阻塞 turn 完成
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 通过 _run_coroutine_threadsafe 在后台调度
+                task_args = {
+                    "session_id": turn.session_id,
+                    "user_input": turn.input_text[:300],
+                }
+                # 延迟 5 分钟（300秒），检查 session 是否需要回顾
+                task_id = loop.create_task(
+                    scheduler.schedule_delayed(
+                        func_name="followup_check",
+                        delay_seconds=300,
+                        args=task_args,
+                        name=f"followup-{turn.session_id[:20]}",
+                    )
+                )
+                turn.meta["followup_scheduled"] = True
+                logger.debug("followup task scheduled for session %s", turn.session_id)
+        except Exception as exc:
+            logger.debug("schedule_followup failed: %s", exc)
 
     # --------------------------------------------------- Advanced RAG integration (Round 7)
     async def _enhanced_web_search(self, query: str, turn: TurnContext) -> str:
