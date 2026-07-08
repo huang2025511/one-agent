@@ -81,11 +81,11 @@ COMPLEX_COMPLEXITY_THRESHOLD = DEFAULT_SIMPLE_THRESHOLD     # >= → think + ref
 SIMPLE_COMPLEXITY_THRESHOLD = DEFAULT_TRIVIAL_THRESHOLD     # >= → light self-verification
 # Smart boost feature flags by complexity tier
 # - trivial (<0.2): direct execution, no enhancements (max speed)
-# - simple (0.2-0.5): lightweight thinking + self-verification
+# - simple (0.2-0.5): light thinking only if needed + skip self-verification (speed optimized)
 # - complex (0.5-0.8): full pre-thinking + reflection + self-verification + final polish + clarification
 # - expert (>=0.8): everything + post-execution review + tool chain planning
-THINK_MIN_COMPLEXITY = 0.2            # simple and above — lowered from 0.5 for better reasoning
-SELF_VERIFY_MIN_COMPLEXITY = 0.2     # simple and above
+THINK_MIN_COMPLEXITY = 0.3            # raised from 0.2 — reduce overhead for very simple tasks
+SELF_VERIFY_MIN_COMPLEXITY = 0.35     # raised from 0.2 — skip verification for most simple tasks
 CLARIFICATION_MIN_COMPLEXITY = 0.5      # complex and above
 FINAL_POLISH_MIN_COMPLEXITY = 0.5     # complex and above
 POST_REFLECT_MIN_COMPLEXITY = 0.8       # expert only
@@ -1040,10 +1040,9 @@ class Coordinator(Plugin):
             self._emit_progress(turn, "正在启动多智能体协作...", "multi_agent")
             multi_agent_done = await self._multi_agent_phase(messages, turn)
         elif complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
-            # Complex level: think + reflect
+            # Complex level: think + reflect in ONE call (performance optimization)
             self._emit_progress(turn, "正在思考分析...", "thinking")
-            await self._think_phase(messages, turn)
-            await self._reflect_phase(messages, turn)
+            await self._think_phase(messages, turn, include_reflection=True)
         elif complexity >= THINK_MIN_COMPLEXITY:
             # Simple level: lightweight thinking for better reasoning
             await self._think_phase(messages, turn)
@@ -1071,19 +1070,23 @@ class Coordinator(Plugin):
         # --- Step 4: Post-execution quality improvements by tier ---
         # For complex+: combine self-verification and final polish into one
         # LLM call when possible (saves one round-trip).
+        result_length = len(turn.result) if turn.result else 0
         if complexity >= FINAL_POLISH_MIN_COMPLEXITY and turn.result and not turn.error:
             self._emit_progress(turn, "正在验证和优化结果...", "verification")
             await self._verify_and_polish(messages, turn, complexity)
-            # Gap 9：输出客观验证 — 交叉检查搜索结果、代码、数字
-            await self._objective_verify(turn)
+            # Skip objective_verify for short answers (< 300 chars) — low error probability
+            if result_length >= 300:
+                await self._objective_verify(turn)
         elif complexity >= SELF_VERIFY_MIN_COMPLEXITY and turn.result and not turn.error:
             # simple tier: light self-verification only
             self._emit_progress(turn, "正在验证结果...", "verification")
             await self._self_verify(messages, turn, complexity)
 
         if complexity >= FINAL_POLISH_MIN_COMPLEXITY and turn.result:
+            # Skip post_reflect for short answers (< 400 chars) — minimal learning value
             # Post-execution reflection: learn from this turn (complex and above)
-            await self._post_reflect(turn)
+            if result_length >= 400:
+                await self._post_reflect(turn)
 
         # Auto-extract entities (offload SQLite writes to worker thread)
         await asyncio.to_thread(self._extract_entities, turn)
@@ -1613,7 +1616,7 @@ class Coordinator(Plugin):
             turn.skills = []
         return tools
 
-    async def _think_phase(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
+    async def _think_phase(self, messages: List[Dict[str, Any]], turn: TurnContext, include_reflection: bool = False) -> None:
         """Execute structured thinking phase (Chain-of-Thought style planning).
 
         This is the thinking backbone of One-Agent. Instead of the previous
@@ -1622,6 +1625,9 @@ class Coordinator(Plugin):
         assistant response, so every subsequent tool-loop call can see the
         plan and is more likely to follow it instead of drifting into
         superficial chatter.
+
+        When include_reflection=True, combines thinking + reflection in ONE
+        LLM call to save latency. Uses lightweight model for auxiliary calls.
 
         Steps we guide the model to produce:
         1. Intent + output form
@@ -1634,6 +1640,9 @@ class Coordinator(Plugin):
 
         The thinking is NOT shown to the user directly — it drives execution.
         """
+
+        # Use lightweight model for thinking to reduce latency
+        model = self._lightweight_model(turn)
 
         # Build the thinking prompt.  We attach it as an additional user
         # message so the model has access to the full conversation history
@@ -1668,14 +1677,46 @@ class Coordinator(Plugin):
                 "Important: do NOT write the final user answer. Produce only these 7 steps as your own execution plan."
             )
 
+        if include_reflection:
+            if self._is_zh():
+                plan_prompt += (
+                    "\n\n【内部反思 — 在完成上述规划后立即执行】\n\n"
+                    "请站在更高的角度审视你刚刚制定的计划，找出潜在问题和改进空间。\n\n"
+                    "请思考并回答以下问题：\n"
+                    "1. 计划中最大的风险是什么？哪个环节最可能失败？\n"
+                    "2. 是否遗漏了用户可能关心的边界情况或细节？\n"
+                    "3. 各个步骤之间是否存在依赖关系没考虑到？\n"
+                    "4. 如果某个工具调用失败，备用方案是否足够有效？\n"
+                    "5. 是否有更高效的路径可以达到相同目标？\n"
+                    "6. 最终输出是否真的能满足用户的核心需求？\n\n"
+                    "请用简洁的语言总结你的反思结论，并给出具体的改进建议（如果有的话）。\n\n"
+                    "输出格式要求：先输出【计划】部分（7步），然后输出【反思】部分（回答上述6个问题）。"
+                )
+            else:
+                plan_prompt += (
+                    "\n\n[Internal reflection — do this IMMEDIATELY after the plan]\n\n"
+                    "Step back and critically review your plan for potential flaws.\n\n"
+                    "Answer these questions:\n"
+                    "1. What is the biggest risk in this plan? Which step is most likely to fail?\n"
+                    "2. Are there any edge cases or details the user might care about that were missed?\n"
+                    "3. Are there dependencies between steps that weren't considered?\n"
+                    "4. If a tool call fails, is the fallback sufficient?\n"
+                    "5. Is there a more efficient path to the same goal?\n"
+                    "6. Will the final output truly address the user's core need?\n\n"
+                    "Summarize your reflections and provide specific improvement suggestions if any.\n\n"
+                    "Output format: First [PLAN] section (7 steps), then [REFLECTION] section (answers to the 6 questions)."
+                )
+
         thinking_messages = list(messages) + [{"role": "user", "content": plan_prompt}]
+
+        max_tokens = min(turn.token_budget or 2048, 1400 if include_reflection else 900)
 
         try:
             think_resp = await self._llm.chat_completion(
                 messages=thinking_messages,
-                model=turn.model,
-                max_tokens=min(turn.token_budget or 2048, 900),
-                tools=None,  # planning only, no tools
+                model=model,
+                max_tokens=max_tokens,
+                tools=None,
             )
             thinking_text = (think_resp.get("text") or "").strip()
         except Exception as exc:
@@ -1683,16 +1724,43 @@ class Coordinator(Plugin):
             thinking_text = ""
 
         if thinking_text:
-            turn.meta["thinking"] = thinking_text
-            # Inject the plan as an assistant message so the subsequent tool
-            # loop sees it — this is the key behavioral change. We also tag
-            # it with a visible header so the LLM understands this is its
-            # own plan.
+            if include_reflection:
+                zh = self._is_zh()
+                plan_marker = "【反思】" if zh else "[REFLECTION]"
+                if plan_marker in thinking_text:
+                    plan_part, reflect_part = thinking_text.split(plan_marker, 1)
+                    thinking_text = plan_part.strip()
+                    reflect_text = reflect_part.strip()
+                else:
+                    plan_marker2 = "【计划】" if zh else "[PLAN]"
+                    if plan_marker2 in thinking_text:
+                        parts = thinking_text.split(plan_marker2)
+                        thinking_text = parts[-1].strip() if len(parts) > 1 else thinking_text
+                        reflect_text = ""
+                    else:
+                        reflect_text = ""
+
+                turn.meta["thinking"] = thinking_text
+                if reflect_text:
+                    turn.meta["reflection"] = reflect_text
+                    header = "【我的反思与改进】\n" if zh else "[My reflection and improvements]\n"
+                    reflect_message = {"role": "assistant", "content": header + reflect_text}
+                    messages.append(reflect_message)
+                    prompt = (
+                        "好。根据你的反思，如果需要调整计划，请立即执行调整后的方案。"
+                        if zh
+                        else "Good. Based on your reflection, execute with any adjustments needed."
+                    )
+                    messages.append({"role": "user", "content": prompt})
+                    logger.debug("combined think+reflect phase completed (%d chars)", len(thinking_text) + len(reflect_text))
+                else:
+                    turn.meta["reflection"] = ""
+            else:
+                turn.meta["thinking"] = thinking_text
+
             header = "【我的执行计划】\n" if self._is_zh() else "[My execution plan]\n"
             plan_message = {"role": "assistant", "content": header + thinking_text}
             messages.append(plan_message)
-            # Append a short user follow-up so conversation flow is preserved
-            # and the model knows it should now execute the plan.
             prompt = (
                 "好。现在按照上面的计划一步一步执行。"
                 if self._is_zh()
@@ -1702,6 +1770,8 @@ class Coordinator(Plugin):
             logger.debug("think phase completed (%d chars)", len(thinking_text))
         else:
             turn.meta["thinking"] = ""
+            if include_reflection:
+                turn.meta["reflection"] = ""
 
     async def _reflect_phase(self, messages: List[Dict[str, Any]], turn: TurnContext) -> None:
         """Execute reflection phase — critically review the plan before execution.
