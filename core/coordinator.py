@@ -950,7 +950,7 @@ class Coordinator(Plugin):
             self.publish("turn_completed", turn=turn)
             return True
         if skill_id == "_branch_list":
-            await self._handle_branch_list(turn)
+            await self._handle_branch_list(turn, args_text)
             self.publish("turn_completed", turn=turn)
             return True
 
@@ -1010,23 +1010,40 @@ class Coordinator(Plugin):
             return
 
         # Handle slash commands first
-        if turn.input_text and turn.input_text.strip().startswith("/"):
-            if await self._handle_slash_command(turn):
-                return
+        try:
+            if turn.input_text and turn.input_text.strip().startswith("/"):
+                if await self._handle_slash_command(turn):
+                    return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("slash command handler failed: %s", exc, exc_info=True)
+            turn.record_failure(str(exc))
+            self.publish("turn_completed", turn=turn)
+            return
 
         # 自然语言→skill 直通：检测"拉取/添加/刷新模型"类自然语言意图，
         # 直接调度 model_manage skill，绕过弱模型的 tool-calling 限制。
         # 这让用户说"商汤有新免费模型，拉取一下"就能触发，无需 /添加模型。
-        if turn.input_text and self._skills is not None:
-            if await self._maybe_direct_skill_dispatch(turn):
-                return
+        try:
+            if turn.input_text and self._skills is not None:
+                if await self._maybe_direct_skill_dispatch(turn):
+                    return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("direct skill dispatch failed: %s", exc, exc_info=True)
+            turn.record_failure(str(exc))
+            self.publish("turn_completed", turn=turn)
+            return
 
-        # 傻瓜化：检测自然语言中的批量任务/模型对比意图，自动调用 /batch、/compare
-        # 处理器。用户无需知道斜杠命令——输入"翻译以下：1.xxx 2.xxx 3.xxx"或
-        # "对比 openai/gpt-4o 和 anthropic/claude 这个问题"即自动触发。
-        if turn.input_text and self._llm is not None:
-            if await self._maybe_auto_special_task(turn):
-                return
+        # 傻瓜化：检测自然语言中的批量任务/模型对比/图表生成意图，自动调用
+        # /batch、/compare、/chart 等处理器。用户无需知道斜杠命令。
+        try:
+            if turn.input_text and self._llm is not None:
+                if await self._maybe_auto_special_task(turn):
+                    return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("auto special task failed: %s", exc, exc_info=True)
+            turn.record_failure(str(exc))
+            self.publish("turn_completed", turn=turn)
+            return
 
         # Auto-detect language from user input
         if turn.input_text:
@@ -4480,6 +4497,7 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- Email handler
     async def _handle_email(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在处理邮件...", "email")
         zh = self._is_zh()
         skill = get_email_skill()
         parts = args_text.strip().split(None, 1)
@@ -4508,6 +4526,7 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- Calendar handler
     async def _handle_calendar(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在查询日程...", "calendar")
         zh = self._is_zh()
         skill = get_calendar_skill()
         parts = args_text.strip().split(None, 1)
@@ -4527,6 +4546,7 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- Database handler
     async def _handle_db(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在查询数据库...", "db")
         zh = self._is_zh()
         skill = get_database_skill()
         parts = args_text.strip().split(None, 1)
@@ -4549,6 +4569,7 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- MCP handler
     async def _handle_mcp(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在管理 MCP 服务器...", "mcp")
         zh = self._is_zh()
         server = get_mcp_server()
         # Register current skills
@@ -4566,6 +4587,7 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- OpenAPI handler
     async def _handle_openapi(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在加载 OpenAPI 规范...", "openapi")
         zh = self._is_zh()
         skill = get_openapi_skill()
         parts = args_text.strip().split(None, 2)
@@ -4589,6 +4611,7 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- Agent mesh handler
     async def _handle_agent_mesh(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在启动多智能体协作...", "agent_mesh")
         zh = self._is_zh()
         if not args_text.strip():
             turn.result = (
@@ -4632,6 +4655,7 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- Chart handler
     async def _handle_chart(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在生成图表...", "chart")
         zh = self._is_zh()
         gen = get_chart_generator()
         if not args_text.strip():
@@ -4655,6 +4679,7 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- Branch handlers
     async def _handle_branch(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在创建分支...", "branch")
         zh = self._is_zh()
         mgr = get_branch_manager()
         branch_id = mgr.branch(turn.session_id, "", args_text.strip() or "branch")
@@ -4666,6 +4691,7 @@ class Coordinator(Plugin):
         turn.record_success(turn.result, 0)
 
     async def _handle_branch_switch(self, turn: TurnContext, args_text: str) -> None:
+        self._emit_progress(turn, "正在切换分支...", "branch_switch")
         zh = self._is_zh()
         mgr = get_branch_manager()
         ok = mgr.switch_branch(turn.session_id, args_text.strip())
@@ -4681,7 +4707,8 @@ class Coordinator(Plugin):
             )
         turn.record_success(turn.result, 0)
 
-    async def _handle_branch_list(self, turn: TurnContext) -> None:
+    async def _handle_branch_list(self, turn: TurnContext, args_text: str = "") -> None:
+        self._emit_progress(turn, "正在列出分支...", "branch_list")
         mgr = get_branch_manager()
         tree = mgr.get_tree(turn.session_id)
         branches = tree.list_branches()
