@@ -1451,8 +1451,108 @@ class Coordinator(Plugin):
             text,
             flags=re.DOTALL,
         )
+        # Remove self-closing tool tags like <web_search query="..."/>
+        # or <system_run command="..."/> that weak models emit when they
+        # can't use function calling. These may have been parsed & executed
+        # by _parse_xml_tool_tags, but the raw tags must not leak to users.
+        text = self._strip_executed_xml_tags(text)
         # Clean up excessive blank lines left behind
         text = re.sub(r'\n{3,}', '\n\n', text)
+        return text.strip()
+
+    # 已知工具名集合 — 用于校验解析出的标签名是否合法
+    _XML_TOOL_NAMES = frozenset({
+        "web_search", "python_execute", "calc", "send_message",
+        "system_run", "settings", "model_manage", "now", "email",
+        "calendar", "database", "mcp", "openapi", "workflow",
+        "chart", "branch", "branch_switch", "branch_list",
+    })
+
+    def _parse_xml_tool_tags(self, text: str) -> List[Dict[str, Any]]:
+        """从 LLM 输出文本中解析自闭合 XML 工具标签，转为 tool_calls 结构。
+
+        当模型不支持 OpenAI function calling（如 sensenova flash-lite）时，
+        LLM 可能输出 <web_search query="..."/> 这类标签来表达工具调用意图。
+        本方法把这些标签解析成标准 tool_calls 结构，让 _execute_tool_calls 能执行。
+
+        支持的格式（自闭合，属性即参数）：
+            <web_search query="dmxapi API 文档" />
+            <system_run command="curl -s https://api.dmxapi.cn/v1/models" />
+            <calc expr="1+1" />
+
+        也支持成对标签：
+            <web_search query="..."></web_search>
+
+        返回 [] 表示没有可解析的工具标签。
+        """
+        import re as _re
+        import json as _json
+
+        if not text or "<" not in text:
+            return []
+
+        calls: List[Dict[str, Any]] = []
+        # 匹配 <tool_name attr1="v1" attr2='v2' />  或  <tool_name ...></tool_name>
+        # 限制 tool_name 只能是已知工具名，避免误解析普通 XML/HTML
+        pattern = _re.compile(
+            r'<(?P<name>[a-z_]+)(?P<attrs>(?:\s+[a-zA-Z_]\w*\s*=\s*(?:"[^"]*"|\'[^\']*\'))+)\s*/?>',
+            _re.IGNORECASE,
+        )
+        attr_pattern = _re.compile(
+            r'(?P<key>[a-zA-Z_]\w*)\s*=\s*(?P<val>"(?P<dval>[^"]*)"|\'(?P<sval>[^\']*)\')',
+        )
+
+        for m in pattern.finditer(text):
+            name = m.group("name").lower()
+            if name not in self._XML_TOOL_NAMES:
+                continue
+            attrs_str = m.group("attrs")
+            args: Dict[str, Any] = {}
+            for am in attr_pattern.finditer(attrs_str):
+                key = am.group("key")
+                # 优先双引号值，否则单引号值
+                val = am.group("dval") if am.group("dval") is not None else am.group("sval")
+                args[key] = val
+
+            if not args:
+                continue
+
+            # 兼容 _execute_tool_calls 期望的字段格式
+            calls.append({
+                "id": f"xml_{len(calls)}_{name}",
+                "name": name,
+                "args": args,
+            })
+
+        return calls
+
+    def _strip_executed_xml_tags(self, text: str) -> str:
+        """从输出文本中移除已解析执行过的 XML 工具标签，避免泄漏给用户。
+
+        与 _sanitize_model_output 不同，本方法只移除已知工具名的自闭合标签，
+        保留普通文本内容。在 _parse_xml_tool_tags 成功解析后调用。
+        """
+        import re as _re
+        if not text or "<" not in text:
+            return text
+        # 构建正则：<(?:web_search|system_run|calc|...)\s+.../>
+        names_alt = "|".join(_re.escape(n) for n in self._XML_TOOL_NAMES)
+        # 移除自闭合标签 <tool_name .../>
+        text = _re.sub(
+            rf'<(?:{names_alt})(?:\s+[a-zA-Z_]\w*\s*=\s*(?:"[^"]*"|\'[^\']*\'))+\s*/?>',
+            '',
+            text,
+            flags=_re.IGNORECASE,
+        )
+        # 移除成对空标签 <tool_name ...></tool_name>
+        text = _re.sub(
+            rf'<(?:{names_alt})(?:\s[^>]*)?>\s*</(?:{names_alt})>',
+            '',
+            text,
+            flags=_re.IGNORECASE,
+        )
+        # 清理多余空行
+        text = _re.sub(r'\n{3,}', '\n\n', text)
         return text.strip()
 
     def _needs_clarification_check(self, turn: TurnContext) -> bool:
@@ -2500,6 +2600,28 @@ class Coordinator(Plugin):
             total_cost += (tokens_used / 1000) * model_cost_per_1k
 
             tool_calls = resp.get("tool_calls") or []
+
+            # Fallback: 当模型不支持 function calling (如 sensenova flash-lite) 时，
+            # LLM 可能在纯文本里输出 <web_search query="..."/> 这类自闭合 XML 标签
+            # 来"表达"工具调用意图。之前这些标签既不解析也不执行，直接泄漏给用户。
+            # 这里补一条解析链路：从输出文本中提取 XML 工具标签 → 转为 tool_calls 结构。
+            if not tool_calls and resp.get("text"):
+                parsed_calls = self._parse_xml_tool_tags(resp["text"])
+                if parsed_calls:
+                    # 安全过滤：system_run 需要 OS 模式开启才能执行
+                    # 否则即使模型输出了 <system_run/> 标签也不执行
+                    if not (self._os_mode_enabled or turn.meta.get("needs_system_access")):
+                        parsed_calls = [
+                            c for c in parsed_calls if c["name"] != "system_run"
+                        ]
+                    if parsed_calls:
+                        tool_calls = parsed_calls
+                        # 记录工具调用来源，供后续 sanitize 使用
+                        turn.meta["xml_parsed_tool_calls"] = True
+                        logger.info(
+                            "tool_loop: parsed %d tool call(s) from XML tags in text output",
+                            len(tool_calls),
+                        )
 
             if not tool_calls:
                 # Gap 1 修复：流式输出 — 使用 streaming 获取最终回复
