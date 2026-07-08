@@ -675,6 +675,87 @@ class Coordinator(Plugin):
 
         return None, None, None
 
+    async def _maybe_auto_special_task(self, turn: TurnContext) -> bool:
+        """傻瓜化：检测自然语言中的批量任务/模型对比意图，自动调用对应处理器。
+
+        让用户无需知道 /batch、/compare 等斜杠命令——只要输入符合模式就自动触发：
+        - 批量任务：包含任务动词（翻译/总结/分类/提取）+ 编号列表（3 项以上）
+        - 模型对比：含"对比/比较" + 两个 provider/model token（带 /）+ 问题
+        """
+        text = (turn.input_text or "").strip()
+        if not text or len(text) < 10:
+            return False
+
+        import re as _re
+
+        # ---- 批量任务自动检测 ----
+        # 触发条件：任务动词 + 至少 3 个编号列表项（1. 2. 3. 或 1、 2、 3、）
+        batch_verbs = {
+            "翻译": "translate", "translate": "translate",
+            "总结": "summarize", "摘要": "summarize", "summarize": "summarize",
+            "分类": "classify", "classify": "classify",
+            "提取": "extract", "extract": "extract",
+        }
+        text_lower = text.lower()
+        matched_verb = None
+        for verb, task_type in batch_verbs.items():
+            if verb in text_lower or verb in text:
+                matched_verb = (verb, task_type)
+                break
+
+        if matched_verb is not None:
+            # 检测编号列表项：1. / 1、 / 1) / - / * 开头的行
+            list_item_pattern = _re.compile(
+                r"^\s*(?:\d+[.、)]\s+|[-*]\s+).+", _re.MULTILINE
+            )
+            list_items = list_item_pattern.findall(text)
+            if len(list_items) >= 3:
+                _, task_type = matched_verb
+                # 构造 args_text：<task_type>\n<原始内容>
+                args_text = f"{task_type}\n{text}"
+                self._emit_progress(turn, f"检测到批量{matched_verb[0]}任务，自动处理 {len(list_items)} 项...", "batch")
+                try:
+                    await self._handle_batch(turn, args_text)
+                    if turn.result:
+                        turn.meta["auto_batch_triggered"] = True
+                        self.publish("turn_completed", turn=turn)
+                        return True
+                except Exception as exc:
+                    logger.debug("auto batch failed, falling back: %s", exc)
+
+        # ---- 模型对比自动检测 ----
+        # 触发条件：含"对比/比较" + 两个 provider/model 格式的 token（含 /）+ 问题
+        compare_keywords = ("对比一下", "比较一下", "对比", "比较", "vs", "versus", "compare")
+        if any(kw in text_lower for kw in compare_keywords):
+            # 提取所有 provider/model 格式的 token（如 openai/gpt-4o）
+            model_tokens = _re.findall(r"[a-zA-Z][\w.-]*/[\w.-]+", text)
+            if len(model_tokens) >= 2:
+                model_a, model_b = model_tokens[0], model_tokens[1]
+                # 问题是去掉关键词和两个模型名后的剩余文本
+                question = text
+                for kw in compare_keywords:
+                    question = question.replace(kw, " ")
+                question = question.replace(model_a, " ").replace(model_b, " ")
+                question = _re.sub(r"\s+", " ", question).strip(" ，,。.?？")
+                # 如果没有显式问题，复用上一轮输入
+                if len(question) < 5:
+                    history = turn.meta.get("history", [])
+                    if history:
+                        question = str(history[-1].get("input", ""))[:500]
+                if len(question) >= 5:
+                    args_text = f"{model_a} {model_b} {question}"
+                    self._emit_progress(turn, f"检测到模型对比意图，对比 {model_a} vs {model_b}...", "model_compare")
+                    try:
+                        await self._handle_model_compare(turn, args_text)
+                        if turn.result:
+                            turn.meta["auto_compare_triggered"] = True
+                            self.publish("turn_completed", turn=turn)
+                            return True
+                    except Exception as exc:
+                        logger.debug("auto compare failed, falling back: %s", exc)
+
+        return False
+
     async def _handle_slash_command(self, turn: TurnContext) -> bool:
         """Handle slash commands like /help, /settings.
 
@@ -848,6 +929,13 @@ class Coordinator(Plugin):
         # 这让用户说"商汤有新免费模型，拉取一下"就能触发，无需 /添加模型。
         if turn.input_text and self._skills is not None:
             if await self._maybe_direct_skill_dispatch(turn):
+                return
+
+        # 傻瓜化：检测自然语言中的批量任务/模型对比意图，自动调用 /batch、/compare
+        # 处理器。用户无需知道斜杠命令——输入"翻译以下：1.xxx 2.xxx 3.xxx"或
+        # "对比 openai/gpt-4o 和 anthropic/claude 这个问题"即自动触发。
+        if turn.input_text and self._llm is not None:
+            if await self._maybe_auto_special_task(turn):
                 return
 
         # Auto-detect language from user input
@@ -1531,6 +1619,25 @@ class Coordinator(Plugin):
                         break
                 else:
                     messages.insert(0, {"role": "system", "content": restart_note})
+
+        # 注入回复风格：StyleAdapter 根据用户历史反馈/画像自动调整回复风格
+        # （简洁/详细、正式/友好、emoji、代码详尽度等）。之前 getter 定义了却
+        # 从未被调用 → 风格个性化能力完全是死代码。这里激活它，让 agent 自动
+        # 适应用户的沟通偏好，无需用户手动配置。
+        try:
+            style_adapter = self._get_style_adapter()
+            lang = "zh" if self._is_zh() else "en"
+            style_snippet = style_adapter.generate_system_prompt_snippet(lang=lang)
+            if style_snippet:
+                style_msg = {"role": "system", "content": style_snippet}
+                # 插到第一个 system 消息之后，作为持久化风格指令
+                if messages and messages[0].get("role") == "system":
+                    messages.insert(1, style_msg)
+                else:
+                    messages.insert(0, style_msg)
+                turn.meta["style_adapter_injected"] = True
+        except Exception as exc:
+            logger.debug("style adapter injection skipped: %s", exc)
 
         return messages
 
@@ -3566,6 +3673,28 @@ class Coordinator(Plugin):
                 except Exception as exc:
                     logger.debug("dialog summary generation failed: %s", exc)
 
+            # 8. 风格自适应学习：检测用户对回复风格的自然语言反馈
+            # （"太啰嗦了"/"详细一点"/"别用 emoji"/"专业点"等），自动调整
+            # StyleAdapter 并持久化到用户画像，下一轮 _prepare_messages 即生效。
+            # 这让 agent 能听懂用户的风格偏好，无需任何手动配置。
+            try:
+                style_adapter = self._get_style_adapter()
+                updates = style_adapter.adjust_from_feedback(turn.input_text)
+                if updates:
+                    profile = self._get_profile()
+                    current = profile.get_preference("response_style") or {}
+                    if isinstance(current, dict):
+                        current.update(updates)
+                    else:
+                        current = dict(updates)
+                    await asyncio.to_thread(
+                        profile.set_preference, "response_style", current
+                    )
+                    turn.meta["style_adjusted"] = updates
+                    logger.debug("style auto-adjusted from feedback: %s", updates)
+            except Exception as exc:
+                logger.debug("style auto-learning skipped: %s", exc)
+
         except Exception as exc:
             logger.debug("intelligence recording failed: %s", exc)
 
@@ -4457,16 +4586,18 @@ class Coordinator(Plugin):
                 ]
                 input_lower = turn.input_text.lower()
                 if any(kw in input_lower for kw in completion_keywords):
-                    summarizer.complete_task(session_id)
+                    completed = summarizer.complete_task(session_id)
                     logger.debug("task_state: completed task '%s'", active.name)
+                    self._append_task_completion_summary(turn, completed)
                     return
 
                 # Check if all steps are done
                 if active.steps:
                     all_done = all(s.get("status") == "done" for s in active.steps)
                     if all_done:
-                        summarizer.complete_task(session_id)
+                        completed = summarizer.complete_task(session_id)
                         logger.debug("task_state: all steps done, completed '%s'", active.name)
+                        self._append_task_completion_summary(turn, completed)
                         return
 
             # Detect new multi-step task from user input
@@ -4538,6 +4669,56 @@ class Coordinator(Plugin):
                         logger.debug("task_state: LLM extraction failed: %s", exc)
         except Exception as exc:
             logger.debug("task_state: update failed: %s", exc)
+
+    def _append_task_completion_summary(self, turn: TurnContext, completed_task: Any) -> None:
+        """任务完成时自动生成总结报告并追加到回复末尾。
+
+        之前 _update_task_state 检测到任务完成只记一行 debug 日志就 return，
+        用户完全不知道任务被标记完成。现在自动生成结构化总结，让 agent
+        主动汇报"这个多步任务做完了，各步骤结果如何"，无需用户追问。
+        """
+        if completed_task is None:
+            return
+        try:
+            zh = self._is_zh()
+            name = getattr(completed_task, "name", "") or ""
+            steps = getattr(completed_task, "steps", []) or []
+            if not name and not steps:
+                return
+
+            if zh:
+                lines = [f"\n\n---\n✅ **任务完成：{name}**"]
+                if steps:
+                    lines.append("各步骤回顾：")
+                    for i, s in enumerate(steps):
+                        step_name = s.get("step", "") if isinstance(s, dict) else str(s)
+                        status = s.get("status", "") if isinstance(s, dict) else ""
+                        result = s.get("result", "") if isinstance(s, dict) else ""
+                        icon = {"done": "✅", "failed": "❌", "in_progress": "🔄"}.get(status, "⬜")
+                        line = f"  {icon} {i+1}. {step_name}"
+                        if result:
+                            line += f" — {result[:80]}"
+                        lines.append(line)
+                lines.append("如需调整或继续，告诉我即可。")
+            else:
+                lines = [f"\n\n---\n✅ **Task completed: {name}**"]
+                if steps:
+                    lines.append("Step recap:")
+                    for i, s in enumerate(steps):
+                        step_name = s.get("step", "") if isinstance(s, dict) else str(s)
+                        status = s.get("status", "") if isinstance(s, dict) else ""
+                        result = s.get("result", "") if isinstance(s, dict) else ""
+                        icon = {"done": "✅", "failed": "❌", "in_progress": "🔄"}.get(status, "⬜")
+                        line = f"  {icon} {i+1}. {step_name}"
+                        if result:
+                            line += f" — {result[:80]}"
+                        lines.append(line)
+                lines.append("Let me know if you'd like to adjust or continue.")
+            summary_block = "\n".join(lines)
+            turn.result = (turn.result or "") + summary_block
+            turn.meta["task_completion_summary"] = True
+        except Exception as exc:
+            logger.debug("task completion summary skipped: %s", exc)
 
     def _maybe_schedule_followup(self, turn: TurnContext) -> None:
         """Schedule a follow-up check task for complex/expert work.
