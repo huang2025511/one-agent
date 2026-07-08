@@ -1695,6 +1695,90 @@ class SkillManager(Plugin):
             handler=_mcp_server_handler,
         ))
 
+        # Round 8: 深度研究 — 自动注册为 skill，LLM 可通过 tool-calling 调用
+        async def _deep_research_handler(args, llm=None, **kw):
+            from core.deep_research import get_deep_researcher
+            if isinstance(args, str):
+                args = {"input": args}
+            question = args.get("input", "") or args.get("question", "")
+            if not question or len(question) < 5:
+                return "[深度研究需要提供研究问题]"
+            researcher = get_deep_researcher(llm, self)
+            def on_progress(phase, msg):
+                pass  # 静默执行，coordinator 层会处理进度
+            report = await researcher.research(
+                question=question, model=None, depth=2, on_progress=on_progress,
+            )
+            return researcher.format_report(report)
+
+        self.register(Skill(
+            id="deep_research",
+            title="Deep Researcher",
+            description="对复杂问题进行多轮深度研究：分解子问题→搜索→分析→综合报告。适用于需要广泛信息收集和分析的问题。",
+            schema=_schema("deep_research", "Conduct deep research on a complex question. Provide the research question.", ["input"]),
+            handler=_deep_research_handler,
+        ))
+
+        # Round 8: 批量处理 — 自动注册为 skill
+        async def _batch_process_handler(args, llm=None, **kw):
+            from core.batch import get_batch_processor
+            if isinstance(args, str):
+                args = {"input": args}
+            text = args.get("input", "")
+            if not text or len(text) < 10:
+                return "[批量处理需要提供内容和任务类型]"
+            processor = get_batch_processor(llm, self)
+            lines = text.split("\n", 1)
+            task_type = "general"
+            content = text
+            if len(lines) >= 2:
+                first_word = lines[0].strip().lower()
+                if first_word in ("translate", "翻译", "summarize", "总结", "classify", "分类", "extract", "提取"):
+                    task_type_map = {
+                        "translate": "translate", "翻译": "translate",
+                        "summarize": "summarize", "总结": "summarize",
+                        "classify": "classify", "分类": "classify",
+                        "extract": "extract", "提取": "extract",
+                    }
+                    task_type = task_type_map.get(first_word, "general")
+                    content = lines[1].strip()
+            items = processor.split_items(content)
+            if len(items) < 2:
+                return "[批量处理需要至少 2 个项目]"
+            results = await processor.process(items, task_type=task_type, model=None)
+            return processor.format_results(results)
+
+        self.register(Skill(
+            id="batch_process",
+            title="Batch Processor",
+            description="批量处理多个项目（翻译、总结、分类、提取）。输入格式：第一行任务类型，后续每行一个项目。",
+            schema=_schema("batch_process", "Batch process multiple items. First line: task type (translate/summarize/classify/extract). Following lines: items.", ["input"]),
+            handler=_batch_process_handler,
+        ))
+
+        # Round 8: 工作流引擎 — 自动注册为 skill
+        async def _workflow_run_handler(args, llm=None, **kw):
+            from core.workflow_engine import get_workflow_engine
+            import json as _json
+            if isinstance(args, str):
+                args = {"input": args}
+            wf_text = args.get("input", "")
+            try:
+                workflow = _json.loads(wf_text.strip())
+            except _json.JSONDecodeError:
+                return "[工作流需要 JSON 格式定义]"
+            engine = get_workflow_engine(llm, self)
+            result = await engine.execute(workflow)
+            return f"工作流完成: {result.status.value}\n步骤: {len(result.steps)}"
+
+        self.register(Skill(
+            id="workflow_run",
+            title="Workflow Runner",
+            description="执行多步骤工作流。输入 JSON 格式的工作流定义。",
+            schema=_schema("workflow_run", "Run a multi-step workflow defined in JSON.", ["input"]),
+            handler=_workflow_run_handler,
+        ))
+
 
 def _schema(name: str, description: str, required: List[str]) -> Dict[str, Any]:
     return {

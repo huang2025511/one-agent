@@ -1065,6 +1065,16 @@ class Coordinator(Plugin):
         if multi_agent_done:
             return
 
+        # --- Step 2.3: Auto deep research for research-heavy complex tasks ---
+        # Round 8: 之前 DEEP_RESEARCH_MIN_COMPLEXITY 定义了但从未使用，
+        # 深度研究只能通过 /deep 斜杠命令手动触发。
+        # 现在：complexity >= 0.7 且任务为研究型时自动触发。
+        if complexity >= DEEP_RESEARCH_MIN_COMPLEXITY and self._is_research_task(turn.input_text):
+            self._emit_progress(turn, "检测到研究型任务，正在启动深度研究...", "deep_research")
+            deep_done = await self._auto_deep_research(turn)
+            if deep_done:
+                return  # deep research published turn_completed itself
+
         # Context compression (always, but cheap when not needed)
         await self._compress_context(messages, turn)
 
@@ -2597,7 +2607,14 @@ class Coordinator(Plugin):
         if provider == "anthropic":
             # 并行执行所有工具调用（Gap 5: 先查缓存, Round 7: backoff 重试）
             from core.backoff import tool_backoff
+            # Round 8: 断路器 — 跳过持续失败的工具
+            fr = self._get_failure_recovery()
             async def _run_one(tc, name, args):
+                # Round 8: 断路器检查
+                if fr.is_circuit_open(f"tool:{name}"):
+                    logger.warning("circuit_breaker: skipping tool %s (circuit open)", name)
+                    return ToolResult(tool_name=name, status="error",
+                                      error=f"工具 {name} 近期多次失败，已自动跳过")
                 cached = tool_cache.get(name, args)
                 if cached is not None:
                     logger.debug("tool_cache: hit for %s", name)
@@ -2613,8 +2630,11 @@ class Coordinator(Plugin):
                     result = await tb.retry(_do_dispatch)
                 except Exception as exc:
                     result = ToolResult(tool_name=name, status="error", error=str(exc))
+                    # Round 8: 记录失败到断路器
+                    fr._record_failure(f"tool:{name}", exc)
                 if result.status == "success":
                     tool_cache.set(name, args, str(result.data or ""))
+                    fr._record_success(f"tool:{name}")
                 return result
             coros = [_run_one(tc, name, args) for _, tc, name, args, _ in tc_info]
             results = await asyncio.gather(*coros, return_exceptions=True)
@@ -2658,7 +2678,14 @@ class Coordinator(Plugin):
             })
             # 并行执行所有工具调用（Gap 5: 先查缓存, Round 7: backoff 重试）
             from core.backoff import tool_backoff
+            # Round 8: 断路器 — 跳过持续失败的工具
+            fr = self._get_failure_recovery()
             async def _run_one(tc, name, args):
+                # Round 8: 断路器检查
+                if fr.is_circuit_open(f"tool:{name}"):
+                    logger.warning("circuit_breaker: skipping tool %s (circuit open)", name)
+                    return ToolResult(tool_name=name, status="error",
+                                      error=f"工具 {name} 近期多次失败，已自动跳过")
                 cached = tool_cache.get(name, args)
                 if cached is not None:
                     logger.debug("tool_cache: hit for %s", name)
@@ -2674,8 +2701,11 @@ class Coordinator(Plugin):
                     result = await tb.retry(_do_dispatch)
                 except Exception as exc:
                     result = ToolResult(tool_name=name, status="error", error=str(exc))
+                    # Round 8: 记录失败到断路器
+                    fr._record_failure(f"tool:{name}", exc)
                 if result.status == "success":
                     tool_cache.set(name, args, str(result.data or ""))
+                    fr._record_success(f"tool:{name}")
                 return result
             coros = [_run_one(tc, name, args) for _, tc, name, args, _ in tc_info]
             results = await asyncio.gather(*coros, return_exceptions=True)
@@ -3803,6 +3833,87 @@ class Coordinator(Plugin):
         except Exception as exc:
             turn.record_failure(f"regeneration failed: {exc}")
             turn.result = f"重新生成失败: {exc}" if zh else f"Regeneration failed: {exc}"
+
+    # --------------------------------------------------- Round 8: Auto deep research
+
+    # 研究型任务关键词 — 触发自动深度研究
+    _RESEARCH_KEYWORDS = frozenset({
+        # 中文
+        "研究", "调研", "调查", "分析", "综述", "对比分析", "深入了解",
+        "详细分析", "全面分析", "深度分析", "深入研究", "系统性分析",
+        "最新进展", "发展现状", "趋势分析", "行业分析", "技术调研",
+        # English
+        "research", "investigate", "analyze", "analysis", "review",
+        "comprehensive", "in-depth", "deep dive", "survey", "study",
+        "state of", "latest advances", "trends in", "overview of",
+    })
+
+    def _is_research_task(self, text: str) -> bool:
+        """检测用户输入是否为研究型任务。
+
+        两个条件（满足其一即可）：
+        1. 包含研究关键词
+        2. 输入较长（>100字符）且包含问号（暗示复杂问题）
+        """
+        if not text or len(text) < 10:
+            return False
+        text_lower = text.lower()
+        # 条件 1：关键词匹配
+        for kw in self._RESEARCH_KEYWORDS:
+            if kw in text_lower:
+                return True
+        # 条件 2：长问题 + 问号
+        if len(text) > 100 and ("?" in text or "？" in text):
+            return True
+        return False
+
+    async def _auto_deep_research(self, turn: TurnContext) -> bool:
+        """自动触发深度研究。
+
+        Returns True if deep research handled the turn (published turn_completed),
+        False if it failed and should fall back to normal flow.
+        """
+        try:
+            researcher = get_deep_researcher(self._llm, self._skills)
+
+            def on_progress(phase: str, msg: str) -> None:
+                self._emit_progress(turn, msg, f"deep_research/{phase}")
+
+            report = await researcher.research(
+                question=turn.input_text,
+                model=turn.model,
+                depth=2,
+                on_progress=on_progress,
+            )
+
+            turn.result = researcher.format_report(report)
+            turn.meta["deep_research"] = {
+                "sub_questions": len(report.sub_questions),
+                "sources": len(report.sources),
+                "searches": report.total_searches,
+                "duration": round(report.duration_seconds, 1),
+                "auto_triggered": True,
+            }
+            turn.record_success(turn.result, 0)
+            logger.info("auto deep_research: completed in %.1fs, %d sources",
+                       report.duration_seconds, len(report.sources))
+
+            # KG extraction
+            if self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg:
+                full_text = f"{turn.input_text}\n{turn.result}"
+                try:
+                    count = self.ctx.memory._kg.extract_from_text(full_text, source=turn.session_id)
+                    if count > 0:
+                        logger.debug("Extracted %d entities from deep_research turn %s", count, turn.session_id)
+                except Exception as exc:
+                    logger.debug("KG extraction failed in deep_research: %s", exc)
+
+            self.publish("turn_completed", turn=turn)
+            return True
+
+        except Exception as exc:
+            logger.warning("auto deep_research failed, falling back to normal flow: %s", exc)
+            return False
 
     # --------------------------------------------------- Gap 6: Deep research handler
     async def _handle_deep_research(self, turn: TurnContext, args_text: str) -> None:
