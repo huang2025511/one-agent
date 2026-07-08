@@ -1517,6 +1517,18 @@ class Coordinator(Plugin):
             if not args:
                 continue
 
+            # 参数名映射：LLM 在 XML 标签里用的参数名可能和技能 schema 定义的不一致。
+            # 例如 web_search 的 schema 定义 required=["input"]，但 LLM 输出
+            # <web_search query="..."/> 用 query。这里做统一映射。
+            _XML_PARAM_MAP = {
+                "web_search": {"query": "input", "q": "input"},
+                "calc": {"expr": "input", "expression": "input"},
+            }
+            if name in _XML_PARAM_MAP:
+                for xml_key, mapped_key in _XML_PARAM_MAP[name].items():
+                    if xml_key in args and mapped_key not in args:
+                        args[mapped_key] = args.pop(xml_key)
+
             # 兼容 _execute_tool_calls 期望的字段格式
             calls.append({
                 "id": f"xml_{len(calls)}_{name}",
