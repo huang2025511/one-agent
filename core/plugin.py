@@ -17,7 +17,7 @@ import asyncio
 import importlib
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from core.context import AgentContext
@@ -40,6 +40,9 @@ class Plugin:
     def __init__(self) -> None:
         self.ctx: Optional["AgentContext"] = None
         self.bus: Optional[Any] = None
+        # 跟踪本插件订阅的所有事件，stop 时自动 unsubscribe
+        # 避免子类遗忘清理导致内存泄漏或幽灵调用
+        self._subscribed_handlers: List[Tuple[str, Any]] = []
 
     # lifecycle -------------------------------------------------------------
     async def setup(self, ctx: "AgentContext") -> None:
@@ -51,6 +54,14 @@ class Plugin:
         logger.info("%s started", self.name)
 
     async def stop(self) -> None:
+        # 自动取消所有通过 self.subscribe() 注册的事件订阅
+        if self.bus is not None and self._subscribed_handlers:
+            for event_type, handler in self._subscribed_handlers:
+                try:
+                    self.bus.unsubscribe(event_type, handler)
+                except Exception:
+                    pass
+            self._subscribed_handlers.clear()
         logger.info("%s stopped", self.name)
 
     # helpers ---------------------------------------------------------------
@@ -63,6 +74,17 @@ class Plugin:
             "source": self.name,
             "context_id": payload.get("context_id"),
         })
+
+    def subscribe(self, event_type: str, handler) -> None:
+        """订阅事件并自动跟踪，stop 时自动 unsubscribe。
+
+        推荐插件使用此方法而非直接调用 bus.subscribe()，
+        避免忘记清理导致内存泄漏和幽灵调用。
+        """
+        if self.bus is None:
+            return
+        self.bus.subscribe(event_type, handler)
+        self._subscribed_handlers.append((event_type, handler))
 
 
 def _collect_from_module(

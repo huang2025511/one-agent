@@ -274,6 +274,19 @@ class UserProfileStore:
             self._conn.commit()
         self._cache.clear()
 
+    def close(self) -> None:
+        """Close the database connection."""
+        try:
+            with self._write_lock:
+                if self._conn:
+                    self._conn.close()
+                    self._conn = None
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        self.close()
+
 
 # Singleton instance (lazy-loaded)
 _profile_store: Optional[UserProfileStore] = None

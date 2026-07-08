@@ -226,6 +226,12 @@ class DatabaseSkill:
 
         db_type = conn_info.get("type", "sqlite").lower()
 
+        # 表名/标识符不能用参数化查询，必须做严格的白名单校验
+        # 只允许字母、数字、下划线，防止 SQL 注入
+        import re
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
+            return {"ok": False, "error": f"无效的表名: {table_name}（只允许字母、数字、下划线）"}
+
         if db_type in ("postgresql", "postgres"):
             return await self.query(
                 """SELECT column_name, data_type, is_nullable, column_default

@@ -53,7 +53,9 @@ from i18n import _
 logger = logging.getLogger(__name__)
 
 # API configuration constants
-DEFAULT_HOST = "0.0.0.0"
+# 默认绑定 127.0.0.1 而非 0.0.0.0 — 安全默认原则：
+# 开发环境够用，生产环境需要用户显式配置为 0.0.0.0 或特定 IP
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18792
 DEFAULT_RATE_LIMIT = 60
 MAX_CHAT_BODY_SIZE = 64 * 1024  # 64 KB
@@ -126,6 +128,35 @@ class RESTAPIGateway(Plugin):
         # Trusted proxies for X-Forwarded-For header validation
         # Only trust these IPs when extracting real client IP from X-Forwarded-For
         self._trusted_proxies = set(cfg.get("trusted_proxies", []))
+
+        # ===== 安全检查 =====
+        is_localhost = self._host in ("127.0.0.1", "localhost", "::1")
+
+        # 检查 1: 非 localhost 绑定但无 API Key → 严重安全风险
+        if not is_localhost and not self._api_key:
+            logger.critical(
+                "REST API 安全警告: 绑定到 %s 但未配置 api_key！\n"
+                "  任何人都可以访问你的 API 并执行任意操作。\n"
+                "  请立即在配置中设置 rest.api_key，或绑定到 127.0.0.1。",
+                self._host,
+            )
+
+        # 检查 2: CORS 允许所有源 + 非 localhost → 中等风险
+        has_wildcard_cors = "*" in (self._cors_origins or [])
+        if not is_localhost and has_wildcard_cors:
+            logger.warning(
+                "REST API 安全提示: CORS 允许所有源 ('*') 且 API 绑定到 %s。\n"
+                "  这意味着任何网站都可以跨域调用你的 API。\n"
+                "  建议设置具体的 cors_origins 列表。",
+                self._host,
+            )
+
+        # 检查 3: localhost 但无 API Key → 低风险，提示一下
+        if is_localhost and not self._api_key:
+            logger.info(
+                "REST API: 本地模式（%s），未设置 api_key（仅本地可访问）",
+                self._host,
+            )
 
         # Initialize audit log
         from core.audit_log import AuditLog

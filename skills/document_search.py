@@ -197,6 +197,19 @@ class DocumentStore:
         self._conn.commit()
         return True
 
+    def close(self) -> None:
+        """Close the database connection."""
+        try:
+            with self._write_lock:
+                if self._conn:
+                    self._conn.close()
+                    self._conn = None
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        self.close()
+
 
 # ------------------------------------------------------------------ skill handler factory
 

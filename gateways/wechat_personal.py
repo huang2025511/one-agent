@@ -279,6 +279,7 @@ class WeChatPersonalGateway(Plugin):
         # chat_id → turn 完成时间戳。turn_completed 后到达的 turn_progress
         # 事件（竞态）通过该标记丢弃，避免"结果已发后又冒出一条⏳进度"。
         self._turn_done_at: Dict[str, float] = {}
+        self._cleanup_counter: int = 0  # 定期清理计数器，每 20 次 turn 清理一次
         # 与全仓库其它 gateway/executor 约定一致（WebGateway / RESTAPIGateway /
         # SystemExecutor / DockerExecutor / BrowserExecutor 都用 _enabled 表示
         # 「配置层是否启用」。_running 表示「已连接并正在轮询」是另一层语义，
@@ -841,6 +842,15 @@ class WeChatPersonalGateway(Plugin):
                 await self.send(chat_id, msg)
             except Exception as exc:
                 logger.warning("wechat_personal: failed to send timeout notice: %s", exc)
+
+        # 定期清理过期的字典条目（每 20 次 turn 清理一次）
+        self._cleanup_counter += 1
+        if self._cleanup_counter >= 20:
+            self._cleanup_counter = 0
+            try:
+                self._cleanup_stale_heartbeats()
+            except Exception:
+                    pass
 
     def _cleanup_stale_heartbeats(self) -> None:
         """清理已完成或超时的心跳任务（避免字典残留 + 异常路径泄漏）。"""
