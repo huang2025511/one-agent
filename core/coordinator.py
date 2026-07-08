@@ -154,6 +154,16 @@ class Coordinator(Plugin):
         self.bus.subscribe("turn_routed", self._on_routed)
         self.bus.subscribe("external_message", self._on_external)
 
+        # 注册 followup_check 到 AsyncTaskScheduler
+        # 之前只调度不注册，导致延迟任务执行时报 "Unknown function: followup_check"
+        try:
+            from core.task_scheduler import get_task_scheduler
+            scheduler = get_task_scheduler()
+            scheduler.register("followup_check", self._followup_check_handler)
+            logger.info("coordinator: registered followup_check task function")
+        except Exception as exc:
+            logger.debug("coordinator: failed to register followup_check: %s", exc)
+
     def bind(self, llm: LLMProvider, skills: SkillManager) -> None:
         self._llm = llm
         self._skills = skills
@@ -4943,6 +4953,72 @@ class Coordinator(Plugin):
                 logger.debug("followup task scheduled for session %s", turn.session_id)
         except Exception as exc:
             logger.debug("schedule_followup failed: %s", exc)
+
+    async def _followup_check_handler(self, session_id: str = "", user_input: str = "") -> None:
+        """延迟任务：跟进检查，主动给用户发消息询问是否需要继续。
+
+        这是 AsyncTaskScheduler 调度的 followup_check 任务的实际处理函数。
+        任务触发后，通过 bot_send_message 事件主动推送消息给用户，
+        解决"一问一答"模式下用户不问就不说话的问题。
+
+        Args:
+            session_id: 会话 ID，格式为 "{gateway}-{chat_id}"（如 "wechat-xxx"）
+            user_input: 用户原始输入，用于生成跟进提示
+        """
+        if not session_id:
+            return
+
+        # 从 session_id 解析 gateway 和 chat_id
+        gateway = ""
+        chat_id = ""
+        if "-" in session_id:
+            prefix, rest = session_id.split("-", 1)
+            gateway_map = {
+                "wechat": "wechat_personal",
+                "wecom": "wecom",
+                "telegram": "telegram",
+                "dingtalk": "dingtalk",
+                "feishu": "feishu",
+                "discord": "discord",
+                "slack": "slack",
+                "web": "web",
+                "cli": "cli",
+            }
+            gateway = gateway_map.get(prefix, prefix)
+            chat_id = rest
+        else:
+            chat_id = session_id
+
+        if not chat_id:
+            return
+
+        # 生成跟进消息
+        zh = self._is_zh()
+        if user_input:
+            preview = user_input[:40] + "..." if len(user_input) > 40 else user_input
+            if zh:
+                message = f"⏰ 温馨提醒\n\n关于之前的问题「{preview}」，\n您之前提到稍后继续，现在需要我接着处理吗？\n\n回复「继续」或直接说您的需求即可。"
+            else:
+                message = f"⏰ Reminder\n\nRegarding your previous request「{preview}」，\nyou mentioned continuing later. Would you like to proceed now?\n\nReply 'continue' or just tell me what you need."
+        else:
+            if zh:
+                message = "⏰ 温馨提醒\n\n您之前有任务提到稍后继续，现在需要我接着处理吗？\n\n回复「继续」或直接说您的需求即可。"
+            else:
+                message = "⏰ Reminder\n\nYou had a task you wanted to continue later. Would you like to proceed now?\n\nReply 'continue' or just tell me what you need."
+
+        # 发布 bot_send_message 事件，由对应网关主动推送
+        try:
+            from core.events import Event
+            event = Event("bot_send_message", {
+                "chat_id": chat_id,
+                "text": message,
+                "gateway": gateway,
+                "source": "coordinator:followup_check",
+            })
+            self.bus.publish(event)
+            logger.info("coordinator: followup check sent to %s (gateway=%s)", chat_id[:8], gateway)
+        except Exception as exc:
+            logger.warning("coordinator: followup check send failed: %s", exc)
 
     # --------------------------------------------------- Advanced RAG integration (Round 7)
     async def _enhanced_web_search(self, query: str, turn: TurnContext) -> str:

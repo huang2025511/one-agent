@@ -556,6 +556,17 @@ class OneAgentApp:
 
         await self._pm.start_all()
 
+        # 启动 AsyncTaskScheduler — 后台任务/延迟任务/定时任务的执行引擎
+        # 之前未启动，导致所有 schedule_delayed / schedule_background 的任务都是死的
+        # （followup_check、异步通知、定时提醒等全部不工作，表现为"一问一答"）
+        try:
+            from core.task_scheduler import get_task_scheduler
+            task_scheduler = get_task_scheduler()
+            await task_scheduler.start()
+            logger.info("AsyncTaskScheduler started (background/delayed tasks enabled)")
+        except Exception as exc:
+            logger.warning("AsyncTaskScheduler start failed (non-fatal): %s", exc)
+
         # Register daily self-improvement analysis task
         if self.scheduler is not None:
             def _analyze_improvements():
