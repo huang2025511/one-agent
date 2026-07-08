@@ -199,7 +199,7 @@ class TestCompressContextPreservesSystemPrompt:
         ]
 
         # mock _compress_messages 返回非空摘要以触发压缩
-        async def fake_compress(msgs, turn):
+        async def fake_compress(msgs, turn, extra_hints=None):
             return "这是摘要"
         coord._compress_messages = fake_compress
 

@@ -4649,9 +4649,13 @@ class Coordinator(Plugin):
             return
         engine = get_workflow_engine(self._llm, self._skills)
         self._emit_progress(turn, "执行工作流...", "workflow")
-        result = await engine.execute(workflow)
-        turn.result = f"工作流完成: {result.status.value}\n耗时: {result.total_duration_ms:.0f}ms\n步骤: {len(result.steps)}"
-        turn.record_success(turn.result, 0)
+        try:
+            result = await engine.execute(workflow)
+            turn.result = f"工作流完成: {result.status.value}\n耗时: {result.total_duration_ms:.0f}ms\n步骤: {len(result.steps)}"
+            turn.record_success(turn.result, 0)
+        except Exception as exc:
+            turn.record_failure(f"workflow execution failed: {exc}")
+            turn.result = f"工作流执行失败: {exc}" if zh else f"Workflow execution failed: {exc}"
 
     # --------------------------------------------------- Chart handler
     async def _handle_chart(self, turn: TurnContext, args_text: str) -> None:

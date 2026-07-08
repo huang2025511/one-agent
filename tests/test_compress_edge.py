@@ -28,7 +28,7 @@ async def test_short_message_list_no_duplicate_system():
         {"role": "user", "content": "z" * 5000},
     ]
 
-    async def fake_compress(msgs, turn):
+    async def fake_compress(msgs, turn, extra_hints=None):
         return "摘要"
     coord._compress_messages = fake_compress
 
