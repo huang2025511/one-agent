@@ -213,13 +213,13 @@ class CostTracker:
             if self._conn:
                 self._conn.close()
                 self._conn = None
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("CostTracker close error: %s", exc)
 
     def __del__(self):
         """Ensure connection is closed on garbage collection."""
         if hasattr(self, '_conn') and self._conn:
             try:
                 self._conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("CostTracker __del__ close error: %s", exc)

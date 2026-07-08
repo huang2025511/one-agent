@@ -245,12 +245,12 @@ class AuditLog:
             if self._conn:
                 self._conn.close()
                 self._conn = None
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("AuditLog close error: %s", exc)
 
     def __del__(self):
         """Ensure connection is closed on garbage collection."""
         try:
             self.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("AuditLog __del__ close error: %s", exc)

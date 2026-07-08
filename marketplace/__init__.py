@@ -287,6 +287,14 @@ class MarketplacePlugin(Plugin):
           - URL: full raw URL to a .md file
         Returns {"ok": True, "skill": {...}} or {"ok": False, "error": "..."}
         """
+        # 安全提示：第三方技能可能包含可执行代码（shell 命令、Python 代码等）
+        # 仅安装来自可信来源的技能
+        logger.warning(
+            "marketplace: installing skill from %s — "
+            "第三方技能可能包含可执行代码，请确保来源可信！",
+            source,
+        )
+
         url = self._resolve_source(source)
         if not url:
             return {"ok": False, "error": f"invalid source: {source}"}

@@ -93,7 +93,8 @@ def _load_sync_buf(account_id: str) -> str:
     if path.exists():
         try:
             return path.read_text(encoding="utf-8").strip()
-        except Exception:
+        except Exception as exc:
+            logger.warning("wechat_personal: failed to load sync_buf: %s", exc)
             return ""
     return ""
 
@@ -102,8 +103,8 @@ def _save_sync_buf(account_id: str, sync_buf: str) -> None:
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         _sync_path(account_id).write_text(sync_buf, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("wechat_personal: failed to save sync_buf: %s", exc)
 
 
 def _save_credentials(account_id: str, token: str, base_url: str, user_id: str = "") -> None:
@@ -347,8 +348,9 @@ class WeChatPersonalGateway(Plugin):
                 ts = 0.0
                 try:
                     ts = time.mktime(time.strptime(saved_at, "%Y-%m-%dT%H:%M:%SZ"))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("wechat_personal: failed to parse saved_at: %s, error: %s", saved_at, exc)
+                    ts = 0.0
                 if ts > best_time:
                     best_time = ts
                     best = data
@@ -669,8 +671,8 @@ class WeChatPersonalGateway(Plugin):
                         try:
                             if self._session and not self._session.closed:
                                 await self._session.close()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("wechat_personal: error closing old session: %s", exc)
                         self._session = aiohttp.ClientSession(trust_env=True)
                         consecutive_errors = 0
                     continue
@@ -716,8 +718,8 @@ class WeChatPersonalGateway(Plugin):
                 if is_conn_err and self._session and not self._session.closed:
                     try:
                         await self._session.close()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("wechat_personal: error closing session after conn error: %s", exc)
                     self._session = aiohttp.ClientSession(trust_env=True)
                     logger.info("wechat_personal: recreated session after connection error")
                 await asyncio.sleep(min(2 ** consecutive_errors, 30))
@@ -849,8 +851,8 @@ class WeChatPersonalGateway(Plugin):
             self._cleanup_counter = 0
             try:
                 self._cleanup_stale_heartbeats()
-            except Exception:
-                    pass
+            except Exception as exc:
+                logger.debug("wechat_personal: cleanup stale heartbeats error: %s", exc)
 
     def _cleanup_stale_heartbeats(self) -> None:
         """清理已完成或超时的心跳任务（避免字典残留 + 异常路径泄漏）。"""
@@ -976,8 +978,8 @@ class WeChatPersonalGateway(Plugin):
             # 同 _on_turn_progress：先发后计数，失败不消耗配额
             try:
                 await self.send(chat_id, "⏳ 正在处理中，请稍候...", use_context_token=False)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("wechat_personal: heartbeat send failed: %s", exc)
             else:
                 self._progress_last_sent[chat_id] = now
                 self._progress_count[chat_id] = count + 1
