@@ -80,20 +80,20 @@ DECOMPOSE_PROMPT_ZH = """【任务分解专家】
 
 输出 JSON 格式：
 ```json
-{
+{{
   "subtasks": [
-    {
+    {{
       "id": "task_1",
       "description": "子任务描述",
       "dependencies": []
-    },
-    {
-      "id": "task_2", 
+    }},
+    {{
+      "id": "task_2",
       "description": "子任务描述",
       "dependencies": ["task_1"]
-    }
+    }}
   ]
-}
+}}
 ```
 
 只输出 JSON，不要其他内容。"""
@@ -112,20 +112,20 @@ Requirements:
 
 Output JSON format:
 ```json
-{
+{{
   "subtasks": [
-    {
+    {{
       "id": "task_1",
       "description": "subtask description",
       "dependencies": []
-    },
-    {
+    }},
+    {{
       "id": "task_2",
-      "description": "subtask description", 
+      "description": "subtask description",
       "dependencies": ["task_1"]
-    }
+    }}
   ]
-}
+}}
 ```
 
 Output only JSON, nothing else."""
@@ -185,19 +185,19 @@ COMPOSE_PROMPT_ZH = """【工作流编排】
 
 输出 JSON 格式：
 ```json
-{
+{{
   "nodes": [
-    {
+    {{
       "subtask_id": "task_1",
       "skill_id": "web_search",
-      "args": {"input": "..."},
+      "args": {{"input": "..."}},
       "dependencies": []
-    }
+    }}
   ],
   "edges": [
     ["task_1", "task_2"]
   ]
-}
+}}
 ```
 
 只输出 JSON，不要其他内容。"""
@@ -217,19 +217,19 @@ Compose an efficient DAG workflow:
 
 Output JSON format:
 ```json
-{
+{{
   "nodes": [
-    {
+    {{
       "subtask_id": "task_1",
       "skill_id": "web_search",
-      "args": {"input": "..."},
+      "args": {{"input": "..."}},
       "dependencies": []
-    }
+    }}
   ],
   "edges": [
     ["task_1", "task_2"]
   ]
-}
+}}
 ```
 
 Output only JSON, nothing else."""
@@ -338,7 +338,7 @@ class SkillIndex:
         
         results = []
         for i, idx in enumerate(indices[0]):
-            if idx < len(self._skill_ids):
+            if 0 <= idx < len(self._skill_ids):
                 results.append((self._skill_ids[idx], float(scores[0][i])))
         
         return results
