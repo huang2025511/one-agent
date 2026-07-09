@@ -39,6 +39,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-flutter-
 
+      - name: Create platform directories if missing
+        run: |
+          if [ ! -d "android" ]; then
+            flutter create --platforms=android --org com.oneagent .
+          fi
+
       - name: Get dependencies
         run: flutter pub get
 
