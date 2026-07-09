@@ -41,6 +41,14 @@ router:
     enabled: false
   self_evolution:
     enabled: false
+  # SkillWeaver: Semantic skill routing (Alibaba 2025)
+  # Replaces keyword matching with embedding + FAISS retrieval
+  skillweaver:
+    enabled: true
+    embedding_model: all-MiniLM-L6-v2  # Fast, 384-dim
+    max_sad_iterations: 2  # SAD feedback loop iterations
+    top_k_candidates: 5  # Skills to retrieve per subtask
+    min_complexity: 0.3  # Skip trivial tasks (greetings etc)
 memory:
   short_term:
     max_turns: 20
