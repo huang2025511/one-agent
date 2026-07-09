@@ -388,16 +388,26 @@ class SkillWeaverRouter:
         """Build semantic index from current skill registry."""
         if self._initialized:
             return True
-        
+
         # Get all skills from manager
         skills_dict = getattr(self._skills, '_skills', {})
         if not skills_dict:
             logger.warning("SkillWeaverRouter: no skills registered")
             return False
-        
+
         # Build index
         self._initialized = self._index.build(skills_dict)
         return self._initialized
+
+    def retrieve_skills(self, query: str, top_k: int = 5) -> List[Tuple[str, float]]:
+        """Public API: semantic retrieval of top-K skills for a query.
+
+        Returns List of (skill_id, score) tuples.
+        Falls back to empty list if index not available.
+        """
+        if not self._initialized:
+            self.initialize()
+        return self._index.retrieve(query, top_k)
     
     async def route(self, query: str, zh: bool = True) -> DAGWorkflow:
         """Main entry point: decompose → retrieve → compose with SAD loop.

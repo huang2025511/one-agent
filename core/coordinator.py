@@ -113,6 +113,8 @@ class Coordinator(Plugin):
         self._max_tool_iterations = MAX_TOOL_ITERATIONS
         self._max_tokens = DEFAULT_MAX_TOKENS
         self._os_mode_enabled: bool = False  # OS 操作权限模式（会话级）
+        # SkillWeaver router cache — 避免每轮重建 FAISS 索引
+        self._skillweaver_router: Optional[Any] = None
         # Track background turn-completion tasks so they aren't GC'd
         # mid-execution (Python's asyncio only holds a weak ref to tasks).
         self._pending_turn_tasks: set = set()
@@ -1947,6 +1949,28 @@ class Coordinator(Plugin):
             header = "Retrieved from memory — most relevant to current question:\n"
         return header + "\n".join(hits[:5])
 
+    def _get_skillweaver_router(self) -> Optional[Any]:
+        """Get cached SkillWeaver router, building index once.
+
+        Avoids rebuilding the FAISS index on every turn — the index
+        is built once at first use and reused for subsequent turns.
+        """
+        if self._skillweaver_router is not None:
+            return self._skillweaver_router
+        try:
+            from core.skillweaver import create_skillweaver_router
+            router = create_skillweaver_router(self._llm, self._skills)
+            if router.initialize():
+                self._skillweaver_router = router
+                logger.info("skillweaver: router initialized and cached")
+                return router
+            logger.warning("skillweaver: router.initialize() returned False")
+        except ImportError:
+            logger.debug("skillweaver: module not available (install sentence-transformers + faiss-cpu)")
+        except Exception as exc:
+            logger.debug("skillweaver: router init failed: %s", exc)
+        return None
+
     def _prepare_tools(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Pick relevant skills and prepare tool schemas.
 
@@ -1970,19 +1994,22 @@ class Coordinator(Plugin):
 
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
-            # Round 12: Try SkillWeaver semantic retrieval first
+            # SkillWeaver: 语义检索替代关键词匹配
+            # 配置路径: router.skillweaver (见 config/default_config.yaml)
+            sw_cfg = {}
+            if self.ctx and hasattr(self.ctx, "config"):
+                sw_cfg = self.ctx.config.get("router", {}).get("skillweaver", {})
             use_skillweaver = (
-                self._cfg.get("skillweaver", {}).get("enabled", True)
-                and getattr(turn, "estimated_complexity", 0) >= 0.3  # Skip trivial tasks
+                sw_cfg.get("enabled", True)
+                and getattr(turn, "estimated_complexity", 0) >= sw_cfg.get("min_complexity", 0.3)
             )
-            
+
             if use_skillweaver:
                 try:
-                    from core.skillweaver import create_skillweaver_router
-                    router = create_skillweaver_router(self._llm, self._skills)
-                    if router.initialize():
-                        # Semantic retrieval - returns skill_ids ranked by embedding similarity
-                        results = router._index.retrieve(turn.input_text, top_k=6)
+                    router = self._get_skillweaver_router()
+                    if router:
+                        # 公开 API: retrieve_skills() — 不直接访问 _index
+                        results = router.retrieve_skills(turn.input_text, top_k=6)
                         chosen = [self._skills.get(sid) for sid, _ in results if self._skills.get(sid)]
                         logger.debug(
                             "skillweaver: semantic retrieval found %d skills for '%s'",
@@ -1990,9 +2017,6 @@ class Coordinator(Plugin):
                         )
                     else:
                         chosen = self._skills.pick_relevant(turn.input_text, limit=6)
-                except ImportError:
-                    # Fallback to keyword matching
-                    chosen = self._skills.pick_relevant(turn.input_text, limit=6)
                 except Exception as exc:
                     logger.debug("skillweaver retrieval failed: %s, fallback to keywords", exc)
                     chosen = self._skills.pick_relevant(turn.input_text, limit=6)
@@ -3892,16 +3916,40 @@ class Coordinator(Plugin):
     ) -> None:
         """Plan a tool execution chain for expert-tier tasks.
 
-        Instead of the model discovering tools one by one in the loop,
-        we pre-plan the optimal tool sequence. This reduces wasted tool
-        calls and makes execution more strategic.
-
-        The plan is injected into messages as guidance for the tool loop.
+        SkillWeaver 深度集成：
+        优先使用 SkillWeaver 三阶段管线 (Decompose → SAD → Compose) 生成 DAG 工作流，
+        利用语义检索对齐子任务与工具词汇，生成更精准的执行计划。
+        若 SkillWeaver 不可用或失败，回退到简单 LLM prompt 规划。
         """
         if not tools:
             return
 
         zh = self._is_zh()
+
+        # --- 优先尝试 SkillWeaver 三阶段管线 ---
+        router = self._get_skillweaver_router()
+        if router is not None:
+            try:
+                workflow = await router.route(turn.input_text, zh=zh)
+                if workflow.nodes:
+                    plan = self._format_dag_workflow(workflow, zh)
+                    if plan:
+                        header = "【工具链执行规划 — SkillWeaver DAG】\n" if zh else "[Tool chain plan — SkillWeaver DAG]\n"
+                        messages.append({"role": "assistant", "content": header + plan})
+                        prompt = (
+                            "好。按照这个规划执行工具调用。"
+                            if zh else
+                            "Good. Execute tool calls following this plan."
+                        )
+                        messages.append({"role": "user", "content": prompt})
+                        turn.meta["tool_chain_plan"] = plan
+                        logger.info("skillweaver: DAG plan created (%d nodes, %d edges)",
+                                   len(workflow.nodes), len(workflow.edges))
+                        return
+            except Exception as exc:
+                logger.debug("skillweaver route() failed: %s, fallback to simple planning", exc)
+
+        # --- 回退：简单 LLM prompt 规划 ---
         tool_names = [
             t.get("function", {}).get("name", "") for t in tools
             if isinstance(t, dict)
@@ -3949,6 +3997,50 @@ class Coordinator(Plugin):
             messages.append({"role": "user", "content": prompt})
             turn.meta["tool_chain_plan"] = plan
             logger.debug("tool chain plan created (%d chars)", len(plan))
+
+    def _format_dag_workflow(self, workflow: Any, zh: bool) -> str:
+        """Format a SkillWeaver DAGWorkflow into a human-readable plan.
+
+        Groups nodes by dependency layers: nodes with no dependencies
+        run first (potentially in parallel), then their dependents, etc.
+        """
+        lines: List[str] = []
+        nodes_by_id = {n.subtask_id: n for n in workflow.nodes}
+
+        # Topological layering — find nodes with all deps satisfied
+        remaining = set(nodes_by_id.keys())
+        layer = 0
+        while remaining:
+            # Nodes whose dependencies are all completed
+            ready = [
+                sid for sid in remaining
+                if all(d not in remaining for d in nodes_by_id[sid].dependencies)
+            ]
+            if not ready:
+                # Circular dependency — just list remaining
+                ready = list(remaining)
+
+            layer += 1
+            if zh:
+                lines.append(f"\n第 {layer} 步（可并行）：")
+            else:
+                lines.append(f"\nStep {layer} (parallel):")
+
+            for sid in ready:
+                node = nodes_by_id[sid]
+                args_str = ", ".join(f"{k}={v}" for k, v in node.args.items()) if node.args else ""
+                if zh:
+                    lines.append(f"  • 工具: {node.skill_id}({args_str})")
+                else:
+                    lines.append(f"  • Tool: {node.skill_id}({args_str})")
+                if node.dependencies:
+                    if zh:
+                        lines.append(f"    依赖: {', '.join(node.dependencies)}")
+                    else:
+                        lines.append(f"    Depends on: {', '.join(node.dependencies)}")
+                remaining.discard(sid)
+
+        return "\n".join(lines)
 
     # ======================================================== Intelligent Features
 
