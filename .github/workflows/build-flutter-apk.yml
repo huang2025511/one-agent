@@ -48,21 +48,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-flutter-
 
-      - name: Backup source code
+      - name: Create launcher icons
         run: |
-          mkdir -p /tmp/lib_backup
-          cp -r lib/* /tmp/lib_backup/
-
-      - name: Create platform directories if missing
-        run: |
-          if [ ! -d "android" ]; then
-            flutter create --platforms=android --org com.oneagent .
-          fi
-
-      - name: Restore source code
-        run: |
-          rm -rf lib/*
-          cp -r /tmp/lib_backup/* lib/
+          mkdir -p android/app/src/main/res/mipmap-hdpi android/app/src/main/res/mipmap-mdpi android/app/src/main/res/mipmap-xhdpi android/app/src/main/res/mipmap-xxhdpi android/app/src/main/res/mipmap-xxxhdpi
+          echo "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAhElEQVRYR+2WMQ6AIBAF4f799F7qUe0y6670G6RkYGRgYGRgYGRgYGRgYGRgYGRgYGRgYGRgYGNiAgYGRgYGRgYGRgYGRgYGRgYGRgYGRgYGNmIAgYGRgYGRgYGRgYGRgYGRgYGRgYGRgYGNmIAgYGRgYGRgYGRgYGRgYGRgYGRgYGRgYGNmIAgYGRgYGRgYGRgYGRgYGRgYGRgYGRgYGNmIAgYG//u8Q5F0y+0k6ZAAAAAElFTkSuQmCC" | base64 -d > android/app/src/main/res/mipmap-hdpi/ic_launcher.png
+          cp android/app/src/main/res/mipmap-hdpi/ic_launcher.png android/app/src/main/res/mipmap-mdpi/ic_launcher.png
+          cp android/app/src/main/res/mipmap-hdpi/ic_launcher.png android/app/src/main/res/mipmap-xhdpi/ic_launcher.png
+          cp android/app/src/main/res/mipmap-hdpi/ic_launcher.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          cp android/app/src/main/res/mipmap-hdpi/ic_launcher.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
 
       - name: Get dependencies
         run: flutter pub get
