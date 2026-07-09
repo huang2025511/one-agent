@@ -57,7 +57,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
         thinking: m['thinking'] as String?,
         sessionId: state.currentSessionId,
         timestamp: m['timestamp'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(m['timestamp'])
+            ? (m['timestamp'] is int
+                ? DateTime.fromMillisecondsSinceEpoch(m['timestamp'])
+                : DateTime.tryParse(m['timestamp'].toString()) ?? DateTime.now())
             : DateTime.now(),
       );
     }).toList();

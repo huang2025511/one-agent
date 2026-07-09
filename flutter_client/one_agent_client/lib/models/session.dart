@@ -27,16 +27,28 @@ class Session with _$Session {
     return Session(
       id: json['session_id'] ?? json['id'] ?? '',
       title: json['title'] ?? '未命名会话',
-      createdAt: json['created_at'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((json['created_at'] * 1000).toInt())
-          : null,
-      updatedAt: json['updated_at'] != null
-          ? DateTime.fromMillisecondsSinceEpoch((json['updated_at'] * 1000).toInt())
-          : null,
+      createdAt: _parseTimestamp(json['created_at']),
+      updatedAt: _parseTimestamp(json['updated_at']),
       messageCount: json['message_count'] ?? 0,
       status: json['status'] ?? 'active',
       source: json['source'],
     );
+  }
+
+  static DateTime? _parseTimestamp(dynamic value) {
+    if (value == null) return null;
+    if (value is int) {
+      // 秒级时间戳转毫秒
+      return DateTime.fromMillisecondsSinceEpoch(
+        value > 1e12 ? value : value * 1000,
+      );
+    }
+    if (value is double) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        (value > 1e12 ? value : value * 1000).toInt(),
+      );
+    }
+    return DateTime.tryParse(value.toString());
   }
 }
 

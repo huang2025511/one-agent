@@ -146,8 +146,10 @@ class MemoryScreen extends ConsumerWidget {
               final ok = await ref
                   .read(memoryProvider.notifier)
                   .add(text, tags: tagsController.text.trim());
-              if (context.mounted) {
+              if (ctx.mounted) {
                 Navigator.of(ctx).pop();
+              }
+              if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
                     content: Text(ok ? '添加成功' : '添加失败'),

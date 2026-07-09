@@ -46,8 +46,10 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   @override
   void initState() {
     super.initState();
-    // 启动审批轮询
-    ref.read(approvalProvider.notifier).startPolling();
+    // 延迟启动审批轮询，等设置加载完成
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(approvalProvider.notifier).startPolling();
+    });
   }
 
   @override

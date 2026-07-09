@@ -28,7 +28,7 @@ class ApprovalRequest with _$ApprovalRequest {
       riskLevel: json['risk_level'] ?? 'medium',
       createdAt: json['created_at'] != null
           ? DateTime.tryParse(json['created_at'].toString())
-          : DateTime.now(),
+          : null,
       status: json['status'] ?? 'pending',
     );
   }

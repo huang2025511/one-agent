@@ -26,9 +26,13 @@ class SessionApi {
       return SessionDetail(
         id: sessionId,
         messages: (data['messages'] as List<dynamic>? ?? [])
-            .cast<Map<String, dynamic>>(),
+            .map((e) => e as Map<String, dynamic>)
+            .toList(),
         createdAt: data['created_at'] != null
-            ? DateTime.fromMillisecondsSinceEpoch((data['created_at'] * 1000).toInt())
+            ? (data['created_at'] is int
+                ? DateTime.fromMillisecondsSinceEpoch(
+                    data['created_at'] > 1e12 ? data['created_at'] : data['created_at'] * 1000)
+                : DateTime.tryParse(data['created_at'].toString()))
             : null,
       );
     } on DioException catch (e) {

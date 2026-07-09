@@ -9,8 +9,11 @@ class SkillApi {
   static Future<List<Skill>> listSkills() async {
     final resp = await ApiClient.dio.get('/api/skills');
     final data = resp.data as Map<String, dynamic>;
-    final ids = (data['skills'] as List<dynamic>? ?? []).cast<String>();
-    return ids.map((id) => Skill.fromApi(id, null)).toList();
+    final skills = data['skills'] as List<dynamic>? ?? [];
+    return skills.map((e) {
+      final id = e is String ? e : (e is Map ? e['id']?.toString() ?? '' : e.toString());
+      return Skill.fromApi(id, e is Map ? e : null);
+    }).toList();
   }
 
   /// 获取市场包列表

@@ -9,14 +9,44 @@ import 'session_list_screen.dart';
 import 'settings_screen.dart';
 
 /// 聊天主页面
-class ChatScreen extends ConsumerWidget {
+class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends ConsumerState<ChatScreen> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final chatState = ref.watch(chatProvider);
     final settingsState = ref.watch(settingsProvider);
     final isConnected = settingsState.isConnected;
+
+    // 消息变化时滚动到底部
+    if (chatState.messages.isNotEmpty) {
+      _scrollToBottom();
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -73,6 +103,7 @@ class ChatScreen extends ConsumerWidget {
             child: chatState.messages.isEmpty
                 ? _buildEmptyState(context)
                 : ListView.builder(
+                    controller: _scrollController,
                     padding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 8,

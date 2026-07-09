@@ -8,11 +8,25 @@ import '../providers/chat_provider.dart';
 import '../models/session.dart';
 
 /// 会话列表页面
-class SessionListScreen extends ConsumerWidget {
+class SessionListScreen extends ConsumerStatefulWidget {
   const SessionListScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SessionListScreen> createState() => _SessionListScreenState();
+}
+
+class _SessionListScreenState extends ConsumerState<SessionListScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // 打开页面时自动加载会话列表
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(sessionListProvider.notifier).load();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final sessionState = ref.watch(sessionListProvider);
 
     return Scaffold(
