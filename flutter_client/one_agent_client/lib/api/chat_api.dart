@@ -1,8 +1,14 @@
-import 'package:dio/dio.dart';
-
 import '../models/chat_message.dart';
 import 'api_client.dart';
 import 'sse_client.dart';
+
+/// 流式聊天的返回结果：包含事件流和底层 SseClient（调用方需在结束时 dispose）
+class StreamChatResult {
+  final Stream<StreamEvent> stream;
+  final SseClient client;
+
+  const StreamChatResult({required this.stream, required this.client});
+}
 
 /// 聊天相关 API
 class ChatApi {
@@ -18,8 +24,8 @@ class ChatApi {
     return resp.data as Map<String, dynamic>;
   }
 
-  /// 流式聊天 — 返回 SSE 事件流
-  static Stream<StreamEvent> sendMessageStream({
+  /// 流式聊天 — 返回 SSE 事件流及 SseClient（调用方负责 dispose）
+  static StreamChatResult sendMessageStream({
     required String text,
     String? sessionId,
     String? model,
@@ -27,15 +33,18 @@ class ChatApi {
     int? maxTokens,
   }) {
     final sse = SseClient(
-      baseUrl: ApiClient.dio.options.baseUrl,
-      apiKey: ApiClient.dio.options.headers['X-API-Key'] as String?,
+      baseUrl: ApiClient.baseUrl,
+      apiKey: ApiClient.apiKey,
     );
-    return sse.chatStream(
-      text: text,
-      sessionId: sessionId,
-      model: model,
-      temperature: temperature,
-      maxTokens: maxTokens,
+    return StreamChatResult(
+      stream: sse.chatStream(
+        text: text,
+        sessionId: sessionId,
+        model: model,
+        temperature: temperature,
+        maxTokens: maxTokens,
+      ),
+      client: sse,
     );
   }
 }

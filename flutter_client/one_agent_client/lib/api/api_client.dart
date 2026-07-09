@@ -16,6 +16,12 @@ class ApiClient {
     return _dio!;
   }
 
+  /// 当前配置的 API Key（供不走 Dio 拦截器的客户端使用，如 SSE）
+  static String get apiKey => _apiKey;
+
+  /// 当前配置的 baseUrl
+  static String get baseUrl => _baseUrl;
+
   /// 重新配置 baseUrl 和 apiKey
   static void configure({required String baseUrl, String? apiKey}) {
     _baseUrl = baseUrl;

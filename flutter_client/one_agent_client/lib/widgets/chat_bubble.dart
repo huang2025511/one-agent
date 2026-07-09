@@ -91,6 +91,7 @@ class ChatBubble extends StatelessWidget {
   }
 
   Widget _buildContent(BuildContext context) {
+    final isUser = message.role == MessageRole.user;
     if (message.isStreaming == true && message.content.isEmpty) {
       return SizedBox(
         width: 40,

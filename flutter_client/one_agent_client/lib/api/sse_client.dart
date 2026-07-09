@@ -104,7 +104,12 @@ class SseClient {
       }
 
       if (json.containsKey('status') && json['status'] == 'thinking') {
-        return StreamEvent(type: 'thinking', status: 'thinking', sessionId: json['session_id'] as String?);
+        return StreamEvent(
+          type: 'thinking',
+          status: 'thinking',
+          content: (json['content'] ?? json['text'] ?? json['thinking']) as String?,
+          sessionId: json['session_id'] as String?,
+        );
       }
 
       if (json.containsKey('content') || json.containsKey('text')) {

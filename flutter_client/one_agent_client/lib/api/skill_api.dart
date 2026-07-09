@@ -1,5 +1,3 @@
-import 'package:dio/dio.dart';
-
 import '../models/skill.dart';
 import 'api_client.dart';
 
@@ -11,8 +9,11 @@ class SkillApi {
     final data = resp.data as Map<String, dynamic>;
     final skills = data['skills'] as List<dynamic>? ?? [];
     return skills.map((e) {
-      final id = e is String ? e : (e is Map ? e['id']?.toString() ?? '' : e.toString());
-      return Skill.fromApi(id, e is Map ? e : null);
+      final id = e is String
+          ? e
+          : (e is Map ? e['id']?.toString() ?? '' : e.toString());
+      final detail = e is Map ? Map<String, dynamic>.from(e) : null;
+      return Skill.fromApi(id, detail);
     }).toList();
   }
 

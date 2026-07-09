@@ -19,7 +19,8 @@ class OneAgentApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final settings = ref.watch(settingsProvider);
+    // 监听连接状态以触发设置 Provider 初始化（加载已保存的服务器地址/API Key）
+    ref.watch(settingsProvider.select((s) => s.isConnected));
 
     return MaterialApp(
       title: 'One-Agent',

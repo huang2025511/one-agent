@@ -72,13 +72,11 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         selectedIndex: _currentIndex,
         onDestinationSelected: (index) => setState(() => _currentIndex = index),
         destinations: List.generate(_pages.length, (i) {
-          final badge = i == 3 && pendingCount > 0
-              ? NavigationBadge(label: pendingCount.toString())
-              : null;
+          final showBadge = i == 3 && pendingCount > 0;
           return NavigationDestination(
             icon: Badge(
-              isLabelVisible: badge != null,
-              label: badge != null ? Text(badge.label) : null,
+              isLabelVisible: showBadge,
+              label: showBadge ? Text(pendingCount.toString()) : null,
               child: Icon(_icons[i]),
             ),
             selectedIcon: Icon(_activeIcons[i]),

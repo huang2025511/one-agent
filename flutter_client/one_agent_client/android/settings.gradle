@@ -14,4 +14,3 @@ if (flutterSdkPath == null) {
 }
 
 apply from: "$flutterSdkPath/packages/flutter_tools/gradle/app_plugin_loader.gradle"
-apply from: "$flutterSdkPath/packages/flutter_tools/gradle/flutter.gradle"

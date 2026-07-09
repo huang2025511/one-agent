@@ -18,6 +18,20 @@ class ChatScreen extends ConsumerStatefulWidget {
 
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
+  bool _isNearBottom = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(() {
+      if (!_scrollController.hasClients) return;
+      final max = _scrollController.position.maxScrollExtent;
+      final near = _scrollController.position.pixels >= max - 120;
+      if (near != _isNearBottom) {
+        setState(() => _isNearBottom = near);
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -43,8 +57,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final settingsState = ref.watch(settingsProvider);
     final isConnected = settingsState.isConnected;
 
-    // 消息变化时滚动到底部
-    if (chatState.messages.isNotEmpty) {
+    // 仅在接近底部时自动滚动，避免打断用户上滑阅读历史
+    if (chatState.messages.isNotEmpty && _isNearBottom) {
       _scrollToBottom();
     }
 
