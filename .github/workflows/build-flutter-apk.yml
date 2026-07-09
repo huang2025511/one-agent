@@ -48,11 +48,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-flutter-
 
+      - name: Backup source code
+        run: |
+          mkdir -p /tmp/lib_backup
+          cp -r lib/* /tmp/lib_backup/
+
       - name: Create platform directories if missing
         run: |
           if [ ! -d "android" ]; then
             flutter create --platforms=android --org com.oneagent .
           fi
+
+      - name: Restore source code
+        run: |
+          rm -rf lib/*
+          cp -r /tmp/lib_backup/* lib/
 
       - name: Get dependencies
         run: flutter pub get
