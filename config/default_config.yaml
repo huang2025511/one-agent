@@ -1,4 +1,33 @@
+agent:
+  name: One-Agent-Test
+  description: Test configuration for One-Agent
+  version: 2.0.0
+  data_dir: ./data
+  log_level: WARNING
+  timezone: Asia/Shanghai
+  language: en
 llm:
+  primary_provider: sensenova
+  primary_model: sensenova/deepseek-v4-flash
+  lightweight_model: sensenova/sensenova-6.7-flash-lite
+  local_endpoint: http://localhost:11434
+  local_model: qwen2.5:7b
+  api_keys:
+    openrouter: null
+    openai: null
+    anthropic: null
+    deepseek: null
+    dashscope: null
+    sensenova: ${SENSENOVA_API_KEY}
+    siliconflow: ${SILICONFLOW_API_KEY}
+  default_temperature: 0.3
+  default_max_tokens: 4096
+  timeout: 60
+  retries: 3
+  cost_tracking:
+    daily_budget: 1.0
+    monthly_budget: 20.0
+    db_path: data/memory/costs.db
   model_tiers:
     trivial:
     - openrouter/meta-llama/llama-3-8b-instruct
@@ -11,6 +40,9 @@ llm:
     - openai/gpt-4o-mini
     - google/gemini-2.0-flash
     - sensenova/sensenova-6.7-flash-lite
+    - sensenova/deepseek-v4-flash
+    - sensenova/glm-5.2
+    - sensenova/sensenova-u1-fast
     complex:
     - anthropic/claude-3.5-sonnet-20241022
     - openai/gpt-4o
@@ -21,13 +53,66 @@ llm:
     - openai/o3
     - google/gemini-2.5-pro-preview-05-15
     - kimi/kimi-k2-0711-preview
-    - sensenova/deepseek-v4-flash
-
-security:
-  system_executor_password: ""
-  password_cache_minutes: 15
-  require_password_for_dangerous: true
-
+router:
+  enabled: true
+  task_complexity_thresholds:
+    trivial: 0.2
+    simple: 0.5
+    complex: 0.8
+    expert: 1.0
+  context_compression:
+    enabled: false
+  skill_lazy_loading:
+    enabled: false
+  self_evolution:
+    enabled: false
+memory:
+  short_term:
+    max_turns: 20
+    max_tokens: 8000
+  long_term:
+    enabled: true
+    storage: sqlite-fts5
+    max_results: 5
+    decay_enabled: true
+  procedural:
+    enabled: true
+    auto_create_skills: true
+    min_usage_before_skill: 3
+    skill_storage: markdown
+skills:
+  enabled: true
+  auto_discover: true
+  search_paths:
+  - ./skills
 gateways:
   wechat_personal:
     enabled: false
+    allowed_users: []
+    reply_prefix: ''
+    hot_reload: false
+execution: {}
+scheduler: {}
+security:
+  system_executor_password: ''
+  password_cache_minutes: 15
+  max_password_attempts: 3
+  lockout_minutes: 5
+  require_password_for_dangerous: true
+  command_timeout_seconds: 30
+  max_output_bytes: 65536
+rest:
+  enabled: true
+  host: 0.0.0.0
+  port: 18792
+  api_key: null
+  rate_limit_per_minute: 10000
+  max_chat_bytes: 65536
+  cors_origins:
+  - '*'
+monitoring: {}
+multimodal: {}
+marketplace:
+  enabled: true
+  registry_url: ''
+llm_cache: {}
