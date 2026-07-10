@@ -15,9 +15,12 @@ from __future__ import annotations
 import logging
 import struct
 import time
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore[assignment]
 
 from .base_store import BaseSQLiteStore
 
@@ -83,9 +86,11 @@ class EmbeddingStore(BaseSQLiteStore):
         self._cache_norms: List[float] = []
         # Numpy arrays for vectorized cosine similarity (P2-2 fix).
         # _cache_matrix: (N, D) float32 array; _cache_norms_np: (N,) float32.
-        # Both are None when cache is empty, rebuilt by _load_vector_cache().
-        self._cache_matrix: Optional[np.ndarray] = None
-        self._cache_norms_np: Optional[np.ndarray] = None
+        # Both are None when cache is empty or numpy unavailable, rebuilt by
+        # _load_vector_cache(). When numpy is missing, search() falls back to
+        # the pure-Python loop below (slower but functional).
+        self._cache_matrix: Optional[Any] = None
+        self._cache_norms_np: Optional[Any] = None
         # Legacy alias kept for backward-compat with code that checks _vector_cache
         self._vector_cache: Optional[List[Tuple[str, List[float]]]] = None
         super().__init__(db_path)
@@ -269,8 +274,8 @@ class EmbeddingStore(BaseSQLiteStore):
                 ]
                 return results[:top_k]
 
-            # Fallback: Python loop (used before cache is loaded or if
-            # numpy arrays are somehow unavailable)
+            # Fallback: Python loop (used before cache is loaded, or when
+            # numpy is not installed — slower but functional)
             vecs = self._cache_vecs
             norms = self._cache_norms
             results: List[Tuple[str, float]] = []
@@ -314,7 +319,9 @@ class EmbeddingStore(BaseSQLiteStore):
             self._cache_vecs = vecs
             self._cache_norms = norms
             # Build numpy arrays for vectorized search (P2-2 fix).
-            if vecs:
+            # Skipped when numpy is not installed — search() will use the
+            # pure-Python loop instead.
+            if vecs and np is not None:
                 self._cache_matrix = np.array(vecs, dtype=np.float32)
                 self._cache_norms_np = np.array(norms, dtype=np.float32)
             else:
