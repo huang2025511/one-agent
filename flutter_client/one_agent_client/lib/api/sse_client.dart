@@ -98,6 +98,20 @@ class SseClient {
     try {
       final json = jsonDecode(dataLine) as Map<String, dynamic>;
 
+      // 错误事件：服务端可能返回 {"error": "...", "done": true}
+      if (json.containsKey('error') && json['error'] != null) {
+        final errorMsg = json['error'].toString();
+        if (errorMsg.isNotEmpty) {
+          return StreamEvent(
+            type: 'error',
+            content: errorMsg,
+            done: json['done'] == true,
+            sessionId: json['session_id'] as String?,
+            metadata: json,
+          );
+        }
+      }
+
       // 处理不同格式的 SSE 事件
       if (json.containsKey('done') && json['done'] == true) {
         return StreamEvent(type: 'done', done: true, sessionId: json['session_id'] as String?);
@@ -112,10 +126,13 @@ class SseClient {
         );
       }
 
-      if (json.containsKey('content') || json.containsKey('text')) {
+      // 内容事件：识别 content / text / delta 三种字段名
+      // 服务端 LLM 层用 delta，Coordinator 层用 content，兼容两者
+      final content = json['content'] ?? json['text'] ?? json['delta'];
+      if (content != null && content.toString().isNotEmpty) {
         return StreamEvent(
           type: eventType ?? 'text',
-          content: json['content'] ?? json['text'] ?? '',
+          content: content.toString(),
           sessionId: json['session_id'] as String?,
           metadata: json,
         );

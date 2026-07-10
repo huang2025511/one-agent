@@ -149,6 +149,22 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
     _streamSub = result.stream.listen(
       (event) {
+        // 错误事件：显示错误信息，不写入回复内容
+        if (event.type == 'error') {
+          final updatedMsgs = [...state.messages];
+          final lastIdx = updatedMsgs.length - 1;
+          if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
+            updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
+              content: event.content ?? '发生未知错误',
+              isError: true,
+              errorMessage: event.content,
+              isStreaming: false,
+            );
+            state = state.copyWith(messages: updatedMsgs, isLoading: false);
+          }
+          return;
+        }
+
         if (event.type == 'thinking') {
           // 累积真实的思考内容
           thinkingBuffer = (thinkingBuffer ?? '') + (event.content ?? '');
