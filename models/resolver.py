@@ -257,8 +257,8 @@ async def resolve(
         if own_client:
             try:
                 await cli.aclose()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
 
 
 def clear_cache() -> None:

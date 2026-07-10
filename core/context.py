@@ -8,6 +8,7 @@ separate prevents a single turn from polluting global state.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import time
 import uuid
@@ -68,6 +69,9 @@ class TurnContext:
         """Validate meta field type."""
         if not isinstance(self.meta, dict):
             raise ValueError('meta must be a dict')
+        # asyncio.Event lazily binds to the running loop on wait(), so it is
+        # safe to construct here even outside an event loop.
+        self._done: asyncio.Event = asyncio.Event()
 
     # ----------------------------------------------------------- convenience
     def record_success(self, answer: str, tokens_used: int) -> None:
@@ -75,11 +79,26 @@ class TurnContext:
         self.error = None  # Clear any stale error from a concurrent timeout
         self.tokens_used = tokens_used
         self.duration_seconds = time.monotonic() - self.created_at
+        self._done.set()
 
     def record_failure(self, error: str) -> None:
         self.error = error
         self.result = None  # Clear any stale result from a concurrent success
         self.duration_seconds = time.monotonic() - self.created_at
+        self._done.set()
+
+    async def wait_done(self) -> None:
+        """Block until the turn has a result or error.
+
+        Signaled by ``record_success`` / ``record_failure``, and by external
+        callers via ``mark_done`` (e.g. a ``turn_completed`` bus subscriber
+        that bridges the cases where ``turn.result`` is assigned directly).
+        """
+        await self._done.wait()
+
+    def mark_done(self) -> None:
+        """Signal that this turn is complete (idempotent)."""
+        self._done.set()
 
 
 @dataclass

@@ -196,8 +196,8 @@ class TaskStore:
         if hasattr(self, '_conn'):
             try:
                 self._conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
 
     def _row_to_task(self, row: sqlite3.Row) -> Task:
         return Task(

@@ -27,8 +27,8 @@ def _find_wechat_gateway(ctx_ref=None) -> Optional[Any]:
             for plugin in plugins:
                 if plugin and getattr(plugin, 'name', '') == 'gateway_wechat_personal':
                     return plugin
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("ignored non-critical error: %s", exc)
 
     return None
 
@@ -42,8 +42,8 @@ def _get_ctx(ctx_ref=None) -> Optional[Any]:
         app = getattr(oa, '_app_instance', None)
         if app is not None:
             return getattr(app, 'ctx', None)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("ignored non-critical error: %s", exc)
     return None
 
 

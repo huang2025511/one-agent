@@ -95,8 +95,8 @@ class SemanticCache:
             try:
                 if hasattr(self._embedding_provider, "embed"):
                     return self._embedding_provider.embed(text)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
 
         # Try sentence-transformers directly (lazy import)
         if self._embedding_available is None:

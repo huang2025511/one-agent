@@ -626,3 +626,390 @@ async def test_dispatch_smart_toolresult_unavailable_increments_counter():
 
     assert result.status == "success"  # wrapped by _dispatch_smart
     assert failed.get("search") == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Pure / stateless helper methods — safe to test in isolation
+# ══════════════════════════════════════════════════════════════════════════
+
+
+# --- _is_zh ---
+
+def test_is_zh_returns_true_for_chinese():
+    """_is_zh returns True when i18n language starts with 'zh'."""
+    from i18n import set_language
+    set_language("zh")
+    assert Coordinator._is_zh() is True
+
+
+def test_is_zh_returns_false_for_english():
+    """_is_zh returns False when language is 'en'."""
+    from i18n import set_language
+    set_language("en")
+    assert Coordinator._is_zh() is False
+
+
+# --- _sanitize_model_output ---
+
+def test_sanitize_removes_invoke_blocks():
+    """<invoke name="...">...</invoke> blocks are stripped."""
+    coord = _make_coordinator()
+    text = 'Before <invoke name="web_search"><parameter name="query">test</parameter>result</invoke> After'
+    result = coord._sanitize_model_output(text)
+    assert "<invoke" not in result
+    assert "Before" in result
+    assert "After" in result
+
+
+def test_sanitize_removes_tool_call_blocks():
+    """<tool_call>...</tool_call> blocks are stripped."""
+    coord = _make_coordinator()
+    text = 'Answer <tool_call>{"name":"calc"}</tool_call> done'
+    result = coord._sanitize_model_output(text)
+    assert "<tool_call" not in result
+    assert "Answer" in result
+
+
+def test_sanitize_removes_function_call_blocks():
+    """<function_call>...</function_call> blocks are stripped."""
+    coord = _make_coordinator()
+    text = '<function_call name="web_search">test</function_call>result'
+    result = coord._sanitize_model_output(text)
+    assert "<function_call" not in result
+
+
+def test_sanitize_preserves_plain_text():
+    """Text without XML tags is returned unchanged (except strip)."""
+    coord = _make_coordinator()
+    text = "This is a normal response with no tags."
+    assert coord._sanitize_model_output(text) == text
+
+
+def test_sanitize_collapses_excessive_blank_lines():
+    """3+ consecutive newlines are collapsed to 2."""
+    coord = _make_coordinator()
+    text = "line1\n\n\n\n\nline2"
+    result = coord._sanitize_model_output(text)
+    assert "\n\n\n" not in result
+
+
+# --- _parse_xml_tool_tags ---
+
+def test_parse_xml_self_closing_tag():
+    """Self-closing XML tag <web_search query="..."/> is parsed into tool_calls.
+
+    Note: _parse_xml_tool_tags maps 'query' → 'input' for web_search.
+    """
+    coord = _make_coordinator()
+    text = 'Let me search <web_search query="python 3.13" /> for that.'
+    calls = coord._parse_xml_tool_tags(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "web_search"
+    assert calls[0]["args"]["input"] == "python 3.13"
+
+
+def test_parse_xml_paired_tag():
+    """Paired XML tags <calc expr="..."></calc> are parsed.
+
+    Note: _parse_xml_tool_tags maps 'expr' → 'input' for calc.
+    """
+    coord = _make_coordinator()
+    text = 'Result: <calc expr="1+1"></calc> done'
+    calls = coord._parse_xml_tool_tags(text)
+    assert len(calls) == 1
+    assert calls[0]["name"] == "calc"
+    assert calls[0]["args"]["input"] == "1+1"
+
+
+def test_parse_xml_multiple_tags():
+    """Multiple XML tags in one response are all parsed."""
+    coord = _make_coordinator()
+    text = '<web_search query="a" /> then <calc expr="2+2" />'
+    calls = coord._parse_xml_tool_tags(text)
+    assert len(calls) == 2
+    assert calls[0]["name"] == "web_search"
+    assert calls[1]["name"] == "calc"
+
+
+def test_parse_xml_unknown_tool_ignored():
+    """Tags with names not in _XML_TOOL_NAMES are ignored."""
+    coord = _make_coordinator()
+    text = '<unknown_tool foo="bar" />'
+    calls = coord._parse_xml_tool_tags(text)
+    assert len(calls) == 0
+
+
+def test_parse_xml_no_tags_returns_empty():
+    """Text without XML tags returns empty list."""
+    coord = _make_coordinator()
+    assert coord._parse_xml_tool_tags("just plain text") == []
+
+
+# --- _strip_executed_xml_tags ---
+
+def test_strip_xml_removes_self_closing_tags():
+    """Self-closing known tool tags are removed from text."""
+    coord = _make_coordinator()
+    text = 'Before <web_search query="test" /> After'
+    result = coord._strip_executed_xml_tags(text)
+    assert "<web_search" not in result
+    assert "Before" in result
+    assert "After" in result
+
+
+def test_strip_xml_preserves_unknown_tags():
+    """Non-tool XML tags are preserved."""
+    coord = _make_coordinator()
+    text = '<custom_tag>content</custom_tag>'
+    result = coord._strip_executed_xml_tags(text)
+    assert "<custom_tag>" in result
+
+
+def test_strip_xml_empty_string():
+    """Empty string is handled without error."""
+    coord = _make_coordinator()
+    assert coord._strip_executed_xml_tags("") == ""
+
+
+# --- _needs_clarification_check ---
+
+def test_clarification_short_input_returns_false():
+    """Short inputs (< 15 chars) don't need clarification."""
+    coord = _make_coordinator()
+    turn = _make_turn(input_text="hello")
+    assert coord._needs_clarification_check(turn) is False
+
+
+def test_clarification_code_input_returns_false():
+    """Inputs with code blocks don't need clarification."""
+    coord = _make_coordinator()
+    turn = _make_turn(input_text="```python\nprint('hello world')\n```")
+    assert coord._needs_clarification_check(turn) is False
+
+
+def test_clarification_url_input_returns_false():
+    """Inputs with URLs don't need clarification."""
+    coord = _make_coordinator()
+    turn = _make_turn(input_text="please visit https://example.com for details")
+    assert coord._needs_clarification_check(turn) is False
+
+
+def test_clarification_long_ambiguous_returns_true():
+    """Long inputs without markers return True."""
+    coord = _make_coordinator()
+    turn = _make_turn(input_text="can you help me understand the situation")
+    assert coord._needs_clarification_check(turn) is True
+
+
+# --- _needs_web_search ---
+
+def test_web_search_chinese_keywords():
+    """Chinese search keywords trigger True."""
+    coord = _make_coordinator()
+    assert coord._needs_web_search("搜索一下最新的新闻") is True
+    assert coord._needs_web_search("今天的天气怎么样") is True
+
+
+def test_web_search_english_keywords():
+    """English search keywords trigger True."""
+    coord = _make_coordinator()
+    assert coord._needs_web_search("search for the latest news") is True
+    assert coord._needs_web_search("what's the weather today") is True
+
+
+def test_web_search_no_keywords():
+    """Non-search inputs return False."""
+    coord = _make_coordinator()
+    assert coord._needs_web_search("write a hello world program") is False
+    assert coord._needs_web_search("calculate 1+1") is False
+
+
+def test_web_search_year_keyword_long():
+    """Year + long text triggers search."""
+    coord = _make_coordinator()
+    assert coord._needs_web_search("what happened in 2025 that was important") is True
+
+
+# --- _detect_output_format ---
+
+def test_detect_format_code_with_def():
+    """Code blocks with def/class/import are detected as code format."""
+    coord = _make_coordinator()
+    fmt = coord._detect_output_format("Here:\n```python\ndef hello():\n    pass\n```")
+    assert "代码块" in fmt
+
+
+def test_detect_format_table():
+    """Markdown tables are detected."""
+    coord = _make_coordinator()
+    fmt = coord._detect_output_format("| A | B |\n|---|---|\n| 1 | 2 |")
+    assert "表格" in fmt
+
+
+def test_detect_format_list():
+    """Numbered/bulleted lists are detected."""
+    coord = _make_coordinator()
+    fmt = coord._detect_output_format("1. First\n2. Second\n3. Third")
+    assert "列表" in fmt
+
+
+def test_detect_format_plain():
+    """Plain text returns empty string."""
+    coord = _make_coordinator()
+    assert coord._detect_output_format("Just a simple answer.") == ""
+
+
+# --- _parse_error ---
+
+def test_parse_error_string():
+    """String errors are returned as-is for both type and detail."""
+    etype, edetail = Coordinator._parse_error("timeout occurred")
+    assert etype == "timeout occurred"
+    assert edetail == "timeout occurred"
+
+
+def test_parse_error_dict():
+    """Dict errors extract 'type' and 'detail' keys."""
+    etype, edetail = Coordinator._parse_error({"type": "NetworkError", "detail": "connection refused"})
+    assert etype == "NetworkError"
+    assert edetail == "connection refused"
+
+
+def test_parse_error_dict_missing_keys():
+    """Dict without keys uses defaults."""
+    etype, edetail = Coordinator._parse_error({})
+    assert etype == "unknown"
+    assert "{}" in edetail
+
+
+def test_parse_error_none():
+    """None error returns 'unknown' type."""
+    etype, edetail = Coordinator._parse_error(None)
+    assert etype == "unknown"
+    assert edetail == "unknown"
+
+
+# --- _parse_planned_tools ---
+
+def test_parse_planned_tools_ordered():
+    """Tools are returned in first-occurrence order."""
+    coord = _make_coordinator()
+    plan = "First use web_search, then calc, then web_search again"
+    result = coord._parse_planned_tools(plan, {"web_search", "calc", "system_run"})
+    assert result == ["web_search", "calc"]
+
+
+def test_parse_planned_tools_empty_plan():
+    """Empty plan returns empty list."""
+    coord = _make_coordinator()
+    assert coord._parse_planned_tools("", {"web_search"}) == []
+
+
+def test_parse_planned_tools_no_available():
+    """No available tools returns empty list."""
+    coord = _make_coordinator()
+    assert coord._parse_planned_tools("use web_search now", set()) == []
+
+
+def test_parse_planned_tools_unknown_names():
+    """Names not in available set are skipped."""
+    coord = _make_coordinator()
+    result = coord._parse_planned_tools("use web_search and foobar", {"web_search"})
+    assert result == ["web_search"]
+
+
+# --- _should_show_suggestions ---
+
+def test_show_suggestions_default():
+    """Without ctx/config, defaults to True."""
+    coord = _make_coordinator()
+    assert coord._should_show_suggestions() is True
+
+
+def test_show_suggestions_config_disabled():
+    """Config can disable suggestions."""
+    coord = _make_coordinator()
+    coord.ctx = type("Ctx", (), {"config": {"agent": {"show_suggestions": False}}})()
+    assert coord._should_show_suggestions() is False
+
+
+# --- _extract_entities ---
+
+def test_extract_entities_no_ctx_skips():
+    """Without ctx, extraction is a no-op."""
+    coord = _make_coordinator()
+    turn = _make_turn(input_text="test")
+    turn.result = "some answer"
+    # Should not raise
+    coord._extract_entities(turn)
+
+
+def test_extract_entities_error_turn_skips():
+    """Error turns are skipped (no entity extraction)."""
+    coord = _make_coordinator()
+    turn = _make_turn(input_text="test")
+    turn.error = "some error"
+    turn.result = "some answer"
+    # Mock ctx with memory._kg
+    coord.ctx = type("Ctx", (), {
+        "config": {},
+        "memory": type("M", (), {"_kg": None})(),
+    })()
+    coord._extract_entities(turn)  # should not raise
+
+
+def test_extract_entities_empty_result_skips():
+    """Turns with empty results are skipped."""
+    coord = _make_coordinator()
+    turn = _make_turn(input_text="test")
+    turn.result = ""
+    coord.ctx = type("Ctx", (), {
+        "config": {},
+        "memory": type("M", (), {"_kg": None})(),
+    })()
+    coord._extract_entities(turn)  # should not raise
+
+
+# --- _compute_dynamic_temperature ---
+
+def test_dynamic_temp_default():
+    """Without task_types or complexity, returns base temperature."""
+    from core.coordinator import DYNAMIC_TEMP_BASE
+    coord = _make_coordinator()
+    turn = _make_turn()
+    turn.estimated_complexity = 0.1
+    temp = coord._compute_dynamic_temperature(turn)
+    assert temp == DYNAMIC_TEMP_BASE
+
+
+def test_dynamic_temp_high_complexity():
+    """High complexity returns lower temperature."""
+    from core.coordinator import EXPERT_COMPLEXITY_THRESHOLD
+    coord = _make_coordinator()
+    turn = _make_turn()
+    turn.estimated_complexity = EXPERT_COMPLEXITY_THRESHOLD + 0.1
+    temp = coord._compute_dynamic_temperature(turn)
+    assert temp == 0.15
+
+
+def test_dynamic_temp_creative_task():
+    """Creative tasks get higher temperature."""
+    from core.coordinator import DYNAMIC_TEMP_CREATIVE
+    coord = _make_coordinator()
+    turn = _make_turn()
+    turn.estimated_complexity = 0.5
+    turn.meta["task_types"] = ["creative", "writing"]
+    temp = coord._compute_dynamic_temperature(turn)
+    assert temp == DYNAMIC_TEMP_CREATIVE
+
+
+def test_dynamic_temp_factual_task():
+    """Factual tasks get lower temperature."""
+    from core.coordinator import DYNAMIC_TEMP_FACTUAL
+    coord = _make_coordinator()
+    turn = _make_turn()
+    turn.estimated_complexity = 0.5
+    turn.meta["task_types"] = ["factual", "coding"]
+    temp = coord._compute_dynamic_temperature(turn)
+    assert temp == DYNAMIC_TEMP_FACTUAL
+

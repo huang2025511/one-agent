@@ -69,7 +69,10 @@ class LongTermMemory:
         self._path = path
         # Enable WAL so concurrent readers (e.g. /api/memory/page) don't
         # block writers from the event-bus turn handler.
-        self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        # Use default isolation_level (deferred) — autocommit mode
+        # (isolation_level=None) mixed with manual BEGIN IMMEDIATE caused
+        # transaction state inconsistency (P0-5 fix).
+        self._conn = sqlite3.connect(path, check_same_thread=False)
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -79,7 +82,6 @@ class LongTermMemory:
             pass
         self._decay_enabled = decay_enabled
         self._decay_factor = decay_factor
-        self._has_weight_col: Optional[bool] = None
         # Write lock — serializes write operations across threads to
         # prevent "database is locked" errors when multiple asyncio
         # tasks (via asyncio.to_thread) access this connection.
@@ -100,6 +102,14 @@ class LongTermMemory:
                 "content TEXT, source TEXT, tags TEXT, timestamp REAL, weight REAL DEFAULT 1.0)"
             )
             c.execute("CREATE INDEX IF NOT EXISTS idx_memory_ts ON memory(timestamp)")
+        # P0-2 fix: FTS5 virtual tables cannot have a weight column, so we
+        # store importance weights in a separate side table keyed by rowid.
+        # This makes the 0.5/1.0/1.5/2.0 weights from _on_turn_completed
+        # actually take effect instead of being silently discarded.
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS memory_weights ("
+            "rowid INTEGER PRIMARY KEY, weight REAL DEFAULT 1.0)"
+        )
         self._conn.commit()
 
     def add(self, content: str, source: str = "user", tags: str = "", weight: float = 1.0) -> Optional[int]:
@@ -119,35 +129,24 @@ class LongTermMemory:
             max_retries = 3
             result_rowid: Optional[int] = None
             for attempt in range(max_retries):
-                # Create a fresh cursor inside the loop — closing it in finally
-                # and reusing a closed cursor was the original bug.
                 c = self._conn.cursor()
                 try:
-                    self._conn.execute("BEGIN IMMEDIATE")
-                    if self._has_weight_col is None:
-                        try:
-                            # Use a separate cursor for schema check to avoid state issues
-                            schema_cursor = self._conn.cursor()
-                            schema_cursor.execute("PRAGMA table_info(memory)")
-                            self._has_weight_col = "weight" in {row[1] for row in schema_cursor.fetchall()}
-                            schema_cursor.close()
-                        except sqlite3.DatabaseError:
-                            self._has_weight_col = False
-                    if self._has_weight_col:
-                        c.execute(
-                            "INSERT INTO memory(content, source, tags, timestamp, weight) VALUES (?,?,?,?,?)",
-                            (content, source, tags, time.time(), weight),
-                        )
-                    else:
+                    # P0-5 fix: use `with self._conn:` for automatic
+                    # transaction management instead of manual
+                    # BEGIN IMMEDIATE / commit / rollback.
+                    with self._conn:
                         c.execute(
                             "INSERT INTO memory(content, source, tags, timestamp) VALUES (?,?,?,?)",
                             (content, source, tags, time.time()),
                         )
-                    result_rowid = c.lastrowid
-                    self._conn.commit()
-                    break  # Success
+                        result_rowid = c.lastrowid
+                        # P0-2 fix: store importance weight in side table
+                        c.execute(
+                            "INSERT OR REPLACE INTO memory_weights(rowid, weight) VALUES (?, ?)",
+                            (result_rowid, weight),
+                        )
+                    break  # Success — with-block committed
                 except sqlite3.OperationalError as exc:
-                    self._conn.rollback()
                     if "locked" in str(exc).lower() and attempt < max_retries - 1:
                         import time as time_module
                         delay = min(0.01 * (2 ** attempt), 0.1)  # 10ms, 20ms, 40ms
@@ -161,7 +160,6 @@ class LongTermMemory:
                     logger.exception("memory add failed: %s", exc)
                     raise
                 except sqlite3.Error as exc:
-                    self._conn.rollback()
                     logger.exception("memory add failed: %s", exc)
                     raise
                 finally:
@@ -193,16 +191,19 @@ class LongTermMemory:
         c = self._conn.cursor()
         try:
             # FTS5 rank(): bm25 returns negative values; more negative = more relevant.
-            # Include rowid directly to avoid N+1 queries
+            # P0-2 fix: LEFT JOIN memory_weights to retrieve the importance
+            # weight that was stored alongside the FTS5 row.
             c.execute(
-                "SELECT rowid, content, source, tags, timestamp, rank "
-                "FROM memory WHERE memory MATCH ? "
+                "SELECT m.rowid, m.content, m.source, m.tags, m.timestamp, m.rank, "
+                "COALESCE(w.weight, 1.0) AS weight "
+                "FROM memory m "
+                "LEFT JOIN memory_weights w ON w.rowid = m.rowid "
+                "WHERE memory MATCH ? "
                 "ORDER BY rank LIMIT ? OFFSET ?",
                 (query, limit, offset),
             )
             rows = c.fetchall()
-            # Normalize: (rowid, content, source, tags, timestamp, rank, weight=1.0)
-            normalized = [(r[0], r[1], r[2], r[3], r[4], r[5], 1.0) for r in rows]
+            normalized = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6]) for r in rows]
         except sqlite3.OperationalError:
             c.execute(
                 "SELECT rowid, content, source, tags, timestamp FROM memory "
@@ -223,8 +224,12 @@ class LongTermMemory:
             w = row[6] if len(row) > 6 else 1.0
             # Apply decay to old entries
             if self._decay_enabled:
-                # Use monotonic time for decay calculation to avoid wall clock issues
-                # Note: timestamp is stored as wall clock, but decay uses relative time
+                # P2-6 fix: timestamp is stored as wall-clock (time.time()),
+                # so decay must also use wall-clock for the age calculation
+                # to be correct. Using monotonic time here would produce
+                # nonsensical ages since the two clocks have different
+                # epochs. Wall-clock is susceptible to NTP jumps, but that
+                # is an acceptable trade-off for correctness.
                 age_hours = (time.time() - timestamp) / 3600
                 # Cap decay at 30 days to prevent underflow
                 age_hours = min(age_hours, 30 * 24)
@@ -265,7 +270,11 @@ class LongTermMemory:
     def stats(self) -> Dict[str, Any]:
         c = self._conn.cursor()
         try:
-            c.execute("SELECT COUNT(*), AVG(weight) FROM memory")
+            # P0-2 fix: query weight from the side table
+            c.execute(
+                "SELECT COUNT(*), AVG(w.weight) FROM memory m "
+                "LEFT JOIN memory_weights w ON w.rowid = m.rowid"
+            )
             row = c.fetchone()
             return {"rows": row[0] or 0, "avg_weight": round(row[1] or 1.0, 3)}
         except sqlite3.OperationalError:
@@ -343,8 +352,8 @@ class LongTermMemory:
         if hasattr(self, "_conn") and self._conn:
             try:
                 self._conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("LongTermMemory close on GC failed: %s", exc)
 
 
 # ---------- tier 3: procedural memory (auto-generated skills) --------------

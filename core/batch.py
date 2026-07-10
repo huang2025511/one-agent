@@ -160,8 +160,8 @@ class BatchProcessor:
                     done = sum(1 for i in batch_items if i.status in (BatchItemStatus.DONE, BatchItemStatus.FAILED))
                     try:
                         on_progress(done, total, item.input_data[:50])
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("ignored non-critical error: %s", exc)
 
         # Run all in parallel (limited by semaphore)
         await asyncio.gather(*(process_one(item) for item in batch_items))

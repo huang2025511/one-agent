@@ -108,8 +108,8 @@ class RecommendationMixin:
                     import os as _os
                     if _os.path.exists(cand):
                         return cand
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("ignored non-critical error: %s", exc)
         return None
 
     def _dump_config(self, cfg: Dict[str, Any], path: str) -> None:

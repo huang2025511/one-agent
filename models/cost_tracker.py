@@ -115,8 +115,8 @@ class CostTracker:
         # Check budget (fire-and-forget — never block the caller)
         try:
             self.check_budget()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("ignored non-critical error: %s", exc)
 
         return cost
 

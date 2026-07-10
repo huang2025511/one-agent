@@ -142,7 +142,13 @@ class KnowledgeGraph(BaseSQLiteStore):
 
     def add_relation(self, subject: str, predicate: str, obj: str,
                     weight: float = 1.0, source: str = "") -> bool:
-        """Add a relationship between two entities with transaction support."""
+        """Add a relationship between two entities with transaction support.
+
+        P0-4 fix: entity upsert and relation insert are now in the same
+        transaction. Previously, add_entity() was called separately (each
+        committing independently), so a failure during relation insert
+        would leave orphaned entities in the database.
+        """
         # Validate predicate
         if not predicate or not isinstance(predicate, str):
             raise ValueError("Predicate must be a non-empty string")
@@ -154,12 +160,15 @@ class KnowledgeGraph(BaseSQLiteStore):
         if not isinstance(weight, (int, float)) or weight < 0:
             raise ValueError("Weight must be a non-negative number")
 
-        subj_id = self.add_entity(subject, source=source)
-        obj_id = self.add_entity(obj, source=source)
-
+        now = time.time()
         with self._write_lock:
             try:
-                with self._conn:  # automatic transaction
+                with self._conn:  # single atomic transaction
+                    # Upsert subject entity (inline — don't call add_entity
+                    # which commits independently)
+                    subj_id = self._upsert_entity_tx(subject, now, source)
+                    obj_id = self._upsert_entity_tx(obj, now, source)
+
                     # Check if relation already exists
                     cur = self._conn.execute(
                         "SELECT id FROM relations WHERE subject_id = ? AND predicate = ? AND object_id = ?",
@@ -180,6 +189,28 @@ class KnowledgeGraph(BaseSQLiteStore):
                 logger.error("Transaction failed in add_relation: %s", e)
                 raise
         return True
+
+    def _upsert_entity_tx(self, name: str, now: float, source: str = "") -> int:
+        """Upsert an entity within the current transaction (no commit).
+
+        This is the transaction-safe version of add_entity used by
+        add_relation to avoid independent commits that break atomicity.
+        """
+        name = name.strip()
+        name = re.sub(r'\s+', ' ', name)
+        cur = self._conn.execute("SELECT id FROM entities WHERE name = ?", (name,))
+        row = cur.fetchone()
+        if row:
+            self._conn.execute(
+                "UPDATE entities SET type = ?, updated_at = ? WHERE id = ?",
+                ("unknown", now, row["id"])
+            )
+            return row["id"]
+        cur = self._conn.execute(
+            "INSERT INTO entities (name, type, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (name, "unknown", source, now, now)
+        )
+        return cur.lastrowid
 
     def query_entity(self, name: str) -> Optional[Dict[str, Any]]:
         """Get entity info and its relationships."""
