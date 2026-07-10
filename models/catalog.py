@@ -135,8 +135,8 @@ class ModelCatalog:
         try:
             if self._client is not None:
                 await self._client.aclose()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("ignored non-critical error: %s", exc)
 
     # ---------------------------------------------------------- refresh
     async def refresh(self, force: bool = False) -> int:

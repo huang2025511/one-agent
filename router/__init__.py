@@ -669,6 +669,12 @@ class SmartRouter(Plugin):
             if coordinator is not None:
                 os_mode_enabled = getattr(coordinator, "_os_mode_enabled", False)
 
+        # P1-2 fix: generate today's date dynamically instead of hardcoding.
+        from datetime import datetime
+        _now = datetime.now()
+        today_zh = f"{_now.year} 年 {_now.month} 月 {_now.day} 日"
+        today_en = _now.strftime("%B %-d, %Y")
+
         if lang.startswith("zh"):
             system = (
                 "你是 One-Agent，一个极度独立、有思考能力、善用记忆的智能助手。\n\n"
@@ -676,7 +682,7 @@ class SmartRouter(Plugin):
                 "你的训练数据截止到 2025 年 8 月，之后的事件（2025 年 9 月及以后）你无法通过内部知识获知。\n"
                 "当用户询问 2025 年 9 月之后的事件、新闻、版本更新、价格变动等时效性信息时，\n"
                 "你必须主动使用 web_search 工具搜索最新信息，不要仅凭训练数据猜测或编造。\n"
-                "对于当前日期和时间（今天是 2026 年 7 月 6 日），使用 now 工具获取精确时间。\n\n"
+                "对于当前日期和时间（今天是 {today}），使用 now 工具获取精确时间。\n\n"
                 "【安全护栏 — 保护用户隐私，拒绝有害请求】\n"
                 "1. 隐私保护：绝不输出用户的手机号、身份证号、银行卡号、邮箱地址等个人信息。\n"
                 "   如果搜索结果中包含此类信息，必须脱敏处理（如 138****1234）。\n"
@@ -757,7 +763,7 @@ class SmartRouter(Plugin):
                 "注意：这是按复杂度选模型，不是故障 fallback。模型列表定义在 models/tiers.py 的 MODEL_TIERS 字典，\n"
                 "配置在 config/default_config.yaml 的 router 段。添加新模型时，模型名格式为 provider/model（如 nvidia/meta/llama-3.1-70b-instruct），\n"
                 "放到对应能力的 tier 列表里，不要在 model 字段重复 provider 前缀。"
-            )
+            ).format(today=today_zh)
             if os_mode_enabled:
                 system += (
                     "\n\n【OS 模式已开启 — 你有操作系统权限】\n"
@@ -780,7 +786,7 @@ class SmartRouter(Plugin):
                 "version updates, price changes, or any time-sensitive information after "
                 "September 2025, you MUST use the web_search tool to look up the latest "
                 "information — do NOT guess or fabricate based on training data alone.\n"
-                "For the current date and time (today is July 6, 2026), use the now tool for precise time.\n\n"
+                "For the current date and time (today is {today_en}), use the now tool for precise time.\n\n"
                 "【Safety Guardrails — Protect privacy, reject harmful requests】\n"
                 "1. Privacy: NEVER output phone numbers, ID numbers, bank card numbers, "
                 "email addresses, or other PII. If search results contain such info, "
@@ -861,7 +867,7 @@ class SmartRouter(Plugin):
                 "Note: This is complexity-based selection, NOT failover fallback. Model lists are in models/tiers.py (MODEL_TIERS dict),\n"
                 "config in config/default_config.yaml (router section). When adding models, use provider/model format (e.g. nvidia/meta/llama-3.1-70b-instruct),\n"
                 "place in the appropriate tier list, and do NOT duplicate the provider prefix in the model field."
-            )
+            ).format(today_en=today_en)
             if os_mode_enabled:
                 system += (
                     "\n\n【OS Mode ENABLED — You have OS operation permissions】\n"

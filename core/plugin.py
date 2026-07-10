@@ -59,8 +59,8 @@ class Plugin:
             for event_type, handler in self._subscribed_handlers:
                 try:
                     self.bus.unsubscribe(event_type, handler)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("ignored non-critical error: %s", exc)
             self._subscribed_handlers.clear()
         logger.info("%s stopped", self.name)
 

@@ -122,8 +122,8 @@ class DeepResearcher:
         if self._on_progress:
             try:
                 self._on_progress(phase, message)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
 
     # --------------------------------------------------- decompose
 

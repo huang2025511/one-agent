@@ -85,8 +85,8 @@ class MultimodalPlugin(Plugin):
         for cli in self._clients.values():
             try:
                 await cli.aclose()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
         self._clients.clear()
         await super().stop()
 

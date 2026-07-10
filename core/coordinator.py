@@ -21,6 +21,46 @@ from core.context import TurnContext
 from core.events import Event
 from core.plugin import Plugin
 from core.tool_result import ToolResult
+
+from .coordinator_helpers import (
+    XML_TOOL_NAMES,
+    sanitize_model_output,
+    parse_xml_tool_tags,
+    strip_executed_xml_tags,
+    needs_web_search,
+    needs_clarification_check as _needs_clarification_check_fn,
+    detect_output_format,
+    parse_planned_tools,
+    append_to_content,
+    prepend_to_content,
+)
+from .coordinator_features import (
+    handle_chart,
+    handle_branch,
+    handle_branch_switch,
+    handle_branch_list,
+    record_conversation_branch,
+    handle_email,
+    handle_calendar,
+    handle_db,
+    handle_mcp,
+    handle_openapi,
+    handle_agent_mesh,
+    handle_workflow,
+)
+from .coordinator_tasks import (
+    update_task_state,
+    append_task_completion_summary,
+    maybe_schedule_followup,
+    followup_check_handler,
+)
+from .coordinator_intelligence import (
+    record_self_improvement_async,
+    record_self_improvement,
+    record_intelligence,
+    extract_topics,
+    generate_suggestions,
+)
 from i18n import get_language
 from models import LLMProvider
 from router import DEFAULT_COMPLEX_THRESHOLD, DEFAULT_SIMPLE_THRESHOLD, DEFAULT_TRIVIAL_THRESHOLD
@@ -108,13 +148,12 @@ class Coordinator(Plugin):
 
     def __init__(self) -> None:
         super().__init__()
+        self._bg_tasks: set = set()
         self._llm: Optional[LLMProvider] = None
         self._skills: Optional[SkillManager] = None
         self._max_tool_iterations = MAX_TOOL_ITERATIONS
         self._max_tokens = DEFAULT_MAX_TOKENS
         self._os_mode_enabled: bool = False  # OS 操作权限模式（会话级）
-        # SkillWeaver router cache — 避免每轮重建 FAISS 索引
-        self._skillweaver_router: Optional[Any] = None
         # Track background turn-completion tasks so they aren't GC'd
         # mid-execution (Python's asyncio only holds a weak ref to tasks).
         self._pending_turn_tasks: set = set()
@@ -845,8 +884,8 @@ class Coordinator(Plugin):
                             data = _json.loads(cleaned)
                             if isinstance(data, dict):
                                 key_update = data
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("chart data parse failed: %s", exc)
                     gen = get_chart_generator()
                     turn.result = gen.generate_mermaid(chart_type, key_update)
                     turn.meta["auto_chart_triggered"] = True
@@ -1393,201 +1432,26 @@ class Coordinator(Plugin):
 
     @staticmethod
     def _append_to_content(content: Any, suffix: str) -> Any:
-        """Append text to a message content field, compatible with both
-        str and list (vision/multimodal) content formats.
-
-        修复：之前直接 content + "\n\n" + hint 假设 content 是 str,
-        但 OpenAI/Anthropic 多模态格式 content 是 list (如
-        [{"type":"text","text":"..."},{"type":"image_url",...}]),
-        str + list 抛 TypeError。
-        """
-        if isinstance(content, str):
-            return content + "\n\n" + suffix
-        if isinstance(content, list):
-            # 多模态：追加一个 text 块
-            return content + [{"type": "text", "text": suffix}]
-        # content 为 None 或其他类型：直接返回 suffix 作为字符串
-        return suffix
+        return append_to_content(content, suffix)
 
     @staticmethod
     def _prepend_to_content(content: Any, prefix: str) -> Any:
-        """Prepend text to a message content field (compatible with str/list)."""
-        if isinstance(content, str):
-            return prefix + "\n\n" + content
-        if isinstance(content, list):
-            # 多模态：在开头插入一个 text 块
-            return [{"type": "text", "text": prefix}] + content
-        return prefix
+        return prepend_to_content(content, prefix)
 
     def _sanitize_model_output(self, text: str) -> str:
-        """Remove XML tool-call tags that weak models may emit as text.
-
-        Some models (especially flash/lite variants) output tool-call XML
-        like <invoke name="web_search">...</invoke> or <tool_call ...>...
-        directly in their text response instead of using the proper API.
-        This strips those tags so users never see raw XML.
-        """
-        import re
-        # Remove <invoke ...>...</invoke> blocks
-        text = re.sub(
-            r'<invoke\s+name="[^"]*">.*?</invoke>',
-            '',
-            text,
-            flags=re.DOTALL,
-        )
-        # Remove <parameter ...>...</parameter> blocks
-        text = re.sub(
-            r'<parameter\s+name="[^"]*">.*?</parameter>',
-            '',
-            text,
-            flags=re.DOTALL,
-        )
-        # Remove standalone <invoke ...> tags (unclosed)
-        text = re.sub(r'<invoke\s+name="[^"]*"[^>]*/?\s*>', '', text)
-        # Remove <tool_call ...>...</tool_call > blocks
-        text = re.sub(
-            r'<tool_call[^>]*>.*?</tool_call\s*>',
-            '',
-            text,
-            flags=re.DOTALL,
-        )
-        # Remove <function_call ...>...</function_call> blocks
-        text = re.sub(
-            r'<function_call[^>]*>.*?</function_call\s*>',
-            '',
-            text,
-            flags=re.DOTALL,
-        )
-        # Remove self-closing tool tags like <web_search query="..."/>
-        # or <system_run command="..."/> that weak models emit when they
-        # can't use function calling. These may have been parsed & executed
-        # by _parse_xml_tool_tags, but the raw tags must not leak to users.
-        text = self._strip_executed_xml_tags(text)
-        # Clean up excessive blank lines left behind
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip()
+        return sanitize_model_output(text)
 
     # 已知工具名集合 — 用于校验解析出的标签名是否合法
-    _XML_TOOL_NAMES = frozenset({
-        "web_search", "python_execute", "calc", "send_message",
-        "system_run", "settings", "model_manage", "now", "email",
-        "calendar", "database", "mcp", "openapi", "workflow",
-        "chart", "branch", "branch_switch", "branch_list",
-    })
+    _XML_TOOL_NAMES = XML_TOOL_NAMES
 
     def _parse_xml_tool_tags(self, text: str) -> List[Dict[str, Any]]:
-        """从 LLM 输出文本中解析自闭合 XML 工具标签，转为 tool_calls 结构。
-
-        当模型不支持 OpenAI function calling（如 sensenova flash-lite）时，
-        LLM 可能输出 <web_search query="..."/> 这类标签来表达工具调用意图。
-        本方法把这些标签解析成标准 tool_calls 结构，让 _execute_tool_calls 能执行。
-
-        支持的格式（自闭合，属性即参数）：
-            <web_search query="dmxapi API 文档" />
-            <system_run command="curl -s https://api.dmxapi.cn/v1/models" />
-            <calc expr="1+1" />
-
-        也支持成对标签：
-            <web_search query="..."></web_search>
-
-        返回 [] 表示没有可解析的工具标签。
-        """
-        import re as _re
-        import json as _json
-
-        if not text or "<" not in text:
-            return []
-
-        calls: List[Dict[str, Any]] = []
-        # 匹配 <tool_name attr1="v1" attr2='v2' />  或  <tool_name ...></tool_name>
-        # 限制 tool_name 只能是已知工具名，避免误解析普通 XML/HTML
-        pattern = _re.compile(
-            r'<(?P<name>[a-z_]+)(?P<attrs>(?:\s+[a-zA-Z_]\w*\s*=\s*(?:"[^"]*"|\'[^\']*\'))+)\s*/?>',
-            _re.IGNORECASE,
-        )
-        attr_pattern = _re.compile(
-            r'(?P<key>[a-zA-Z_]\w*)\s*=\s*(?P<val>"(?P<dval>[^"]*)"|\'(?P<sval>[^\']*)\')',
-        )
-
-        for m in pattern.finditer(text):
-            name = m.group("name").lower()
-            if name not in self._XML_TOOL_NAMES:
-                continue
-            attrs_str = m.group("attrs")
-            args: Dict[str, Any] = {}
-            for am in attr_pattern.finditer(attrs_str):
-                key = am.group("key")
-                # 优先双引号值，否则单引号值
-                val = am.group("dval") if am.group("dval") is not None else am.group("sval")
-                args[key] = val
-
-            if not args:
-                continue
-
-            # 参数名映射：LLM 在 XML 标签里用的参数名可能和技能 schema 定义的不一致。
-            # 例如 web_search 的 schema 定义 required=["input"]，但 LLM 输出
-            # <web_search query="..."/> 用 query。这里做统一映射。
-            _XML_PARAM_MAP = {
-                "web_search": {"query": "input", "q": "input"},
-                "calc": {"expr": "input", "expression": "input"},
-            }
-            if name in _XML_PARAM_MAP:
-                for xml_key, mapped_key in _XML_PARAM_MAP[name].items():
-                    if xml_key in args and mapped_key not in args:
-                        args[mapped_key] = args.pop(xml_key)
-
-            # 兼容 _execute_tool_calls 期望的字段格式
-            calls.append({
-                "id": f"xml_{len(calls)}_{name}",
-                "name": name,
-                "args": args,
-            })
-
-        return calls
+        return parse_xml_tool_tags(text)
 
     def _strip_executed_xml_tags(self, text: str) -> str:
-        """从输出文本中移除已解析执行过的 XML 工具标签，避免泄漏给用户。
-
-        与 _sanitize_model_output 不同，本方法只移除已知工具名的自闭合标签，
-        保留普通文本内容。在 _parse_xml_tool_tags 成功解析后调用。
-        """
-        import re as _re
-        if not text or "<" not in text:
-            return text
-        # 构建正则：<(?:web_search|system_run|calc|...)\s+.../>
-        names_alt = "|".join(_re.escape(n) for n in self._XML_TOOL_NAMES)
-        # 移除自闭合标签 <tool_name .../>
-        text = _re.sub(
-            rf'<(?:{names_alt})(?:\s+[a-zA-Z_]\w*\s*=\s*(?:"[^"]*"|\'[^\']*\'))+\s*/?>',
-            '',
-            text,
-            flags=_re.IGNORECASE,
-        )
-        # 移除成对空标签 <tool_name ...></tool_name>
-        text = _re.sub(
-            rf'<(?:{names_alt})(?:\s[^>]*)?>\s*</(?:{names_alt})>',
-            '',
-            text,
-            flags=_re.IGNORECASE,
-        )
-        # 清理多余空行
-        text = _re.sub(r'\n{3,}', '\n\n', text)
-        return text.strip()
+        return strip_executed_xml_tags(text)
 
     def _needs_clarification_check(self, turn: TurnContext) -> bool:
-        """Heuristic: should we even bother asking the LLM if input is ambiguous?
-
-        Short, specific questions (e.g. "现在几点", "1+1=") don't need the
-        clarification check even at complex tier — it would just waste a call.
-        """
-        text = (turn.input_text or "").strip()
-        # Very short inputs are usually clear commands or questions
-        if len(text) < 15:
-            return False
-        # Inputs with code blocks, URLs, or file paths are usually concrete tasks
-        if any(marker in text for marker in ("```", "http", "/workspace", ".py", ".js")):
-            return False
-        return True
+        return _needs_clarification_check_fn((turn.input_text or "").strip())
 
     async def _prepare_messages(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Prepare message list with memory snippets from long-term memory + KG.
@@ -1791,8 +1655,8 @@ class Coordinator(Plugin):
                 else:
                     messages.append(summary_block)
                 turn.meta["dialog_summary_injected"] = True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("dialog summary injection failed: %s", exc)
 
         # Gap 5 修复：注入上一轮生成的主动规划，让 LLM 预判用户下一步
         proactive_plan = self._get_proactive_plan(turn.session_id)
@@ -1949,28 +1813,6 @@ class Coordinator(Plugin):
             header = "Retrieved from memory — most relevant to current question:\n"
         return header + "\n".join(hits[:5])
 
-    def _get_skillweaver_router(self) -> Optional[Any]:
-        """Get cached SkillWeaver router, building index once.
-
-        Avoids rebuilding the FAISS index on every turn — the index
-        is built once at first use and reused for subsequent turns.
-        """
-        if self._skillweaver_router is not None:
-            return self._skillweaver_router
-        try:
-            from core.skillweaver import create_skillweaver_router
-            router = create_skillweaver_router(self._llm, self._skills)
-            if router.initialize():
-                self._skillweaver_router = router
-                logger.info("skillweaver: router initialized and cached")
-                return router
-            logger.warning("skillweaver: router.initialize() returned False")
-        except ImportError:
-            logger.debug("skillweaver: module not available (install sentence-transformers + faiss-cpu)")
-        except Exception as exc:
-            logger.debug("skillweaver: router init failed: %s", exc)
-        return None
-
     def _prepare_tools(self, turn: TurnContext) -> List[Dict[str, Any]]:
         """Pick relevant skills and prepare tool schemas.
 
@@ -1994,22 +1836,20 @@ class Coordinator(Plugin):
 
         tools: List[Dict[str, Any]] = []
         if self._skills is not None:
-            # SkillWeaver: 语义检索替代关键词匹配
-            # 配置路径: router.skillweaver (见 config/default_config.yaml)
-            sw_cfg = {}
-            if self.ctx and hasattr(self.ctx, "config"):
-                sw_cfg = self.ctx.config.get("router", {}).get("skillweaver", {})
+            # Round 12: Try SkillWeaver semantic retrieval first
+            _sw_cfg = (self.ctx.config if self.ctx and self.ctx.config else {}).get("skillweaver", {})
             use_skillweaver = (
-                sw_cfg.get("enabled", True)
-                and getattr(turn, "estimated_complexity", 0) >= sw_cfg.get("min_complexity", 0.3)
+                _sw_cfg.get("enabled", True)
+                and getattr(turn, "estimated_complexity", 0) >= 0.3  # Skip trivial tasks
             )
-
+            
             if use_skillweaver:
                 try:
-                    router = self._get_skillweaver_router()
-                    if router:
-                        # 公开 API: retrieve_skills() — 不直接访问 _index
-                        results = router.retrieve_skills(turn.input_text, top_k=6)
+                    from core.skillweaver import create_skillweaver_router
+                    router = create_skillweaver_router(self._llm, self._skills)
+                    if router.initialize():
+                        # Semantic retrieval - returns skill_ids ranked by embedding similarity
+                        results = router._index.retrieve(turn.input_text, top_k=6)
                         chosen = [self._skills.get(sid) for sid, _ in results if self._skills.get(sid)]
                         logger.debug(
                             "skillweaver: semantic retrieval found %d skills for '%s'",
@@ -2017,6 +1857,9 @@ class Coordinator(Plugin):
                         )
                     else:
                         chosen = self._skills.pick_relevant(turn.input_text, limit=6)
+                except ImportError:
+                    # Fallback to keyword matching
+                    chosen = self._skills.pick_relevant(turn.input_text, limit=6)
                 except Exception as exc:
                     logger.debug("skillweaver retrieval failed: %s, fallback to keywords", exc)
                     chosen = self._skills.pick_relevant(turn.input_text, limit=6)
@@ -2512,25 +2355,7 @@ class Coordinator(Plugin):
             )
 
     def _needs_web_search(self, text: str) -> bool:
-        """Heuristic check whether the user's request requires web search.
-
-        Used as a fallback when the model doesn't support tool calling —
-        so the agent can still look up real-time info.
-        """
-        import re
-        t = text.lower()
-        search_patterns = [
-            r"搜索|搜|查找|查一下|查一查|查新|最新|最近|新闻|资讯|头条|热门|热搜|实时|今天|昨天|近日|近期",
-            r"web search|search for|look up|find out|what's new|what is new|latest|recent news|current events|breaking",
-            r"价格|股价|行情|比分|比赛结果|天气|汇率|价格表|排行榜",
-            r"how much|how many|price of|weather|score|result",
-        ]
-        for pat in search_patterns:
-            if re.search(pat, t):
-                return True
-        if re.search(r"今年|本月|本周|今天|现在|目前|当前|2025|2026", t) and len(t) > 10:
-            return True
-        return False
+        return needs_web_search(text)
 
     async def _auto_web_search_if_needed(self, messages: List[Dict[str, Any]], turn: TurnContext) -> bool:
         """If the model doesn't support tools, handle the no-tools scenario.
@@ -2597,8 +2422,8 @@ class Coordinator(Plugin):
                                 search_result_text = enhanced + "\n\n---\n" + search_result_text[:2000]
                                 turn.meta["rag_enhanced"] = True
                                 logger.debug("auto-search enhanced with RAG (HyDE+rerank)")
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("RAG enhancement failed: %s", exc)
 
                         # Round 8: 如果 RAG 增强后结果仍然很长 (>6000 chars)，
                         # 用 SubAgent 做信息提取/总结，让 LLM 拿到精炼版结果
@@ -3063,21 +2888,7 @@ class Coordinator(Plugin):
     def _parse_planned_tools(
         self, plan_text: str, available_tool_names: set,
     ) -> List[str]:
-        """Gap 6：从工具链规划文本中提取预期的工具调用顺序。
-
-        匹配规则：规划里出现的、且当前确实可用的工具名，按首次出现顺序返回。
-        没有规划或匹配不到时返回空列表（不约束）。
-        """
-        if not plan_text or not available_tool_names:
-            return []
-        ordered: List[str] = []
-        seen: set = set()
-        # 工具名通常是 word-boundary 的标识符（如 web_search、calc、system_run）
-        for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", plan_text):
-            if name in available_tool_names and name not in seen:
-                ordered.append(name)
-                seen.add(name)
-        return ordered
+        return parse_planned_tools(plan_text, available_tool_names)
 
     async def _execute_tool_calls(
         self,
@@ -3342,64 +3153,10 @@ class Coordinator(Plugin):
         return "unknown", str(turn_error or "unknown")
 
     async def _record_self_improvement_async(self, turn: TurnContext) -> None:
-        """Record failure + 用 LLM 提炼改进 + 持久化应用（真正闭环）。
-
-        之前 _record_self_improvement 只调 record_failure 写库，
-        generate_improvement / apply_improvement 从不被调用 →
-        失败→学习→改进行为闭环断裂。现在：
-        1. record_failure 写库
-        2. 每 5 次失败触发一次 LLM 改进生成
-        3. apply_improvement 持久化到 DB
-        4. 下一轮 _prepare_messages 通过 get_active_improvements 注入
-        """
-        assert turn is not None, "turn cannot be None"
-
-        if not (self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver):
-            return
-
-        error_type, error_detail = self._parse_error(turn.error)
-
-        self.ctx.self_improver.record_failure(
-            user_input=turn.input_text,
-            error_type=error_type,
-            error_detail=error_detail,
-            turn_meta=turn.meta,
-        )
-
-        # 每 5 次失败触发一次 LLM 改进生成（避免每次失败都调 LLM 浪费 token）
-        try:
-            stats = self.ctx.self_improver.get_stats()
-            total_failures = stats.get("total_failures", 0)
-            if total_failures > 0 and total_failures % 5 == 0 and self._llm is not None:
-                suggestion = await self.ctx.self_improver.generate_improvement_async(
-                    self._llm,
-                )
-                if suggestion:
-                    self.ctx.self_improver.apply_improvement("llm_analyzed", suggestion)
-                    logger.info("self-improvement: 已生成并应用改进建议: %s", suggestion[:80])
-        except Exception as exc:
-            logger.debug("self-improvement LLM 生成失败: %s", exc)
+        await record_self_improvement_async(self, turn)
 
     def _record_self_improvement(self, turn: TurnContext) -> None:
-        """Record failure for self-improvement analysis（同步兼容包装）。
-
-        Fire-and-forget: 启动异步版本，不等待结果，避免阻塞调用方。
-        真正的闭环逻辑在 _record_self_improvement_async 里。
-        """
-        assert turn is not None, "turn cannot be None"
-        if not (self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver):
-            return
-        try:
-            asyncio.create_task(self._record_self_improvement_async(turn))
-        except RuntimeError:
-            # 没有运行中的事件循环时，退化到同步 record_failure
-            error_type, error_detail = self._parse_error(turn.error)
-            self.ctx.self_improver.record_failure(
-                user_input=turn.input_text,
-                error_type=error_type,
-                error_detail=error_detail,
-                turn_meta=turn.meta,
-            )
+        record_self_improvement(self, turn)
 
     def _extract_entities(self, turn: TurnContext) -> None:
         """Auto-extract entities from turn for knowledge graph.
@@ -3653,24 +3410,7 @@ class Coordinator(Plugin):
             turn.result = prev_result
 
     def _detect_output_format(self, answer: str) -> str:
-        """Gap 修复：检测回复类型，返回格式提示。
-
-        之前 verify_and_polish 的 prompt 只说"优化结构"，LLM 可能把代码块
-        优化成纯文本描述、把表格优化成段落。现在先检测格式类型，注入提示保格式。
-        """
-        if "```" in answer and ("def " in answer or "class " in answer or "import " in answer):
-            return "代码块格式（保留 ``` 代码块）"
-        if "```" in answer:
-            return "代码块格式"
-        if "|" in answer and "---" in answer:
-            return "表格格式"
-        if re.search(r"^\d+\.\s", answer, re.MULTILINE) or re.search(r"^-\s", answer, re.MULTILINE):
-            if len(answer) > 500:
-                return "列表+要点总结格式"
-            return "列表格式"
-        if "http" in answer and len(answer) > 300:
-            return "保留链接和引用"
-        return ""
+        return detect_output_format(answer)
 
     async def _verify_and_polish(
         self, messages: List[Dict[str, Any]], turn: TurnContext, complexity: float,
@@ -3916,40 +3656,16 @@ class Coordinator(Plugin):
     ) -> None:
         """Plan a tool execution chain for expert-tier tasks.
 
-        SkillWeaver 深度集成：
-        优先使用 SkillWeaver 三阶段管线 (Decompose → SAD → Compose) 生成 DAG 工作流，
-        利用语义检索对齐子任务与工具词汇，生成更精准的执行计划。
-        若 SkillWeaver 不可用或失败，回退到简单 LLM prompt 规划。
+        Instead of the model discovering tools one by one in the loop,
+        we pre-plan the optimal tool sequence. This reduces wasted tool
+        calls and makes execution more strategic.
+
+        The plan is injected into messages as guidance for the tool loop.
         """
         if not tools:
             return
 
         zh = self._is_zh()
-
-        # --- 优先尝试 SkillWeaver 三阶段管线 ---
-        router = self._get_skillweaver_router()
-        if router is not None:
-            try:
-                workflow = await router.route(turn.input_text, zh=zh)
-                if workflow.nodes:
-                    plan = self._format_dag_workflow(workflow, zh)
-                    if plan:
-                        header = "【工具链执行规划 — SkillWeaver DAG】\n" if zh else "[Tool chain plan — SkillWeaver DAG]\n"
-                        messages.append({"role": "assistant", "content": header + plan})
-                        prompt = (
-                            "好。按照这个规划执行工具调用。"
-                            if zh else
-                            "Good. Execute tool calls following this plan."
-                        )
-                        messages.append({"role": "user", "content": prompt})
-                        turn.meta["tool_chain_plan"] = plan
-                        logger.info("skillweaver: DAG plan created (%d nodes, %d edges)",
-                                   len(workflow.nodes), len(workflow.edges))
-                        return
-            except Exception as exc:
-                logger.debug("skillweaver route() failed: %s, fallback to simple planning", exc)
-
-        # --- 回退：简单 LLM prompt 规划 ---
         tool_names = [
             t.get("function", {}).get("name", "") for t in tools
             if isinstance(t, dict)
@@ -3998,50 +3714,6 @@ class Coordinator(Plugin):
             turn.meta["tool_chain_plan"] = plan
             logger.debug("tool chain plan created (%d chars)", len(plan))
 
-    def _format_dag_workflow(self, workflow: Any, zh: bool) -> str:
-        """Format a SkillWeaver DAGWorkflow into a human-readable plan.
-
-        Groups nodes by dependency layers: nodes with no dependencies
-        run first (potentially in parallel), then their dependents, etc.
-        """
-        lines: List[str] = []
-        nodes_by_id = {n.subtask_id: n for n in workflow.nodes}
-
-        # Topological layering — find nodes with all deps satisfied
-        remaining = set(nodes_by_id.keys())
-        layer = 0
-        while remaining:
-            # Nodes whose dependencies are all completed
-            ready = [
-                sid for sid in remaining
-                if all(d not in remaining for d in nodes_by_id[sid].dependencies)
-            ]
-            if not ready:
-                # Circular dependency — just list remaining
-                ready = list(remaining)
-
-            layer += 1
-            if zh:
-                lines.append(f"\n第 {layer} 步（可并行）：")
-            else:
-                lines.append(f"\nStep {layer} (parallel):")
-
-            for sid in ready:
-                node = nodes_by_id[sid]
-                args_str = ", ".join(f"{k}={v}" for k, v in node.args.items()) if node.args else ""
-                if zh:
-                    lines.append(f"  • 工具: {node.skill_id}({args_str})")
-                else:
-                    lines.append(f"  • Tool: {node.skill_id}({args_str})")
-                if node.dependencies:
-                    if zh:
-                        lines.append(f"    依赖: {', '.join(node.dependencies)}")
-                    else:
-                        lines.append(f"    Depends on: {', '.join(node.dependencies)}")
-                remaining.discard(sid)
-
-        return "\n".join(lines)
-
     # ======================================================== Intelligent Features
 
     def _get_sentiment(self) -> Any:
@@ -4084,8 +3756,8 @@ class Coordinator(Plugin):
                 saved_style = profile.get_preference("response_style")
                 if saved_style:
                     self._style_adapter.set_style(saved_style)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("style adapter setup failed: %s", exc)
         return self._style_adapter
 
     def _get_failure_recovery(self) -> Any:
@@ -4101,141 +3773,13 @@ class Coordinator(Plugin):
         return self._dialog_summarizer
 
     async def _record_intelligence(self, turn: TurnContext) -> None:
-        """Record user preferences, sentiment, and patterns."""
-        if not turn.input_text or not turn.result:
-            return
-
-        try:
-            # 1. Analyze sentiment
-            sentiment = self._get_sentiment()
-            analysis = await asyncio.to_thread(sentiment.analyze, turn.input_text)
-            turn.meta["sentiment"] = analysis
-
-            # 2. Record skill usage (from tool_calls in meta)
-            profile = self._get_profile()
-            skills_used = turn.meta.get("skills_used", [])
-            for skill in skills_used:
-                success = "error" not in str(turn.result).lower()
-                await asyncio.to_thread(profile.record_skill_usage, skill, success)
-
-            # 3. Record time pattern
-            await asyncio.to_thread(profile.record_time_pattern)
-
-            # 4. Extract and record topics (simple keyword extraction)
-            topics = self._extract_topics(turn.input_text)
-            for topic in topics[:3]:
-                await asyncio.to_thread(profile.record_topic, topic)
-
-            # 5. Update language preference if detected
-            if hasattr(turn, "detected_lang"):
-                await asyncio.to_thread(
-                    profile.set_preference, "language", turn.detected_lang
-                )
-
-            # 6. Track dialog summary turn counter
-            summarizer = self._get_dialog_summarizer()
-            turn_count = summarizer.increment_turn(turn.session_id)
-            turn.meta["turn_count"] = turn_count
-
-            # 7. 对话摘要 — 每 N 轮生成一次摘要，下轮注入上下文
-            if summarizer.should_summarize(turn.session_id):
-                try:
-                    # 从 turn.messages 中提取 user/assistant 对话对
-                    history_for_summary = []
-                    for msg in turn.messages:
-                        role = msg.get("role", "")
-                        content = msg.get("content", "")
-                        if role == "user" and content and not content.startswith("["):
-                            history_for_summary.append({"input": content, "reply": ""})
-                        elif role == "assistant" and content and history_for_summary:
-                            history_for_summary[-1]["reply"] = content
-
-                    if history_for_summary:
-                        existing = (summarizer.get_summary(turn.session_id) or {}).get("summary", "")
-                        lang = "zh" if self._is_zh() else "en"
-                        prompt = summarizer.generate_summary_prompt(
-                            history_for_summary[-10:], existing, lang
-                        )
-                        summary_resp = await self._llm.chat_completion(
-                            messages=[{"role": "user", "content": prompt}],
-                            model=self._lightweight_model(turn),
-                            temperature=0.2,
-                            max_tokens=400,
-                            use_cache=False,
-                        )
-                        summary_text = summary_resp.get("text", "").strip()
-                        if summary_text:
-                            summarizer.store_summary(turn.session_id, summary_text, turn_count)
-                            logger.debug("dialog summary generated for session %s (%d turns)",
-                                        turn.session_id, turn_count)
-                except Exception as exc:
-                    logger.debug("dialog summary generation failed: %s", exc)
-
-            # 8. 风格自适应学习：检测用户对回复风格的自然语言反馈
-            # （"太啰嗦了"/"详细一点"/"别用 emoji"/"专业点"等），自动调整
-            # StyleAdapter 并持久化到用户画像，下一轮 _prepare_messages 即生效。
-            # 这让 agent 能听懂用户的风格偏好，无需任何手动配置。
-            try:
-                style_adapter = self._get_style_adapter()
-                updates = style_adapter.adjust_from_feedback(turn.input_text)
-                if updates:
-                    profile = self._get_profile()
-                    current = profile.get_preference("response_style") or {}
-                    if isinstance(current, dict):
-                        current.update(updates)
-                    else:
-                        current = dict(updates)
-                    await asyncio.to_thread(
-                        profile.set_preference, "response_style", current
-                    )
-                    turn.meta["style_adjusted"] = updates
-                    logger.debug("style auto-adjusted from feedback: %s", updates)
-            except Exception as exc:
-                logger.debug("style auto-learning skipped: %s", exc)
-
-        except Exception as exc:
-            logger.debug("intelligence recording failed: %s", exc)
+        await record_intelligence(self, turn)
 
     def _extract_topics(self, text: str) -> List[str]:
-        """Extract topic keywords from user input."""
-        # Simple keyword-based topic extraction
-        # In production, could use NLP/LLM for better extraction
-        topics = []
-
-        # Technical topics
-        tech_patterns = [
-            (r"代码|编程|python|javascript|java|rust", "编程"),
-            (r"搜索|查找|查询|search", "搜索"),
-            (r"文档|文件|file|document", "文档"),
-            (r"系统|shell|命令|command", "系统"),
-            (r"计算|数学|math|calc", "计算"),
-            (r"图片|图像|image|photo", "图片"),
-            (r"音频|语音|audio|voice", "音频"),
-            (r"笔记|记录|note|save", "笔记"),
-        ]
-
-        for pattern, topic in tech_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                topics.append(topic)
-
-        return topics
+        return extract_topics(text)
 
     async def _generate_suggestions(self, turn: TurnContext) -> List[Dict[str, Any]]:
-        """Generate proactive suggestions based on context."""
-        try:
-            suggestions_engine = self._get_suggestions()
-            skills_used = turn.meta.get("skills_used", [])
-            suggestions = await asyncio.to_thread(
-                suggestions_engine.generate_suggestions,
-                turn.input_text,
-                turn.result,
-                skills_used,
-                {"complexity": getattr(turn, "estimated_complexity", 0.0)},
-            )
-            return suggestions
-        except Exception as exc:
-            logger.debug("suggestion generation failed: %s", exc)
-            return []
+        return await generate_suggestions(self, turn)
 
     def _should_show_suggestions(self) -> bool:
         """Check if suggestions should be displayed to user."""
@@ -4896,518 +4440,62 @@ class Coordinator(Plugin):
 
     # --------------------------------------------------- Email handler
     async def _handle_email(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在处理邮件...", "email")
-        zh = self._is_zh()
-        skill = get_email_skill()
-        parts = args_text.strip().split(None, 1)
-        action = parts[0].lower() if parts else "read"
-        rest = parts[1] if len(parts) > 1 else ""
-
-        if action == "read":
-            msgs = await skill.read_inbox(limit=10)
-            if not msgs:
-                turn.result = "收件箱为空" if zh else "Inbox is empty"
-            else:
-                turn.result = "\n\n---\n\n".join(
-                    f"[{m.date}] {m.sender} → {m.subject}\n{m.body[:200]}"
-                    for m in msgs
-                )
-        elif action == "send":
-            turn.result = "用法: /email send <收件人> <主题> <正文>" if zh else "Usage: /email send <to> <subject> <body>"
-        elif action == "search":
-            msgs = await skill.search(rest)
-            turn.result = "\n\n---\n\n".join(
-                f"[{m.date}] {m.sender} → {m.subject}" for m in msgs
-            ) if msgs else "未找到" if zh else "Not found"
-        else:
-            turn.result = "用法: /email read|send|search" if zh else "Usage: /email read|send|search"
-        turn.record_success(turn.result, 0)
+        await handle_email(self, turn, args_text)
 
     # --------------------------------------------------- Calendar handler
     async def _handle_calendar(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在查询日程...", "calendar")
-        zh = self._is_zh()
-        skill = get_calendar_skill()
-        parts = args_text.strip().split(None, 1)
-        action = parts[0].lower() if parts else "list"
-
-        if action == "list" or action == "today":
-            events = await skill.list_today()
-            turn.result = "今日日程:\n" + skill.format_events(events)
-        elif action == "week":
-            events = await skill.list_this_week()
-            turn.result = "本周日程:\n" + skill.format_events(events)
-        elif action == "create":
-            turn.result = "用法: /calendar create <标题> <开始时间> [结束时间]" if zh else "Usage: /calendar create <title> <start> [end]"
-        else:
-            turn.result = "用法: /calendar list|today|week|create" if zh else "Usage: /calendar list|today|week|create"
-        turn.record_success(turn.result, 0)
+        await handle_calendar(self, turn, args_text)
 
     # --------------------------------------------------- Database handler
     async def _handle_db(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在查询数据库...", "db")
-        zh = self._is_zh()
-        skill = get_database_skill()
-        parts = args_text.strip().split(None, 1)
-        action = parts[0].lower() if parts else "tables"
-        rest = parts[1] if len(parts) > 1 else ""
-
-        if action == "tables":
-            result = await skill.list_tables()
-            if result.get("ok"):
-                tables = [r[0] for r in result.get("rows", [])]
-                turn.result = "数据库表:\n" + "\n".join(f"  - {t}" for t in tables)
-            else:
-                turn.result = f"获取失败: {result.get('error')}"
-        elif action == "query":
-            result = await skill.query(sql=rest)
-            turn.result = skill._format_result(result) if result.get("ok") else f"查询失败: {result.get('error')}"
-        else:
-            turn.result = "用法: /db tables|query <sql>" if zh else "Usage: /db tables|query <sql>"
-        turn.record_success(turn.result, 0)
+        await handle_db(self, turn, args_text)
 
     # --------------------------------------------------- MCP handler
     async def _handle_mcp(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在管理 MCP 服务器...", "mcp")
-        zh = self._is_zh()
-        server = get_mcp_server()
-        # Register current skills
-        if self._skills:
-            for name, skill in self._skills._skills.items():
-                server.register_skill(name, skill)
-        turn.result = (
-            f"MCP Server 就绪。已注册 {len(server._skills)} 个工具。\n"
-            f"使用: /mcp start 启动服务器"
-            if zh else
-            f"MCP Server ready. {len(server._skills)} tools registered.\n"
-            f"Use: /mcp start to start the server"
-        )
-        turn.record_success(turn.result, 0)
+        await handle_mcp(self, turn, args_text)
 
     # --------------------------------------------------- OpenAPI handler
     async def _handle_openapi(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在加载 OpenAPI 规范...", "openapi")
-        zh = self._is_zh()
-        skill = get_openapi_skill()
-        parts = args_text.strip().split(None, 2)
-        action = parts[0].lower() if parts else "list"
-
-        if action == "load" and len(parts) >= 2:
-            result = await skill.load_from_url(name=parts[1] if len(parts) > 1 else "default", url=parts[-1])
-            if result.get("ok"):
-                turn.result = f"已加载: {result['title']} ({result['endpoints_count']} 端点)"
-            else:
-                turn.result = f"加载失败: {result.get('error')}"
-        elif action == "list":
-            endpoints = skill.list_endpoints("default")
-            if endpoints:
-                turn.result = "\n".join(f"  {e['method']} {e['path']}" for e in endpoints[:20])
-            else:
-                turn.result = "未加载 API。用法: /openapi load <url>" if zh else "No API loaded. Usage: /openapi load <url>"
-        else:
-            turn.result = "用法: /openapi load <url> | list | search <keyword>" if zh else "Usage: /openapi load <url> | list | search <keyword>"
-        turn.record_success(turn.result, 0)
+        await handle_openapi(self, turn, args_text)
 
     # --------------------------------------------------- Agent mesh handler
     async def _handle_agent_mesh(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在启动多智能体协作...", "agent_mesh")
-        zh = self._is_zh()
-        if not args_text.strip():
-            turn.result = (
-                "用法: /mesh <复杂任务描述>\n使用多个专业Agent协作完成任务"
-                if zh else "Usage: /mesh <complex task description>"
-            )
-            return
-        if self._llm is None:
-            turn.result = "[LLM not initialized]"
-            return
-        mesh = get_agent_mesh(self._llm, self._skills)
-        self._emit_progress(turn, "多智能体协作中...", "agent_mesh")
-        result = await mesh.solve(args_text.strip(), model=turn.model)
-        turn.result = mesh.format_result(result)
-        turn.record_success(turn.result, 0)
+        await handle_agent_mesh(self, turn, args_text)
 
     # --------------------------------------------------- Workflow handler
     async def _handle_workflow(self, turn: TurnContext, args_text: str) -> None:
-        zh = self._is_zh()
-        if not args_text.strip():
-            turn.result = (
-                "用法: /workflow <JSON工作流定义>\n"
-                "示例: {\"name\":\"test\",\"steps\":[{\"id\":\"s1\",\"type\":\"llm_call\",\"prompt\":\"Hello\"}]}"
-                if zh else "Usage: /workflow <JSON workflow definition>"
-            )
-            return
-        if self._llm is None:
-            turn.result = "[LLM not initialized]"
-            return
-        import json
-        try:
-            workflow = json.loads(args_text.strip())
-        except json.JSONDecodeError:
-            turn.result = "无效的JSON格式" if zh else "Invalid JSON format"
-            return
-        engine = get_workflow_engine(self._llm, self._skills)
-        self._emit_progress(turn, "执行工作流...", "workflow")
-        try:
-            result = await engine.execute(workflow)
-            turn.result = f"工作流完成: {result.status.value}\n耗时: {result.total_duration_ms:.0f}ms\n步骤: {len(result.steps)}"
-            turn.record_success(turn.result, 0)
-        except Exception as exc:
-            turn.record_failure(f"workflow execution failed: {exc}")
-            turn.result = f"工作流执行失败: {exc}" if zh else f"Workflow execution failed: {exc}"
+        await handle_workflow(self, turn, args_text)
 
     # --------------------------------------------------- Chart handler
     async def _handle_chart(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在生成图表...", "chart")
-        zh = self._is_zh()
-        gen = get_chart_generator()
-        if not args_text.strip():
-            turn.result = (
-                "用法: /chart <类型> <JSON数据>\n"
-                "类型: flowchart, sequence, pie, gantt, timeline, mindmap, bar, line"
-                if zh else "Usage: /chart <type> <JSON data>"
-            )
-            return
-        parts = args_text.strip().split(None, 1)
-        chart_type = parts[0]
-        data = {}
-        if len(parts) > 1:
-            import json
-            try:
-                data = json.loads(parts[1])
-            except json.JSONDecodeError:
-                pass
-        turn.result = gen.generate_mermaid(chart_type, data) if chart_type in ("flowchart", "sequence", "pie", "gantt", "timeline", "mindmap") else "不支持的图表类型"
-        turn.record_success(turn.result, 0)
+        await handle_chart(self, turn, args_text)
 
     # --------------------------------------------------- Branch handlers
     async def _handle_branch(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在创建分支...", "branch")
-        zh = self._is_zh()
-        mgr = get_branch_manager()
-        branch_id = mgr.branch(turn.session_id, "", args_text.strip() or "branch")
-        tree = mgr.get_tree(turn.session_id)
-        turn.result = (
-            f"已创建分支: {branch_id}\n" + tree.visualize()
-            if zh else f"Branch created: {branch_id}\n" + tree.visualize()
-        )
-        turn.record_success(turn.result, 0)
+        await handle_branch(self, turn, args_text)
 
     async def _handle_branch_switch(self, turn: TurnContext, args_text: str) -> None:
-        self._emit_progress(turn, "正在切换分支...", "branch_switch")
-        zh = self._is_zh()
-        mgr = get_branch_manager()
-        ok = mgr.switch_branch(turn.session_id, args_text.strip())
-        if ok:
-            turn.result = (
-                f"已切换到分支: {args_text.strip()}"
-                if zh else f"Switched to branch: {args_text.strip()}"
-            )
-        else:
-            turn.result = (
-                f"分支 '{args_text.strip()}' 不存在"
-                if zh else f"Branch '{args_text.strip()}' does not exist"
-            )
-        turn.record_success(turn.result, 0)
+        await handle_branch_switch(self, turn, args_text)
 
     async def _handle_branch_list(self, turn: TurnContext, args_text: str = "") -> None:
-        self._emit_progress(turn, "正在列出分支...", "branch_list")
-        mgr = get_branch_manager()
-        tree = mgr.get_tree(turn.session_id)
-        branches = tree.list_branches()
-        if not branches:
-            turn.result = "暂无分支"
-        else:
-            turn.result = "分支列表:\n" + "\n".join(
-                f"  {'→ ' if b['is_active'] else '  '}{b['name']}: {b['messages']} 条消息"
-                for b in branches
-            )
-        turn.record_success(turn.result, 0)
+        await handle_branch_list(self, turn, args_text)
 
     # --------------------------------------------------- Branch auto-tracking (Round 7)
     def _record_conversation_branch(self, turn: TurnContext) -> None:
-        """Automatically record every conversation turn in the branch tree."""
-        try:
-            mgr = get_branch_manager()
-            tree = mgr.get_tree(turn.session_id)
-            tree.add_message("user", turn.input_text[:500])
-            if turn.result:
-                tree.add_message("assistant", turn.result[:500])
-        except Exception as exc:
-            logger.debug("conv_branch auto-track failed: %s", exc)
+        record_conversation_branch(self, turn)
 
     # --------------------------------------------------- Task state tracking (Round 7 fix)
     async def _update_task_state(self, turn: TurnContext) -> None:
-        """Detect and track multi-step tasks across turns.
-
-        Uses a lightweight heuristic: if the user's input contains task indicators
-        (步骤, 第一步, 先...再, plan, step 1, etc.), set an active task.
-        If there's already an active task, check if it's completed.
-        """
-        try:
-            from memory.dialog_summary import get_dialog_summarizer
-            summarizer = get_dialog_summarizer()
-            session_id = turn.session_id
-            active = summarizer.get_active_task(session_id)
-
-            # Check if current turn completes the active task
-            if active and active.status == "in_progress":
-                completion_keywords = [
-                    "完成", "搞定", "做好了", "结束了", "done", "complete", "finished",
-                    "最后一步", "全部做完", "全部完成",
-                ]
-                input_lower = turn.input_text.lower()
-                if any(kw in input_lower for kw in completion_keywords):
-                    completed = summarizer.complete_task(session_id)
-                    logger.debug("task_state: completed task '%s'", active.name)
-                    self._append_task_completion_summary(turn, completed)
-                    return
-
-                # Check if all steps are done
-                if active.steps:
-                    all_done = all(s.get("status") == "done" for s in active.steps)
-                    if all_done:
-                        completed = summarizer.complete_task(session_id)
-                        logger.debug("task_state: all steps done, completed '%s'", active.name)
-                        self._append_task_completion_summary(turn, completed)
-                        return
-
-            # Detect new multi-step task from user input
-            task_indicators = [
-                "步骤", "第一步", "第二步", "先...再", "先...然后",
-                "分几步", "step 1", "step 2", "plan", "计划",
-                "流程", "分步",
-            ]
-            input_text = turn.input_text
-            is_multi_step = any(indicator in input_text for indicator in task_indicators)
-
-            if is_multi_step and not active:
-                # Use LLM to extract task name and steps (lightweight, 1 call)
-                if self._llm:
-                    try:
-                        zh = self._is_zh()
-                        # 深度审计 P2-6 修复：使用 response_format JSON 模式, 避免自由文本解析失败
-                        prompt = (
-                            "分析以下用户请求，提取任务名称和步骤。"
-                            "输出 JSON 对象，字段：task_name (string, 简短任务名), "
-                            "steps (array of string, 按顺序的步骤列表, 最多 8 个)。\n\n"
-                            f"请求：{input_text[:500]}\n\n"
-                            "JSON 输出："
-                        ) if zh else (
-                            "Analyze the following user request and extract task name and steps. "
-                            "Output a JSON object with fields: task_name (string, short task name), "
-                            "steps (array of string, ordered steps, max 8).\n\n"
-                            f"Request: {input_text[:500]}\n\n"
-                            "JSON output:"
-                        )
-                        resp = await self._llm.chat_completion(
-                            messages=[{"role": "user", "content": prompt}],
-                            model=turn.model,
-                            max_tokens=400,
-                            tools=None,
-                            temperature=0.2,
-                            response_format={"type": "json_object"},
-                        )
-                        text = (resp.get("text") or "").strip()
-                        task_name = None
-                        steps: List[str] = []
-                        # 优先尝试 JSON 解析; 失败则回退到行解析
-                        try:
-                            import json as _json
-                            # 部分模型会在 JSON 外包 ```json ... ``` 围栏, 需剥离
-                            cleaned = text
-                            if cleaned.startswith("```"):
-                                cleaned = cleaned.split("```", 2)[1]
-                                if cleaned.startswith("json"):
-                                    cleaned = cleaned[4:]
-                            obj = _json.loads(cleaned)
-                            task_name = (obj.get("task_name") or "").strip()[:100]
-                            raw_steps = obj.get("steps") or []
-                            if isinstance(raw_steps, list):
-                                steps = [str(s).strip()[:200] for s in raw_steps if str(s).strip()][:8]
-                        except Exception:
-                            # 回退: 行解析
-                            lines = [l.strip() for l in text.split("\n") if l.strip()]
-                            if lines:
-                                task_name = lines[0][:100]
-                                steps = lines[1:10] if len(lines) > 1 else []
-                        if task_name:
-                            summarizer.set_active_task(session_id, task_name, steps)
-                            logger.info(
-                                "task_state: detected task '%s' with %d steps",
-                                task_name, len(steps),
-                            )
-                    except Exception as exc:
-                        logger.debug("task_state: LLM extraction failed: %s", exc)
-        except Exception as exc:
-            logger.debug("task_state: update failed: %s", exc)
+        await update_task_state(self, turn)
 
     def _append_task_completion_summary(self, turn: TurnContext, completed_task: Any) -> None:
-        """任务完成时自动生成总结报告并追加到回复末尾。
-
-        之前 _update_task_state 检测到任务完成只记一行 debug 日志就 return，
-        用户完全不知道任务被标记完成。现在自动生成结构化总结，让 agent
-        主动汇报"这个多步任务做完了，各步骤结果如何"，无需用户追问。
-        """
-        if completed_task is None:
-            return
-        try:
-            zh = self._is_zh()
-            name = getattr(completed_task, "name", "") or ""
-            steps = getattr(completed_task, "steps", []) or []
-            if not name and not steps:
-                return
-
-            if zh:
-                lines = [f"\n\n---\n✅ **任务完成：{name}**"]
-                if steps:
-                    lines.append("各步骤回顾：")
-                    for i, s in enumerate(steps):
-                        step_name = s.get("step", "") if isinstance(s, dict) else str(s)
-                        status = s.get("status", "") if isinstance(s, dict) else ""
-                        result = s.get("result", "") if isinstance(s, dict) else ""
-                        icon = {"done": "✅", "failed": "❌", "in_progress": "🔄"}.get(status, "⬜")
-                        line = f"  {icon} {i+1}. {step_name}"
-                        if result:
-                            line += f" — {result[:80]}"
-                        lines.append(line)
-                lines.append("如需调整或继续，告诉我即可。")
-            else:
-                lines = [f"\n\n---\n✅ **Task completed: {name}**"]
-                if steps:
-                    lines.append("Step recap:")
-                    for i, s in enumerate(steps):
-                        step_name = s.get("step", "") if isinstance(s, dict) else str(s)
-                        status = s.get("status", "") if isinstance(s, dict) else ""
-                        result = s.get("result", "") if isinstance(s, dict) else ""
-                        icon = {"done": "✅", "failed": "❌", "in_progress": "🔄"}.get(status, "⬜")
-                        line = f"  {icon} {i+1}. {step_name}"
-                        if result:
-                            line += f" — {result[:80]}"
-                        lines.append(line)
-                lines.append("Let me know if you'd like to adjust or continue.")
-            summary_block = "\n".join(lines)
-            turn.result = (turn.result or "") + summary_block
-            turn.meta["task_completion_summary"] = True
-        except Exception as exc:
-            logger.debug("task completion summary skipped: %s", exc)
+        append_task_completion_summary(self, turn, completed_task)
 
     def _maybe_schedule_followup(self, turn: TurnContext) -> None:
-        """Schedule a follow-up check task for complex/expert work.
-
-        Round 8：接入 AsyncTaskScheduler。如果 LLM 回复中包含"稍后"/"待跟进"/
-        "I'll check back" 等关键词，注册一个延迟任务。
-        用户下次发起会话时，会自动加载跟进状态。
-
-        之前 task_scheduler 完全是死代码，定义了 AsyncTaskScheduler 但
-        coordinator 从未调用。现在用于真实的 follow-up 场景。
-        """
-        try:
-            from core.task_scheduler import get_task_scheduler
-            scheduler = get_task_scheduler()
-        except Exception as exc:
-            logger.debug("task_scheduler not available: %s", exc)
-            return
-
-        result = (turn.result or "").lower()
-        followup_indicators = [
-            "稍后", "稍等", "等一下", "我稍后", "我等下", "待跟进", "待完成",
-            "稍后检查", "稍后回来", "我会", "我会回来", "下次",
-            "later", "check back", "follow up", "followup", "will check",
-        ]
-        if not any(ind in result for ind in followup_indicators):
-            return
-
-        # Round 8：使用 asyncio 调度（scheduler.schedule_delayed 是 async）
-        # 这里用 ensure_future fire-and-forget，不阻塞 turn 完成
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 通过 _run_coroutine_threadsafe 在后台调度
-                task_args = {
-                    "session_id": turn.session_id,
-                    "user_input": turn.input_text[:300],
-                }
-                # 延迟 5 分钟（300秒），检查 session 是否需要回顾
-                task_id = loop.create_task(
-                    scheduler.schedule_delayed(
-                        func_name="followup_check",
-                        delay_seconds=300,
-                        args=task_args,
-                        name=f"followup-{turn.session_id[:20]}",
-                    )
-                )
-                turn.meta["followup_scheduled"] = True
-                logger.debug("followup task scheduled for session %s", turn.session_id)
-        except Exception as exc:
-            logger.debug("schedule_followup failed: %s", exc)
+        maybe_schedule_followup(self, turn)
 
     async def _followup_check_handler(self, session_id: str = "", user_input: str = "") -> None:
-        """延迟任务：跟进检查，主动给用户发消息询问是否需要继续。
-
-        这是 AsyncTaskScheduler 调度的 followup_check 任务的实际处理函数。
-        任务触发后，通过 bot_send_message 事件主动推送消息给用户，
-        解决"一问一答"模式下用户不问就不说话的问题。
-
-        Args:
-            session_id: 会话 ID，格式为 "{gateway}-{chat_id}"（如 "wechat-xxx"）
-            user_input: 用户原始输入，用于生成跟进提示
-        """
-        if not session_id:
-            return
-
-        # 从 session_id 解析 gateway 和 chat_id
-        gateway = ""
-        chat_id = ""
-        if "-" in session_id:
-            prefix, rest = session_id.split("-", 1)
-            gateway_map = {
-                "wechat": "wechat_personal",
-                "wecom": "wecom",
-                "telegram": "telegram",
-                "dingtalk": "dingtalk",
-                "feishu": "feishu",
-                "discord": "discord",
-                "slack": "slack",
-                "web": "web",
-                "cli": "cli",
-            }
-            gateway = gateway_map.get(prefix, prefix)
-            chat_id = rest
-        else:
-            chat_id = session_id
-
-        if not chat_id:
-            return
-
-        # 生成跟进消息
-        zh = self._is_zh()
-        if user_input:
-            preview = user_input[:40] + "..." if len(user_input) > 40 else user_input
-            if zh:
-                message = f"⏰ 温馨提醒\n\n关于之前的问题「{preview}」，\n您之前提到稍后继续，现在需要我接着处理吗？\n\n回复「继续」或直接说您的需求即可。"
-            else:
-                message = f"⏰ Reminder\n\nRegarding your previous request「{preview}」，\nyou mentioned continuing later. Would you like to proceed now?\n\nReply 'continue' or just tell me what you need."
-        else:
-            if zh:
-                message = "⏰ 温馨提醒\n\n您之前有任务提到稍后继续，现在需要我接着处理吗？\n\n回复「继续」或直接说您的需求即可。"
-            else:
-                message = "⏰ Reminder\n\nYou had a task you wanted to continue later. Would you like to proceed now?\n\nReply 'continue' or just tell me what you need."
-
-        # 发布 bot_send_message 事件，由对应网关主动推送
-        try:
-            from core.events import Event
-            event = Event("bot_send_message", {
-                "chat_id": chat_id,
-                "text": message,
-                "gateway": gateway,
-                "source": "coordinator:followup_check",
-            })
-            self.bus.publish(event)
-            logger.info("coordinator: followup check sent to %s (gateway=%s)", chat_id[:8], gateway)
-        except Exception as exc:
-            logger.warning("coordinator: followup check send failed: %s", exc)
+        await followup_check_handler(self, session_id, user_input)
 
     # --------------------------------------------------- Advanced RAG integration (Round 7)
     async def _enhanced_web_search(self, query: str, turn: TurnContext) -> str:

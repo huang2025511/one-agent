@@ -43,7 +43,15 @@ class BaseSQLiteStore:
     to prevent "database is locked" errors and data corruption when
     multiple asyncio tasks (running via ``asyncio.to_thread``) access
     the same connection concurrently.
+
+    Schema versioning (P2-1 fix): subclasses set ``SCHEMA_VERSION`` and
+    implement :meth:`_migrate` for version-specific migrations. The base
+    class reads ``PRAGMA user_version`` before ``_init_db`` and passes
+    the old version so subclasses can run conditional migrations.
     """
+
+    #: Current schema version. Subclasses override this.
+    SCHEMA_VERSION: int = 1
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -59,7 +67,14 @@ class BaseSQLiteStore:
         # Uses RLock (reentrant) because some write methods call other
         # write methods (e.g. KnowledgeGraph.add_relation calls add_entity).
         self._write_lock = threading.RLock()
+        # P2-1: read existing schema version before init
+        cur = self._conn.execute("PRAGMA user_version")
+        self._old_schema_version: int = cur.fetchone()[0]
         self._init_db()
+        # P2-1: bump version after successful init/migration
+        if self._old_schema_version < self.SCHEMA_VERSION:
+            self._conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
+            self._conn.commit()
 
     def _init_db(self) -> None:  # pragma: no cover - abstract
         """Initialize schema. Override in subclasses."""
@@ -139,5 +154,5 @@ class BaseSQLiteStore:
         if hasattr(self, "_conn") and self._conn:
             try:
                 self._conn.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("base_store close on GC failed: %s", exc)

@@ -486,8 +486,8 @@ class EvalHarness:
             if self._conn:
                 self._conn.close()
                 self._conn = None
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("ignored non-critical error: %s", exc)
 
 
 # Singleton

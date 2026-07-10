@@ -18,7 +18,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,10 @@ class EventBus:
 
     def __init__(self, max_queue_size: int = MAX_QUEUE_SIZE) -> None:
         self._subscribers: Dict[str, List[Handler]] = {}
-        self._wildcards: List[Handler] = []
+        # Wildcard subscriptions: list of (prefix, handler) tuples where
+        # prefix is None for a global "*" wildcard, or the literal prefix
+        # (e.g. "user_message") for a "user_message.*" subscription.
+        self._wildcards: List[Tuple[Optional[str], Handler]] = []
         self._queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=max_queue_size)
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -180,6 +183,10 @@ class EventBus:
         # Dead-letter queue for unhandled events (bounded deque to prevent memory leak)
         self._dead_letter_queue: deque[Event] = deque(maxlen=DEAD_LETTER_QUEUE_LIMIT)
         self._dlq_limit = DEAD_LETTER_QUEUE_LIMIT
+        # DLQ retry configuration: each event is retried up to _dlq_max_retries
+        # times before being left in the DLQ for manual inspection.
+        self._dlq_max_retries = 3
+        self._dlq_retry_counts: Dict[str, int] = {}
 
         # Message tracker: id -> Event, with TTL-based expiration
         self._tracker: Dict[str, Event] = {}
@@ -211,7 +218,17 @@ class EventBus:
         if handler is None or not callable(handler):
             raise ValueError("handler must be callable")
 
-        self._subscribers.setdefault(event_type, []).append(handler)
+        if event_type == "*":
+            # Global wildcard — receives every dispatched event.
+            self._wildcards.append((None, handler))
+        elif event_type.endswith(".*"):
+            # Prefix wildcard (e.g. "user_message.*") — receives every event
+            # whose type starts with the prefix. Store the prefix without the
+            # trailing ".*" so dispatch can match with startswith(prefix + ".").
+            prefix = event_type[:-2]
+            self._wildcards.append((prefix, handler))
+        else:
+            self._subscribers.setdefault(event_type, []).append(handler)
         logger.info("subscribed %s to %s", handler, event_type)
 
     def unsubscribe(self, event_type: str, handler: Handler) -> None:
@@ -220,6 +237,20 @@ class EventBus:
         Safe to call even if the handler was never subscribed or the
         event type has no subscribers — it silently does nothing.
         """
+        if event_type == "*":
+            self._wildcards = [
+                (p, h) for (p, h) in self._wildcards if h is not handler or p is not None
+            ]
+            logger.debug("unsubscribed %s from %s", handler, event_type)
+            return
+        if event_type.endswith(".*"):
+            prefix = event_type[:-2]
+            self._wildcards = [
+                (p, h) for (p, h) in self._wildcards if h is not handler or p != prefix
+            ]
+            logger.debug("unsubscribed %s from %s", handler, event_type)
+            return
+
         handlers = self._subscribers.get(event_type)
         if not handlers:
             return
@@ -340,7 +371,17 @@ class EventBus:
         self._tracker[event.id] = event
         event.mark_processing()
 
-        handlers: List[Handler] = list(self._wildcards)
+        # Build the handler list from wildcard subscribers first, then the
+        # exact-match subscribers. A wildcard matches when its prefix is None
+        # (global "*" wildcard) or when the event type falls under that
+        # prefix (either exact prefix match or "<prefix>.<...>").
+        handlers: List[Handler] = [
+            handler
+            for prefix, handler in self._wildcards
+            if prefix is None
+            or event.type == prefix
+            or event.type.startswith(prefix + ".")
+        ]
         handlers.extend(self._subscribers.get(event.type, []))
         self._metrics["processed"] += 1
 
@@ -389,8 +430,62 @@ class EventBus:
     # ---------------------------------------------------------------- DLQ
     def _add_to_dlq(self, event: Event) -> None:
         event.status = EventStatus.DEAD_LETTER
+        # Only initialize the retry counter the first time an event enters the
+        # DLQ — subsequent re-entries (e.g. after a failed retry) must keep
+        # accumulating their count so we can honour _dlq_max_retries.
+        if event.id not in self._dlq_retry_counts:
+            self._dlq_retry_counts[event.id] = 0
         # deque automatically evicts oldest when maxlen is reached
         self._dead_letter_queue.append(event)
+
+    async def retry_dlq(self) -> int:
+        """Re-publish all retryable events currently sitting in the DLQ.
+
+        Each event is retried at most ``_dlq_max_retries`` times. Events that
+        have already exhausted their retry budget are left in the DLQ for
+        manual inspection. Returns the number of events that were re-published
+        to the queue.
+        """
+        if not self._dead_letter_queue:
+            return 0
+
+        # Drain the DLQ in one shot so we can decide per-event whether to
+        # retry or keep it.
+        pending = list(self._dead_letter_queue)
+        self._dead_letter_queue.clear()
+
+        retried = 0
+        for event in pending:
+            count = self._dlq_retry_counts.get(event.id, 0)
+            if count >= self._dlq_max_retries:
+                # Over budget — put it back and leave for manual inspection.
+                self._dead_letter_queue.append(event)
+                logger.info(
+                    "DLQ event %s exceeded max retries (%d/%d) — leaving for manual inspection",
+                    event.id, count, self._dlq_max_retries,
+                )
+                continue
+
+            self._dlq_retry_counts[event.id] = count + 1
+            event.status = EventStatus.SENT
+            event.error = None
+            try:
+                self._queue.put_nowait(event)
+                retried += 1
+                logger.info(
+                    "re-publishing DLQ event %s (retry %d/%d)",
+                    event.id, count + 1, self._dlq_max_retries,
+                )
+            except asyncio.QueueFull:
+                # Queue is full — push back to DLQ and stop retrying this round.
+                event.status = EventStatus.DEAD_LETTER
+                self._dead_letter_queue.append(event)
+                logger.warning(
+                    "queue full while retrying DLQ event %s — returned to DLQ",
+                    event.id,
+                )
+                break
+        return retried
 
     # ---------------------------------------------------------------- tracker
     def _track(self, event: Event) -> None:

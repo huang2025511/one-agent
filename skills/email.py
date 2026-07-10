@@ -145,8 +145,8 @@ class EmailSkill:
         finally:
             try:
                 await asyncio.to_thread(imap.logout)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
 
     def _parse_email(self, raw_data: list, uid: str) -> Optional[EmailMessage]:
         """Parse raw IMAP fetch response into EmailMessage."""
@@ -187,8 +187,8 @@ class EmailSkill:
                             body += text
                         elif content_type == "text/html":
                             html_body += text
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("ignored non-critical error: %s", exc)
             else:
                 try:
                     payload = parsed.get_payload(decode=True)
@@ -199,8 +199,8 @@ class EmailSkill:
                             html_body = text
                         else:
                             body = text
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("ignored non-critical error: %s", exc)
 
             return EmailMessage(
                 uid=uid,
@@ -299,8 +299,8 @@ class EmailSkill:
         finally:
             try:
                 await asyncio.to_thread(imap.logout)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
 
     # --------------------------------------------------- utilities
 

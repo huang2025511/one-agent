@@ -742,33 +742,54 @@ class RESTAPIGateway(Plugin):
                 detected_lang = detect_language(text)
                 set_thread_language(detected_lang)
 
-            if _llm is None:
-                raise HTTPException(503, _("llm_not_available"))
-
             from fastapi.responses import StreamingResponse
 
             async def event_generator():
-                # Build messages list
-                msgs: List[Dict[str, Any]] = [{"role": "user", "content": text}]
-                if body.get("system"):
-                    msgs.insert(0, {"role": "system", "content": body["system"]})
                 yield f"data: {json.dumps({'status': 'thinking', 'session_id': session_id})}\n\n"
 
-                # Check client connection periodically during streaming
-                chunks_sent = 0
-                async for chunk in _llm.chat_completion_stream(
-                    messages=msgs,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    tools=tools,
-                ):
-                    # Check every 10 chunks if client disconnected
-                    if chunks_sent % 10 == 0:
-                        if await request.is_disconnected():
-                            break
-                    yield f"data: {json.dumps(chunk)}\n\n"
-                    chunks_sent += 1
+                try:
+                    if _app_instance and hasattr(_app_instance, "chat_with_thinking"):
+                        # Full Coordinator pipeline: memory, skills, routing, tools.
+                        # 之前流式端点直接调 _llm.chat_completion_stream，绕过了
+                        # Coordinator → 无记忆、无技能、无路由，回复质量极差。
+                        # 现在统一走 chat_with_thinking，和非流式 /api/chat 一致。
+                        result = await _app_instance.chat_with_thinking(
+                            text, source="api", session_id=session_id
+                        )
+                        reply = result.get("reply", "")
+                        thinking = result.get("thinking", "")
+                        if thinking:
+                            yield f"data: {json.dumps({'status': 'thinking', 'content': thinking, 'session_id': session_id})}\n\n"
+                        if reply:
+                            yield f"data: {json.dumps({'content': reply, 'session_id': session_id})}\n\n"
+                    elif _llm is not None:
+                        # Fallback: direct LLM streaming (no Coordinator)
+                        msgs: List[Dict[str, Any]] = [{"role": "user", "content": text}]
+                        if body.get("system"):
+                            msgs.insert(0, {"role": "system", "content": body["system"]})
+                        chunks_sent = 0
+                        async for chunk in _llm.chat_completion_stream(
+                            messages=msgs,
+                            model=model,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            tools=tools,
+                        ):
+                            if chunks_sent % 10 == 0:
+                                if await request.is_disconnected():
+                                    break
+                            # Translate delta → content for client compatibility.
+                            # LLM 层产出 {"delta": "...", "done": false}，
+                            # 但客户端只认 content/text 字段，不翻译会导致空回复。
+                            if "delta" in chunk and "content" not in chunk:
+                                chunk["content"] = chunk.pop("delta")
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                            chunks_sent += 1
+                    else:
+                        yield f"data: {json.dumps({'error': 'LLM provider not available', 'session_id': session_id})}\n\n"
+                except Exception as exc:
+                    logger.error("stream chat error: %s", exc, exc_info=True)
+                    yield f"data: {json.dumps({'error': str(exc), 'session_id': session_id})}\n\n"
 
                 yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
 

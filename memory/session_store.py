@@ -20,6 +20,10 @@ class SessionStore(BaseSQLiteStore):
     async event handlers.
     """
 
+    # P2-1: schema version 2 — messages.id changed from INTEGER
+    # AUTOINCREMENT to TEXT PRIMARY KEY (P0-3 fix).
+    SCHEMA_VERSION = 2
+
     def __init__(self, db_path: str = "data/memory/sessions.db") -> None:
         super().__init__(db_path)
 
@@ -37,7 +41,7 @@ class SessionStore(BaseSQLiteStore):
                 fork_point INTEGER
             );
             CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
@@ -47,6 +51,34 @@ class SessionStore(BaseSQLiteStore):
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
         """)
+        # P0-3 migration: if the old schema had INTEGER id (v1), rebuild
+        # the messages table to use TEXT id. SQLite doesn't support
+        # ALTER COLUMN, so we recreate the table.
+        if self._old_schema_version < 2:
+            try:
+                cur = self._conn.execute("PRAGMA table_info(messages)")
+                cols = {row[1]: row[2] for row in cur.fetchall()}
+                if cols.get("id", "").upper() == "INTEGER":
+                    self._conn.executescript("""
+                        ALTER TABLE messages RENAME TO messages_old;
+                        CREATE TABLE messages (
+                            id TEXT PRIMARY KEY,
+                            session_id TEXT NOT NULL,
+                            role TEXT NOT NULL,
+                            content TEXT NOT NULL,
+                            meta TEXT DEFAULT '{}',
+                            created_at REAL,
+                            FOREIGN KEY (session_id) REFERENCES sessions(id)
+                        );
+                        INSERT INTO messages(id, session_id, role, content, meta, created_at)
+                        SELECT CAST(id AS TEXT), session_id, role, content, meta, created_at
+                        FROM messages_old;
+                        DROP TABLE messages_old;
+                        CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+                    """)
+                    logger.info("migrated messages.id from INTEGER to TEXT (schema v1→v2)")
+            except sqlite3.OperationalError as exc:
+                logger.debug("messages table migration skipped: %s", exc)
         # Add fork columns to existing tables
         try:
             self._conn.execute("ALTER TABLE sessions ADD COLUMN parent_id TEXT")
@@ -154,18 +186,16 @@ class SessionStore(BaseSQLiteStore):
                             )
 
                     # Insert message with optional ID
-                    if message_id:
-                        self._conn.execute(
-                            "INSERT INTO messages(id, session_id, role, content, meta, created_at, tokens) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                            (message_id, session_id, role, content, meta_json, now, tokens),
-                        )
-                    else:
-                        self._conn.execute(
-                            "INSERT INTO messages(session_id, role, content, meta, created_at, tokens) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (session_id, role, content, meta_json, now, tokens),
-                        )
+                    # P0-3 fix: messages.id is now TEXT PRIMARY KEY (was
+                    # INTEGER AUTOINCREMENT), so we must always provide an
+                    # explicit id — generate a UUID when caller doesn't.
+                    import uuid as _uuid
+                    msg_id = message_id or _uuid.uuid4().hex
+                    self._conn.execute(
+                        "INSERT INTO messages(id, session_id, role, content, meta, created_at, tokens) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (msg_id, session_id, role, content, meta_json, now, tokens),
+                    )
 
                     # Update session counters
                     self._conn.execute(

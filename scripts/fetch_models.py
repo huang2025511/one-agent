@@ -3,11 +3,14 @@
 
 import argparse
 import json
+import logging
 import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 # Custom providers storage
 CUSTOM_PROVIDERS_FILE = Path.home() / ".one-agent" / "custom_providers.json"
@@ -19,8 +22,8 @@ def load_custom_providers() -> Dict[str, dict]:
         try:
             with open(CUSTOM_PROVIDERS_FILE) as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("ignored non-critical error: %s", exc)
     return {}
 
 
@@ -460,8 +463,8 @@ def fetch_models(provider: str, api_key: str = None, base_url: str = None) -> tu
         models = cfg["fetch"](api_key, base_url)
         if models and not models[0].startswith("Error"):
             return models, cfg["name"]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("ignored non-critical error: %s", exc)
 
     # Fallback to default models
     return cfg.get("default_models", []), cfg["name"]

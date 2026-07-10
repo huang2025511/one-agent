@@ -599,17 +599,27 @@ class OneAgentApp:
     async def chat(self, text: str, source: str = "cli", session_id: str = "default") -> str:
         from core.context import TurnContext
         turn = TurnContext(input_text=text, source=source, session_id=session_id)
+        # The coordinator assigns turn.result directly in many places (slash
+        # commands, skill dispatch, LLM success) and always publishes
+        # ``turn_completed`` afterwards. Subscribe to that event to wake the
+        # instant *this* turn finishes, instead of polling turn.result ~10×/s
+        # (which previously burned ~1800 empty polls per 180s request).
+        def _on_completed(evt) -> None:
+            if evt.get("turn") is turn:
+                turn.mark_done()
+
+        self.bus.subscribe("turn_completed", _on_completed)
         self.bus.publish({
             "type": "user_message",
             "payload": {"turn": turn, "session_id": session_id},
             "source": source,
         })
-        import time as _time
-        deadline = _time.monotonic() + 180
-        while _time.monotonic() < deadline:
-            if turn.result is not None or turn.error is not None:
-                break
-            await asyncio.sleep(0.1)
+        try:
+            await asyncio.wait_for(turn.wait_done(), timeout=180)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self.bus.unsubscribe("turn_completed", _on_completed)
         return turn.result if turn.result is not None else "[timeout]"
 
     async def chat_with_thinking(self, text: str, source: str = "api", session_id: str = "default") -> dict:
@@ -619,17 +629,23 @@ class OneAgentApp:
         """
         from core.context import TurnContext
         turn = TurnContext(input_text=text, source=source, session_id=session_id)
+        # See chat() for why we wait on an event instead of polling turn.result.
+        def _on_completed(evt) -> None:
+            if evt.get("turn") is turn:
+                turn.mark_done()
+
+        self.bus.subscribe("turn_completed", _on_completed)
         self.bus.publish({
             "type": "user_message",
             "payload": {"turn": turn, "session_id": session_id},
             "source": source,
         })
-        import time as _time
-        deadline = _time.monotonic() + 180
-        while _time.monotonic() < deadline:
-            if turn.result is not None or turn.error is not None:
-                break
-            await asyncio.sleep(0.1)
+        try:
+            await asyncio.wait_for(turn.wait_done(), timeout=180)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self.bus.unsubscribe("turn_completed", _on_completed)
         reply = turn.result if turn.result is not None else "[timeout]"
         thinking_text = turn.meta.get("thinking", "")
         return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
@@ -783,15 +799,15 @@ async def _interactive(app: OneAgentApp) -> None:
                     hint = _extract_provider_hint(line)
                     if hint and hint not in ("unknown", ""):
                         prov = hint
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("provider hint extraction failed: %s", exc)
             try:
                 result = await llm.rebuild_tiers(provider=prov)
             except Exception as exc:  # noqa: BLE001
-                print(f"[rebuild_tiers error: {exc}]")
+                logger.error("rebuild_tiers error: %s", exc)
                 continue
             if not result.get("ok"):
-                print(f"[rebuild_tiers failed: {result.get('error')}]")
+                logger.error("rebuild_tiers failed: %s", result.get('error'))
                 continue
             print(f"\n✓ 已为 provider '{result['provider']}' 重新分层"
                   f"（共 {result['model_count']} 个模型）:")
@@ -846,7 +862,7 @@ async def main(interactive: bool = True) -> None:
         _setup_ran = setup_if_needed()
     except Exception as exc:  # noqa: BLE001
         _setup_ran = False
-        print(f"[setup wizard unavailable: {exc}]")
+        logger.warning("setup wizard unavailable: %s", exc)
 
     # 修复：支持 ONE_AGENT_ENV 选 config 文件（dev/staging/prod）。
     # 之前 dev_config.yaml 等文件头注释 "使用方式：ONE_AGENT_ENV=dev one-agent"
@@ -1126,8 +1142,8 @@ def _cmd_doctor():
                             if v:
                                 val = v
                             break
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("config read failed: %s", exc)
         if val:
             if val.startswith("http"):
                 status = "✓"

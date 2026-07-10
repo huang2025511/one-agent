@@ -19,7 +19,7 @@ import re
 import sqlite3
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 
@@ -869,6 +869,101 @@ class LLMProvider(RecommendationMixin, Plugin):
 
         return best_model
 
+    def _resolve_provider(self, model: str) -> Tuple[str, str, str, str]:
+        # 推断 provider：之前只从 model 名字 split "/")[0] 推断，但很多
+        # provider 的 model id 是 "<vendor>/<model>" 格式（如 nvidia 的
+        # "meta/llama-3.1-8b-instruct"），会被误判为 provider="meta"，
+        # 导致 base_url 和 api_key 查找失败。
+        # 修复：如果 model 的第一段是已注册的 provider（在 _provider_base_urls
+        # 里有对应 URL），用它；否则用 config 显式声明的 _primary_provider。
+        _first_seg = model.split("/", 1)[0] if "/" in model else ""
+        if _first_seg and _first_seg in self._provider_base_urls:
+            provider = _first_seg
+        elif getattr(self, "_primary_provider", None):
+            provider = self._primary_provider
+        else:
+            provider = _first_seg or "openai"
+        # Use .get() with fallback to avoid KeyError if openrouter is missing
+        base = self._provider_base_urls.get(
+            provider,
+            self._provider_base_urls.get("openrouter", "https://openrouter.ai/api/v1"),
+        )
+        api_key = self._api_keys.get(provider) or self._api_keys.get("openrouter")
+        # Strip the "<provider>/" prefix from the model id — OpenAI-compatible
+        # endpoints expect the bare model name (e.g. "deepseek-v4-flash",
+        # not "sensenova/deepseek-v4-flash").  Anthropic keeps the prefix
+        # stripped in its own branch below.
+        #
+        # 修复 bug：之前无条件 strip 第一段，但对 nvidia 等 provider，
+        # model id 是 "<vendor>/<model>" 格式（如 "meta/llama-3.1-8b-instruct"），
+        # API 期望完整的 "meta/llama-3.1-8b-instruct"，strip 后的 "llama-3.1-8b-instruct"
+        # 会 404。修复：只有当第一段就是 provider 本身时才 strip
+        # （如 "openai/gpt-4o" → "gpt-4o"，"nvidia/nemotron-70b" → "nemotron-70b"）。
+        # 如果第一段不是 provider（vendor/model 格式），保留完整 id。
+        if "/" in model:
+            first_seg = model.split("/", 1)[0]
+            if first_seg == provider:
+                # "provider/model" 格式 → strip provider 前缀
+                bare_model = model.split("/", 1)[1]
+            else:
+                # "vendor/model" 格式（provider≠vendor）→ 保留完整 id
+                bare_model = model
+        else:
+            bare_model = model
+        return provider, base, api_key, bare_model
+
+    def _build_circuit_breaker(self, provider) -> CircuitBreaker:
+        # Get or create circuit breaker for this provider
+        if provider not in self._circuit_breakers:
+            self._circuit_breakers[provider] = CircuitBreaker()
+        return self._circuit_breakers[provider]
+
+    async def _handle_circuit_breaker_open(
+        self, provider, model, messages, temperature, max_tokens, tools, use_cache,
+    ) -> Optional[Dict[str, Any]]:
+        for fb in self._fallback_chain:
+            fb_model = fb.get("model")
+            if not fb_model or fb_model == model:
+                continue
+            logger.info("circuit open, trying fallback model %s", fb_model)
+            fb_result = await self.chat_completion(
+                messages, model=fb_model, temperature=temperature,
+                max_tokens=max_tokens, tools=tools,
+                use_cache=use_cache, _skip_fallback=True,
+            )
+            if not fb_result.get("failed"):
+                return fb_result
+        return None
+
+    async def _try_fallback_chain(
+        self, messages, model, temperature, max_tokens, tools, use_cache,
+    ) -> Optional[Dict[str, Any]]:
+        # --- Fallback chain: try alternative providers if primary fails ---
+        for fb in self._fallback_chain:
+            fb_model = fb.get("model")
+            if not fb_model or fb_model == model:
+                continue
+
+            logger.info("Trying fallback model: %s", fb_model)
+            try:
+                result = await self.chat_completion(
+                    messages=messages,
+                    model=fb_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    use_cache=use_cache,
+                    _skip_fallback=True,  # Prevent recursive fallback
+                )
+                if not result.get("failed"):
+                    result["fallback_used"] = fb_model
+                    logger.info("Fallback succeeded with %s", fb_model)
+                    return result
+            except Exception as exc:
+                logger.warning("Fallback %s failed: %s", fb_model, exc)
+                continue
+        return None
+
     async def chat_completion(
         self,
         messages: List[Dict[str, Any]],
@@ -922,46 +1017,7 @@ class LLMProvider(RecommendationMixin, Plugin):
                 )
                 model = self._find_cheapest_free_model()
 
-        # 推断 provider：之前只从 model 名字 split "/")[0] 推断，但很多
-        # provider 的 model id 是 "<vendor>/<model>" 格式（如 nvidia 的
-        # "meta/llama-3.1-8b-instruct"），会被误判为 provider="meta"，
-        # 导致 base_url 和 api_key 查找失败。
-        # 修复：如果 model 的第一段是已注册的 provider（在 _provider_base_urls
-        # 里有对应 URL），用它；否则用 config 显式声明的 _primary_provider。
-        _first_seg = model.split("/", 1)[0] if "/" in model else ""
-        if _first_seg and _first_seg in self._provider_base_urls:
-            provider = _first_seg
-        elif getattr(self, "_primary_provider", None):
-            provider = self._primary_provider
-        else:
-            provider = _first_seg or "openai"
-        # Use .get() with fallback to avoid KeyError if openrouter is missing
-        base = self._provider_base_urls.get(
-            provider,
-            self._provider_base_urls.get("openrouter", "https://openrouter.ai/api/v1"),
-        )
-        api_key = self._api_keys.get(provider) or self._api_keys.get("openrouter")
-        # Strip the "<provider>/" prefix from the model id — OpenAI-compatible
-        # endpoints expect the bare model name (e.g. "deepseek-v4-flash",
-        # not "sensenova/deepseek-v4-flash").  Anthropic keeps the prefix
-        # stripped in its own branch below.
-        #
-        # 修复 bug：之前无条件 strip 第一段，但对 nvidia 等 provider，
-        # model id 是 "<vendor>/<model>" 格式（如 "meta/llama-3.1-8b-instruct"），
-        # API 期望完整的 "meta/llama-3.1-8b-instruct"，strip 后的 "llama-3.1-8b-instruct"
-        # 会 404。修复：只有当第一段就是 provider 本身时才 strip
-        # （如 "openai/gpt-4o" → "gpt-4o"，"nvidia/nemotron-70b" → "nemotron-70b"）。
-        # 如果第一段不是 provider（vendor/model 格式），保留完整 id。
-        if "/" in model:
-            first_seg = model.split("/", 1)[0]
-            if first_seg == provider:
-                # "provider/model" 格式 → strip provider 前缀
-                bare_model = model.split("/", 1)[1]
-            else:
-                # "vendor/model" 格式（provider≠vendor）→ 保留完整 id
-                bare_model = model
-        else:
-            bare_model = model
+        provider, base, api_key, bare_model = self._resolve_provider(model)
 
         # If no API key is available, fail fast — 但先尝试 fallback chain，
         # 这样当 primary_model 默认到一个未配置的 provider（如 Pydantic
@@ -1025,10 +1081,7 @@ class LLMProvider(RecommendationMixin, Plugin):
             logger.warning("auto-heal model name normalization failed with unexpected error for %s: %s", provider, exc, exc_info=True)
 
         # --- Circuit breaker check ---
-        # Get or create circuit breaker for this provider
-        if provider not in self._circuit_breakers:
-            self._circuit_breakers[provider] = CircuitBreaker()
-        circuit_breaker = self._circuit_breakers[provider]
+        circuit_breaker = self._build_circuit_breaker(provider)
 
         if not circuit_breaker.can_execute():
             logger.warning(
@@ -1040,18 +1093,12 @@ class LLMProvider(RecommendationMixin, Plugin):
             # here would skip the fallback logic, defeating its purpose.
             # Skip directly to fallback chain
             if not _skip_fallback and self._fallback_chain:
-                for fb in self._fallback_chain:
-                    fb_model = fb.get("model")
-                    if not fb_model or fb_model == model:
-                        continue
-                    logger.info("circuit open, trying fallback model %s", fb_model)
-                    fb_result = await self.chat_completion(
-                        messages, model=fb_model, temperature=temperature,
-                        max_tokens=max_tokens, tools=tools,
-                        use_cache=use_cache, _skip_fallback=True,
-                    )
-                    if not fb_result.get("failed"):
-                        return fb_result
+                cb_result = await self._handle_circuit_breaker_open(
+                    provider, model, messages, temperature,
+                    max_tokens, tools, use_cache,
+                )
+                if cb_result is not None:
+                    return cb_result
             return {
                 "text": f"服务暂时不可用（{provider}），请稍后重试",
                 "tool_calls": [],
@@ -1290,29 +1337,11 @@ class LLMProvider(RecommendationMixin, Plugin):
 
         # --- Fallback chain: try alternative providers if primary fails ---
         if not _skip_fallback and self._fallback_chain:
-            for fb in self._fallback_chain:
-                fb_model = fb.get("model")
-                if not fb_model or fb_model == model:
-                    continue
-
-                logger.info("Trying fallback model: %s", fb_model)
-                try:
-                    result = await self.chat_completion(
-                        messages=messages,
-                        model=fb_model,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        tools=tools,
-                        use_cache=use_cache,
-                        _skip_fallback=True,  # Prevent recursive fallback
-                    )
-                    if not result.get("failed"):
-                        result["fallback_used"] = fb_model
-                        logger.info("Fallback succeeded with %s", fb_model)
-                        return result
-                except Exception as exc:
-                    logger.warning("Fallback %s failed: %s", fb_model, exc)
-                    continue
+            result = await self._try_fallback_chain(
+                messages, model, temperature, max_tokens, tools, use_cache,
+            )
+            if result is not None:
+                return result
 
         return {
             "text": _("service_unavailable"),

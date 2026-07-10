@@ -451,8 +451,8 @@ class SkillManager(Plugin):
                     llm = cfg.get("llm", {})
                     lines.append(f"  🧠 主模型: {llm.get('primary_provider', '?')}/{llm.get('primary_model', '?')}")
                     lines.append(f"  🪶 轻量模型: {llm.get('lightweight_model', '?')}")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
             lines.append(f"  🧰 已加载技能: {len(self._skills)}")
             return "\n".join(lines)
         self.register(Skill(
@@ -601,8 +601,8 @@ class SkillManager(Plugin):
                     "timestamp": _time.time(),
                     "message": "重启完成，新版本已生效",
                 }, ensure_ascii=False), encoding="utf-8")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("ignored non-critical error: %s", exc)
 
             # 延迟重启，让事件总线把回复发给用户。
             # 关键：_do_restart 是 async，先 sleep 1.5s 让回复发出，
@@ -961,8 +961,8 @@ class SkillManager(Plugin):
                                 gateway = gateway_map.get(gw_prefix, "")
                             if not chat_id:
                                 chat_id = parts[1]
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("ignored non-critical error: %s", exc)
 
             if not chat_id:
                 return "错误: 无法确定目标 chat_id，请显式指定 chat_id 参数"
@@ -2130,8 +2130,8 @@ def _save_config(config: dict) -> None:
             if use_fcntl and lock_fd:
                 try:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("ignored non-critical error: %s", exc)
             elif lock_fd:
                 try:
                     import msvcrt
@@ -2743,8 +2743,8 @@ async def _search_provider_url(provider: str, api_key: str) -> str:
         url = await _web_search_provider_api(provider, api_key=api_key)
         if url:
             return url
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("ignored non-critical error: %s", exc)
 
     return ""
 
@@ -2822,7 +2822,7 @@ async def _web_search_provider_api(provider: str, api_key: str = "") -> str:
                                         return guess
                                 except Exception:
                                     continue
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("ignored non-critical error: %s", exc)
 
     return ""

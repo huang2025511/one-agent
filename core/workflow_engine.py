@@ -141,8 +141,8 @@ class WorkflowEngine:
             if on_step:
                 try:
                     on_step(step_result.step_id, step_result.status.value, step_result.output_data)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("ignored non-critical error: %s", exc)
 
             # Stop on failure unless continue_on_error is set
             if step_result.status == StepStatus.FAILED:

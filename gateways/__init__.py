@@ -282,26 +282,41 @@ class WebGateway(Plugin):
             tools = None
 
             _llm = self.ctx.get_plugin("llm") if self.ctx else None
-            if _llm is None:
-                return {"error": "LLM provider not available"}
 
             import json as _json
 
             from fastapi.responses import StreamingResponse
 
             async def event_generator():
-                msgs = [{"role": "user", "content": text}]
-                if body.get("system"):
-                    msgs.insert(0, {"role": "system", "content": body["system"]})
                 yield f"data: {_json.dumps({'status': 'thinking', 'session_id': session_id})}\n\n"
-                async for chunk in _llm.chat_completion_stream(
-                    messages=msgs,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    tools=tools,
-                ):
-                    yield f"data: {_json.dumps(chunk)}\n\n"
+                try:
+                    if self._agent_callback is not None:
+                        # Full agent pipeline via callback (Coordinator: memory,
+                        # skills, routing).  之前直接调 _llm.chat_completion_stream
+                        # 绕过了 Coordinator → 无记忆/技能/路由。
+                        reply = await self._agent_callback(text, source="web", session_id=session_id)
+                        if reply:
+                            yield f"data: {_json.dumps({'content': reply, 'session_id': session_id})}\n\n"
+                    elif _llm is not None:
+                        msgs = [{"role": "user", "content": text}]
+                        if body.get("system"):
+                            msgs.insert(0, {"role": "system", "content": body["system"]})
+                        async for chunk in _llm.chat_completion_stream(
+                            messages=msgs,
+                            model=model,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            tools=tools,
+                        ):
+                            # delta → content 翻译（客户端只认 content/text）
+                            if "delta" in chunk and "content" not in chunk:
+                                chunk["content"] = chunk.pop("delta")
+                            yield f"data: {_json.dumps(chunk)}\n\n"
+                    else:
+                        yield f"data: {_json.dumps({'error': 'LLM provider not available', 'session_id': session_id})}\n\n"
+                except Exception as exc:
+                    logger.error("web stream chat error: %s", exc, exc_info=True)
+                    yield f"data: {_json.dumps({'error': str(exc), 'session_id': session_id})}\n\n"
                 yield f"data: {_json.dumps({'done': True, 'session_id': session_id})}\n\n"
 
             return StreamingResponse(

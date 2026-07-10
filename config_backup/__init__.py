@@ -143,8 +143,8 @@ class ConfigBackupManager:
             if temp_path.exists():
                 try:
                     temp_path.unlink()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("ignored non-critical error: %s", exc)
             return False
 
     def list_backups(self) -> List[Dict[str, Any]]:

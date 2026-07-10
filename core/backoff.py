@@ -91,8 +91,8 @@ class ExponentialBackoff:
                     if on_retry:
                         try:
                             on_retry(attempt + 1, exc)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("ignored non-critical error: %s", exc)
                     await asyncio.sleep(delay)
                 else:
                     logger.error(
@@ -130,8 +130,8 @@ class ExponentialBackoff:
                     if on_retry:
                         try:
                             on_retry(attempt + 1, exc)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("ignored non-critical error: %s", exc)
                     _time.sleep(delay)
                 else:
                     logger.error(
