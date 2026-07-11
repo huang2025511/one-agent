@@ -319,7 +319,7 @@ class _UpdateCard extends ConsumerWidget {
             title: const Text('检查更新'),
             subtitle: Text(
               updateState.currentVersion != null
-                  ? '当前版本 v${updateState.currentVersion}'
+                  ? '当前版本 v${updateState.currentVersionName ?? ''} (${updateState.currentVersion})'
                   : '点击检查是否有新版本',
             ),
             trailing: updateState.isChecking

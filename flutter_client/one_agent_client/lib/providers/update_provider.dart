@@ -10,6 +10,7 @@ class UpdateState {
   final bool isDownloading;
   final ReleaseInfo? latestRelease;
   final int? currentVersion;
+  final String? currentVersionName;
   final double downloadProgress; // 0.0 - 1.0
   final String? error;
 
@@ -18,6 +19,7 @@ class UpdateState {
     this.isDownloading = false,
     this.latestRelease,
     this.currentVersion,
+    this.currentVersionName,
     this.downloadProgress = 0,
     this.error,
   });
@@ -30,6 +32,7 @@ class UpdateState {
     bool? isDownloading,
     ReleaseInfo? latestRelease,
     int? currentVersion,
+    String? currentVersionName,
     double? downloadProgress,
     String? error,
   }) => UpdateState(
@@ -37,6 +40,7 @@ class UpdateState {
     isDownloading: isDownloading ?? this.isDownloading,
     latestRelease: latestRelease ?? this.latestRelease,
     currentVersion: currentVersion ?? this.currentVersion,
+    currentVersionName: currentVersionName ?? this.currentVersionName,
     downloadProgress: downloadProgress ?? this.downloadProgress,
     error: error,
   );
@@ -51,6 +55,7 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
     state = UpdateState(
       isChecking: true,
       currentVersion: state.currentVersion,
+      currentVersionName: state.currentVersionName,
       error: null,
     );
 
@@ -58,6 +63,7 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
       // 获取当前应用版本号
       final packageInfo = await PackageInfo.fromPlatform();
       final buildNumber = int.tryParse(packageInfo.buildNumber) ?? 0;
+      final versionName = packageInfo.version;
 
       final release = await UpdateApi.getLatestRelease(
         currentVersion: buildNumber,
@@ -66,12 +72,14 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
       state = UpdateState(
         isChecking: false,
         currentVersion: buildNumber,
+        currentVersionName: versionName,
         latestRelease: release,
       );
     } catch (e) {
       state = UpdateState(
         isChecking: false,
         currentVersion: state.currentVersion,
+        currentVersionName: state.currentVersionName,
         error: '检查更新失败: $e',
       );
     }
