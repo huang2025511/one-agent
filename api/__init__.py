@@ -195,7 +195,25 @@ class RESTAPIGateway(Plugin):
         if hasattr(cb, "__self__"):
             self._app_instance = cb.__self__
 
+    def _get_plugin(self, name):
+        """Get a plugin/attribute from the agent context by name.
+
+        This is the class-level equivalent of the ``_cp`` closure historically
+        defined inside ``start()``.  The ``_register_*`` helper methods build
+        route handlers that need to look up plugins (session_store,
+        marketplace, approval_manager, mcp_client, …) at request time.  Those
+        handlers previously referenced a bare ``_cp`` name that only existed as
+        a local in ``start()`` and was therefore *not* visible inside the
+        separate ``_register_*`` methods — resulting in ``NameError`` at
+        runtime and HTTP 500 on every endpoint that touched a context plugin
+        (``/api/stats``, ``/api/marketplace``, ``/api/approvals/pending`` …).
+        Each ``_register_*`` method now aliases this via ``_cp = self._get_plugin``.
+        """
+        ctx = self.ctx
+        return getattr(ctx, name, None) if ctx else None
+
     def _register_health_routes(self, app, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin):
+        _cp = self._get_plugin
         @app.get("/health")
         async def health_check():
             """Basic health check - service is alive"""
@@ -435,6 +453,7 @@ class RESTAPIGateway(Plugin):
             }
 
     def _register_session_probe_routes(self, app, auth, _ctx, _agent):
+        _cp = self._get_plugin
         from fastapi import Header, HTTPException
         @app.get("/api/sessions/list")
         async def sessions_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -485,6 +504,7 @@ class RESTAPIGateway(Plugin):
             return {"alive": True}
 
     def _register_stats_metrics_routes(self, app, auth, _ctx, _llm, _memory, _bus, _skills, _memory_plugin):
+        _cp = self._get_plugin
         # 修复：新版 fastapi（0.139+）把 JSONResponse 从顶层命名空间移除，
         # 必须从 fastapi.responses 导入。旧代码 `from fastapi import JSONResponse`
         # 会在 import 时抛 ImportError，导致整个 REST API gateway start 失败。
@@ -848,6 +868,7 @@ class RESTAPIGateway(Plugin):
             return {"skills": _skills.all_skill_ids()}
 
     def _register_marketplace_routes(self, app, auth, _ctx, _skills, _llm):
+        _cp = self._get_plugin
         from fastapi import Header, HTTPException
         @app.get("/api/marketplace")
         async def list_marketplace(query: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -964,6 +985,7 @@ class RESTAPIGateway(Plugin):
             return _llm.clear_cache()
 
     def _register_improvement_routes(self, app, auth, _ctx):
+        _cp = self._get_plugin
         from fastapi import Header, HTTPException
         @app.get("/api/improvements")
         async def get_improvements(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -1283,6 +1305,7 @@ class RESTAPIGateway(Plugin):
             return {"deleted": True, "name": name}
 
     def _register_alerting_routes(self, app, auth, _ctx):
+        _cp = self._get_plugin
         from fastapi import Header, HTTPException
         @app.get("/api/alerts/rules")
         async def alert_rules_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -1337,6 +1360,7 @@ class RESTAPIGateway(Plugin):
             return {"alerts": _alert_mgr.list_history(limit=limit)}
 
     def _register_approval_routes(self, app, auth, _ctx):
+        _cp = self._get_plugin
         from fastapi import Header, HTTPException
         @app.get("/api/approvals/pending")
         async def list_pending_approvals(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -1372,6 +1396,7 @@ class RESTAPIGateway(Plugin):
             return {"approved": False, "request_id": request_id}
 
     def _register_mcp_routes(self, app, auth, _ctx):
+        _cp = self._get_plugin
         from fastapi import Header, HTTPException
         @app.get("/api/mcp/tools")
         async def mcp_list_tools(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):

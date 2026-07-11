@@ -33,6 +33,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ============================================================
 
 class TestResult:
+    # pytest 不应收集此类（它不是测试类，只是结果收集器）
+    __test__ = False
+
     def __init__(self):
         self.passed = 0
         self.failed = 0
@@ -219,9 +222,9 @@ def make_mock_skill_manager(skills_dict):
 # 测试用例
 # ============================================================
 
-async def test_1_skillindex_build_and_retrieve(result: TestResult):
+async def check_1_skillindex_build_and_retrieve(result: TestResult):
     """验证1: SkillIndex 构建真实 FAISS 索引并执行语义检索。"""
-    name = "test_1_skillindex_build_and_retrieve"
+    name = "check_1_skillindex_build_and_retrieve"
     print(f"\n--- {name} ---")
     try:
         from core.skillweaver import SkillIndex
@@ -268,9 +271,9 @@ async def test_1_skillindex_build_and_retrieve(result: TestResult):
         traceback.print_exc()
 
 
-async def test_2_retrieve_skills_public_api(result: TestResult):
+async def check_2_retrieve_skills_public_api(result: TestResult):
     """验证2: SkillWeaverRouter.retrieve_skills() 公开 API。"""
-    name = "test_2_retrieve_skills_public_api"
+    name = "check_2_retrieve_skills_public_api"
     print(f"\n--- {name} ---")
     try:
         from core.skillweaver import SkillWeaverRouter
@@ -301,9 +304,9 @@ async def test_2_retrieve_skills_public_api(result: TestResult):
         traceback.print_exc()
 
 
-async def test_3_route_three_phase_pipeline(result: TestResult):
+async def check_3_route_three_phase_pipeline(result: TestResult):
     """验证3: route() 三阶段管线 Decompose → SAD → Compose 完整执行。"""
-    name = "test_3_route_three_phase_pipeline"
+    name = "check_3_route_three_phase_pipeline"
     print(f"\n--- {name} ---")
     try:
         from core.skillweaver import SkillWeaverRouter
@@ -364,9 +367,9 @@ async def test_3_route_three_phase_pipeline(result: TestResult):
         traceback.print_exc()
 
 
-async def test_4_router_caching(result: TestResult):
+async def check_4_router_caching(result: TestResult):
     """验证4: Coordinator._get_skillweaver_router() 缓存是否生效。"""
-    name = "test_4_router_caching"
+    name = "check_4_router_caching"
     print(f"\n--- {name} ---")
     try:
         from core.coordinator import Coordinator
@@ -417,9 +420,9 @@ async def test_4_router_caching(result: TestResult):
         traceback.print_exc()
 
 
-async def test_5_prepare_tools_config_path(result: TestResult):
+async def check_5_prepare_tools_config_path(result: TestResult):
     """验证5: _prepare_tools() 正确读取 router.skillweaver 配置路径。"""
-    name = "test_5_prepare_tools_config_path"
+    name = "check_5_prepare_tools_config_path"
     print(f"\n--- {name} ---")
     try:
         from core.coordinator import Coordinator
@@ -480,9 +483,9 @@ async def test_5_prepare_tools_config_path(result: TestResult):
         traceback.print_exc()
 
 
-async def test_6_plan_tool_chain_calls_route(result: TestResult):
+async def check_6_plan_tool_chain_calls_route(result: TestResult):
     """验证6: _plan_tool_chain() 是否真正调用 route() 生成 DAG 计划。"""
-    name = "test_6_plan_tool_chain_calls_route"
+    name = "check_6_plan_tool_chain_calls_route"
     print(f"\n--- {name} ---")
     try:
         from core.coordinator import Coordinator
@@ -551,9 +554,9 @@ async def test_6_plan_tool_chain_calls_route(result: TestResult):
         traceback.print_exc()
 
 
-async def test_7_format_dag_workflow_topological(result: TestResult):
+async def check_7_format_dag_workflow_topological(result: TestResult):
     """验证7: _format_dag_workflow() 拓扑分层是否正确。"""
-    name = "test_7_format_dag_workflow_topological"
+    name = "check_7_format_dag_workflow_topological"
     print(f"\n--- {name} ---")
     try:
         from core.coordinator import Coordinator
@@ -620,9 +623,9 @@ async def test_7_format_dag_workflow_topological(result: TestResult):
         traceback.print_exc()
 
 
-async def test_8_execute_workflow_parallel(result: TestResult):
+async def check_8_execute_workflow_parallel(result: TestResult):
     """验证8: execute_workflow() DAG 并行执行。"""
-    name = "test_8_execute_workflow_parallel"
+    name = "check_8_execute_workflow_parallel"
     print(f"\n--- {name} ---")
     try:
         from core.skillweaver import SkillWeaverRouter, DAGWorkflow, SkillNode
@@ -748,14 +751,14 @@ async def main():
 
     result = TestResult()
 
-    await test_1_skillindex_build_and_retrieve(result)
-    await test_2_retrieve_skills_public_api(result)
-    await test_3_route_three_phase_pipeline(result)
-    await test_4_router_caching(result)
-    await test_5_prepare_tools_config_path(result)
-    await test_6_plan_tool_chain_calls_route(result)
-    await test_7_format_dag_workflow_topological(result)
-    await test_8_execute_workflow_parallel(result)
+    await check_1_skillindex_build_and_retrieve(result)
+    await check_2_retrieve_skills_public_api(result)
+    await check_3_route_three_phase_pipeline(result)
+    await check_4_router_caching(result)
+    await check_5_prepare_tools_config_path(result)
+    await check_6_plan_tool_chain_calls_route(result)
+    await check_7_format_dag_workflow_topological(result)
+    await check_8_execute_workflow_parallel(result)
 
     ok = result.summary()
     sys.exit(0 if ok else 1)
