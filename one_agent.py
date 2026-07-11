@@ -628,6 +628,7 @@ class OneAgentApp:
         Uses its own TurnContext to avoid cross-request race conditions.
         """
         from core.context import TurnContext
+        logger.info("chat_with_thinking: start, text=%r, source=%s, session_id=%s", text[:80], source, session_id)
         turn = TurnContext(input_text=text, source=source, session_id=session_id)
         # See chat() for why we wait on an event instead of polling turn.result.
         def _on_completed(evt) -> None:
@@ -640,14 +641,17 @@ class OneAgentApp:
             "payload": {"turn": turn, "session_id": session_id},
             "source": source,
         })
+        logger.info("chat_with_thinking: published user_message event, waiting for turn_completed...")
         try:
             await asyncio.wait_for(turn.wait_done(), timeout=180)
         except asyncio.TimeoutError:
+            logger.warning("chat_with_thinking: TIMEOUT after 180s, text=%r", text[:80])
             pass
         finally:
             self.bus.unsubscribe("turn_completed", _on_completed)
         reply = turn.result if turn.result is not None else "[timeout]"
         thinking_text = turn.meta.get("thinking", "")
+        logger.info("chat_with_thinking: done, reply_len=%d, thinking_len=%d", len(reply), len(thinking_text))
         return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
 
     async def stop(self) -> None:

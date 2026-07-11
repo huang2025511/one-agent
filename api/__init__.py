@@ -681,10 +681,9 @@ class RESTAPIGateway(Plugin):
         async def chat(request: Request, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
-            # 修复: body.get("session_id", default) 当 key 存在但值为 null 时返回 None，
-            # 导致 session_store.get_session(None) 抛 ValueError，消息处理失败。
-            # 用 `or` 确保 None/空字符串时生成新 session_id。
             session_id = body.get("session_id") or uuid.uuid4().hex[:12]
+            logger.info("chat: received request, text=%r, session_id=%s, client=%s",
+                        text[:80], session_id, request.client.host if request.client else "?")
 
             # Validate text input
             try:
@@ -739,6 +738,8 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id") or uuid.uuid4().hex[:12]
+            logger.info("chat/stream: received request, text=%r, session_id=%s, client=%s",
+                        text[:80], session_id, request.client.host if request.client else "?")
 
             # Security restrictions: limit parameters to prevent abuse
             model = body.get("model")
