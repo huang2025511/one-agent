@@ -21,16 +21,39 @@ class Memory with _$Memory {
   const Memory._();
 
   factory Memory.fromApi(Map<String, dynamic> json) {
+    // 服务端 /api/memory/search 返回 id 为字符串（str(rowid)），
+    // /api/memory/page 的条目则没有 id 字段。统一安全解析为 int。
+    final rawId = json['id'];
+    final id = rawId is int
+        ? rawId
+        : int.tryParse(rawId?.toString() ?? '') ?? 0;
+    // 服务端用 timestamp（float epoch）而非 created_at（ISO 字符串）
+    final rawTs = json['timestamp'] ?? json['created_at'];
+    final createdAt = _parseTimestamp(rawTs);
     return Memory(
-      id: json['id'] ?? 0,
+      id: id,
       text: json['text'] ?? json['content'] ?? '',
       source: json['source'],
       tags: json['tags'],
-      createdAt: json['created_at'] != null
-          ? DateTime.tryParse(json['created_at'].toString())
-          : null,
-      relevance: json['relevance']?.toDouble(),
+      createdAt: createdAt,
+      // 服务端用 weight 表示相关度
+      relevance: (json['weight'] ?? json['relevance'])?.toDouble(),
     );
+  }
+
+  static DateTime? _parseTimestamp(dynamic value) {
+    if (value == null) return null;
+    if (value is int) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        value > 1e12 ? value : value * 1000,
+      );
+    }
+    if (value is double) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        (value > 1e12 ? value : value * 1000).toInt(),
+      );
+    }
+    return DateTime.tryParse(value.toString());
   }
 }
 

@@ -579,6 +579,7 @@ CostStats _$CostStatsFromJson(Map<String, dynamic> json) {
 /// @nodoc
 mixin _$CostStats {
   Map<String, dynamic>? get daily => throw _privateConstructorUsedError;
+  Map<String, dynamic>? get monthly => throw _privateConstructorUsedError;
   Map<String, dynamic>? get byProvider => throw _privateConstructorUsedError;
   Map<String, dynamic>? get byModel => throw _privateConstructorUsedError;
   int? get totalTokens => throw _privateConstructorUsedError;
@@ -597,6 +598,7 @@ abstract class $CostStatsCopyWith<$Res> {
   @useResult
   $Res call(
       {Map<String, dynamic>? daily,
+      Map<String, dynamic>? monthly,
       Map<String, dynamic>? byProvider,
       Map<String, dynamic>? byModel,
       int? totalTokens,
@@ -617,6 +619,7 @@ class _$CostStatsCopyWithImpl<$Res, $Val extends CostStats>
   @override
   $Res call({
     Object? daily = freezed,
+    Object? monthly = freezed,
     Object? byProvider = freezed,
     Object? byModel = freezed,
     Object? totalTokens = freezed,
@@ -626,6 +629,10 @@ class _$CostStatsCopyWithImpl<$Res, $Val extends CostStats>
       daily: freezed == daily
           ? _value.daily
           : daily // ignore: cast_nullable_to_non_nullable
+              as Map<String, dynamic>?,
+      monthly: freezed == monthly
+          ? _value.monthly
+          : monthly // ignore: cast_nullable_to_non_nullable
               as Map<String, dynamic>?,
       byProvider: freezed == byProvider
           ? _value.byProvider
@@ -657,6 +664,7 @@ abstract class _$$CostStatsImplCopyWith<$Res>
   @useResult
   $Res call(
       {Map<String, dynamic>? daily,
+      Map<String, dynamic>? monthly,
       Map<String, dynamic>? byProvider,
       Map<String, dynamic>? byModel,
       int? totalTokens,
@@ -675,6 +683,7 @@ class __$$CostStatsImplCopyWithImpl<$Res>
   @override
   $Res call({
     Object? daily = freezed,
+    Object? monthly = freezed,
     Object? byProvider = freezed,
     Object? byModel = freezed,
     Object? totalTokens = freezed,
@@ -684,6 +693,10 @@ class __$$CostStatsImplCopyWithImpl<$Res>
       daily: freezed == daily
           ? _value._daily
           : daily // ignore: cast_nullable_to_non_nullable
+              as Map<String, dynamic>?,
+      monthly: freezed == monthly
+          ? _value._monthly
+          : monthly // ignore: cast_nullable_to_non_nullable
               as Map<String, dynamic>?,
       byProvider: freezed == byProvider
           ? _value._byProvider
@@ -710,11 +723,13 @@ class __$$CostStatsImplCopyWithImpl<$Res>
 class _$CostStatsImpl implements _CostStats {
   const _$CostStatsImpl(
       {final Map<String, dynamic>? daily,
+      final Map<String, dynamic>? monthly,
       final Map<String, dynamic>? byProvider,
       final Map<String, dynamic>? byModel,
       this.totalTokens,
       this.totalCost})
       : _daily = daily,
+        _monthly = monthly,
         _byProvider = byProvider,
         _byModel = byModel;
 
@@ -727,6 +742,16 @@ class _$CostStatsImpl implements _CostStats {
     final value = _daily;
     if (value == null) return null;
     if (_daily is EqualUnmodifiableMapView) return _daily;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableMapView(value);
+  }
+
+  final Map<String, dynamic>? _monthly;
+  @override
+  Map<String, dynamic>? get monthly {
+    final value = _monthly;
+    if (value == null) return null;
+    if (_monthly is EqualUnmodifiableMapView) return _monthly;
     // ignore: implicit_dynamic_type
     return EqualUnmodifiableMapView(value);
   }
@@ -758,7 +783,7 @@ class _$CostStatsImpl implements _CostStats {
 
   @override
   String toString() {
-    return 'CostStats(daily: $daily, byProvider: $byProvider, byModel: $byModel, totalTokens: $totalTokens, totalCost: $totalCost)';
+    return 'CostStats(daily: $daily, monthly: $monthly, byProvider: $byProvider, byModel: $byModel, totalTokens: $totalTokens, totalCost: $totalCost)';
   }
 
   @override
@@ -767,6 +792,7 @@ class _$CostStatsImpl implements _CostStats {
         (other.runtimeType == runtimeType &&
             other is _$CostStatsImpl &&
             const DeepCollectionEquality().equals(other._daily, _daily) &&
+            const DeepCollectionEquality().equals(other._monthly, _monthly) &&
             const DeepCollectionEquality()
                 .equals(other._byProvider, _byProvider) &&
             const DeepCollectionEquality().equals(other._byModel, _byModel) &&
@@ -781,6 +807,7 @@ class _$CostStatsImpl implements _CostStats {
   int get hashCode => Object.hash(
       runtimeType,
       const DeepCollectionEquality().hash(_daily),
+      const DeepCollectionEquality().hash(_monthly),
       const DeepCollectionEquality().hash(_byProvider),
       const DeepCollectionEquality().hash(_byModel),
       totalTokens,
@@ -803,6 +830,7 @@ class _$CostStatsImpl implements _CostStats {
 abstract class _CostStats implements CostStats {
   const factory _CostStats(
       {final Map<String, dynamic>? daily,
+      final Map<String, dynamic>? monthly,
       final Map<String, dynamic>? byProvider,
       final Map<String, dynamic>? byModel,
       final int? totalTokens,
@@ -813,6 +841,8 @@ abstract class _CostStats implements CostStats {
 
   @override
   Map<String, dynamic>? get daily;
+  @override
+  Map<String, dynamic>? get monthly;
   @override
   Map<String, dynamic>? get byProvider;
   @override
@@ -834,7 +864,7 @@ AppConfig _$AppConfigFromJson(Map<String, dynamic> json) {
 /// @nodoc
 mixin _$AppConfig {
   Map<String, dynamic>? get config => throw _privateConstructorUsedError;
-  DateTime? get timestamp => throw _privateConstructorUsedError;
+  double? get timestamp => throw _privateConstructorUsedError;
 
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
   @JsonKey(ignore: true)
@@ -847,7 +877,7 @@ abstract class $AppConfigCopyWith<$Res> {
   factory $AppConfigCopyWith(AppConfig value, $Res Function(AppConfig) then) =
       _$AppConfigCopyWithImpl<$Res, AppConfig>;
   @useResult
-  $Res call({Map<String, dynamic>? config, DateTime? timestamp});
+  $Res call({Map<String, dynamic>? config, double? timestamp});
 }
 
 /// @nodoc
@@ -874,7 +904,7 @@ class _$AppConfigCopyWithImpl<$Res, $Val extends AppConfig>
       timestamp: freezed == timestamp
           ? _value.timestamp
           : timestamp // ignore: cast_nullable_to_non_nullable
-              as DateTime?,
+              as double?,
     ) as $Val);
   }
 }
@@ -887,7 +917,7 @@ abstract class _$$AppConfigImplCopyWith<$Res>
       __$$AppConfigImplCopyWithImpl<$Res>;
   @override
   @useResult
-  $Res call({Map<String, dynamic>? config, DateTime? timestamp});
+  $Res call({Map<String, dynamic>? config, double? timestamp});
 }
 
 /// @nodoc
@@ -912,7 +942,7 @@ class __$$AppConfigImplCopyWithImpl<$Res>
       timestamp: freezed == timestamp
           ? _value.timestamp
           : timestamp // ignore: cast_nullable_to_non_nullable
-              as DateTime?,
+              as double?,
     ));
   }
 }
@@ -937,7 +967,7 @@ class _$AppConfigImpl implements _AppConfig {
   }
 
   @override
-  final DateTime? timestamp;
+  final double? timestamp;
 
   @override
   String toString() {
@@ -976,7 +1006,7 @@ class _$AppConfigImpl implements _AppConfig {
 abstract class _AppConfig implements AppConfig {
   const factory _AppConfig(
       {final Map<String, dynamic>? config,
-      final DateTime? timestamp}) = _$AppConfigImpl;
+      final double? timestamp}) = _$AppConfigImpl;
 
   factory _AppConfig.fromJson(Map<String, dynamic> json) =
       _$AppConfigImpl.fromJson;
@@ -984,7 +1014,7 @@ abstract class _AppConfig implements AppConfig {
   @override
   Map<String, dynamic>? get config;
   @override
-  DateTime? get timestamp;
+  double? get timestamp;
   @override
   @JsonKey(ignore: true)
   _$$AppConfigImplCopyWith<_$AppConfigImpl> get copyWith =>

@@ -28,17 +28,28 @@ class SessionApi {
         messages: (data['messages'] as List<dynamic>? ?? [])
             .map((e) => e as Map<String, dynamic>)
             .toList(),
-        createdAt: data['created_at'] != null
-            ? (data['created_at'] is int
-                ? DateTime.fromMillisecondsSinceEpoch(
-                    data['created_at'] > 1e12 ? data['created_at'] : data['created_at'] * 1000)
-                : DateTime.tryParse(data['created_at'].toString()))
-            : null,
+        createdAt: _parseTimestamp(data['created_at']),
       );
     } on DioException catch (e) {
       if (e.response?.statusCode == 404) return null;
       rethrow;
     }
+  }
+
+  /// 解析服务端时间戳（float epoch 或 int 或 ISO 字符串）
+  static DateTime? _parseTimestamp(dynamic value) {
+    if (value == null) return null;
+    if (value is int) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        value > 1e12 ? value : value * 1000,
+      );
+    }
+    if (value is double) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        (value > 1e12 ? value : value * 1000).toInt(),
+      );
+    }
+    return DateTime.tryParse(value.toString());
   }
 
   /// 删除会话

@@ -25,11 +25,15 @@ class MemoryApi {
     String source = 'mobile',
   }) async {
     try {
-      await ApiClient.dio.post('/api/memory/add', data: {
+      // 仅在 tags 非空时发送，避免服务端存储 SQL NULL
+      final data = <String, dynamic>{
         'text': text,
-        'tags': tags,
         'source': source,
-      });
+      };
+      if (tags != null && tags.isNotEmpty) {
+        data['tags'] = tags;
+      }
+      await ApiClient.dio.post('/api/memory/add', data: data);
       return true;
     } catch (_) {
       return false;

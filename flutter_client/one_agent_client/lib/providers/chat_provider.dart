@@ -84,6 +84,10 @@ class ChatNotifier extends StateNotifier<ChatState> {
   Future<void> loadHistory(List<Map<String, dynamic>> history) async {
     final msgs = history.map((m) {
       final roleStr = m['role'] as String? ?? 'assistant';
+      // 服务端消息结构: {id, session_id, role, content, meta, created_at, tokens}
+      // thinking 嵌套在 meta 中（如果有），created_at 是 float epoch
+      final meta = m['meta'];
+      final thinking = meta is Map ? meta['thinking'] as String? : null;
       return ChatMessage(
         id: m['id']?.toString() ??
             'hist_${DateTime.now().millisecondsSinceEpoch}_${m['role'] ?? 'msg'}',
@@ -92,36 +96,49 @@ class ChatNotifier extends StateNotifier<ChatState> {
           orElse: () => MessageRole.assistant,
         ),
         content: (m['content'] ?? m['text'] ?? m['reply'] ?? '').toString(),
-        thinking: m['thinking'] as String?,
+        thinking: thinking,
         sessionId: state.currentSessionId,
-        timestamp: m['timestamp'] != null
-            ? (m['timestamp'] is int
-                ? DateTime.fromMillisecondsSinceEpoch(
-                    (m['timestamp'] as int) > 1e12.toInt()
-                        ? (m['timestamp'] as int)
-                        : (m['timestamp'] as int) * 1000,
-                  )
-                : DateTime.tryParse(m['timestamp'].toString()) ?? DateTime.now())
-            : DateTime.now(),
+        timestamp: _parseTimestamp(m['created_at'] ?? m['timestamp']),
       );
     }).toList();
     state = state.copyWith(messages: msgs);
+  }
+
+  /// 解析服务端时间戳（float/int epoch 或 ISO 字符串）
+  DateTime _parseTimestamp(dynamic value) {
+    if (value == null) return DateTime.now();
+    if (value is int) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        value > 1e12 ? value : value * 1000,
+      );
+    }
+    if (value is double) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        (value > 1e12 ? value : value * 1000).toInt(),
+      );
+    }
+    return DateTime.tryParse(value.toString()) ?? DateTime.now();
   }
 
   /// 发送消息（流式）
   Future<void> sendMessage(String text) async {
     if (text.trim().isEmpty) return;
 
-    // 取消上一个进行中的流式请求
+    // 取消上一个进行中的流式请求，并标记上一条助手消息结束流式
     _disposeStream();
+    final prevMsgs = [...state.messages];
+    final lastIdx = prevMsgs.length - 1;
+    if (lastIdx >= 0 && prevMsgs[lastIdx].role == MessageRole.assistant) {
+      prevMsgs[lastIdx] = prevMsgs[lastIdx].copyWith(isStreaming: false);
+    }
 
-    // 添加用户消息
+    // 添加用户消息（使用已更新上一条流式状态的 prevMsgs）
     final userMsg = ChatMessage.user(
       content: text,
       sessionId: state.currentSessionId,
     );
     state = state.copyWith(
-      messages: [...state.messages, userMsg],
+      messages: [...prevMsgs, userMsg],
       isLoading: true,
       error: null,
     );
@@ -189,7 +206,18 @@ class ChatNotifier extends StateNotifier<ChatState> {
         }
       },
       onError: (err) {
+        // 标记占位助手消息结束流式并显示错误
+        final updatedMsgs = [...state.messages];
+        final lastIdx = updatedMsgs.length - 1;
+        if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
+          updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
+            isStreaming: false,
+            isError: true,
+            errorMessage: err.toString(),
+          );
+        }
         state = state.copyWith(
+          messages: updatedMsgs,
           isLoading: false,
           error: '发送失败: $err',
         );

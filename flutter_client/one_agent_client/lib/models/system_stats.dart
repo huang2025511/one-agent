@@ -7,14 +7,14 @@ part 'system_stats.g.dart';
 @freezed
 class SystemStats with _$SystemStats {
   const factory SystemStats({
-    int? uptimeSeconds,
-    Map<String, dynamic>? busMetrics,
-    Map<String, dynamic>? llmStats,
-    Map<String, dynamic>? memoryStats,
-    int? skillsCount,
+    @JsonKey(name: 'uptime_seconds') int? uptimeSeconds,
+    @JsonKey(name: 'bus_metrics') Map<String, dynamic>? busMetrics,
+    @JsonKey(name: 'llm_stats') Map<String, dynamic>? llmStats,
+    @JsonKey(name: 'memory_stats') Map<String, dynamic>? memoryStats,
+    @JsonKey(name: 'skills_count') int? skillsCount,
     Map<String, dynamic>? sessions,
     Map<String, dynamic>? messages,
-    Map<String, dynamic>? knowledgeGraph,
+    @JsonKey(name: 'knowledge_graph') Map<String, dynamic>? knowledgeGraph,
   }) = _SystemStats;
 
   factory SystemStats.fromJson(Map<String, dynamic> json) =>
@@ -40,10 +40,11 @@ class SystemHealth with _$SystemHealth {
 class CostStats with _$CostStats {
   const factory CostStats({
     Map<String, dynamic>? daily,
-    Map<String, dynamic>? byProvider,
-    Map<String, dynamic>? byModel,
-    int? totalTokens,
-    double? totalCost,
+    Map<String, dynamic>? monthly,
+    @JsonKey(name: 'by_provider') Map<String, dynamic>? byProvider,
+    @JsonKey(name: 'by_model') Map<String, dynamic>? byModel,
+    @JsonKey(name: 'total_tokens') int? totalTokens,
+    @JsonKey(name: 'total_cost') double? totalCost,
   }) = _CostStats;
 
   factory CostStats.fromJson(Map<String, dynamic> json) =>
@@ -55,7 +56,9 @@ class CostStats with _$CostStats {
 class AppConfig with _$AppConfig {
   const factory AppConfig({
     Map<String, dynamic>? config,
-    DateTime? timestamp,
+    /// 服务端返回 float epoch（time.time()），不是 ISO 字符串。
+    /// 用 double? 原样保存，避免 DateTime.parse 抛异常。
+    double? timestamp,
   }) = _AppConfig;
 
   factory AppConfig.fromJson(Map<String, dynamic> json) =>

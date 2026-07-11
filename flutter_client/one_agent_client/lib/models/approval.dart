@@ -26,11 +26,25 @@ class ApprovalRequest with _$ApprovalRequest {
       operation: json['operation'] ?? '未知操作',
       details: json['details'],
       riskLevel: json['risk_level'] ?? 'medium',
-      createdAt: json['created_at'] != null
-          ? DateTime.tryParse(json['created_at'].toString())
-          : null,
+      // 服务端 created_at 是 float epoch（time.time()），不是 ISO 字符串
+      createdAt: _parseTimestamp(json['created_at']),
       status: json['status'] ?? 'pending',
     );
+  }
+
+  static DateTime? _parseTimestamp(dynamic value) {
+    if (value == null) return null;
+    if (value is int) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        value > 1e12 ? value : value * 1000,
+      );
+    }
+    if (value is double) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        (value > 1e12 ? value : value * 1000).toInt(),
+      );
+    }
+    return DateTime.tryParse(value.toString());
   }
 
   bool get isPending => status == 'pending';
