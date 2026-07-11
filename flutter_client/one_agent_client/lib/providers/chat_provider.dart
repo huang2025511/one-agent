@@ -254,6 +254,32 @@ class ChatNotifier extends StateNotifier<ChatState> {
     );
   }
 
+  /// 非流式发送（SSE 失败时的回退方案）
+  Future<void> _sendNonStream(String text) async {
+    try {
+      final result = await ChatApi.sendMessage(
+        text: text,
+        sessionId: state.currentSessionId,
+      );
+      _updateLastAssistantMessage(
+        content: result['reply']?.toString() ?? '无回复',
+        isStreaming: false,
+        thinking: result['thinking'] as String?,
+      );
+      if (result['session_id'] != null && state.currentSessionId == null) {
+        state = state.copyWith(currentSessionId: result['session_id'].toString());
+      }
+    } catch (e) {
+      _updateLastAssistantMessage(
+        content: '发送失败: $e',
+        isError: true,
+        errorMessage: e.toString(),
+      );
+    } finally {
+      state = state.copyWith(isLoading: false);
+    }
+  }
+
   /// 更新最后一条助手消息
   void _updateLastAssistantMessage({
     String? content,
