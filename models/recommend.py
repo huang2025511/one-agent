@@ -287,15 +287,18 @@ class RecommendationMixin:
                 logger.debug("rebuild_tiers: failed to populate _verified_models: %s", exc)
             if persist:
                 try:
-                    # 之前 self._config 在 LLMProvider 上从未初始化（已在
-                    # setup() 中修复），且本块只修改内存 dict 而从未写盘，
-                    # 导致 persist=True 与 persist=False 行为完全等价。
-                    cfg = getattr(self, "_config", None) or {}
-                    if isinstance(cfg, dict):
+                    # _config 必须通过 setup() 正式初始化才允许持久化。
+                    # 修复 critical bug：单元测试中直接 new LLMProvider() 调用
+                    # rebuild_tiers(persist=True) 时，_config 为 None，旧代码
+                    # 用 `or {}` 把它变成空 dict，然后 setdefault("llm",{})
+                    # ["model_tiers"]={...} 只产生 {"llm":{"model_tiers":{...}}}，
+                    # _dump_config 把这个部分配置写入 default_config.yaml，
+                    # 覆盖了整个配置文件——security、gateways、router 等全部丢失。
+                    cfg = getattr(self, "_config", None)
+                    if cfg and isinstance(cfg, dict):
                         cfg.setdefault("llm", {})["model_tiers"] = {
                             k: list(v) for k, v in new.items()
                         }
-                        self._config = cfg
                         # 真正写盘：回写 config 文件
                         config_path = self._resolve_config_path()
                         if config_path:
