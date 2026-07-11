@@ -31,6 +31,22 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Generate signing keystore
+        run: |
+          # 生成固定的 debug keystore，确保每次构建签名一致
+          # 使用固定的别名和密码，这样后续更新可以直接覆盖安装
+          keytool -genkey -v \
+            -keystore /home/runner/debug.keystore \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+          echo "Keystore generated at /home/runner/debug.keystore"
+          ls -la /home/runner/debug.keystore
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -56,17 +72,24 @@ jobs:
         working-directory: flutter_client/one_agent_client
         run: dart run build_runner build --delete-conflicting-outputs
 
-      - name: Set versionCode to build number
+      - name: Set versionCode and versionName to build number
         working-directory: flutter_client/one_agent_client
         run: |
-          # 将 pubspec.yaml 的 buildNumber 设为 GitHub Actions run_number
-          # 这样每次构建的 APK versionCode 都比上一次大，Android 才允许覆盖安装
-          sed -i "s/^version: .*/version: 1.0.0+${{ github.run_number }}/" pubspec.yaml
+          # 将 pubspec.yaml 的 versionName 和 buildNumber 都更新
+          # versionName: 1.0.run_number (如 1.0.33)
+          # versionCode: run_number
+          # 这样每次构建的 APK 版本号都比上一次大，Android 才允许覆盖安装
+          sed -i "s/^version: .*/version: 1.0.${{ github.run_number }}+${{ github.run_number }}/" pubspec.yaml
           echo "Updated pubspec.yaml version:"
           grep '^version:' pubspec.yaml
 
       - name: Build APK
         working-directory: flutter_client/one_agent_client
+        env:
+          KEYSTORE_PATH: /home/runner/debug.keystore
+          KEYSTORE_PASSWORD: android
+          KEYSTORE_ALIAS: androiddebugkey
+          KEYSTORE_ALIAS_PASSWORD: android
         run: flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK artifact
