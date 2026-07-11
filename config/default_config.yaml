@@ -3,7 +3,7 @@ agent:
   description: Test configuration for One-Agent
   version: 2.0.0
   data_dir: ./data
-  log_level: WARNING
+  log_level: INFO
   timezone: Asia/Shanghai
   language: en
 llm:
