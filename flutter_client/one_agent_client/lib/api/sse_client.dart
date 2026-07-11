@@ -26,9 +26,18 @@ class SseClient {
   }) async* {
     _client?.close();
     _client = HttpClient();
+    _client!.connectionTimeout = const Duration(seconds: 15);
 
     final uri = Uri.parse('$baseUrl${ApiConstants.chatStream}');
-    final request = await _client!.postUrl(uri);
+    debugPrint('🌐 SSE: POST $uri | baseUrl=$baseUrl | text=${text.substring(0, text.length > 30 ? 30 : text.length)}...');
+
+    HttpClientRequest request;
+    try {
+      request = await _client!.postUrl(uri);
+    } catch (e) {
+      debugPrint('❌ SSE: 连接失败 - $e');
+      rethrow;
+    }
 
     request.headers.set('Content-Type', 'application/json');
     request.headers.set('Accept', 'text/event-stream');
@@ -47,10 +56,20 @@ class SseClient {
     });
     request.write(body);
 
-    final response = await request.close();
+    HttpClientResponse response;
+    try {
+      response = await request.close();
+    } catch (e) {
+      debugPrint('❌ SSE: 请求失败 - $e');
+      rethrow;
+    }
+
+    debugPrint('✅ SSE: 响应状态 ${response.statusCode}');
 
     if (response.statusCode != 200) {
-      throw Exception('SSE error: ${response.statusCode}');
+      final responseBody = await response.transform(utf8.decoder).join();
+      debugPrint('❌ SSE: 错误响应体 - $responseBody');
+      throw Exception('SSE error: ${response.statusCode} - $responseBody');
     }
 
     String buffer = '';

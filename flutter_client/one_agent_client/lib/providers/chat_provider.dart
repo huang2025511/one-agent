@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -158,10 +159,22 @@ class ChatNotifier extends StateNotifier<ChatState> {
     final buffer = StringBuffer();
     String? thinkingBuffer;
 
-    final result = ChatApi.sendMessageStream(
-      text: text,
-      sessionId: state.currentSessionId,
-    );
+    StreamChatResult result;
+    try {
+      result = ChatApi.sendMessageStream(
+        text: text,
+        sessionId: state.currentSessionId,
+      );
+    } catch (e) {
+      debugPrint('❌ sendMessageStream 创建失败: $e');
+      _updateLastAssistantMessage(
+        content: '创建请求失败: $e',
+        isError: true,
+        errorMessage: '创建请求失败: $e',
+      );
+      state = state.copyWith(isLoading: false, error: '创建请求失败: $e');
+      return;
+    }
     _sseClient = result.client;
 
     _streamSub = result.stream.listen(
@@ -206,11 +219,13 @@ class ChatNotifier extends StateNotifier<ChatState> {
         }
       },
       onError: (err) {
+        debugPrint('❌ SSE stream onError: $err');
         // 标记占位助手消息结束流式并显示错误
         final updatedMsgs = [...state.messages];
         final lastIdx = updatedMsgs.length - 1;
         if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
           updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
+            content: '发送失败: $err',
             isStreaming: false,
             isError: true,
             errorMessage: err.toString(),
@@ -234,6 +249,28 @@ class ChatNotifier extends StateNotifier<ChatState> {
         _sseClient = null;
       },
     );
+  }
+
+  /// 更新最后一条助手消息
+  void _updateLastAssistantMessage({
+    String? content,
+    bool? isStreaming,
+    bool? isError,
+    String? errorMessage,
+    String? thinking,
+  }) {
+    final updatedMsgs = [...state.messages];
+    final lastIdx = updatedMsgs.length - 1;
+    if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
+      updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
+        content: content,
+        isStreaming: isStreaming,
+        isError: isError,
+        errorMessage: errorMessage,
+        thinking: thinking,
+      );
+      state = state.copyWith(messages: updatedMsgs);
+    }
   }
 
   /// 取消当前流式请求
