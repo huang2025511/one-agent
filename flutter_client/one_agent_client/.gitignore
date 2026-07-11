@@ -1,0 +1,66 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+
+# Flutter/Dart/Pub related
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+ios/.symlinks/
+ios/Pods/
+android/.gradle/
+android/key.properties
+*.iml
+
+# Android Studio
+*.iml
+.idea/
+*.ipr
+*.iws
+
+# Xcode
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.xcuserdata
+project.xcworkspace/
+xcshareddata/
+Pods/
+*.xccheckout
+*.moved-aside
+
+# IntelliJ IDEA
+*.iml
+.idea/
+*.ipr
+*.iws
+
+# VS Code
+.vscode/
+.project
+.classpath
+.settings/
+
+# Git hooks
+.git/hooks/pre-commit
+
+# Local configuration
+local.properties
+.env
+.env.local
+.env.*.local
+
+# Generated files
+lib/generated/
