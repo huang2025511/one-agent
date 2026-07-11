@@ -13,6 +13,9 @@ on:
       - '.github/workflows/build-flutter-apk.yml'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
