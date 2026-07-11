@@ -79,6 +79,7 @@ class SmartRouter(Plugin):
         turn: TurnContext | None = event.get("turn")
         if turn is None or turn.result is not None:
             return
+        logger.info("router: _on_user_message, text=%r, session_id=%s", turn.input_text[:80], turn.session_id)
         # 1) classify complexity — LLM-based with heuristic fast-path
         #    Gap 7：传入 session_id / user_id，让意图缓存按会话/用户隔离
         _uid = ""

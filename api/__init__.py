@@ -682,6 +682,8 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id") or uuid.uuid4().hex[:12]
+            logger.info("chat: received request, text=%r, session_id=%s, client=%s",
+                        text[:80], session_id, request.client.host if request.client else "?")
 
             # Validate text input
             try:
@@ -736,6 +738,8 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
             session_id = body.get("session_id") or uuid.uuid4().hex[:12]
+            logger.info("chat/stream: received request, text=%r, session_id=%s, client=%s",
+                        text[:80], session_id, request.client.host if request.client else "?")
 
             # Security restrictions: limit parameters to prevent abuse
             model = body.get("model")

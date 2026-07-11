@@ -80,6 +80,34 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ),
         actions: [
           IconButton(
+            icon: const Icon(Icons.delete_outline),
+            tooltip: '清空对话',
+            onPressed: chatState.messages.isEmpty
+                ? null
+                : () {
+                    showDialog(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('清空对话'),
+                        content: const Text('确定要清空当前对话的所有消息吗？'),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.of(ctx).pop(),
+                            child: const Text('取消'),
+                          ),
+                          FilledButton(
+                            onPressed: () {
+                              ref.read(chatProvider.notifier).clear();
+                              Navigator.of(ctx).pop();
+                            },
+                            child: const Text('清空'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+          ),
+          IconButton(
             icon: const Icon(Icons.history),
             tooltip: '会话列表',
             onPressed: () {
@@ -132,35 +160,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           const _InputBar(),
         ],
       ),
-      floatingActionButton: chatState.messages.isNotEmpty
-          ? FloatingActionButton.small(
-              heroTag: 'chat_clear',
-              tooltip: '清空对话',
-              onPressed: () {
-                showDialog(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: const Text('清空对话'),
-                    content: const Text('确定要清空当前对话的所有消息吗？'),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text('取消'),
-                      ),
-                      FilledButton(
-                        onPressed: () {
-                          ref.read(chatProvider.notifier).clear();
-                          Navigator.of(ctx).pop();
-                        },
-                        child: const Text('清空'),
-                      ),
-                    ],
-                  ),
-                );
-              },
-              child: const Icon(Icons.delete_outline),
-            )
-          : null,
     );
   }
 
