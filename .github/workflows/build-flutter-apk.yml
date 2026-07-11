@@ -56,6 +56,15 @@ jobs:
         working-directory: flutter_client/one_agent_client
         run: dart run build_runner build --delete-conflicting-outputs
 
+      - name: Set versionCode to build number
+        working-directory: flutter_client/one_agent_client
+        run: |
+          # 将 pubspec.yaml 的 buildNumber 设为 GitHub Actions run_number
+          # 这样每次构建的 APK versionCode 都比上一次大，Android 才允许覆盖安装
+          sed -i "s/^version: .*/version: 1.0.0+${{ github.run_number }}/" pubspec.yaml
+          echo "Updated pubspec.yaml version:"
+          grep '^version:' pubspec.yaml
+
       - name: Build APK
         working-directory: flutter_client/one_agent_client
         run: flutter build apk --release --no-tree-shake-icons
