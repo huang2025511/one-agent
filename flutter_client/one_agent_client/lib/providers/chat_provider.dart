@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/api_client.dart';
 import '../api/chat_api.dart';
 import '../api/session_api.dart';
 import '../api/sse_client.dart';
