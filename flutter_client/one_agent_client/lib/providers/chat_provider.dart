@@ -262,8 +262,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
     final updatedMsgs = [...state.messages];
     final lastIdx = updatedMsgs.length - 1;
     if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
-      updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
-        content: content,
+      final oldMsg = updatedMsgs[lastIdx];
+      updatedMsgs[lastIdx] = oldMsg.copyWith(
+        content: content ?? oldMsg.content,
         isStreaming: isStreaming,
         isError: isError,
         errorMessage: errorMessage,
