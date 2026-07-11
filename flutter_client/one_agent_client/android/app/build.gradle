@@ -15,12 +15,6 @@ if (localPropertiesFile.exists()) {
 def flutterVersionCode = localProperties.getProperty('flutter.versionCode') ?: '1'
 def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '1.0'
 
-// 从环境变量读取 keystore 配置（CI 构建时使用）
-def keystorePath = System.getenv("KEYSTORE_PATH")
-def keystorePassword = System.getenv("KEYSTORE_PASSWORD") ?: "android"
-def keystoreAlias = System.getenv("KEYSTORE_ALIAS") ?: "androiddebugkey"
-def keystoreAliasPassword = System.getenv("KEYSTORE_ALIAS_PASSWORD") ?: "android"
-
 android {
     namespace "com.oneagent"
     compileSdk flutter.compileSdkVersion
@@ -39,18 +33,6 @@ android {
         main.java.srcDirs += 'src/main/kotlin'
     }
 
-    signingConfigs {
-        // CI 构建时使用的固定签名配置
-        if (keystorePath != null && new File(keystorePath).exists()) {
-            release {
-                keyAlias keystoreAlias
-                keyPassword keystoreAliasPassword
-                storeFile file(keystorePath)
-                storePassword keystorePassword
-            }
-        }
-    }
-
     defaultConfig {
         applicationId "com.oneagent"
         minSdk flutter.minSdkVersion
@@ -61,8 +43,7 @@ android {
 
     buildTypes {
         release {
-            // CI 环境有 keystore 时使用 release 签名，否则使用 debug 签名
-            signingConfig signingConfigs.hasProperty('release') ? signingConfigs.release : signingConfigs.debug
+            signingConfig signingConfigs.debug
             minifyEnabled false
             shrinkResources false
         }
