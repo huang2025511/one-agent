@@ -681,7 +681,7 @@ class RESTAPIGateway(Plugin):
         async def chat(request: Request, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
-            session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            session_id = body.get("session_id") or uuid.uuid4().hex[:12]
 
             # Validate text input
             try:
@@ -735,7 +735,7 @@ class RESTAPIGateway(Plugin):
         async def chat_stream(body: dict, request: Request, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
             text = body.get("text") or body.get("message", "")
-            session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            session_id = body.get("session_id") or uuid.uuid4().hex[:12]
 
             # Security restrictions: limit parameters to prevent abuse
             model = body.get("model")

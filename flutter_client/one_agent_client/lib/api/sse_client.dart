@@ -38,7 +38,9 @@ class SseClient {
 
     final body = jsonEncode({
       'text': text,
-      'session_id': sessionId,
+      // 只在有值时发送 session_id，避免发送 null 导致服务端
+      // body.get("session_id", default) 返回 None 而非默认值
+      if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
       if (model != null) 'model': model,
       if (temperature != null) 'temperature': temperature,
       if (maxTokens != null) 'max_tokens': maxTokens,

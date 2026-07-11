@@ -250,7 +250,7 @@ class WebGateway(Plugin):
             text = body.get("text", "")
             if not isinstance(text, str) or not text.strip():
                 return JSONResponse({"error": "empty text"}, status_code=400)
-            session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            session_id = body.get("session_id") or uuid.uuid4().hex[:12]
             if self._agent_callback is None:
                 return {"reply": "[no agent callback bound]"}
             reply = await self._agent_callback(text, source="web", session_id=session_id)
@@ -263,7 +263,7 @@ class WebGateway(Plugin):
             text = body.get("text", "")
             if not isinstance(text, str) or not text.strip():
                 return JSONResponse({"error": "empty text"}, status_code=400)
-            session_id = body.get("session_id", uuid.uuid4().hex[:12])
+            session_id = body.get("session_id") or uuid.uuid4().hex[:12]
             # Clamp / sanitize caller-controlled params to prevent cost abuse
             model = body.get("model")
             temperature = body.get("temperature")

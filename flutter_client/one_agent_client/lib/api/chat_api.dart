@@ -19,7 +19,10 @@ class ChatApi {
   }) async {
     final resp = await ApiClient.dio.post(
       '/api/chat',
-      data: {'text': text, 'session_id': sessionId},
+      data: {
+        'text': text,
+        if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
+      },
     );
     return resp.data as Map<String, dynamic>;
   }
