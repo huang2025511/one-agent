@@ -66,7 +66,7 @@ jobs:
           name: one-agent-app-apk
           path: flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk
 
-      - name: Create Release
+      - name: Create GitHub Release
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: softprops/action-gh-release@v2
@@ -78,3 +78,34 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Gitee Release (国内加速下载)
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -e
+          APK_PATH="flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk"
+          TAG="app-v${RUN_NUMBER}"
+          # 1. 创建 Gitee Release（target_commitish=main）
+          RESP=$(curl -s -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases" \
+            -H "Content-Type: application/json;charset=UTF-8" \
+            -d "{
+              \"access_token\": \"${GITEE_TOKEN}\",
+              \"tag_name\": \"${TAG}\",
+              \"name\": \"One-Agent App v${RUN_NUMBER}\",
+              \"body\": \"由 GitHub Actions 自动构建发布\",
+              \"target_commitish\": \"main\"
+            }")
+          REL_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+          if [ -z "$REL_ID" ]; then
+            echo "Gitee Release 创建失败: $RESP"
+            exit 0
+          fi
+          echo "Gitee Release ID: $REL_ID"
+          # 2. 上传 APK 附件
+          curl -s -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/${REL_ID}/attach_files" \
+            -F "access_token=${GITEE_TOKEN}" \
+            -F "file=@${APK_PATH}" | python3 -c "import sys,json; r=json.load(sys.stdin); a=r if isinstance(r,dict) else (r[0] if r else {}); print('Gitee 下载地址:', a.get('browser_download_url','FAILED'))"

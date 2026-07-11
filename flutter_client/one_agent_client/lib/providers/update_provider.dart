@@ -91,6 +91,7 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
     try {
       final apkPath = await UpdateApi.downloadApk(
         release.apkUrl,
+        giteeUrl: release.giteeApkUrl,
         onProgress: (received, total) {
           if (total > 0) {
             state = state.copyWith(
