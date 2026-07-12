@@ -124,18 +124,16 @@ class PasswordManager:
         self._lockout_until: float = 0
 
     def is_configured(self) -> bool:
-        """Return True if a password hash is actually set."""
-        return bool(self._password_hash) and (
-            len(self._password_hash) == 64  # legacy SHA-256 hex
-            or self._password_hash.startswith("pbkdf2_sha256$")  # new format
-        )
+        """Return True if a password is set (plaintext or hash)."""
+        return bool(self._password_hash)
 
     def verify(self, password: str) -> bool:
-        """Check plaintext password against stored hash.
+        """Check plaintext password against stored value.
 
-        Supports two formats:
-        - ``pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>`` (recommended)
-        - 64-char hex SHA-256 (legacy, unsalted — accepted for backward compat)
+        支持三种存储格式（均向后兼容）：
+        - ``pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>`` (推荐，带盐)
+        - 64 字符 hex SHA-256 (legacy，无盐)
+        - 明文密码 (用户直接在 yaml 中填写明文，最简单)
 
         安全说明：未配置密码时返回 False（拒绝），而非 True。
         之前的 `return True` 让 DANGEROUS 命令（rm -rf, mkfs 等）能被
@@ -149,9 +147,12 @@ class PasswordManager:
         stored = self._password_hash
         if stored.startswith("pbkdf2_sha256$"):
             return _verify_pbkdf2(password, stored)
-        # Legacy SHA-256 (unsalted) — still accepted so existing configs keep working.
-        trial = hashlib.sha256(password.encode()).hexdigest()
-        return hmac.compare_digest(trial, stored)
+        # 64 字符 hex → legacy SHA-256 校验
+        if len(stored) == 64 and all(c in '0123456789abcdefABCDEF' for c in stored):
+            trial = hashlib.sha256(password.encode()).hexdigest()
+            return hmac.compare_digest(trial, stored)
+        # 否则视为明文密码直接比较（方便用户在 yaml 中直接填明文）
+        return hmac.compare_digest(stored, password)
 
     def can_attempt(self) -> bool:
         """True if we are not in lockout."""

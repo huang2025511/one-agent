@@ -832,7 +832,7 @@ class SkillManager(Plugin):
                 return "\n".join(parts)
 
             if needs_pwd:
-                return "🔒 需要密码才能执行此命令。\n请使用: /shell " + command + " --password <你的密码>\n或先解锁: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中的 security.system_executor_password\n  设为空表示允许所有 Level 0 安全命令，其他命令一律拒绝。"
+                return "🔒 需要密码才能执行此命令。\n请使用: /shell " + command + " --password <你的密码>\n或先解锁: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中的 security.system_executor_password\n  可直接填明文密码(如: mypass123)，也可填 hash(更安全)。\n  hash 生成: python -c \"from executors.system import SystemExecutor; print(SystemExecutor.hash_password('你的密码'))\"\n  设为空表示允许所有 Level 0 安全命令，其他命令一律拒绝。\n  ⚠️ 修改后需重启服务生效。"
 
             return f"❌ 执行失败: {err}"
 
@@ -864,7 +864,7 @@ class SkillManager(Plugin):
             password = str(args.get("password", ""))
 
             if not password:
-                return "用法: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中 security.system_executor_password = \"hash值\"\n  hash值生成: python -c \"from executors.system import SystemExecutor; print(SystemExecutor.hash_password('你的密码'))\""
+                return "用法: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中 security.system_executor_password\n  可直接填明文密码(如: mypass123)，也可填 hash(更安全)。\n  hash 生成: python -c \"from executors.system import SystemExecutor; print(SystemExecutor.hash_password('你的密码'))\"\n  ⚠️ 修改后需重启服务生效。"
 
             try:
                 ok = await executor.verify_password(password)

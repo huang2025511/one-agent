@@ -484,14 +484,12 @@ class Coordinator(Plugin):
         if self._skills is None:
             return False
         try:
-            # Check if password is configured
+            # Check if password is configured (支持明文、SHA-256 hex、PBKDF2 三种格式)
             has_password = False
             if self.ctx and hasattr(self.ctx, "config"):
                 sec_cfg = getattr(self.ctx.config, "get", lambda k, d: d)("security", {})
                 stored_hash = str(sec_cfg.get("system_executor_password", "") or "")
-                has_password = bool(stored_hash) and (
-                    len(stored_hash) == 64 or stored_hash.startswith("pbkdf2_sha256$")
-                )
+                has_password = bool(stored_hash)
 
             if not has_password:
                 logger.info("OS mode auto-enabled (no password configured)")
