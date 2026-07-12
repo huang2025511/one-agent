@@ -8,6 +8,7 @@ import '../api/update_api.dart';
 class UpdateState {
   final bool isChecking;
   final bool isDownloading;
+  final bool isResumed; // 当前下载是否为断点续传
   final ReleaseInfo? latestRelease;
   final int? currentVersion;
   final String? currentVersionName;
@@ -17,6 +18,7 @@ class UpdateState {
   const UpdateState({
     this.isChecking = false,
     this.isDownloading = false,
+    this.isResumed = false,
     this.latestRelease,
     this.currentVersion,
     this.currentVersionName,
@@ -30,19 +32,23 @@ class UpdateState {
   UpdateState copyWith({
     bool? isChecking,
     bool? isDownloading,
+    bool? isResumed,
     ReleaseInfo? latestRelease,
     int? currentVersion,
     String? currentVersionName,
     double? downloadProgress,
+    bool clearError = false,
     String? error,
   }) => UpdateState(
     isChecking: isChecking ?? this.isChecking,
     isDownloading: isDownloading ?? this.isDownloading,
+    isResumed: isResumed ?? this.isResumed,
     latestRelease: latestRelease ?? this.latestRelease,
     currentVersion: currentVersion ?? this.currentVersion,
     currentVersionName: currentVersionName ?? this.currentVersionName,
     downloadProgress: downloadProgress ?? this.downloadProgress,
-    error: error,
+    // clearError=true 显式清空；未传 error 时保留旧值；传了 error 则覆盖
+    error: clearError ? null : (error ?? this.error),
   );
 }
 
@@ -93,17 +99,19 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
     state = state.copyWith(
       isDownloading: true,
       downloadProgress: 0,
-      error: null,
+      isResumed: false,
+      clearError: true,
     );
 
     try {
-      final apkPath = await UpdateApi.downloadApk(
+      final apkPath = await UpdateApi.downloadApkWithResume(
         release.apkUrl,
         giteeUrl: release.giteeApkUrl,
-        onProgress: (received, total) {
+        onProgress: (received, total, isResumed) {
           if (total > 0) {
             state = state.copyWith(
               downloadProgress: received / total,
+              isResumed: isResumed,
             );
           }
         },
@@ -114,14 +122,20 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
       if (result.type != ResultType.done) {
         state = state.copyWith(
           isDownloading: false,
+          isResumed: false,
           error: '无法打开安装器: ${result.message}',
         );
       } else {
-        state = state.copyWith(isDownloading: false);
+        state = state.copyWith(
+          isDownloading: false,
+          isResumed: false,
+          clearError: true,
+        );
       }
     } catch (e) {
       state = state.copyWith(
         isDownloading: false,
+        isResumed: false,
         error: '下载失败: $e',
       );
     }
@@ -129,7 +143,7 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
 
   /// 清除错误状态
   void clearError() {
-    state = state.copyWith(error: null);
+    state = state.copyWith(clearError: true);
   }
 }
 

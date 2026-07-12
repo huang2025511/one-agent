@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
+import '../l10n/app_localizations.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../models/chat_message.dart';
@@ -56,6 +58,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final chatState = ref.watch(chatProvider);
     final settingsState = ref.watch(settingsProvider);
     final isConnected = settingsState.isConnected;
+    final l10n = AppLocalizations.of(context)!;
 
     // 仅在接近底部时自动滚动，避免打断用户上滑阅读历史
     if (chatState.messages.isNotEmpty && _isNearBottom) {
@@ -75,32 +78,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               ),
             ),
             const SizedBox(width: 8),
-            const Text('One-Agent 聊天'),
+            Text(l10n.chatTitle),
           ],
         ),
         actions: [
           IconButton(
             icon: const Icon(Icons.delete_outline),
-            tooltip: '清空对话',
+            tooltip: l10n.clearChat,
             onPressed: chatState.messages.isEmpty
                 ? null
                 : () {
                     showDialog(
                       context: context,
                       builder: (ctx) => AlertDialog(
-                        title: const Text('清空对话'),
-                        content: const Text('确定要清空当前对话的所有消息吗？'),
+                        title: Text(l10n.clearChat),
+                        content: Text(l10n.clearChatConfirm),
                         actions: [
                           TextButton(
                             onPressed: () => Navigator.of(ctx).pop(),
-                            child: const Text('取消'),
+                            child: Text(l10n.cancel),
                           ),
                           FilledButton(
                             onPressed: () {
                               ref.read(chatProvider.notifier).clear();
                               Navigator.of(ctx).pop();
                             },
-                            child: const Text('清空'),
+                            child: Text(l10n.clearChat),
                           ),
                         ],
                       ),
@@ -109,7 +112,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.history),
-            tooltip: '会话列表',
+            tooltip: l10n.sessionList,
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const SessionListScreen()),
@@ -118,7 +121,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
-            tooltip: '设置',
+            tooltip: l10n.settings,
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const SettingsScreen()),
@@ -143,18 +146,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           Expanded(
             child: chatState.messages.isEmpty
-                ? _buildEmptyState(context)
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
+                ? _buildEmptyState(context, l10n)
+                // 使用 SelectionArea 包裹整个 ListView，
+                // 用户可以长按选择任意消息的部分内容进行复制
+                : SelectionArea(
+                    child: ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      itemCount: chatState.messages.length,
+                      itemBuilder: (context, index) {
+                        final msg = chatState.messages[index];
+                        return _MessageBubble(message: msg);
+                      },
                     ),
-                    itemCount: chatState.messages.length,
-                    itemBuilder: (context, index) {
-                      final msg = chatState.messages[index];
-                      return _MessageBubble(message: msg);
-                    },
                   ),
           ),
           const _InputBar(),
@@ -163,7 +170,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
-  Widget _buildEmptyState(BuildContext context) {
+  Widget _buildEmptyState(BuildContext context, AppLocalizations l10n) {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -175,14 +182,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ),
           const SizedBox(height: 16),
           Text(
-            '开始新的对话',
+            l10n.startChat,
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
                   color: Theme.of(context).colorScheme.outline,
                 ),
           ),
           const SizedBox(height: 8),
           Text(
-            '在下方输入框发送消息',
+            l10n.inputBelow,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                   color: Theme.of(context).colorScheme.outlineVariant,
                 ),
@@ -193,15 +200,29 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 }
 
+/// 消息气泡 — 支持长按复制整条消息 + 文本选择复制部分内容
 class _MessageBubble extends StatelessWidget {
   final ChatMessage message;
 
   const _MessageBubble({required this.message});
 
+  /// 复制整条消息内容到剪贴板
+  void _copyMessage(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    Clipboard.setData(ClipboardData(text: message.content));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(l10n.copySuccess),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isUser = message.role == MessageRole.user;
     final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context)!;
 
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -221,49 +242,85 @@ class _MessageBubble extends StatelessWidget {
             bottomRight: Radius.circular(isUser ? 4 : 16),
           ),
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (message.thinking != null && message.thinking!.isNotEmpty)
-              _ThinkingExpansion(thinking: message.thinking!),
+            // 顶部操作栏 — 长按消息或点击复制按钮
             if (message.content.isNotEmpty)
-              MarkdownBody(
-                data: message.content,
-                selectable: true,
-                styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
-                  p: theme.textTheme.bodyMedium?.copyWith(
-                    color: isUser
-                        ? theme.colorScheme.onPrimaryContainer
-                        : theme.colorScheme.onSurfaceVariant,
-                  ),
+              PopupMenuButton<String>(
+                icon: Icon(
+                  Icons.more_horiz,
+                  size: 18,
+                  color: isUser
+                      ? theme.colorScheme.onPrimaryContainer.withOpacity(0.6)
+                      : theme.colorScheme.onSurfaceVariant.withOpacity(0.6),
                 ),
-              )
-            else if (message.isStreaming == true)
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: isUser
-                          ? theme.colorScheme.onPrimaryContainer
-                          : theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '思考中...',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: isUser
-                          ? theme.colorScheme.onPrimaryContainer
-                          : theme.colorScheme.onSurfaceVariant,
+                padding: const EdgeInsets.only(top: 4, right: 4),
+                tooltip: l10n.copy,
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: 'copy',
+                    child: Row(
+                      children: [
+                        const Icon(Icons.copy, size: 18),
+                        const SizedBox(width: 8),
+                        Text(l10n.copy),
+                      ],
                     ),
                   ),
                 ],
+                onSelected: (value) {
+                  if (value == 'copy') _copyMessage(context);
+                },
               ),
+            // 消息内容
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (message.thinking != null && message.thinking!.isNotEmpty)
+                    _ThinkingExpansion(thinking: message.thinking!),
+                  if (message.content.isNotEmpty)
+                    MarkdownBody(
+                      data: message.content,
+                      selectable: true,
+                      styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
+                        p: theme.textTheme.bodyMedium?.copyWith(
+                          color: isUser
+                              ? theme.colorScheme.onPrimaryContainer
+                              : theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  else if (message.isStreaming == true)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: isUser
+                                ? theme.colorScheme.onPrimaryContainer
+                                : theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          l10n.thinking,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: isUser
+                                ? theme.colorScheme.onPrimaryContainer
+                                : theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -286,6 +343,7 @@ class _ThinkingExpansionState extends State<_ThinkingExpansion> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context)!;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -304,7 +362,7 @@ class _ThinkingExpansionState extends State<_ThinkingExpansion> {
                 ),
                 const SizedBox(width: 4),
                 Text(
-                  '思考过程',
+                  l10n.thinkingProcess,
                   style: theme.textTheme.labelSmall?.copyWith(
                     color: theme.colorScheme.primary,
                     fontWeight: FontWeight.w600,
@@ -364,7 +422,6 @@ class _InputBarState extends ConsumerState<_InputBar> {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     // 修复：500ms 防抖，防止用户连续快速点击发送按钮
-    // 之前虽然 TextField 禁用，但发送按钮仍可点击，会触发重复请求
     final now = DateTime.now();
     if (_lastSendTime != null &&
         now.difference(_lastSendTime!).inMilliseconds < 500) {
@@ -381,6 +438,7 @@ class _InputBarState extends ConsumerState<_InputBar> {
   Widget build(BuildContext context) {
     final chatState = ref.watch(chatProvider);
     final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context)!;
 
     return SafeArea(
       child: Container(
@@ -403,7 +461,7 @@ class _InputBarState extends ConsumerState<_InputBar> {
                 minLines: 1,
                 maxLines: 5,
                 decoration: InputDecoration(
-                  hintText: '输入消息...',
+                  hintText: l10n.inputMessage,
                   filled: true,
                   fillColor: theme.colorScheme.surfaceContainerHighest,
                   contentPadding: const EdgeInsets.symmetric(
@@ -422,13 +480,13 @@ class _InputBarState extends ConsumerState<_InputBar> {
               IconButton.filledTonal(
                 onPressed: () => ref.read(chatProvider.notifier).cancelStream(),
                 icon: const Icon(Icons.stop),
-                tooltip: '停止生成',
+                tooltip: l10n.stopGenerate,
               )
             else
               IconButton.filled(
                 onPressed: _send,
                 icon: const Icon(Icons.send),
-                tooltip: '发送',
+                tooltip: l10n.send,
               ),
           ],
         ),

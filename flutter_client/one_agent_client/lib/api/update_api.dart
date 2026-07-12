@@ -152,4 +152,206 @@ class UpdateApi {
     }
     throw Exception('所有下载源均失败: $lastError');
   }
+
+  /// 断点续传下载 APK
+  /// 支持从已下载的位置继续下载，使用 HTTP Range header
+  /// 下载到临时文件（.apk.tmp），完成后重命名为最终文件（.apk）
+  ///
+  /// 处理以下情况：
+  /// - 服务端不支持 Range 请求（返回 200 而非 206）：自动截断临时文件重新下载
+  /// - Gitee URL 作为备用下载源：Gitee 优先，GitHub 兜底
+  /// - 下载中断后保留临时文件：下次调用可从已下载位置继续
+  /// - 正确的进度回调：received/total 包含已下载+本次下载的总量
+  static Future<String> downloadApkWithResume(
+    String url, {
+    String? giteeUrl,
+    void Function(int received, int total, bool isResumed)? onProgress,
+  }) async {
+    final dir = await getTemporaryDirectory();
+    final tempPath = '${dir.path}/one_agent_update.apk.tmp';
+    final finalPath = '${dir.path}/one_agent_update.apk';
+
+    final tempFile = File(tempPath);
+    final finalFile = File(finalPath);
+
+    // 下载候选 URL：Gitee 优先，GitHub 兜底
+    final candidates = <String>[
+      if (giteeUrl != null && giteeUrl.isNotEmpty) giteeUrl,
+      url,
+    ];
+
+    // 1. 通过 HEAD 获取文件总大小（依次尝试各候选源）
+    int? totalSize;
+    for (final candidate in candidates) {
+      final headDio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(seconds: 15),
+        followRedirects: true,
+      ));
+      try {
+        final headResp = await headDio.head(
+          candidate,
+          options: Options(
+            validateStatus: (s) => s != null && s < 400,
+            headers: {'Accept': '*/*'},
+          ),
+        );
+        final len = int.tryParse(
+          headResp.headers.value('content-length') ?? '',
+        );
+        if (len != null && len > 0) {
+          totalSize = len;
+          break;
+        }
+      } catch (_) {
+        // 某些服务器不支持 HEAD，忽略错误继续尝试下一个源
+      } finally {
+        headDio.close();
+      }
+    }
+
+    // 2. 检查临时文件已下载字节数
+    int downloadedBytes = 0;
+    if (await tempFile.exists()) {
+      downloadedBytes = await tempFile.length();
+    }
+
+    // 临时文件比总大小还大，说明数据损坏，删除后重新下载
+    if (totalSize != null &&
+        downloadedBytes > totalSize &&
+        totalSize > 0) {
+      try {
+        await tempFile.delete();
+      } catch (_) {}
+      downloadedBytes = 0;
+    }
+
+    // 3. 若已下载完成，直接重命名为最终文件并返回
+    if (totalSize != null &&
+        downloadedBytes >= totalSize &&
+        totalSize > 0 &&
+        downloadedBytes > 0) {
+      if (await finalFile.exists()) {
+        try {
+          await finalFile.delete();
+        } catch (_) {}
+      }
+      await tempFile.rename(finalPath);
+      return finalPath;
+    }
+
+    // 4. 使用 Range header 流式下载剩余部分，逐个尝试候选源
+    Object? lastError;
+    for (int i = 0; i < candidates.length; i++) {
+      final downloadUrl = candidates[i];
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(minutes: 30),
+        followRedirects: true,
+      ));
+
+      try {
+        // 每轮循环开始前重新读取临时文件大小（上一轮可能已写入部分数据）
+        if (await tempFile.exists()) {
+          downloadedBytes = await tempFile.length();
+        } else {
+          downloadedBytes = 0;
+        }
+
+        final isResumed = downloadedBytes > 0;
+
+        final response = await dio.get(
+          downloadUrl,
+          options: Options(
+            headers: downloadedBytes > 0
+                ? {'Range': 'bytes=$downloadedBytes-'}
+                : null,
+            responseType: ResponseType.stream,
+            receiveTimeout: const Duration(minutes: 30),
+            // 接受 200 / 206；416 表示 Range 越界（视为已完成）
+            validateStatus: (s) => s != null && (s < 300 || s == 416),
+          ),
+        );
+
+        final statusCode = response.statusCode ?? 200;
+
+        // 416 Range Not Satisfiable：临时文件已包含全部内容
+        if (statusCode == 416) {
+          dio.close();
+          if (await finalFile.exists()) {
+            try {
+              await finalFile.delete();
+            } catch (_) {}
+          }
+          await tempFile.rename(finalPath);
+          return finalPath;
+        }
+
+        final supportsResume = statusCode == 206;
+
+        // 服务端返回 200（不支持 Range）但本地有部分数据：
+        // 必须截断临时文件重新下载
+        IOSink sink;
+        int startBytes;
+        if (supportsResume && downloadedBytes > 0) {
+          sink = tempFile.openWrite(mode: FileMode.append);
+          startBytes = downloadedBytes;
+        } else {
+          sink = tempFile.openWrite(mode: FileMode.writeOnly);
+          startBytes = 0;
+          downloadedBytes = 0;
+        }
+
+        // 计算实际总大小
+        final contentLength = int.tryParse(
+              response.headers.value('content-length') ?? '',
+            ) ??
+            0;
+        final actualTotal = supportsResume
+            ? (totalSize ?? (startBytes + contentLength))
+            : (totalSize ?? contentLength);
+
+        try {
+          int currentBytes = startBytes;
+          await response.data.stream.forEach((chunk) {
+            sink.add(chunk);
+            currentBytes += chunk.length;
+            onProgress?.call(currentBytes, actualTotal, isResumed);
+          });
+          await sink.flush();
+          await sink.close();
+
+          // 完整性校验：若已知总大小，校验最终字节数
+          if (actualTotal > 0 && currentBytes < actualTotal) {
+            throw DioException(
+              requestOptions: response.requestOptions,
+              message: '下载不完整: $currentBytes / $actualTotal',
+            );
+          }
+
+          dio.close();
+
+          // 重命名为最终文件
+          if (await finalFile.exists()) {
+            try {
+              await finalFile.delete();
+            } catch (_) {}
+          }
+          await tempFile.rename(finalPath);
+          return finalPath;
+        } catch (e) {
+          try {
+            await sink.close();
+          } catch (_) {}
+          rethrow;
+        }
+      } catch (e) {
+        dio.close();
+        lastError = e;
+        // 不删除临时文件，保留以便下一轮或下次启动时续传
+      }
+    }
+
+    throw Exception('所有下载源均失败: $lastError');
+  }
 }
