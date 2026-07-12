@@ -108,10 +108,10 @@ from core.conv_branch import get_branch_manager
 logger = logging.getLogger(__name__)
 
 # Coordinator configuration constants
-MAX_TOOL_ITERATIONS = 5
+MAX_TOOL_ITERATIONS = 15  # 从5增加到15，支持更复杂的多步任务
 DEFAULT_MAX_TOKENS = 2048
-MAX_SKILL_FAILURES = 3
-TURN_COMPLETION_TIMEOUT = 120.0
+MAX_SKILL_FAILURES = 5  # 从3增加到5，允许更多次尝试
+TURN_COMPLETION_TIMEOUT = 300.0  # 从120增加到300秒，支持更长时间的复杂任务
 SKILL_EXECUTION_TIMEOUT = 60.0
 # Complexity tier thresholds (determine execution strategy).
 # Imported from router to keep a single source of truth — router owns
@@ -1334,11 +1334,86 @@ class Coordinator(Plugin):
         # search intent and inject results before the main LLM call.
         await self._auto_web_search_if_needed(messages, turn)
 
+        # 记录内部消息注入位置，用于生成结果后清理，避免 messages 膨胀
+        _internal_messages_start_idx = len(messages)
+
+        # --- Step 2.7: Task planning for complex tasks ---
+        # 对复杂度 >= 0.5 的任务，先生成执行计划
+        if complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
+            self._emit_progress(turn, "正在规划任务步骤...", "planning")
+            await self._task_planning(messages, turn, tools)
+
+        # --- Step 2.8: Multi-solution comparison for expert tasks ---
+        # 对复杂度 >= 0.7 的任务，生成多个解决方案并选择最优
+        if complexity >= DEEP_RESEARCH_MIN_COMPLEXITY:
+            self._emit_progress(turn, "正在分析多个解决方案...", "comparison")
+            comparison_result = await self._multi_solution_comparison(messages, turn)
+            if comparison_result:
+                # 将多方案比较结果注入 messages，让后续 tool_loop 能参考最优方案
+                turn.meta["multi_solution_comparison"] = comparison_result
+                zh = self._is_zh()
+                comparison_header = "【多方案比较结果】\n" if zh else "[Multi-solution Comparison Result]\n"
+                messages.append({"role": "assistant", "content": comparison_header + comparison_result, "_internal": True})
+                followup = (
+                    "请参考以上多方案比较结果，选择最优方案来执行任务。"
+                    if zh else
+                    "Please use the best solution from the comparison above to execute the task."
+                )
+                messages.append({"role": "user", "content": followup, "_internal": True})
+
+        # --- Step 2.9: Internal reasoning for complex tasks ---
+        # 对复杂度 >= 0.5 的任务，在 tool_loop 之前进行多轮内部推理，
+        # 让 Agent 先通过自我对话深入分析问题，再执行工具调用
+        if complexity >= COMPLEX_COMPLEXITY_THRESHOLD and self._llm is not None:
+            self._emit_progress(turn, "正在进行深度分析...", "reasoning")
+            reasoning_result = await self._internal_reasoning_loop(messages, turn, max_rounds=3)
+            if reasoning_result:
+                zh = self._is_zh()
+                reasoning_header = "【深度分析结论】\n" if zh else "[Deep Analysis Conclusion]\n"
+                messages.append({"role": "assistant", "content": reasoning_header + reasoning_result, "_internal": True})
+                followup = (
+                    "请基于以上分析结论执行任务。"
+                    if zh else
+                    "Please execute the task based on the analysis conclusion above."
+                )
+                messages.append({"role": "user", "content": followup, "_internal": True})
+
         # --- Step 3: Tool-call loop ---
         # 只对复杂任务发进度，简单任务靠心跳兜底
         if complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
             self._emit_progress(turn, "正在执行任务...", "tool_loop")
         await self._tool_loop(messages, turn, tools)
+
+        # --- Step 3.5: Post-execution reflection ---
+        # 在工具循环结束后，对复杂度 >= 0.5 的任务进行反思
+        # 限制最多重新生成 1 次，防止反思-重新生成无限循环
+        if complexity >= COMPLEX_COMPLEXITY_THRESHOLD and turn.result and not turn.error:
+            self._emit_progress(turn, "正在反思执行结果...", "reflection")
+            needs_regenerate = await self._post_execution_reflection(messages, turn, turn.result)
+            if needs_regenerate and not turn.meta.get("_reflection_regenerated"):
+                self._emit_progress(turn, "反思发现问题，重新生成...", "regeneration")
+                turn.meta["_reflection_regenerated"] = True
+                turn.result = None  # 重置 result，让 _tool_loop 重新生成
+                await self._tool_loop(messages, turn, tools)
+
+        # --- Step 3.6: 清理内部消息 ---
+        # 删除 _internal=True 标记的消息，避免内部思考/规划/比较内容
+        # 污染 conversation history 导致后续 LLM 上下文爆炸
+        # 保留 system、user 原始输入和最终 assistant 回复
+        _internal_count = 0
+        _kept_messages: List[Dict[str, Any]] = []
+        for m in messages:
+            if m.pop("_internal", False):
+                _internal_count += 1
+            else:
+                _kept_messages.append(m)
+        if _internal_count > 0:
+            messages.clear()
+            messages.extend(_kept_messages)
+            logger.debug(
+                "internal messages cleaned: removed %d, kept %d",
+                _internal_count, len(messages),
+            )
 
         # --- Step 4: Post-execution quality improvements by tier ---
         # For complex+: combine self-verification and final polish into one
@@ -2492,7 +2567,16 @@ class Coordinator(Plugin):
         return True
 
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
-        """Execute tool-call loop until final reply."""
+        """Execute tool-call loop using ReAct pattern (Reason-Act-Observe).
+        
+        ReAct 模式流程：
+        1. 思考（Reason）: LLM 分析当前状态，决定下一步做什么
+        2. 行动（Act）: 调用工具执行
+        3. 观察（Observe）: 查看工具返回结果
+        4. 再思考（Reason again）: 基于结果继续循环
+        
+        对于复杂任务，每次迭代都包含思考步骤，让 Agent 真正"思考"后再行动。
+        """
         if tools is None:
             raise RuntimeError("tools cannot be None")
 
@@ -2508,7 +2592,6 @@ class Coordinator(Plugin):
         total_cost = 0.0
 
         # Gap 6：思考计划约束执行
-        # 跟踪已调用工具，模型想提前结束时若计划中还有未执行的工具，注入提醒。
         available_tool_names = {
             t.get("function", {}).get("name", "")
             for t in (tools or []) if isinstance(t, dict)
@@ -2517,19 +2600,54 @@ class Coordinator(Plugin):
             turn.meta.get("tool_chain_plan", ""), available_tool_names,
         )
         called_tools: set = set()
-        nudged: bool = False  # 只提醒一次，避免无限循环
+        nudged: bool = False
 
-        # Round 7 修复：熔断器 + 退避 — 在循环外初始化，避免 else 块未定义
+        # Round 7 修复：熔断器 + 退避
         circuit = get_circuit_manager().get(f"llm:{provider}")
         llm_backoff_strategy = llm_backoff()
         dyn_temp = self._compute_dynamic_temperature(turn)
 
-        for i in range(self._max_tool_iterations):
-            # Gap 6 修复：LLM API 调用前先获取令牌（rate limit）
-            await rate_limiter.acquire(provider)
+        # ReAct: 维护思考历史
+        thinking_history: List[str] = []
 
-            # Gap 7 修复：动态温度 — 每轮重新计算（可能因上下文变化调整）
+        for i in range(self._max_tool_iterations):
+            await rate_limiter.acquire(provider)
             dyn_temp = self._compute_dynamic_temperature(turn)
+
+            # ========== ReAct Step 1: 思考（Reason） ==========
+            # 对于复杂任务，每次迭代前都让 LLM 显式思考下一步
+            complexity = getattr(turn, "estimated_complexity", 0.0)
+            if complexity >= 0.3 and i > 0:
+                self._emit_progress(turn, "正在思考下一步...", "thinking")
+                thought_prompt = self._generate_react_thought_prompt(
+                    turn, i, thinking_history, tools, _failed_skills
+                )
+                messages.append({"role": "user", "content": thought_prompt, "_internal": True})
+                
+                async def _do_thought_call():
+                    return await self._llm.chat_completion(
+                        messages=messages,
+                        model=turn.model,
+                        max_tokens=500,
+                        temperature=dyn_temp,
+                    )
+                
+                try:
+                    thought_resp = await circuit.acall(
+                        lambda: llm_backoff_strategy.retry(_do_thought_call),
+                    )
+                    thought_text = thought_resp.get("text", "") or ""
+                    if thought_text:
+                        thinking_history.append(thought_text)
+                        # 将思考结果作为 assistant 消息加入上下文
+                        messages.append({"role": "assistant", "content": f"思考：{thought_text}"})
+                        self._emit_progress(turn, f"思考：{thought_text[:50]}...", "thinking")
+                        tokens_used = int(thought_resp.get("tokens_used") or 0)
+                        total_tokens += tokens_used
+                        total_cost += (tokens_used / 1000) * MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002))
+                except Exception as exc:
+                    logger.debug("ReAct thought step failed: %s", exc)
+                    # 思考失败不阻断，继续执行
 
             async def _do_llm_call():
                 return await self._llm.chat_completion(
@@ -2541,12 +2659,10 @@ class Coordinator(Plugin):
                 )
 
             try:
-                # 先尝试熔断器 + 退避
                 resp = await circuit.acall(
                     lambda: llm_backoff_strategy.retry(_do_llm_call),
                 )
             except CircuitOpenError:
-                # 熔断器打开 — 触发告警，降级返回
                 await get_alert_manager().fire(
                     "circuit_open",
                     title=f"LLM circuit OPEN: {provider}",
@@ -2577,7 +2693,6 @@ class Coordinator(Plugin):
                 turn.meta["circuit_open"] = True
                 return
             except Exception as exc:
-                # 退避也失败了 — 触发告警
                 await get_alert_manager().fire(
                     "llm_error",
                     title=f"LLM call failed: {provider}",
@@ -2593,42 +2708,30 @@ class Coordinator(Plugin):
 
             tool_calls = resp.get("tool_calls") or []
 
-            # Fallback: 当模型不支持 function calling (如 sensenova flash-lite) 时，
-            # LLM 可能在纯文本里输出 <web_search query="..."/> 这类自闭合 XML 标签
-            # 来"表达"工具调用意图。之前这些标签既不解析也不执行，直接泄漏给用户。
-            # 这里补一条解析链路：从输出文本中提取 XML 工具标签 → 转为 tool_calls 结构。
+            # Fallback: 解析 XML 工具标签
             if not tool_calls and resp.get("text"):
                 parsed_calls = self._parse_xml_tool_tags(resp["text"])
                 if parsed_calls:
-                    # 安全过滤：system_run 需要 OS 模式开启才能执行
-                    # 否则即使模型输出了 <system_run/> 标签也不执行
                     if not (self._os_mode_enabled or turn.meta.get("needs_system_access")):
                         parsed_calls = [
                             c for c in parsed_calls if c["name"] != "system_run"
                         ]
                     if parsed_calls:
                         tool_calls = parsed_calls
-                        # 记录工具调用来源，供后续 sanitize 使用
                         turn.meta["xml_parsed_tool_calls"] = True
                         logger.info(
                             "tool_loop: parsed %d tool call(s) from XML tags in text output",
                             len(tool_calls),
                         )
 
+            # ========== ReAct Step 2: 决策 — 输出最终回复或调用工具 ==========
             if not tool_calls:
-                # Gap 1 修复：流式输出 — 使用 streaming 获取最终回复
-                # 尝试流式调用，降级到非流式
                 final_text = resp.get("text", "") or ""
                 try:
                     if hasattr(self._llm, 'chat_completion_stream'):
                         streamed_parts = []
                         last_emit = 0
-                        current_len = 0  # 累积长度计数器, 避免 O(n²) join
-                        # 关键 bug 修复：生产端 chat_completion_stream yield 的字段名是
-                        # "delta" (见 models/__init__.py 所有 yield 语句), 之前消费端
-                        # 写 chunk.get("text", "") 永远取不到值 → 流式静默失效,
-                        # 用户看不到打字机效果, _emit_progress 永不触发。
-                        # 同时初始化 chunk 防 async for 不执行时 UnboundLocalError。
+                        current_len = 0
                         chunk = {}
                         async for chunk in self._llm.chat_completion_stream(
                             messages=messages,
@@ -2640,28 +2743,24 @@ class Coordinator(Plugin):
                             if delta:
                                 streamed_parts.append(delta)
                                 current_len += len(delta)
-                                # 每 50 个字符发送一次进度事件
-                                # 优化: 用计数器避免每次 join, 仅在阈值触发时 join 一次
                                 if current_len - last_emit >= 50:
                                     last_emit = current_len
                                     self._emit_progress(
                                         turn, "".join(streamed_parts), "streaming"
                                     )
-                            # done 帧携带 tokens_used, 取最终值
                             if chunk.get("done") and chunk.get("tokens_used"):
                                 tokens_used = int(chunk["tokens_used"])
                         if streamed_parts:
                             final_text = "".join(streamed_parts)
                 except Exception as stream_err:
                     logger.debug("streaming failed, using non-streamed response: %s", stream_err)
-                    # fallback to non-streamed response already in final_text
 
-                # Gap 6：模型想结束，但计划中还有工具没调用 → 提醒继续执行
+                # Gap 6：计划约束提醒
                 if (
                     not nudged
                     and planned_tools
                     and i < self._max_tool_iterations - 1
-                    and final_text  # 模型确实产出了内容（不是空响应）
+                    and final_text
                 ):
                     missing = [t for t in planned_tools if t not in called_tools]
                     if missing:
@@ -2681,20 +2780,25 @@ class Coordinator(Plugin):
                         messages.append({"role": "user", "content": nudge})
                         nudged = True
                         turn.meta["plan_nudge_triggered"] = True
-                        continue  # 再来一轮，不 break
+                        continue
 
                 if final_text:
+                    # 检测继续思考信号
+                    continue_thinking = await self._handle_continue_thinking(
+                        messages, turn, final_text, tools, _failed_skills, i
+                    )
+                    if continue_thinking:
+                        continue
                     messages.append({"role": "assistant", "content": final_text})
                 break
 
-            # 记录本轮调用的工具名
+            # ========== ReAct Step 3: 行动（Act）— 调用工具 ==========
             for tc in tool_calls:
                 nm = tc.get("name") or tc.get("function", {}).get("name", "")
                 if nm:
                     called_tools.add(nm)
 
-            # Gap 5 修复：语义去重。检测与历史调用完全相同的工具+参数组合，
-            # 跳过重复调用，直接注入缓存结果提示。
+            # Gap 5 修复：语义去重
             deduped_calls = []
             for tc in tool_calls:
                 nm = tc.get("name") or tc.get("function", {}).get("name", "")
@@ -2703,7 +2807,6 @@ class Coordinator(Plugin):
                     args_str = str(args_str)
                 dedup_key = f"{nm}:{args_str[:200]}"
                 if dedup_key in called_tools:
-                    # 重复调用 → 注入提示而不是执行
                     zh = self._is_zh()
                     if zh:
                         hint = f"[系统提示：工具 {nm} 已用相同参数调用过，请勿重复。]"
@@ -2718,7 +2821,8 @@ class Coordinator(Plugin):
             if deduped_calls:
                 await self._execute_tool_calls(messages, turn, deduped_calls, _failed_skills, i)
 
-            # Gap 3 修复：函数调用自修正 — 对失败的工具调用，让 LLM 修正参数后重试
+            # ========== ReAct Step 4: 观察（Observe）— 分析结果并决定下一步 ==========
+            # 自我修正：工具调用失败时自动分析错误并重试
             if i < self._max_tool_iterations - 1:
                 retry_count = turn.meta.get("auto_retry_count", 0)
                 if retry_count < MAX_TOOL_RETRIES:
@@ -2729,20 +2833,17 @@ class Coordinator(Plugin):
                         ) > 0
                     ]
                     if failed_in_round:
-                        # 构造自修正提示：把失败的工具调用和错误信息发给 LLM
-                        # 从 turn.meta["tool_results"] 中提取最新的失败结果，获取错误原因
                         recent_results = turn.meta.get("tool_results", [])
                         failed_info = ""
                         for tc in failed_in_round[:3]:
                             nm = tc.get("name") or tc.get("function", {}).get("name", "")
                             args = tc.get("args") or tc.get("function", {}).get("arguments", "{}")
-                            # 查找该工具最近的错误信息
                             err_msg = ""
                             for r in reversed(recent_results):
                                 if getattr(r, "tool_name", "") == nm and getattr(r, "status", "") in ("error", "unavailable"):
                                     err_msg = getattr(r, "error", "") or getattr(r, "data", "")
                                     if err_msg:
-                                        err_msg = err_msg[:200]  # 截断过长的错误信息
+                                        err_msg = err_msg[:200]
                                     break
                             if err_msg:
                                 failed_info += f"\n- {nm}({args}) → 失败，原因: {err_msg}"
@@ -2766,11 +2867,9 @@ class Coordinator(Plugin):
                         turn.meta["auto_retry_triggered"] = True
                         logger.debug("auto-retry: triggered for %d failed tools (attempt %d)",
                                    len(failed_in_round), retry_count + 1)
-                        continue  # 让 LLM 修正后重试同一轮
+                        continue
 
-            # Gap 3：动态重规划 — 检测本轮工具失败，注入重规划提示
-            # 之前工具失败只是记录在 messages 里，模型不一定主动调整策略。
-            # 现在检测到失败后注入明确的"请换方案"提示，让模型重新规划后续步骤。
+            # 动态重规划
             if i < self._max_tool_iterations - 1:
                 this_round_names = [tc.get("name") or tc.get("function", {}).get("name", "") for tc in tool_calls]
                 any_failed = any(
@@ -2808,7 +2907,7 @@ class Coordinator(Plugin):
                 })
 
         else:
-            # Loop exhausted
+            # Loop exhausted — ReAct 模式下，即使耗尽迭代次数，也要给最终回复
             await self._handle_loop_exhaustion(messages, turn)
             await rate_limiter.acquire(provider)
             try:
@@ -2843,7 +2942,7 @@ class Coordinator(Plugin):
             total_tokens += tokens_used
             total_cost += (tokens_used / 1000) * MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002))
 
-        # 记录成本信息（Gap 8）
+        # 记录成本信息
         turn.meta["cost"] = {
             "total_tokens": total_tokens,
             "total_cost_usd": round(total_cost, 6),
@@ -2851,7 +2950,7 @@ class Coordinator(Plugin):
             "cost_per_1k": MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002)),
         }
 
-        # 记录计划完成度（供 self-improvement 分析）
+        # 记录计划完成度
         if planned_tools:
             turn.meta["plan_completion"] = {
                 "planned": planned_tools,
@@ -2860,9 +2959,12 @@ class Coordinator(Plugin):
                 "nudged": nudged,
             }
 
+        # ReAct: 记录思考历史
+        if thinking_history:
+            turn.meta["react_thinking"] = thinking_history
+
         # Record failure for self-improvement
         if turn.result is None and turn.error:
-            # 用异步版本：真正闭环（record_failure + LLM 提炼改进 + apply_improvement）
             await self._record_self_improvement_async(turn)
 
         if not final_text:
@@ -2872,7 +2974,7 @@ class Coordinator(Plugin):
                 "Sorry, the AI couldn't generate a reply. Please try again."
             )
 
-        # Gap 3 修复：输出安全扫描 — 检测输出中是否泄露 PII
+        # Gap 3 修复：输出安全扫描
         output_safety = scan_output(final_text)
         if output_safety.pii_found:
             final_text = output_safety.sanitized_text
@@ -2884,6 +2986,534 @@ class Coordinator(Plugin):
             }
 
         turn.record_success(final_text, total_tokens)
+
+    def _generate_react_thought_prompt(
+        self, turn: TurnContext, iteration: int, thinking_history: List[str],
+        tools: List[Dict[str, Any]], failed_skills: Dict[str, int],
+    ) -> str:
+        """生成 ReAct 思考提示，引导 LLM 在每步行动前先思考。"""
+        zh = self._is_zh()
+        tool_names = [t.get("function", {}).get("name", "") for t in tools]
+        
+        failed_info = ""
+        if failed_skills:
+            failed_list = [f"{name} (失败{cnt}次)" for name, cnt in failed_skills.items()]
+            if zh:
+                failed_info = f"\n已失败的工具：{', '.join(failed_list)}"
+            else:
+                failed_info = f"\nFailed tools: {', '.join(failed_list)}"
+        
+        if zh:
+            prompt = (
+                f"[思考步骤] 这是第 {iteration + 1} 轮迭代。请分析当前情况：\n"
+                f"1. 已完成的操作：请总结之前的对话和工具调用结果\n"
+                f"2. 当前目标：用户最初的请求是什么，现在进展到哪一步\n"
+                f"3. 可用工具：{', '.join(tool_names)}{failed_info}\n"
+                f"4. 下一步计划：你认为下一步应该做什么？是继续调用工具，还是可以直接回答用户？\n"
+                f"5. 风险评估：如果调用工具，可能会遇到什么问题？\n\n"
+                f"请用简洁的语言回答，不需要详细解释，只需说明你的思考。"
+            )
+        else:
+            prompt = (
+                f"[Thought step] This is iteration {iteration + 1}. Analyze the current situation:\n"
+                f"1. Completed actions: Summarize previous conversation and tool results\n"
+                f"2. Current goal: What was the user's original request and where are we now\n"
+                f"3. Available tools: {', '.join(tool_names)}{failed_info}\n"
+                f"4. Next step plan: What should we do next? Call another tool or answer directly?\n"
+                f"5. Risk assessment: What problems might we encounter if calling tools?\n\n"
+                f"Please answer concisely, just state your thinking."
+            )
+        
+        return prompt
+
+    # ------------------------------------------------------------ 阶段二：打破回合制
+    async def _handle_continue_thinking(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, final_text: str,
+        tools: List[Dict[str, Any]], _failed_skills: Dict[str, int], iteration: int,
+    ) -> bool:
+        """检测并处理 Agent 的"继续思考"信号。
+        
+        如果 Agent 的回复中包含特定模式（如"让我继续思考"、"让我再想想"等），
+        则触发继续思考机制，让 Agent 在当前回合内继续推理，而不是直接结束。
+        
+        返回 True 表示继续思考，False 表示结束回合。
+        """
+        if not final_text:
+            return False
+        
+        zh = self._is_zh()
+        
+        # 检测继续思考信号
+        continue_signal_patterns_zh = [
+            "让我继续思考", "让我再想想", "继续思考", "我再想想",
+            "还需要进一步分析", "需要更多思考", "让我深入分析",
+            "继续推理", "我需要继续", "还没完成", "还需要思考",
+        ]
+        continue_signal_patterns_en = [
+            "let me continue thinking", "let me think more", "continue thinking",
+            "need more analysis", "need to think further", "further analysis",
+            "continue reasoning", "not finished yet", "need more thought",
+        ]
+        
+        if zh:
+            has_continue_signal = any(pattern in final_text for pattern in continue_signal_patterns_zh)
+        else:
+            has_continue_signal = any(pattern.lower() in final_text.lower() for pattern in continue_signal_patterns_en)
+        
+        if not has_continue_signal:
+            return False
+        
+        # 防止误判：如果回复很长且包含详细的回答内容，continue 信号
+        # 可能只是正常回答的一部分（如"建议你继续思考这个问题"）
+        # 只有当回复较短（< 300 字符）或信号出现在开头/结尾时才认为是真正的信号
+        text_len = len(final_text)
+        if text_len > 300:
+            # 对长回复，只在开头 150 或结尾 150 字符内检测
+            head = final_text[:150]
+            tail = final_text[-150:] if text_len > 150 else ""
+            if zh:
+                signal_in_short = any(pattern in head for pattern in continue_signal_patterns_zh) or \
+                                  any(pattern in tail for pattern in continue_signal_patterns_zh)
+            else:
+                head_lower = head.lower()
+                tail_lower = tail.lower()
+                signal_in_short = any(pattern.lower() in head_lower for pattern in continue_signal_patterns_en) or \
+                                  any(pattern.lower() in tail_lower for pattern in continue_signal_patterns_en)
+            if not signal_in_short:
+                return False
+        
+        # 触发继续思考
+        if iteration >= self._max_tool_iterations - 1:
+            return False  # 已经是最后一轮了
+        
+        logger.debug("continue_thinking: detected signal, triggering additional thought round")
+        turn.meta["continue_thinking_triggered"] = True
+        
+        # 注入继续思考提示
+        if zh:
+            continue_prompt = (
+                "[系统提示：你表示需要继续思考。请基于当前信息继续深入分析，"
+                "可以调用工具获取更多信息，也可以进行内部推理。"
+                "如果认为已经完成，请直接给出最终答案，不要再说'继续思考'。]"
+            )
+        else:
+            continue_prompt = (
+                "[System: You indicated you need to continue thinking. Please continue "
+                "your analysis based on current information. You can call tools or "
+                "perform internal reasoning. When you're done, give the final answer "
+                "directly without saying 'continue thinking'.]"
+            )
+        
+        messages.append({"role": "assistant", "content": final_text, "_internal": True})
+        messages.append({"role": "user", "content": continue_prompt, "_internal": True})
+        
+        return True
+
+    async def _internal_reasoning_loop(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, max_rounds: int = 5,
+    ) -> str:
+        """多轮内部推理循环 — Agent 可以自己跟自己对话多轮。
+        
+        在不需要调用外部工具的情况下，让 Agent 通过自我对话来深入分析问题。
+        每轮推理都会基于上一轮的思考继续深入。
+        
+        返回最终的推理结果。
+        """
+        if max_rounds <= 0:
+            max_rounds = 3
+        
+        provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
+        circuit = get_circuit_manager().get(f"llm:{provider}")
+        llm_backoff_strategy = llm_backoff()
+        rate_limiter = get_rate_limiter()
+        
+        zh = self._is_zh()
+        reasoning_results: List[str] = []
+        user_question = (turn.input_text or "")[:500]
+        
+        for round_num in range(max_rounds):
+            await rate_limiter.acquire(provider)
+            
+            if zh:
+                reasoning_prompt = (
+                    f"[内部推理第 {round_num + 1}/{max_rounds} 轮]\n"
+                    f"用户问题：{user_question}\n\n"
+                    "请基于之前的对话和你的知识，对这个问题进行深入分析。\n"
+                    "这是你自己的内部思考过程，不需要回答用户，只需要分析问题。\n"
+                    "你的分析应该越来越深入，直到找到答案或确定无法回答。\n"
+                    "如果已经得出结论，请用 '结论：' 开头总结你的发现。"
+                )
+            else:
+                reasoning_prompt = (
+                    f"[Internal reasoning round {round_num + 1}/{max_rounds}]\n"
+                    f"User question: {user_question}\n\n"
+                    "Analyze this problem deeply based on previous conversation and your knowledge.\n"
+                    "This is your internal thought process, not a reply to the user.\n"
+                    "Your analysis should become progressively deeper until you find an answer.\n"
+                    "If you've reached a conclusion, start with 'Conclusion:' to summarize."
+                )
+            
+            messages.append({"role": "user", "content": reasoning_prompt, "_internal": True})
+            
+            if self._llm is None:
+                break
+            
+            async def _do_reasoning_call():
+                return await self._llm.chat_completion(
+                    messages=messages,
+                    model=turn.model,
+                    max_tokens=1000,
+                    temperature=0.7,
+                )
+            
+            try:
+                resp = await circuit.acall(
+                    lambda: llm_backoff_strategy.retry(_do_reasoning_call),
+                )
+                result_text = resp.get("text", "") or ""
+                reasoning_results.append(result_text)
+                messages.append({"role": "assistant", "content": f"[推理结果 {round_num + 1}] {result_text}", "_internal": True})
+                
+                # 检查是否已经得出结论
+                if zh and result_text.startswith("结论："):
+                    break
+                if not zh and result_text.startswith("Conclusion:"):
+                    break
+                
+                self._emit_progress(turn, f"[内部推理] 第 {round_num + 1} 轮完成...", "thinking")
+                
+            except Exception as exc:
+                logger.debug("internal_reasoning_loop failed at round %d: %s", round_num, exc)
+                break
+        
+        if reasoning_results:
+            turn.meta["internal_reasoning"] = reasoning_results
+        
+        # 提取最终结论
+        final_conclusion = ""
+        for result in reversed(reasoning_results):
+            if zh and result.startswith("结论："):
+                final_conclusion = result[3:].strip()
+                break
+            if not zh and result.startswith("Conclusion:"):
+                final_conclusion = result[11:].strip()
+                break
+        
+        if not final_conclusion and reasoning_results:
+            final_conclusion = reasoning_results[-1]
+        
+        return final_conclusion
+
+    # ------------------------------------------------------------ 阶段三：任务规划与反思
+    async def _task_planning(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]],
+    ) -> List[str]:
+        """任务规划 — 复杂任务先拆成子任务，生成执行计划。
+        
+        对于高复杂度任务，让 Agent 先分析任务并生成详细的执行计划，
+        然后按照计划逐步执行。
+        
+        返回计划步骤列表。
+        """
+        complexity = getattr(turn, "estimated_complexity", 0.0)
+        if complexity < 0.5:
+            return []  # 简单任务不需要规划
+        
+        provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
+        circuit = get_circuit_manager().get(f"llm:{provider}")
+        llm_backoff_strategy = llm_backoff()
+        rate_limiter = get_rate_limiter()
+        
+        await rate_limiter.acquire(provider)
+        
+        zh = self._is_zh()
+        tool_names = [t.get("function", {}).get("name", "") for t in tools]
+        
+        user_question = (turn.input_text or "")[:500]
+        if zh:
+            planning_prompt = (
+                f"[任务规划]\n"
+                f"用户请求：{user_question}\n\n"
+                "请分析上述用户请求，并将其拆解为具体的执行步骤。\n"
+                "每个步骤应该是一个可以独立执行的子任务。\n"
+                "可用工具：" + ", ".join(tool_names) + "\n\n"
+                "请按照以下格式输出计划：\n"
+                "步骤 1：[子任务描述]\n"
+                "步骤 2：[子任务描述]\n"
+                "...\n"
+                "步骤 N：[子任务描述]\n\n"
+                "请确保计划完整、可行，并且步骤之间有逻辑顺序。"
+            )
+        else:
+            planning_prompt = (
+                f"[Task Planning]\n"
+                f"User request: {user_question}\n\n"
+                "Analyze the above user request and break it down into specific execution steps.\n"
+                "Each step should be an independently executable subtask.\n"
+                "Available tools: " + ", ".join(tool_names) + "\n\n"
+                "Please output the plan in the following format:\n"
+                "Step 1: [subtask description]\n"
+                "Step 2: [subtask description]\n"
+                "...\n"
+                "Step N: [subtask description]\n\n"
+                "Ensure the plan is complete, feasible, and has logical order between steps."
+            )
+        
+        messages.append({"role": "user", "content": planning_prompt, "_internal": True})
+        
+        if self._llm is None:
+            return []
+        
+        async def _do_planning_call():
+            return await self._llm.chat_completion(
+                messages=messages,
+                model=turn.model,
+                max_tokens=1000,
+                temperature=0.7,
+            )
+        
+        try:
+            resp = await circuit.acall(
+                lambda: llm_backoff_strategy.retry(_do_planning_call),
+            )
+            plan_text = resp.get("text", "") or ""
+            
+            # 解析计划步骤
+            steps = []
+            if zh:
+                for line in plan_text.split("\n"):
+                    line = line.strip()
+                    if line.startswith("步骤") or line.startswith("Step"):
+                        # 提取步骤内容 — 修复：使用 (?:步骤|Step) 而非 [步骤|Step]
+                        # [步骤|Step] 是字符类，只匹配单个字符，不是匹配"步骤"或"Step"这个词
+                        match = re.search(r'(?:步骤|Step)\s*\d+[：:]?\s*(.*)', line, re.IGNORECASE)
+                        if match:
+                            steps.append(match.group(1).strip())
+            else:
+                for line in plan_text.split("\n"):
+                    line = line.strip()
+                    if line.startswith("Step") or line.startswith("step"):
+                        match = re.search(r'Step\s*\d+[.:]?\s*(.*)', line, re.IGNORECASE)
+                        if match:
+                            steps.append(match.group(1).strip())
+            
+            if steps:
+                turn.meta["task_plan"] = steps
+                self._emit_progress(turn, f"已生成 {len(steps)} 步执行计划", "planning")
+                logger.debug("task_planning: generated %d steps", len(steps))
+                
+                # 将计划注入上下文
+                if zh:
+                    plan_summary = "任务计划：\n" + "\n".join([f"{i+1}. {step}" for i, step in enumerate(steps)])
+                else:
+                    plan_summary = "Task Plan:\n" + "\n".join([f"{i+1}. {step}" for i, step in enumerate(steps)])
+                messages.append({"role": "assistant", "content": plan_summary})
+            
+            return steps
+            
+        except Exception as exc:
+            logger.debug("task_planning failed: %s", exc)
+            return []
+
+    async def _post_execution_reflection(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, result_text: str,
+    ) -> bool:
+        """执行后反思 — 做完后检查结果，不对就重来。
+        
+        在生成最终回复后，让 Agent 反思自己的回答是否正确、完整、符合用户需求。
+        如果发现问题，返回 True 表示需要重新生成。
+        
+        返回 True 表示需要重新生成，False 表示结果可以接受。
+        """
+        complexity = getattr(turn, "estimated_complexity", 0.0)
+        if complexity < 0.5:
+            return False  # 简单任务不需要反思
+        
+        if not result_text:
+            return False
+        
+        provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
+        circuit = get_circuit_manager().get(f"llm:{provider}")
+        llm_backoff_strategy = llm_backoff()
+        rate_limiter = get_rate_limiter()
+        
+        await rate_limiter.acquire(provider)
+        
+        zh = self._is_zh()
+        
+        if zh:
+            reflection_prompt = (
+                "[执行后反思]\n"
+                "请检查你刚刚给出的回答，判断是否满足以下条件：\n"
+                "1. 准确性：回答是否准确？有没有事实错误？\n"
+                "2. 完整性：是否回答了用户的所有问题？有没有遗漏？\n"
+                "3. 相关性：回答是否与用户的问题直接相关？\n"
+                "4. 逻辑性：推理过程是否清晰合理？\n"
+                "5. 有用性：用户能否从回答中获得有用的信息？\n\n"
+                "你的回答：\n" + result_text[:2000] + "\n\n"
+                "请用 '是' 或 '否' 回答：这个回答是否需要改进？\n"
+                "如果需要改进，请简要说明问题所在。"
+            )
+        else:
+            reflection_prompt = (
+                "[Post-execution Reflection]\n"
+                "Please review your answer and check if it meets the following criteria:\n"
+                "1. Accuracy: Is the answer accurate? Any factual errors?\n"
+                "2. Completeness: Does it answer all parts of the user's question?\n"
+                "3. Relevance: Is the answer directly relevant to the user's question?\n"
+                "4. Logic: Is the reasoning clear and logical?\n"
+                "5. Helpfulness: Can the user get useful information from the answer?\n\n"
+                "Your answer:\n" + result_text[:2000] + "\n\n"
+                "Please answer 'Yes' or 'No': Does this answer need improvement?\n"
+                "If yes, briefly explain what's wrong."
+            )
+        
+        messages.append({"role": "user", "content": reflection_prompt, "_internal": True})
+        
+        if self._llm is None:
+            return False
+        
+        async def _do_reflection_call():
+            return await self._llm.chat_completion(
+                messages=messages,
+                model=turn.model,
+                max_tokens=500,
+                temperature=0.3,
+            )
+        
+        try:
+            resp = await circuit.acall(
+                lambda: llm_backoff_strategy.retry(_do_reflection_call),
+            )
+            reflection_result = resp.get("text", "") or ""
+            
+            # 精确检测是否需要重新生成 — 只检查回答的首行/首词
+            # 避免 "是" 出现在 "这个回答是准确的" 中导致误判
+            if zh:
+                first_line = reflection_result.strip().split("\n")[0].strip()
+                if first_line.startswith("否"):
+                    needs_improvement = False
+                else:
+                    needs_improvement = first_line.startswith("是") or first_line.startswith("需要")
+            else:
+                first_line = reflection_result.strip().split("\n")[0].strip().lower()
+                if first_line.startswith("no"):
+                    needs_improvement = False
+                else:
+                    needs_improvement = first_line.startswith("yes") or first_line.startswith("need")
+            
+            if needs_improvement:
+                turn.meta["reflection_needed"] = True
+                turn.meta["reflection_reason"] = reflection_result
+                self._emit_progress(turn, "反思发现问题，正在重新生成...", "reflection")
+                logger.debug("post_execution_reflection: needs improvement - %s", reflection_result)
+                
+                # 注入改进提示
+                if zh:
+                    improvement_prompt = (
+                        "[系统提示：反思发现你的回答有问题：" + reflection_result[:200] + "\n"
+                        "请重新生成回答，修正上述问题。]"
+                    )
+                else:
+                    improvement_prompt = (
+                        "[System: Reflection found issues: " + reflection_result[:200] + "\n"
+                        "Please regenerate your answer to fix these issues.]"
+                    )
+                
+                messages.append({"role": "assistant", "content": result_text, "_internal": True})
+                messages.append({"role": "user", "content": improvement_prompt, "_internal": True})
+                
+                return True
+            
+            turn.meta["reflection_completed"] = True
+            return False
+            
+        except Exception as exc:
+            logger.debug("post_execution_reflection failed: %s", exc)
+            return False
+
+    async def _multi_solution_comparison(
+        self, messages: List[Dict[str, Any]], turn: TurnContext, max_solutions: int = 3,
+    ) -> str:
+        """多方案比较 — 对重要问题生成多个方案，选最优。
+        
+        对于复杂决策类问题，让 Agent 生成多个解决方案，然后比较各个方案的优缺点，
+        最后选择最优方案。
+        
+        返回最优方案的描述。
+        """
+        complexity = getattr(turn, "estimated_complexity", 0.0)
+        if complexity < 0.7:
+            return ""  # 不太复杂的问题不需要多方案比较
+        
+        provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
+        circuit = get_circuit_manager().get(f"llm:{provider}")
+        llm_backoff_strategy = llm_backoff()
+        rate_limiter = get_rate_limiter()
+        
+        await rate_limiter.acquire(provider)
+        
+        zh = self._is_zh()
+        user_question = (turn.input_text or "")[:500]
+        
+        if zh:
+            comparison_prompt = (
+                f"[多方案比较]\n"
+                f"用户问题：{user_question}\n\n"
+                f"这是一个复杂的决策问题，请生成 {max_solutions} 个不同的解决方案。\n"
+                "然后比较各个方案的优缺点，最后选择最优方案。\n\n"
+                "请按照以下格式输出：\n"
+                "方案 1：[方案描述]\n"
+                "  优点：[列出优点]\n"
+                "  缺点：[列出缺点]\n\n"
+                "...\n\n"
+                "最优方案：[方案编号]\n"
+                "选择理由：[说明为什么选这个方案]"
+            )
+        else:
+            comparison_prompt = (
+                f"[Multi-solution Comparison]\n"
+                f"User question: {user_question}\n\n"
+                f"This is a complex decision problem. Please generate {max_solutions} different solutions.\n"
+                "Then compare the pros and cons of each, and select the best one.\n\n"
+                "Please output in the following format:\n"
+                "Solution 1: [description]\n"
+                "  Pros: [list pros]\n"
+                "  Cons: [list cons]\n\n"
+                "...\n\n"
+                "Best Solution: [solution number]\n"
+                "Reason: [explain why this solution was chosen]"
+            )
+        
+        messages.append({"role": "user", "content": comparison_prompt, "_internal": True})
+        
+        if self._llm is None:
+            return ""
+        
+        async def _do_comparison_call():
+            return await self._llm.chat_completion(
+                messages=messages,
+                model=turn.model,
+                max_tokens=2000,
+                temperature=0.7,
+            )
+        
+        try:
+            resp = await circuit.acall(
+                lambda: llm_backoff_strategy.retry(_do_comparison_call),
+            )
+            comparison_text = resp.get("text", "") or ""
+            
+            if comparison_text:
+                turn.meta["multi_solution_comparison"] = comparison_text
+                self._emit_progress(turn, "已完成多方案比较", "comparison")
+                logger.debug("multi_solution_comparison: completed")
+            
+            return comparison_text
+            
+        except Exception as exc:
+            logger.debug("multi_solution_comparison failed: %s", exc)
+            return ""
 
     def _parse_planned_tools(
         self, plan_text: str, available_tool_names: set,
