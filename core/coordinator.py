@@ -938,11 +938,11 @@ class Coordinator(Plugin):
                 args["input"] = args_text
         elif skill_id == "system_run":
             # /shell without command — show usage
-            turn.result = "用法: /shell <命令> [--password <密码>]\n示例:\n  /shell ls -la\n  /shell ls -la --password mypass123\n  /unlock mypass123 (先解锁，60分钟内有效)"
+            turn.result = "用法: /shell <命令>\n示例:\n  /shell ls -la\n  /shell pip install requests"
             self.publish("turn_completed", turn=turn)
             return True
         elif skill_id == "system_unlock":
-            turn.result = "用法: /unlock <密码>\n解锁后 60 分钟内执行危险命令不需要再次输入密码。"
+            turn.result = "ℹ️ /unlock 已弃用。系统默认就是 OS 模式，所有命令可直接执行，无需密码验证。"
             self.publish("turn_completed", turn=turn)
             return True
 
@@ -2007,6 +2007,8 @@ class Coordinator(Plugin):
                     logger.debug("combined think+reflect phase completed (%d chars)", len(thinking_text) + len(reflect_text))
                 else:
                     turn.meta["reflection"] = ""
+                    # reflect 为空时也要推送 planning 进度
+                    self._emit_progress(turn, f"【执行计划】\n{thinking_text[:500]}", "planning")
             else:
                 turn.meta["thinking"] = thinking_text
                 # 实时推送思考计划到客户端

@@ -776,8 +776,13 @@ class RESTAPIGateway(Plugin):
                         # 订阅 turn_progress 事件，实时推送思考进度到客户端
                         # 让用户在等待回复时能看到 agent 正在做什么
                         import asyncio as _asyncio
-                        progress_queue: _asyncio.Queue = _asyncio.Queue()
+                        # maxsize 防止消费端卡住时无限增长 OOM
+                        progress_queue: _asyncio.Queue = _asyncio.Queue(maxsize=100)
                         loop = _asyncio.get_event_loop()
+
+                        # 只推送这些 phase 到客户端思考卡片
+                        # streaming/tool_result/batch 等会污染思考卡片，过滤掉
+                        _ALLOWED_PHASES = {"planning", "thinking", "reflection", "plan"}
 
                         def _on_progress(evt) -> None:
                             # 只推送当前 session 的进度
@@ -786,8 +791,16 @@ class RESTAPIGateway(Plugin):
                             try:
                                 msg = evt.get("message", "")
                                 phase = evt.get("phase", "")
-                                # loop.call_soon_threadsafe 让同步回调安全地跨线程投递
-                                loop.call_soon_threadsafe(progress_queue.put_nowait, (msg, phase))
+                                # 过滤掉不相关的 phase（流式回复、工具结果等）
+                                if phase and phase not in _ALLOWED_PHASES:
+                                    return
+                                if not msg:
+                                    return
+                                # put_nowait 满了直接丢弃（进度事件不要求可靠）
+                                try:
+                                    loop.call_soon_threadsafe(progress_queue.put_nowait, (msg, phase))
+                                except _asyncio.QueueFull:
+                                    pass
                             except Exception:
                                 pass
 
@@ -801,28 +814,36 @@ class RESTAPIGateway(Plugin):
                         )
 
                         try:
-                            while True:
-                                # 每 500ms 检查一次：要么有进度事件，要么 chat 完成
-                                done, _pending = await _asyncio.wait(
-                                    [_asyncio.create_task(progress_queue.get())],
-                                    timeout=0.5,
-                                    return_when=_asyncio.FIRST_COMPLETED,
-                                )
-                                if done:
-                                    msg, phase = await done.pop()
+                            while not chat_task.done():
+                                try:
+                                    # 用 wait_for 避免任务泄漏（超时自动取消 coroutine）
+                                    msg, phase = await _asyncio.wait_for(
+                                        progress_queue.get(), timeout=0.5
+                                    )
+                                    yield f"data: {json.dumps({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})}\n\n"
+                                except _asyncio.TimeoutError:
+                                    pass  # 超时继续循环，检查 chat_task 是否完成
+                            # chat_task 完成后，消费队列中剩余的事件
+                            while not progress_queue.empty():
+                                try:
+                                    msg, phase = progress_queue.get_nowait()
                                     if msg:
                                         yield f"data: {json.dumps({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})}\n\n"
-                                if chat_task.done():
+                                except _asyncio.QueueEmpty:
                                     break
                         finally:
                             _app_instance.bus.unsubscribe("turn_progress", _on_progress)
                             if not chat_task.done():
                                 chat_task.cancel()
+                                try:
+                                    await chat_task
+                                except _asyncio.CancelledError:
+                                    pass
 
                         result = await chat_task
                         reply = result.get("reply", "")
                         thinking = result.get("thinking", "")
-                        # 最终的完整思考过程（7步计划）单独发送一次
+                        # 最终的完整思考计划用 phase=plan 标记（客户端会覆盖之前的截断版）
                         if thinking:
                             yield f"data: {json.dumps({'status': 'thinking', 'content': thinking, 'phase': 'plan', 'session_id': session_id})}\n\n"
                         if reply:

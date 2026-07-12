@@ -175,6 +175,7 @@ class SseClient {
           type: 'thinking',
           status: 'thinking',
           content: (json['content'] ?? json['text'] ?? json['thinking']) as String?,
+          phase: json['phase'] as String?, // planning/thinking/reflection/plan
           sessionId: json['session_id'] as String?,
         );
       }

@@ -56,14 +56,24 @@ jobs:
         working-directory: flutter_client/one_agent_client
         run: dart run build_runner build --delete-conflicting-outputs
 
-      - name: Set version to build number
+      - name: Read version from pubspec.yaml
+        id: version
         working-directory: flutter_client/one_agent_client
         run: |
-          # 将版本号设为 1.0.${{ github.run_number }}，versionName 和 versionCode 同步更新
-          # 例如第 39 次构建：versionName=1.0.39, versionCode=39
-          sed -i "s/^version: .*/version: 1.0.${{ github.run_number }}+${{ github.run_number }}/" pubspec.yaml
-          echo "Updated pubspec.yaml version:"
-          grep '^version:' pubspec.yaml
+          # 从 pubspec.yaml 读取版本号（格式: 1.0.48+48）
+          # versionCode 是 + 后面的数字，用于 tag 命名
+          FULL_VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
+          VERSION_CODE=$(echo "$FULL_VERSION" | cut -d '+' -f 2)
+          VERSION_NAME=$(echo "$FULL_VERSION" | cut -d '+' -f 1)
+          if [ -z "$VERSION_CODE" ] || [ "$VERSION_CODE" = "$FULL_VERSION" ]; then
+            echo "::error::pubspec.yaml version 缺少 +N 后缀，当前值: $FULL_VERSION"
+            exit 1
+          fi
+          echo "Full version: $FULL_VERSION"
+          echo "Version name: $VERSION_NAME"
+          echo "Version code: $VERSION_CODE"
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
 
       - name: Setup signing keystore
         if: github.ref == 'refs/heads/main'
@@ -102,8 +112,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk
-          tag_name: app-v${{ github.run_number }}
-          name: One-Agent App v${{ github.run_number }}
+          tag_name: app-v${{ steps.version.outputs.version_code }}
+          name: One-Agent App v${{ steps.version.outputs.version_code }}
           draft: false
           prerelease: false
         env:
@@ -115,11 +125,11 @@ jobs:
         continue-on-error: true
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          RUN_NUMBER: ${{ github.run_number }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
         run: |
           set -e
           APK_PATH="flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk"
-          TAG="app-v${RUN_NUMBER}"
+          TAG="app-v${VERSION_CODE}"
           MAX_RETRIES=3
           
           # 1. 创建 Gitee Release（target_commitish=main）— 带重试
@@ -131,7 +141,7 @@ jobs:
               -d "{
                 \"access_token\": \"${GITEE_TOKEN}\",
                 \"tag_name\": \"${TAG}\",
-                \"name\": \"One-Agent App v${RUN_NUMBER}\",
+                \"name\": \"One-Agent App v${VERSION_CODE}\",
                 \"body\": \"由 GitHub Actions 自动构建发布\",
                 \"target_commitish\": \"main\"
               }")

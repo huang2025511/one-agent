@@ -80,6 +80,7 @@ class StreamEvent with _$StreamEvent {
     required String type,
     String? content,
     String? status,
+    String? phase, // 思考阶段：planning/thinking/reflection/plan
     String? sessionId,
     bool? done,
     Map<String, dynamic>? metadata,

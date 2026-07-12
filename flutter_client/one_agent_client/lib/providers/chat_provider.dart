@@ -196,8 +196,16 @@ class ChatNotifier extends StateNotifier<ChatState> {
         }
 
         if (event.type == 'thinking') {
-          // 累积真实的思考内容
-          thinkingBuffer = (thinkingBuffer ?? '') + (event.content ?? '');
+          final content = event.content ?? '';
+          if (content.isEmpty) {
+            // 初始 thinking 占位事件，无 content，忽略
+          } else if (event.phase == 'plan') {
+            // phase=plan 是最终完整思考计划，覆盖之前截断的进度版
+            thinkingBuffer = content;
+          } else {
+            // phase=planning/thinking/reflection 是中间思考进度，追加
+            thinkingBuffer = (thinkingBuffer ?? '') + content + '\n\n';
+          }
         } else if (event.content != null) {
           buffer.write(event.content);
         }

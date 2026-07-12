@@ -354,12 +354,12 @@ class _ThinkingExpansionState extends State<_ThinkingExpansion> {
     super.didUpdateWidget(oldWidget);
     // 首次收到内容时自动展开（除非用户手动收起过）
     if (!_userToggled && widget.thinking.isNotEmpty && !_expanded) {
-      _expanded = true;
+      setState(() => _expanded = true);
     }
     // 流式更新时滚动到底部
     if (_expanded && widget.thinking != oldWidget.thinking) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
+        if (mounted && _scrollController.hasClients) {
           _scrollController.animateTo(
             _scrollController.position.maxScrollExtent,
             duration: const Duration(milliseconds: 100),
