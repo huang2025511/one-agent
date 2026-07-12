@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
+import 'package:intl/intl.dart';
 
 import '../l10n/app_localizations.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
+import '../providers/session_provider.dart';
 import '../models/chat_message.dart';
-import 'session_list_screen.dart';
+import '../models/session.dart';
 import 'settings_screen.dart';
 
 /// 聊天主页面
@@ -32,6 +35,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       if (near != _isNearBottom) {
         setState(() => _isNearBottom = near);
       }
+    });
+    // 预加载会话列表，供 Drawer 侧边栏使用
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(sessionListProvider.notifier).load();
     });
   }
 
@@ -66,6 +73,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
 
     return Scaffold(
+      drawer: const _SessionDrawer(),
       appBar: AppBar(
         title: Row(
           children: [
@@ -110,14 +118,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     );
                   },
           ),
-          IconButton(
-            icon: const Icon(Icons.history),
-            tooltip: l10n.sessionList,
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const SessionListScreen()),
-              );
-            },
+          Builder(
+            builder: (ctx) => IconButton(
+              icon: const Icon(Icons.history),
+              tooltip: l10n.sessionList,
+              onPressed: () => Scaffold.of(ctx).openDrawer(),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -550,6 +556,243 @@ class _InputBarState extends ConsumerState<_InputBar> {
               ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 聊天页面的历史会话侧边栏（Drawer）
+/// 点击会话直接切换并关闭 Drawer，无需跳转到单独页面。
+class _SessionDrawer extends ConsumerWidget {
+  const _SessionDrawer();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final sessionState = ref.watch(sessionListProvider);
+    final chatState = ref.watch(chatProvider);
+    final currentSessionId = chatState.currentSessionId;
+    final theme = Theme.of(context);
+
+    return Drawer(
+      child: Column(
+        children: [
+          // 顶部标题栏 + 刷新/新建会话按钮
+          AppBar(
+            title: const Text('历史会话'),
+            automaticallyImplyLeading: false,
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                tooltip: '刷新',
+                onPressed: () => ref.read(sessionListProvider.notifier).load(),
+              ),
+              IconButton(
+                icon: const Icon(Icons.add_comment_outlined),
+                tooltip: '新会话',
+                onPressed: () {
+                  ref.read(chatProvider.notifier).setSession(null);
+                  Navigator.of(context).pop();
+                },
+              ),
+            ],
+          ),
+          Expanded(
+            child: _buildBody(context, ref, sessionState, currentSessionId),
+          ),
+          // 底部说明
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest,
+              border: Border(
+                top: BorderSide(color: theme.colorScheme.outlineVariant),
+              ),
+            ),
+            child: Text(
+              '长按会话可 Fork · 左滑可删除',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody(
+    BuildContext context,
+    WidgetRef ref,
+    SessionListState state,
+    String? currentSessionId,
+  ) {
+    if (state.isLoading && state.sessions.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (state.error != null && state.sessions.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.error_outline,
+              size: 48,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            const SizedBox(height: 12),
+            const Text('加载失败'),
+            const SizedBox(height: 16),
+            FilledButton.tonal(
+              onPressed: () => ref.read(sessionListProvider.notifier).load(),
+              child: const Text('重试'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (state.sessions.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.chat_bubble_outline,
+              size: 64,
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '暂无会话',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.outline,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '发送消息后将自动创建',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      itemCount: state.sessions.length,
+      itemBuilder: (context, index) {
+        final session = state.sessions[index];
+        return _SessionDrawerTile(
+          session: session,
+          isSelected: session.id == currentSessionId,
+        );
+      },
+    );
+  }
+}
+
+/// Drawer 中的会话条目 — 支持选中高亮、左滑删除、长按 Fork
+class _SessionDrawerTile extends ConsumerWidget {
+  final Session session;
+  final bool isSelected;
+
+  const _SessionDrawerTile({
+    required this.session,
+    required this.isSelected,
+  });
+
+  String _formatTime(DateTime? dt) {
+    if (dt == null) return '';
+    return DateFormat('MM-dd HH:mm').format(dt);
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+
+    return Slidable(
+      key: ValueKey(session.id),
+      endActionPane: ActionPane(
+        motion: const DrawerMotion(),
+        extentRatio: 0.25,
+        children: [
+          SlidableAction(
+            onPressed: (_) async {
+              final confirmed = await showDialog<bool>(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('删除会话'),
+                  content: Text('确定要删除会话 "${session.title ?? '未命名'}" 吗？'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(ctx).pop(false),
+                      child: const Text('取消'),
+                    ),
+                    FilledButton(
+                      onPressed: () => Navigator.of(ctx).pop(true),
+                      child: const Text('删除'),
+                    ),
+                  ],
+                ),
+              );
+              if (confirmed == true) {
+                await ref.read(sessionListProvider.notifier).delete(session.id);
+              }
+            },
+            backgroundColor: theme.colorScheme.error,
+            foregroundColor: theme.colorScheme.onError,
+            icon: Icons.delete,
+            label: '删除',
+          ),
+        ],
+      ),
+      child: ListTile(
+        selected: isSelected,
+        selectedTileColor: theme.colorScheme.primaryContainer.withOpacity(0.4),
+        leading: CircleAvatar(
+          backgroundColor: isSelected
+              ? theme.colorScheme.primary
+              : theme.colorScheme.primaryContainer,
+          child: Icon(
+            isSelected ? Icons.chat_bubble : Icons.chat_bubble_outline,
+            color: isSelected
+                ? theme.colorScheme.onPrimary
+                : theme.colorScheme.onPrimaryContainer,
+            size: 18,
+          ),
+        ),
+        title: Text(
+          session.title ?? '未命名会话',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: isSelected
+              ? TextStyle(fontWeight: FontWeight.w600, color: theme.colorScheme.primary)
+              : null,
+        ),
+        subtitle: Text(
+          '${_formatTime(session.updatedAt)} · ${session.messageCount ?? 0} 条消息',
+          style: theme.textTheme.bodySmall,
+        ),
+        onTap: () {
+          ref.read(chatProvider.notifier).setSession(session.id);
+          Navigator.of(context).pop(); // 切换会话后关闭 Drawer
+        },
+        onLongPress: () async {
+          final newId =
+              await ref.read(sessionListProvider.notifier).fork(session.id);
+          if (newId != null && context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Fork 会话成功')),
+            );
+            ref.read(sessionListProvider.notifier).load();
+          }
+        },
       ),
     );
   }
