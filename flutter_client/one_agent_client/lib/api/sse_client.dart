@@ -83,7 +83,10 @@ class SseClient {
       if (temperature != null) 'temperature': temperature,
       if (maxTokens != null) 'max_tokens': maxTokens,
     });
-    request.write(body);
+    // 修复：request.write(body) 默认用 Latin1 编码，中文字符会报
+    // "Contains invalid characters" 错误。改用 utf8.encode + request.add
+    // 以 UTF-8 字节流发送，正确支持中文等非 ASCII 字符。
+    request.add(utf8.encode(body));
 
     HttpClientResponse response;
     try {
