@@ -34,6 +34,7 @@ class ChatApi {
     String? model,
     double? temperature,
     int? maxTokens,
+    String? language,
   }) {
     final sse = SseClient(
       baseUrl: ApiClient.baseUrl,
@@ -46,6 +47,7 @@ class ChatApi {
         model: model,
         temperature: temperature,
         maxTokens: maxTokens,
+        language: language,
       ),
       client: sse,
     );

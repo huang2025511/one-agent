@@ -1193,15 +1193,17 @@ class Coordinator(Plugin):
         multi_agent_done = False
         if complexity >= EXPERT_COMPLEXITY_THRESHOLD:
             # Expert level: tool chain planning + multi-agent pattern
-            self._emit_progress(turn, "正在分析任务并规划工具链...", "planning")
+            _zh = self._is_zh()
+            self._emit_progress(turn, "正在分析任务并规划工具链..." if _zh else "Analyzing task and planning tool chain...", "planning")
             if complexity >= TOOL_CHAIN_PLANNING_MIN_COMPLEXITY:
                 await self._plan_tool_chain(messages, turn, tools)
             # multi-agent publishes turn_completed itself on success
-            self._emit_progress(turn, "正在启动多智能体协作...", "multi_agent")
+            self._emit_progress(turn, "正在启动多智能体协作..." if _zh else "Starting multi-agent collaboration...", "multi_agent")
             multi_agent_done = await self._multi_agent_phase(messages, turn)
         elif complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
             # Complex level: think + reflect in ONE call (performance optimization)
-            self._emit_progress(turn, "正在思考分析...", "thinking")
+            _zh = self._is_zh()
+            self._emit_progress(turn, "正在思考分析..." if _zh else "Thinking and analyzing...", "thinking")
             await self._think_phase(messages, turn, include_reflection=True)
         elif complexity >= THINK_MIN_COMPLEXITY:
             # Simple level: lightweight thinking for better reasoning
@@ -1242,7 +1244,8 @@ class Coordinator(Plugin):
         # --- Step 2.7: Task planning for complex tasks ---
         # 对复杂度 >= 0.5 的任务，先生成执行计划
         if complexity >= COMPLEX_COMPLEXITY_THRESHOLD:
-            self._emit_progress(turn, "正在规划任务步骤...", "planning")
+            _zh = self._is_zh()
+            self._emit_progress(turn, "正在规划任务步骤..." if _zh else "Planning task steps...", "planning")
             await self._task_planning(messages, turn, tools)
 
         # --- Step 2.8: Multi-solution comparison for expert tasks ---
@@ -1290,10 +1293,11 @@ class Coordinator(Plugin):
         # 在工具循环结束后，对复杂度 >= 0.5 的任务进行反思
         # 限制最多重新生成 1 次，防止反思-重新生成无限循环
         if complexity >= COMPLEX_COMPLEXITY_THRESHOLD and turn.result and not turn.error:
-            self._emit_progress(turn, "正在反思执行结果...", "reflection")
+            _zh = self._is_zh()
+            self._emit_progress(turn, "正在反思执行结果..." if _zh else "Reflecting on execution results...", "reflection")
             needs_regenerate = await self._post_execution_reflection(messages, turn, turn.result)
             if needs_regenerate and not turn.meta.get("_reflection_regenerated"):
-                self._emit_progress(turn, "反思发现问题，重新生成...", "regeneration")
+                self._emit_progress(turn, "反思发现问题，重新生成..." if _zh else "Reflection found issues, regenerating...", "regeneration")
                 turn.meta["_reflection_regenerated"] = True
                 turn.result = None  # 重置 result，让 _tool_loop 重新生成
                 await self._tool_loop(messages, turn, tools)
@@ -1993,8 +1997,10 @@ class Coordinator(Plugin):
                 if reflect_text:
                     turn.meta["reflection"] = reflect_text
                     # 实时推送思考计划到客户端
-                    self._emit_progress(turn, f"【执行计划】\n{thinking_text[:500]}", "planning")
-                    self._emit_progress(turn, f"【反思】\n{reflect_text[:300]}", "reflection")
+                    plan_label = "【执行计划】" if zh else "[Execution Plan]"
+                    reflect_label = "【反思】" if zh else "[Reflection]"
+                    self._emit_progress(turn, f"{plan_label}\n{thinking_text[:500]}", "planning")
+                    self._emit_progress(turn, f"{reflect_label}\n{reflect_text[:300]}", "reflection")
                     header = "【我的反思与改进】\n" if zh else "[My reflection and improvements]\n"
                     reflect_message = {"role": "assistant", "content": header + reflect_text}
                     messages.append(reflect_message)
@@ -2008,11 +2014,13 @@ class Coordinator(Plugin):
                 else:
                     turn.meta["reflection"] = ""
                     # reflect 为空时也要推送 planning 进度
-                    self._emit_progress(turn, f"【执行计划】\n{thinking_text[:500]}", "planning")
+                    plan_label = "【执行计划】" if zh else "[Execution Plan]"
+                    self._emit_progress(turn, f"{plan_label}\n{thinking_text[:500]}", "planning")
             else:
                 turn.meta["thinking"] = thinking_text
                 # 实时推送思考计划到客户端
-                self._emit_progress(turn, f"【执行计划】\n{thinking_text[:500]}", "planning")
+                plan_label = "【执行计划】" if self._is_zh() else "[Execution Plan]"
+                self._emit_progress(turn, f"{plan_label}\n{thinking_text[:500]}", "planning")
 
             header = "【我的执行计划】\n" if self._is_zh() else "[My execution plan]\n"
             plan_message = {"role": "assistant", "content": header + thinking_text}
@@ -2527,12 +2535,13 @@ class Coordinator(Plugin):
             # 对于复杂任务，每次迭代前都让 LLM 显式思考下一步
             complexity = getattr(turn, "estimated_complexity", 0.0)
             if complexity >= 0.3 and i > 0:
-                self._emit_progress(turn, "正在思考下一步...", "thinking")
+                _zh = self._is_zh()
+                self._emit_progress(turn, "正在思考下一步..." if _zh else "Thinking about next step...", "thinking")
                 thought_prompt = self._generate_react_thought_prompt(
                     turn, i, thinking_history, tools, _failed_skills
                 )
                 messages.append({"role": "user", "content": thought_prompt, "_internal": True})
-                
+
                 async def _do_thought_call():
                     return await self._llm.chat_completion(
                         messages=messages,
@@ -2540,7 +2549,7 @@ class Coordinator(Plugin):
                         max_tokens=500,
                         temperature=dyn_temp,
                     )
-                
+
                 try:
                     thought_resp = await circuit.acall(
                         lambda: llm_backoff_strategy.retry(_do_thought_call),
@@ -2550,9 +2559,10 @@ class Coordinator(Plugin):
                         thinking_history.append(thought_text)
                         # 将思考结果作为 assistant 消息加入上下文
                         # 修复：添加 _internal 标记，使其在最终清理时被移除，避免污染后续 LLM 调用
-                        messages.append({"role": "assistant", "content": f"思考：{thought_text}", "_internal": True})
+                        thought_prefix = "思考：" if _zh else "Thought: "
+                        messages.append({"role": "assistant", "content": f"{thought_prefix}{thought_text}", "_internal": True})
                         # 发送完整思考内容（截断到 500 字符避免 SSE 消息过长）
-                        self._emit_progress(turn, f"思考：{thought_text[:500]}", "thinking")
+                        self._emit_progress(turn, f"{thought_prefix}{thought_text[:500]}", "thinking")
                         tokens_used = int(thought_resp.get("tokens_used") or 0)
                         total_tokens += tokens_used
                         total_cost += (tokens_used / 1000) * MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002))
@@ -3108,9 +3118,11 @@ class Coordinator(Plugin):
                 result_text = resp.get("text", "") or ""
                 # 修复：限制每轮输出字符数，防止超长结果污染 context
                 if len(result_text) > _INTERNAL_REASONING_MAX_CHARS:
-                    result_text = result_text[:_INTERNAL_REASONING_MAX_CHARS] + "\n[...已截断...]"
+                    trunc_label = "\n[...已截断...]" if zh else "\n[...truncated...]"
+                    result_text = result_text[:_INTERNAL_REASONING_MAX_CHARS] + trunc_label
                 reasoning_results.append(result_text)
-                messages.append({"role": "assistant", "content": f"[推理结果 {round_num + 1}] {result_text}", "_internal": True})
+                reasoning_label = f"[推理结果 {round_num + 1}]" if zh else f"[Reasoning {round_num + 1}]"
+                messages.append({"role": "assistant", "content": f"{reasoning_label} {result_text}", "_internal": True})
 
                 # 检查是否已经得出结论
                 if zh and result_text.startswith("结论："):
@@ -3120,7 +3132,8 @@ class Coordinator(Plugin):
 
                 # 发送完整推理内容（截断到 500 字符）
                 preview = result_text[:500] if result_text else ""
-                self._emit_progress(turn, f"[内部推理] 第 {round_num + 1} 轮：{preview}", "thinking")
+                progress_label = f"[内部推理] 第 {round_num + 1} 轮" if zh else f"[Internal Reasoning] Round {round_num + 1}"
+                self._emit_progress(turn, f"{progress_label}：{preview}" if zh else f"{progress_label}: {preview}", "thinking")
 
             except asyncio.TimeoutError:
                 logger.debug(
@@ -3269,7 +3282,8 @@ class Coordinator(Plugin):
 
             if steps:
                 turn.meta["task_plan"] = steps
-                self._emit_progress(turn, f"已生成 {len(steps)} 步执行计划", "planning")
+                plan_msg = f"已生成 {len(steps)} 步执行计划" if zh else f"Generated {len(steps)}-step execution plan"
+                self._emit_progress(turn, plan_msg, "planning")
                 logger.debug("task_planning: generated %d steps", len(steps))
 
                 # 将计划注入上下文
@@ -3378,7 +3392,7 @@ class Coordinator(Plugin):
             if needs_improvement:
                 turn.meta["reflection_needed"] = True
                 turn.meta["reflection_reason"] = reflection_result
-                self._emit_progress(turn, "反思发现问题，正在重新生成...", "reflection")
+                self._emit_progress(turn, "反思发现问题，正在重新生成..." if zh else "Reflection found issues, regenerating...", "reflection")
                 logger.debug("post_execution_reflection: needs improvement - %s", reflection_result)
                 
                 # 注入改进提示

@@ -83,18 +83,46 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # 如果配置了签名密钥，则生成 keystore 文件并设置环境变量
+          # 优先使用配置的签名密钥 Secrets
           if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
-            echo "🔐 检测到签名密钥配置，生成 keystore 文件..."
+            echo "🔐 使用配置的签名密钥（来自 Secrets）..."
             echo "$KEYSTORE_BASE64" | base64 -d > /tmp/one-agent-release.keystore
             echo "KEYSTORE_PATH=/tmp/one-agent-release.keystore" >> $GITHUB_ENV
             echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
             echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
             echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
-            echo "✅ 签名密钥已配置"
+            echo "✅ 签名密钥已配置（来自 Secrets）"
           else
-            echo "⚠️ 未配置签名密钥，将使用 debug 签名（仅用于测试，正式发布请配置签名密钥"
+            echo "⚠️ 未配置签名密钥 Secrets，将使用缓存的固定 keystore（确保签名一致性）"
+            echo "NEEDS_FALLBACK_KEYSTORE=true" >> $GITHUB_ENV
           fi
+
+      - name: Restore fallback keystore from cache
+        if: github.ref == 'refs/heads/main' && env.NEEDS_FALLBACK_KEYSTORE == 'true'
+        id: fallback-keystore
+        uses: actions/cache@v4
+        with:
+          path: /tmp/one-agent-fallback.keystore
+          key: one-agent-fallback-keystore-v1
+
+      - name: Generate fallback keystore (if not cached)
+        if: github.ref == 'refs/heads/main' && env.NEEDS_FALLBACK_KEYSTORE == 'true' && steps.fallback-keystore.outputs.cache-hit != 'true'
+        run: |
+          echo "🔧 生成固定的 fallback keystore（首次运行，后续从缓存恢复）..."
+          keytool -genkey -v -keystore /tmp/one-agent-fallback.keystore \
+            -storepass oneagent2024 -keypass oneagent2024 \
+            -alias one-agent \
+            -keyalg RSA -keysize 2048 -validity 36500 \
+            -dname "CN=One-Agent, OU=Dev, O=One-Agent, L=Beijing, ST=Beijing, C=CN"
+
+      - name: Configure fallback keystore
+        if: github.ref == 'refs/heads/main' && env.NEEDS_FALLBACK_KEYSTORE == 'true'
+        run: |
+          echo "KEYSTORE_PATH=/tmp/one-agent-fallback.keystore" >> $GITHUB_ENV
+          echo "KEYSTORE_PASSWORD=oneagent2024" >> $GITHUB_ENV
+          echo "KEY_ALIAS=one-agent" >> $GITHUB_ENV
+          echo "KEY_PASSWORD=oneagent2024" >> $GITHUB_ENV
+          echo "✅ Fallback keystore 已配置"
 
       - name: Build APK
         working-directory: flutter_client/one_agent_client

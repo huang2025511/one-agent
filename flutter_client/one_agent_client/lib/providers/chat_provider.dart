@@ -122,7 +122,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
   }
 
   /// 发送消息（流式）
-  Future<void> sendMessage(String text) async {
+  Future<void> sendMessage(String text, {String? language}) async {
     if (text.trim().isEmpty) return;
 
     // 取消上一个进行中的流式请求，并标记上一条助手消息结束流式
@@ -164,6 +164,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
       result = ChatApi.sendMessageStream(
         text: text,
         sessionId: state.currentSessionId,
+        language: language,
       );
     } catch (e) {
       debugPrint('❌ sendMessageStream 创建失败: $e');

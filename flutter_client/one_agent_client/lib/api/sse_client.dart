@@ -30,6 +30,7 @@ class SseClient {
     String? model,
     double? temperature,
     int? maxTokens,
+    String? language,
   }) async* {
     _client?.close();
     _client = HttpClient();
@@ -82,6 +83,8 @@ class SseClient {
       if (model != null) 'model': model,
       if (temperature != null) 'temperature': temperature,
       if (maxTokens != null) 'max_tokens': maxTokens,
+      // 传递客户端语言环境，让服务端用对应语言生成思考过程
+      if (language != null && language.isNotEmpty) 'language': language,
     });
     // 修复：request.write(body) 默认用 Latin1 编码，中文字符会报
     // "Contains invalid characters" 错误。改用 utf8.encode + request.add

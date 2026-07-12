@@ -24,6 +24,8 @@ class ChatScreen extends ConsumerStatefulWidget {
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
   bool _isNearBottom = true;
+  String? _lastSessionId;
+  bool _forceScrollToBottom = false;
 
   @override
   void initState() {
@@ -48,14 +50,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     super.dispose();
   }
 
-  void _scrollToBottom() {
+  void _scrollToBottom({bool instant = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
+        if (instant) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        } else {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOut,
+          );
+        }
       }
     });
   }
@@ -67,8 +73,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final isConnected = settingsState.isConnected;
     final l10n = AppLocalizations.of(context)!;
 
-    // 仅在接近底部时自动滚动，避免打断用户上滑阅读历史
-    if (chatState.messages.isNotEmpty && _isNearBottom) {
+    // 检测会话切换：当 currentSessionId 变化时，强制滚动到底部显示最新内容
+    if (chatState.currentSessionId != _lastSessionId) {
+      _lastSessionId = chatState.currentSessionId;
+      _forceScrollToBottom = true;
+    }
+
+    // 会话切换后立即滚动到底部（instant），新消息流式追加时平滑滚动
+    if (_forceScrollToBottom && chatState.messages.isNotEmpty) {
+      _forceScrollToBottom = false;
+      _scrollToBottom(instant: true);
+    } else if (chatState.messages.isNotEmpty && _isNearBottom) {
+      // 仅在接近底部时自动滚动，避免打断用户上滑阅读历史
       _scrollToBottom();
     }
 
@@ -155,19 +171,39 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 ? _buildEmptyState(context, l10n)
                 // 使用 SelectionArea 包裹整个 ListView，
                 // 用户可以长按选择任意消息的部分内容进行复制
-                : SelectionArea(
-                    child: ListView.builder(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 8,
+                : Stack(
+                    children: [
+                      SelectionArea(
+                        child: ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                          itemCount: chatState.messages.length,
+                          itemBuilder: (context, index) {
+                            final msg = chatState.messages[index];
+                            return _MessageBubble(message: msg);
+                          },
+                        ),
                       ),
-                      itemCount: chatState.messages.length,
-                      itemBuilder: (context, index) {
-                        final msg = chatState.messages[index];
-                        return _MessageBubble(message: msg);
-                      },
-                    ),
+                      // 向下箭头：用户不在底部时显示，点击滚动到最新内容
+                      if (!_isNearBottom)
+                        Positioned(
+                          bottom: 16,
+                          right: 16,
+                          child: FloatingActionButton.small(
+                            onPressed: () {
+                              _scrollController.animateTo(
+                                _scrollController.position.maxScrollExtent,
+                                duration: const Duration(milliseconds: 300),
+                                curve: Curves.easeOut,
+                              );
+                            },
+                            child: const Icon(Icons.arrow_downward),
+                          ),
+                        ),
+                    ],
                   ),
           ),
           const _InputBar(),
@@ -495,7 +531,11 @@ class _InputBarState extends ConsumerState<_InputBar> {
     }
     _lastSendTime = now;
 
-    ref.read(chatProvider.notifier).sendMessage(text);
+    // 获取客户端当前语言环境，传递给服务端用于思考过程语言切换
+    final locale = Localizations.localeOf(context);
+    final language = locale.languageCode; // zh / en
+
+    ref.read(chatProvider.notifier).sendMessage(text, language: language);
     _controller.clear();
     _focusNode.requestFocus();
   }

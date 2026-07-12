@@ -712,16 +712,18 @@ class RESTAPIGateway(Plugin):
                     status="success"
                 )
 
-            # Auto-detect language from user input — use thread-local to
-            # avoid multi-tenant language contention (global _current_lang
-            # is shared across all concurrent requests).
-            if text:
-                from i18n import detect_language, set_thread_language
+            # 优先使用客户端传递的语言，没有则自动检测
+            from i18n import detect_language, set_thread_language
+            client_lang = body.get("language")
+            if client_lang and isinstance(client_lang, str) and client_lang.strip():
+                detected_lang = client_lang.strip().lower()
+            elif text:
                 detected_lang = detect_language(text)
-                set_thread_language(detected_lang)
-                # Sanitize language value to prevent log injection
-                safe_lang = str(detected_lang).replace('\n', '\\n').replace('\r', '\\r')
-                logger.info("Auto-detected language: %s from API request", safe_lang)
+            else:
+                detected_lang = "zh"
+            set_thread_language(detected_lang)
+            safe_lang = str(detected_lang).replace('\n', '\\n').replace('\r', '\\r')
+            logger.info("Language set to: %s (chat)", safe_lang)
 
             if _agent is None:
                 raise HTTPException(503, _("agent_not_ready"))
@@ -760,11 +762,17 @@ class RESTAPIGateway(Plugin):
             except InputValidationError as exc:
                 raise HTTPException(400, str(exc))
 
-            # Auto-detect language from user input (thread-local for isolation)
-            if text:
-                from i18n import detect_language, set_thread_language
+            # 优先使用客户端传递的语言，没有则自动检测
+            from i18n import detect_language, set_thread_language
+            client_lang = body.get("language")
+            if client_lang and isinstance(client_lang, str) and client_lang.strip():
+                detected_lang = client_lang.strip().lower()
+            elif text:
                 detected_lang = detect_language(text)
-                set_thread_language(detected_lang)
+            else:
+                detected_lang = "zh"
+            set_thread_language(detected_lang)
+            logger.info("Language set to: %s (stream)", detected_lang)
 
             from fastapi.responses import StreamingResponse
 
