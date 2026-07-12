@@ -90,6 +90,7 @@ jobs:
 
       - name: Create Gitee Release (国内加速下载)
         if: github.ref == 'refs/heads/main'
+        id: gitee-release
         continue-on-error: true
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
@@ -98,23 +99,87 @@ jobs:
           set -e
           APK_PATH="flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk"
           TAG="app-v${RUN_NUMBER}"
-          # 1. 创建 Gitee Release（target_commitish=main）
-          RESP=$(curl -s -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases" \
-            -H "Content-Type: application/json;charset=UTF-8" \
-            -d "{
-              \"access_token\": \"${GITEE_TOKEN}\",
-              \"tag_name\": \"${TAG}\",
-              \"name\": \"One-Agent App v${RUN_NUMBER}\",
-              \"body\": \"由 GitHub Actions 自动构建发布\",
-              \"target_commitish\": \"main\"
-            }")
-          REL_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+          MAX_RETRIES=3
+          
+          # 1. 创建 Gitee Release（target_commitish=main）— 带重试
+          REL_ID=""
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "尝试创建 Gitee Release (第 $i/$MAX_RETRIES 次)..."
+            RESP=$(curl -s -w "\n%{http_code}" -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases" \
+              -H "Content-Type: application/json;charset=UTF-8" \
+              -d "{
+                \"access_token\": \"${GITEE_TOKEN}\",
+                \"tag_name\": \"${TAG}\",
+                \"name\": \"One-Agent App v${RUN_NUMBER}\",
+                \"body\": \"由 GitHub Actions 自动构建发布\",
+                \"target_commitish\": \"main\"
+              }")
+            HTTP_CODE=$(echo "$RESP" | tail -n1)
+            BODY=$(echo "$RESP" | sed '$d')
+            
+            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
+              REL_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
+              if [ -n "$REL_ID" ]; then
+                echo "✅ Gitee Release 创建成功，ID: $REL_ID"
+                break
+              fi
+            fi
+            
+            # 422 通常表示 tag 已存在，尝试获取已存在的 release
+            if [ "$HTTP_CODE" = "422" ]; then
+              echo "Tag 已存在，尝试获取已有 Release..."
+              GET_RESP=$(curl -s "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/tags/${TAG}?access_token=${GITEE_TOKEN}")
+              REL_ID=$(echo "$GET_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+              if [ -n "$REL_ID" ]; then
+                echo "✅ 获取到已存在的 Release，ID: $REL_ID"
+                break
+              fi
+            fi
+            
+            echo "❌ 创建失败 (HTTP $HTTP_CODE): $BODY"
+            if [ $i -lt $MAX_RETRIES ]; then
+              echo "等待 $((i * 2)) 秒后重试..."
+              sleep $((i * 2))
+            fi
+          done
+          
           if [ -z "$REL_ID" ]; then
-            echo "Gitee Release 创建失败: $RESP"
+            echo "::warning::Gitee Release 创建失败，跳过 Gitee 上传"
+            echo "status=failed" >> $GITHUB_OUTPUT
             exit 0
           fi
-          echo "Gitee Release ID: $REL_ID"
-          # 2. 上传 APK 附件
-          curl -s -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/${REL_ID}/attach_files" \
-            -F "access_token=${GITEE_TOKEN}" \
-            -F "file=@${APK_PATH}" | python3 -c "import sys,json; r=json.load(sys.stdin); a=r if isinstance(r,dict) else (r[0] if r else {}); print('Gitee 下载地址:', a.get('browser_download_url','FAILED'))"
+          
+          # 2. 上传 APK 附件 — 带重试
+          UPLOAD_SUCCESS=false
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "尝试上传 APK 到 Gitee (第 $i/$MAX_RETRIES 次)..."
+            UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/${REL_ID}/attach_files" \
+              -F "access_token=${GITEE_TOKEN}" \
+              -F "file=@${APK_PATH}")
+            HTTP_CODE=$(echo "$UPLOAD_RESP" | tail -n1)
+            BODY=$(echo "$UPLOAD_RESP" | sed '$d')
+            
+            if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
+              DOWNLOAD_URL=$(echo "$BODY" | python3 -c "import sys,json; r=json.load(sys.stdin); a=r if isinstance(r,dict) else (r[0] if r else {}); print(a.get('browser_download_url',''))" 2>/dev/null || echo "")
+              if [ -n "$DOWNLOAD_URL" ]; then
+                echo "✅ APK 上传成功！"
+                echo "📥 Gitee 下载地址: $DOWNLOAD_URL"
+                echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
+                echo "status=success" >> $GITHUB_OUTPUT
+                UPLOAD_SUCCESS=true
+                break
+              fi
+            fi
+            
+            echo "❌ 上传失败 (HTTP $HTTP_CODE)"
+            if [ $i -lt $MAX_RETRIES ]; then
+              echo "等待 $((i * 2)) 秒后重试..."
+              sleep $((i * 2))
+            fi
+          done
+          
+          if [ "$UPLOAD_SUCCESS" = false ]; then
+            echo "::warning::Gitee APK 上传失败"
+            echo "status=upload_failed" >> $GITHUB_OUTPUT
+          fi

@@ -14,9 +14,16 @@ class SseClient {
   HttpClient? _client;
   StreamSubscription? _subscription;
 
+  /// 最大重试次数（连接建立失败时）
+  static const int _maxConnectRetries = 3;
+
+  /// 重试初始延迟（毫秒）
+  static const int _retryBaseDelayMs = 1000;
+
   SseClient({required this.baseUrl, this.apiKey});
 
   /// 发送流式聊天请求，返回 Stream<StreamEvent>
+  /// 连接失败时会自动重试（指数退避），最多重试 _maxConnectRetries 次
   Stream<StreamEvent> chatStream({
     required String text,
     String? sessionId,
@@ -32,11 +39,29 @@ class SseClient {
     debugPrint('🌐 SSE: POST $uri | baseUrl=$baseUrl | text=${text.substring(0, text.length > 30 ? 30 : text.length)}...');
 
     HttpClientRequest request;
-    try {
-      request = await _client!.postUrl(uri);
-    } catch (e) {
-      debugPrint('❌ SSE: 连接失败 - $e');
-      rethrow;
+    Exception? lastError;
+
+    for (int attempt = 0; attempt <= _maxConnectRetries; attempt++) {
+      if (attempt > 0) {
+        final delay = _retryBaseDelayMs * (1 << (attempt - 1));
+        debugPrint('🔄 SSE: 连接重试第 $attempt/$_maxConnectRetries 次，等待 ${delay}ms...');
+        await Future.delayed(Duration(milliseconds: delay));
+        // 每次重试前重建 client，避免旧连接状态干扰
+        _client?.close();
+        _client = HttpClient();
+        _client!.connectionTimeout = const Duration(seconds: 15);
+      }
+
+      try {
+        request = await _client!.postUrl(uri);
+        break; // 连接成功，跳出重试循环
+      } catch (e) {
+        lastError = e is Exception ? e : Exception(e.toString());
+        debugPrint('❌ SSE: 连接失败 (尝试 ${attempt + 1}/${_maxConnectRetries + 1}) - $e');
+        if (attempt == _maxConnectRetries) {
+          rethrow; // 最后一次重试失败，抛出异常
+        }
+      }
     }
 
     request.headers.set('Content-Type', 'application/json');
