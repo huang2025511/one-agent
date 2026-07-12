@@ -40,7 +40,9 @@ class SseClient {
     final uri = Uri.parse('$cleanBaseUrl${ApiConstants.chatStream}');
     debugPrint('🌐 SSE: POST $uri | baseUrl=$baseUrl | text=${text.substring(0, text.length > 30 ? 30 : text.length)}...');
 
-    HttpClientRequest request;
+    // 修复：使用 late 让编译器知道此变量在使用前一定已赋值
+    // （循环中要么 break 时已赋值，要么 rethrow 抛出异常不会执行到后续代码）
+    late HttpClientRequest request;
     Exception? lastError;
 
     for (int attempt = 0; attempt <= _maxConnectRetries; attempt++) {
