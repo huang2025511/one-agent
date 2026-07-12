@@ -10,6 +10,25 @@
 
 ---
 
+## 开发工作流（必读）
+
+> **Gitee 为主仓库，GitHub 仅作备份和 APK 自动构建**
+
+| 项目 | 主仓库 (Gitee) | 备份/打包 (GitHub) |
+|------|---------------|-------------------|
+| 服务端 + 客户端 | [gitee.com/huang20260511/one-agent](https://gitee.com/huang20260511/one-agent) | [github.com/huang2025511/one-agent](https://github.com/huang2025511/one-agent) |
+| 客户端 APK | — | GitHub Actions 自动构建 → 自动同步到 Gitee Release |
+
+```bash
+# 修改前：从 Gitee 拉取最新代码
+bash scripts/sync_pull.sh
+
+# 修改后：推送到两端（先 Gitee 成功后再 GitHub）
+bash scripts/sync_push.sh
+```
+
+---
+
 ## Quick Start / 快速开始
 
 **3 步上手：**

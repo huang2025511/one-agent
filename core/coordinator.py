@@ -7,6 +7,16 @@ finally publishes ``turn_completed`` so gateways can display the reply.
 
 Keeping this separate from both the router and the LLM provider means we
 can swap either without touching the control flow.
+
+================ 开发工作流规则（每次修改前必读） ================
+- Gitee 为主仓库：https://gitee.com/huang20260511/one-agent
+- GitHub 为备份/APK构建仓库：https://github.com/huang2025511/one-agent
+- 远程命名：origin=GitHub, gitee=Gitee
+- 修改前：先运行 scripts/sync_pull.sh 从 Gitee 拉取最新代码
+- 修改后：先跑测试，再运行 scripts/sync_push.sh 推送到两端
+- 客户端 APK：GitHub Actions 自动构建，自动同步到 Gitee Release
+- 服务端+客户端 都以 Gitee 为中心
+================================================================
 """
 
 from __future__ import annotations
