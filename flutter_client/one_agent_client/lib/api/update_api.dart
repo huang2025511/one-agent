@@ -313,7 +313,7 @@ class UpdateApi {
 
         try {
           int currentBytes = startBytes;
-          await response.data.stream.forEach((chunk) {
+          await response.data.stream.forEach((List<int> chunk) {
             sink.add(chunk);
             currentBytes += chunk.length;
             onProgress?.call(currentBytes, actualTotal, isResumed);
