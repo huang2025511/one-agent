@@ -56,14 +56,35 @@ jobs:
         working-directory: flutter_client/one_agent_client
         run: dart run build_runner build --delete-conflicting-outputs
 
-      - name: Set versionCode to build number
+      - name: Set version to build number
         working-directory: flutter_client/one_agent_client
         run: |
-          # 将 pubspec.yaml 的 buildNumber 设为 GitHub Actions run_number
-          # 这样每次构建的 APK versionCode 都比上一次大，Android 才允许覆盖安装
-          sed -i "s/^version: .*/version: 1.0.0+${{ github.run_number }}/" pubspec.yaml
+          # 将版本号设为 1.0.${{ github.run_number }}，versionName 和 versionCode 同步更新
+          # 例如第 39 次构建：versionName=1.0.39, versionCode=39
+          sed -i "s/^version: .*/version: 1.0.${{ github.run_number }}+${{ github.run_number }}/" pubspec.yaml
           echo "Updated pubspec.yaml version:"
           grep '^version:' pubspec.yaml
+
+      - name: Setup signing keystore
+        if: github.ref == 'refs/heads/main'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          # 如果配置了签名密钥，则生成 keystore 文件并设置环境变量
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "🔐 检测到签名密钥配置，生成 keystore 文件..."
+            echo "$KEYSTORE_BASE64" | base64 -d > /tmp/one-agent-release.keystore
+            echo "KEYSTORE_PATH=/tmp/one-agent-release.keystore" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+            echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+            echo "✅ 签名密钥已配置"
+          else
+            echo "⚠️ 未配置签名密钥，将使用 debug 签名（仅用于测试，正式发布请配置签名密钥"
+          fi
 
       - name: Build APK
         working-directory: flutter_client/one_agent_client
