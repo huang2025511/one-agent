@@ -54,9 +54,7 @@ class SseClient {
       if (temperature != null) 'temperature': temperature,
       if (maxTokens != null) 'max_tokens': maxTokens,
     });
-    final bodyBytes = utf8.encode(body);
-    request.headers.contentLength = bodyBytes.length;
-    request.add(bodyBytes);
+    request.write(body);
 
     HttpClientResponse response;
     try {

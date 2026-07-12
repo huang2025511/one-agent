@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../api/api_client.dart';
 import '../api/chat_api.dart';
 import '../api/session_api.dart';
 import '../api/sse_client.dart';
@@ -122,7 +121,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
     return DateTime.tryParse(value.toString()) ?? DateTime.now();
   }
 
-  /// 发送消息（流式，失败时自动回退到非流式）
+  /// 发送消息（流式）
   Future<void> sendMessage(String text) async {
     if (text.trim().isEmpty) return;
 
@@ -156,27 +155,6 @@ class ChatNotifier extends StateNotifier<ChatState> {
     );
     state = state.copyWith(messages: [...state.messages, assistantMsg]);
 
-    // 先用 dio 做快速 health 检查，确认网络可达
-    try {
-      final ok = await ApiClient.checkConnection();
-      if (!ok) {
-        debugPrint('❌ sendMessage: health check failed');
-        _updateLastAssistantMessage(
-          content: '无法连接到服务器，请检查设置中的服务器地址',
-          isError: true,
-          errorMessage: 'health check failed',
-        );
-        state = state.copyWith(
-          isLoading: false,
-          error: '无法连接到服务器',
-        );
-        return;
-      }
-      debugPrint('✅ sendMessage: health check passed');
-    } catch (e) {
-      debugPrint('❌ sendMessage: health check error: $e');
-    }
-
     // 开始 SSE 流式接收
     final buffer = StringBuffer();
     String? thinkingBuffer;
@@ -189,8 +167,12 @@ class ChatNotifier extends StateNotifier<ChatState> {
       );
     } catch (e) {
       debugPrint('❌ sendMessageStream 创建失败: $e');
-      // 回退到非流式
-      await _sendNonStream(text);
+      _updateLastAssistantMessage(
+        content: '创建请求失败: $e',
+        isError: true,
+        errorMessage: '创建请求失败: $e',
+      );
+      state = state.copyWith(isLoading: false, error: '创建请求失败: $e');
       return;
     }
     _sseClient = result.client;
@@ -238,8 +220,22 @@ class ChatNotifier extends StateNotifier<ChatState> {
       },
       onError: (err) {
         debugPrint('❌ SSE stream onError: $err');
-        // SSE 失败，自动回退到非流式 /api/chat
-        _sendNonStream(text);
+        // 标记占位助手消息结束流式并显示错误
+        final updatedMsgs = [...state.messages];
+        final lastIdx = updatedMsgs.length - 1;
+        if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
+          updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
+            content: '发送失败: $err',
+            isStreaming: false,
+            isError: true,
+            errorMessage: err.toString(),
+          );
+        }
+        state = state.copyWith(
+          messages: updatedMsgs,
+          isLoading: false,
+          error: '发送失败: $err',
+        );
       },
       onDone: () {
         // 标记流结束
@@ -253,32 +249,6 @@ class ChatNotifier extends StateNotifier<ChatState> {
         _sseClient = null;
       },
     );
-  }
-
-  /// 非流式发送（SSE 失败时的回退方案）
-  Future<void> _sendNonStream(String text) async {
-    try {
-      final result = await ChatApi.sendMessage(
-        text: text,
-        sessionId: state.currentSessionId,
-      );
-      _updateLastAssistantMessage(
-        content: result['reply']?.toString() ?? '无回复',
-        isStreaming: false,
-        thinking: result['thinking'] as String?,
-      );
-      if (result['session_id'] != null && state.currentSessionId == null) {
-        state = state.copyWith(currentSessionId: result['session_id'].toString());
-      }
-    } catch (e) {
-      _updateLastAssistantMessage(
-        content: '发送失败: $e',
-        isError: true,
-        errorMessage: e.toString(),
-      );
-    } finally {
-      state = state.copyWith(isLoading: false);
-    }
   }
 
   /// 更新最后一条助手消息
