@@ -315,50 +315,10 @@ class SystemExecutor(BaseExecutor):
     ) -> Tuple[bool, bool]:
         """Return (allowed, needs_password).
 
-        简化后的策略：
-        - Level 0 (SAFE): 免密码，始终允许
-        - Level 1 (LOW): 当未配置密码时自动允许（git status/log/diff 等只读操作）
-        - Level 2+ (MEDIUM/DANGEROUS): 需要密码，验证通过后缓存 60 分钟
-          （只要对话框不关闭，60 分钟内不需要再次输入）
+        密码锁已移除：所有命令（含 DANGEROUS）均直接允许执行，无需密码。
+        风险级别仅用于日志记录和结果展示，不再阻塞执行。
         """
-        mgr = self._pwd_manager
-
-        # SAFE level: always allowed without password
-        if risk_level == 0:
-            return (True, False)
-
-        # LOW level: allow without password when no password is configured
-        if risk_level == 1:
-            if mgr is None or not mgr._password_hash:
-                return (True, False)
-
-        # No password manager configured → block medium/dangerous
-        if mgr is None:
-            return (False, True)
-
-        # Already cached → allow (会话内 60 分钟有效)
-        if mgr.is_cached(risk_level):
-            return (True, False)
-
-        # Check lockout
-        if not mgr.can_attempt():
-            return (False, True)
-
-        # If password was provided in the request body
-        if provided_password:
-            if mgr.verify(provided_password):
-                # Cache only up to the requested risk level, not
-                # unconditionally level 3. This prevents a low-risk
-                # command's password from silently authorizing a
-                # later DANGEROUS command.
-                mgr.record_success(risk_level)
-                return (True, False)
-            else:
-                mgr.record_failure()
-                return (False, True)
-
-        # Need password — caller should prompt user
-        return (False, True)
+        return (True, False)
 
     # ------------------------------------------------------------ execution
     async def _execute(

@@ -163,7 +163,7 @@ class Coordinator(Plugin):
         self._skills: Optional[SkillManager] = None
         self._max_tool_iterations = MAX_TOOL_ITERATIONS
         self._max_tokens = DEFAULT_MAX_TOKENS
-        self._os_mode_enabled: bool = False  # OS 操作权限模式（会话级）
+        self._os_mode_enabled: bool = True  # 默认 OS 模式（已取消文本/OS 模式区分）
         # Track background turn-completion tasks so they aren't GC'd
         # mid-execution (Python's asyncio only holds a weak ref to tasks).
         self._pending_turn_tasks: set = set()
@@ -382,138 +382,32 @@ class Coordinator(Plugin):
     ) -> None:
         """Handle /os-on, /os-off, /os-mode commands.
 
-        OS 模式 = 用户授权 One-Agent 可以直接调用 system_run 工具
-        （安装软件、执行脚本、apt-get / pip 等），无需每次加 /shell 前缀。
-        危险命令（DANGEROUS 级别）仍然需要额外确认。
-
-        /os-on <password>  — 开启 OS 模式（同时验证密码、缓存授权）
-        /os-off            — 关闭 OS 模式
-        /os-mode           — 查看当前 OS 模式状态
+        已弃用：系统默认就是 OS 模式，无需切换。
+        这些命令保留仅为向后兼容，统一返回弃用提示。
         """
         lang = "zh" if self._is_zh() else "en"
-
-        # /os-mode — 查询状态
-        if cmd == "_os_mode":
-            if self._os_mode_enabled:
-                status = "已开启" if lang.startswith("zh") else "ENABLED"
-                msg = (
-                    f"OS 模式: {status}\n"
-                    "当前可以自动执行系统命令（pip / npm / apt-get / curl 等）。\n"
-                    "使用 /os-off 可关闭。"
-                )
-            else:
-                status = "已关闭" if lang.startswith("zh") else "DISABLED"
-                msg = (
-                    f"OS 模式: {status}\n"
-                    "One-Agent 不能直接执行系统命令，只能通过 /shell 前缀调用。\n"
-                    "使用 /os-on <密码> 可开启。"
-                )
-            turn.result = msg
-            return
-
-        # /os-off — 关闭 OS 模式
-        if cmd in ("_os_off", "disable-os", "关闭os", "关闭系统权限"):
-            self._os_mode_enabled = False
-            turn.meta["os_mode"] = False
-            # 使 SystemExecutor 的密码缓存失效
-            await self._invalidate_os_cache()
-            msg = "OS 模式已关闭。One-Agent 不能再直接操作系统命令。" if lang.startswith("zh") else "OS mode DISABLED. One-Agent can no longer directly execute system commands."
-            turn.result = msg
-            return
-
-        # /os-on — 开启 OS 模式（需要密码验证）
-        password = args_text.strip()
-
-        # 如果密码未提供，要求用户输入
-        if not password:
+        if lang.startswith("zh"):
             turn.result = (
-                "OS 模式开启需要密码验证。\n"
-                "用法: /os-on <你的密码>\n\n"
-                "示例: /os-on mypassword123\n\n"
-                "开启后，One-Agent 可以直接执行系统命令（如 pip install、apt-get、curl 等），\n"
-                "无需加 /shell 前缀。危险命令仍需额外确认。"
-                if lang.startswith("zh")
-                else "Usage: /os-on <your_password>\n\n"
-                "After enabling, One-Agent can directly execute system commands "
-                "(pip install, apt-get, curl, etc.) without the /shell prefix."
-            )
-            return
-
-        # 验证密码并开启 OS 模式
-        success = await self._enable_os_mode(turn, password)
-        if success:
-            self._os_mode_enabled = True
-            turn.meta["os_mode"] = True
-            msg = (
-                "✅ OS 模式已开启！\n\n"
-                "One-Agent 现在可以直接帮你操作系统：\n"
-                "  - pip install / npm install / apt-get install\n"
-                "  - curl / wget 下载文件\n"
-                "  - 创建目录、移动文件\n"
-                "  - 运行自定义脚本\n\n"
-                "【重要】危险命令（如 rm -rf、sudo、格式化）仍需你额外确认。\n"
-                "使用 /os-off 可关闭此权限。"
-                if lang.startswith("zh")
-                else "✅ OS mode ENABLED!\n\n"
-                "One-Agent can now directly help with system operations:\n"
-                "  - pip install / npm install / apt-get install\n"
-                "  - curl / wget downloads\n"
-                "  - create dirs, move files\n"
-                "  - run custom scripts\n\n"
-                "DANGEROUS commands (rm -rf, sudo, mkfs...) still require your explicit confirmation.\n"
-                "Use /os-off to disable."
+                "ℹ️ 该命令已弃用。\n\n"
+                "系统默认就是 OS 模式，可直接执行系统命令（pip / npm / apt-get / curl 等），\n"
+                "无需 /os-on 开启，也无需密码验证。\n\n"
+                "如需执行系统命令，直接描述需求即可，或使用 /shell <命令>。"
             )
         else:
-            msg = (
-                "❌ OS 模式开启失败：密码错误。\n"
-                "请检查密码后重试。连续 3 次错误会锁定 5 分钟。"
-                if lang.startswith("zh")
-                else "❌ OS mode failed: incorrect password.\n"
-                "Please check and retry. 3 wrong attempts = 5-minute lockout."
+            turn.result = (
+                "ℹ️ This command is deprecated.\n\n"
+                "The system defaults to OS mode and can directly execute system commands "
+                "(pip / npm / apt-get / curl, etc.) without /os-on or password.\n\n"
+                "To run a system command, just describe your need or use /shell <command>."
             )
-        turn.result = msg
 
     async def _enable_os_mode(self, turn: TurnContext, password: str) -> bool:
-        """Verify password and enable OS mode for this session.
-
-        When no password is configured (security.system_executor_password is empty),
-        OS mode is automatically enabled since SAFE commands don't require password.
-        This allows the system to automatically enter OS mode when the router
-        detects system operation needs, without requiring user password input.
-        """
-        if self._skills is None:
-            return False
-        try:
-            # Check if password is configured (支持明文、SHA-256 hex、PBKDF2 三种格式)
-            has_password = False
-            if self.ctx and hasattr(self.ctx, "config"):
-                sec_cfg = getattr(self.ctx.config, "get", lambda k, d: d)("security", {})
-                stored_hash = str(sec_cfg.get("system_executor_password", "") or "")
-                has_password = bool(stored_hash)
-
-            if not has_password:
-                logger.info("OS mode auto-enabled (no password configured)")
-                return True
-
-            result = await self._skills.dispatch("system_unlock", {"password": password})
-            ok = "成功" in str(result) or "success" in str(result).lower() or "✅" in str(result)
-            if ok:
-                logger.info("OS mode enabled for session %s", turn.session_id)
-            return ok
-        except Exception as exc:
-            logger.warning("OS mode enable failed: %s", exc)
-            return False
+        """已弃用：系统默认就是 OS 模式，直接返回 True。"""
+        return True
 
     async def _invalidate_os_cache(self) -> None:
-        """Invalidate the SystemExecutor password cache."""
-        if self._skills is None:
-            return
-        try:
-            skill = self._skills.get("system_lock")
-            if skill:
-                await self._skills.dispatch("system_lock", {})
-        except Exception as exc:
-            logger.warning("system_lock handler failed: %s", exc)
+        """已弃用：无密码缓存可失效。"""
+        return
 
     # ------------------------------------------------------------ slash commands
     # Mapping from slash command names (both EN and CN) to skill IDs

@@ -327,17 +327,17 @@ def test_system_executor_safe_command_allowed():
     assert needs_pwd is False
 
 
-def test_system_executor_dangerous_denied_without_password():
-    """DANGEROUS commands denied when no password is set."""
+def test_system_executor_dangerous_allowed_without_password():
+    """密码锁已移除：DANGEROUS 命令也直接允许执行，无需密码。"""
     from executors.system import SystemExecutor
     exe = SystemExecutor()
     exe._enabled = True
-    # Without a password manager, all non-safe should be blocked
+    # 密码锁已移除，所有命令（含 DANGEROUS）均直接允许
     allowed, needs_pwd = asyncio.run(
         exe._check_permission("rm -rf /tmp/test", 3, "dangerous", "")
     )
-    assert allowed is False
-    assert needs_pwd is True
+    assert allowed is True
+    assert needs_pwd is False
 
 
 def test_system_executor_static_hash():
@@ -414,7 +414,7 @@ def main() -> int:
         ("password success resets", test_password_success_resets_failures),
         ("sys exec dispatch", test_system_executor_dispatch_missing_command),
         ("sys exec safe allowed", test_system_executor_safe_command_allowed),
-        ("sys exec dangerous denied", test_system_executor_dangerous_denied_without_password),
+        ("sys exec dangerous allowed", test_system_executor_dangerous_allowed_without_password),
         ("sys exec static hash", test_system_executor_static_hash),
         ("config security", test_config_security_section),
         ("config wechat personal", test_config_wechat_personal_section),

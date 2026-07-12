@@ -663,13 +663,6 @@ class SmartRouter(Plugin):
         from i18n import get_language
         lang = (get_language() or "zh").lower()
 
-        # Check if OS mode is enabled (coordinator exposes this via ctx.get_plugin)
-        os_mode_enabled = False
-        if self.ctx is not None:
-            coordinator = self.ctx.get_plugin("coordinator")
-            if coordinator is not None:
-                os_mode_enabled = getattr(coordinator, "_os_mode_enabled", False)
-
         # P1-2 fix: generate today's date dynamically instead of hardcoding.
         from datetime import datetime
         _now = datetime.now()
@@ -751,10 +744,16 @@ class SmartRouter(Plugin):
                 "5. 用户可以使用 /retry（重新生成回答）、/deep（深度研究）、/batch（批量处理）、\n"
                 "   /compare（模型对比）、/eval（评估回答质量）等命令。\n\n"
                 "【OS 模式 — 操作系统权限】\n"
-                "要执行系统命令（pip install、apt-get、curl、脚本运行等），需要先开启 OS 模式。\n"
-                "用法: /os-on <密码>（密码在 config/default_config.yaml 的 security 段配置）\n"
-                "开启后，你可以直接调用 system_run 工具执行系统命令。\n"
-                "使用 /os-off 关闭，/os-mode 查看当前状态。\n\n"
+                "系统默认就是 OS 模式，你可以直接调用 system_run 工具执行系统命令\n"
+                "（pip install、apt-get、curl、脚本运行等），无需开启或密码验证。\n"
+                "遇到需要安装软件、下载文件、执行脚本、修改配置等系统操作时：\n"
+                "1. 自主判断最合适的命令（pip / npm / apt-get / curl / tar 等）；\n"
+                "2. 直接调用 system_run 工具执行，不要问用户「要不要我...」；\n"
+                "3. 遇到依赖缺失时，自动尝试解决（如 pip install 失败就换 pip3，或 apt-get install）；\n"
+                "4. 如果所有工具都不可用，给用户清晰的状态报告和替代建议；\n"
+                "5. 【危险命令黑名单】以下命令需谨慎：rm -rf、sudo、chmod 777、\n"
+                "   shutdown/reboot/mkfs/dd/fdisk/iptables。执行前告知用户；\n"
+                "6. 每执行完一个系统命令后，报告执行结果（成功/失败/输出摘要）。\n\n"
                 "【智能路由 — 4 层模型选择】\n"
                 "系统使用 4 层智能路由，根据任务复杂度选择模型：\n"
                 "  trivial（极简单）→ 轻量模型（快、省）\n"
@@ -765,19 +764,6 @@ class SmartRouter(Plugin):
                 "配置在 config/default_config.yaml 的 router 段。添加新模型时，模型名格式为 provider/model（如 nvidia/meta/llama-3.1-70b-instruct），\n"
                 "放到对应能力的 tier 列表里，不要在 model 字段重复 provider 前缀。"
             ).format(today=today_zh)
-            if os_mode_enabled:
-                system += (
-                    "\n\n【OS 模式已开启 — 你有操作系统权限】\n"
-                    "用户已授权你直接操作系统。当任务需要安装软件、下载文件、执行脚本、\n"
-                    "修改配置、管理进程等系统操作时，你应该：\n"
-                    "1. 自主判断最合适的命令（pip / npm / apt-get / curl / tar 等）；\n"
-                    "2. 直接调用 system_run 工具执行，不要问用户「要不要我...」；\n"
-                    "3. 遇到依赖缺失时，自动尝试解决（如 pip install 失败就换 pip3，或 apt-get install）；\n"
-                    "4. 如果所有工具都不可用，给用户清晰的状态报告和替代建议；\n"
-                    "5. 【危险命令黑名单】以下命令绝对不能执行：rm -rf、sudo（除非必要且明确）、\n"
-                    "   chmod 777、shutdown/reboot/mkfs/dd/fdisk/iptables。执行前必须告知用户并等确认；\n"
-                    "6. 每执行完一个系统命令后，报告执行结果（成功/失败/输出摘要）。"
-                )
         else:
             system = (
                 "You are One-Agent, an extremely independent, thoughtful, memory-aware AI assistant.\n\n"
@@ -854,11 +840,17 @@ class SmartRouter(Plugin):
                 "5. Users can use /retry (regenerate), /deep (deep research), /batch (batch processing),\n"
                 "   /compare (model comparison), /eval (evaluate answer quality) commands.\n\n"
                 "【OS Mode — System Operation Permissions】\n"
-                "To execute system commands (pip install, apt-get, curl, script running, etc.),\n"
-                "you need to enable OS mode first. Usage: /os-on <password> (password is configured\n"
-                "in config/default_config.yaml under the security section). After enabling,\n"
-                "you can directly call the system_run tool to execute system commands.\n"
-                "Use /os-off to disable, /os-mode to check current status.\n\n"
+                "The system defaults to OS mode. You can directly call the system_run tool to execute\n"
+                "system commands (pip install, apt-get, curl, script running, etc.) without enabling\n"
+                "or password verification. When a task requires installing software, downloading files,\n"
+                "running scripts, modifying configs, or managing processes:\n"
+                "1. Autonomously decide the best command (pip / npm / apt-get / curl / tar / etc.);\n"
+                "2. Directly call system_run to execute — do NOT ask \"should I...\";\n"
+                "3. When dependencies are missing, automatically try solutions (e.g. pip fails → try pip3, or apt-get);\n"
+                "4. Report execution results clearly (success/failure/output summary);\n"
+                "5. 【Dangerous command BLACKLIST】Use with caution: rm -rf, sudo, chmod 777,\n"
+                "   shutdown/reboot/mkfs/dd/fdisk/iptables. Inform the user before executing these;\n"
+                "6. After each system command, report the result.\n\n"
                 "【Smart Router — 4-Layer Model Selection】\n"
                 "The system uses a 4-layer smart router that selects models based on task complexity:\n"
                 "  trivial → lightweight model (fast, cheap)\n"
@@ -869,20 +861,6 @@ class SmartRouter(Plugin):
                 "config in config/default_config.yaml (router section). When adding models, use provider/model format (e.g. nvidia/meta/llama-3.1-70b-instruct),\n"
                 "place in the appropriate tier list, and do NOT duplicate the provider prefix in the model field."
             ).format(today_en=today_en)
-            if os_mode_enabled:
-                system += (
-                    "\n\n【OS Mode ENABLED — You have OS operation permissions】\n"
-                    "The user has authorized you to directly operate the system. When a task requires\n"
-                    "installing software, downloading files, running scripts, modifying configs, or managing\n"
-                    "processes, you should:\n"
-                    "1. Autonomously decide the best command (pip / npm / apt-get / curl / tar / etc.);\n"
-                    "2. Directly call system_run to execute — do NOT ask \"should I...\";\n"
-                    "3. When dependencies are missing, automatically try solutions (e.g. pip fails → try pip3, or apt-get);\n"
-                    "4. Report execution results clearly (success/failure/output summary);\n"
-                    "5. 【Dangerous command BLACKLIST】NEVER execute: rm -rf, sudo (unless necessary & explicit), chmod 777,\n"
-                    "   shutdown/reboot/mkfs/dd/fdisk/iptables. Tell the user and wait for confirmation before these;\n"
-                    "6. After each system command, report the result."
-                )
         history = self._history_tail(turn.session_id)
         # Smart compression: keep recent turns + important context
         compression_cfg = self._cfg.get("context_compression", {}) or {}

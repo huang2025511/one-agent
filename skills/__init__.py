@@ -792,18 +792,16 @@ class SkillManager(Plugin):
     def _seed_system_skills(self) -> None:
         # ---------- 系统命令执行技能 ----------
         async def system_run_handler(args: Dict[str, Any]) -> str:
-            """执行系统命令（带密码保护）。使用方式: /shell ls -la [--password xxx]"""
+            """执行系统命令。使用方式: /shell ls -la"""
             executor = await self._get_system_executor()
             command = str(args.get("command", "")).strip()
-            password = str(args.get("password", "")) if args.get("password") else ""
 
             if not command:
-                return "用法: /shell <命令> [--password <密码>]\n示例:\n  /shell ls -la\n  /shell ls -la --password mypass123"
+                return "用法: /shell <命令>\n示例:\n  /shell ls -la\n  /shell pip install requests"
 
             try:
                 result = await executor.dispatch("system.run", {
                     "command": command,
-                    "password": password,
                 })
             except Exception as exc:
                 return f"执行错误: {exc}"
@@ -812,7 +810,6 @@ class SkillManager(Plugin):
                 return str(result)
 
             ok = result.get("ok", False)
-            needs_pwd = result.get("requires_password", False)
             err = result.get("error", "")
             level = result.get("risk_level", 0)
             label = result.get("risk_label", "UNKNOWN")
@@ -831,24 +828,20 @@ class SkillManager(Plugin):
                     parts.append(f"警告/错误: {stderr.strip()}")
                 return "\n".join(parts)
 
-            if needs_pwd:
-                return "🔒 需要密码才能执行此命令。\n请使用: /shell " + command + " --password <你的密码>\n或先解锁: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中的 security.system_executor_password\n  可直接填明文密码(如: mypass123)，也可填 hash(更安全)。\n  hash 生成: python -c \"from executors.system import SystemExecutor; print(SystemExecutor.hash_password('你的密码'))\"\n  设为空表示允许所有 Level 0 安全命令，其他命令一律拒绝。\n  ⚠️ 修改后需重启服务生效。"
-
             return f"❌ 执行失败: {err}"
 
         self.register(Skill(
             id="system_run", title="系统命令",
-            description="/shell 或 /sh：执行系统命令。危险操作需要密码。\n安全命令(ls/cat/echo/date 等)免密码，其他命令需密码验证(60分钟缓存)。",
+            description="/shell 或 /sh：执行系统命令。所有命令直接执行，无需密码。",
             schema={
                 "type": "function",
                 "function": {
                     "name": "system_run",
-                    "description": "执行系统命令。危险操作需要密码。安全命令免密码，其他命令需密码验证。",
+                    "description": "执行系统命令。所有命令直接执行，无需密码验证。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "command": {"type": "string", "description": "要执行的系统命令"},
-                            "password": {"type": "string", "description": "密码(可选，用于解锁会话)"},
                         },
                         "required": ["command"],
                     },
@@ -857,62 +850,43 @@ class SkillManager(Plugin):
             handler=system_run_handler,
         ))
 
-        # ---------- 解锁会话技能 ----------
+        # ---------- 解锁会话技能（已弃用） ----------
         async def system_unlock_handler(args: Dict[str, Any]) -> str:
-            """输入密码解锁会话。使用方式: /unlock 密码"""
-            executor = await self._get_system_executor()
-            password = str(args.get("password", ""))
-
-            if not password:
-                return "用法: /unlock <你的密码>\n\n密码设置:\n  修改 config/default_config.yaml 中 security.system_executor_password\n  可直接填明文密码(如: mypass123)，也可填 hash(更安全)。\n  hash 生成: python -c \"from executors.system import SystemExecutor; print(SystemExecutor.hash_password('你的密码'))\"\n  ⚠️ 修改后需重启服务生效。"
-
-            try:
-                ok = await executor.verify_password(password)
-                if ok:
-                    return "✅ 解锁成功！60 分钟内执行危险命令不需要再次输入密码。"
-                else:
-                    return "❌ 密码错误，请重试。(连续3次错误会锁定5分钟)"
-            except Exception as exc:
-                return f"解锁错误: {exc}"
+            """已弃用：系统默认就是 OS 模式，无需密码解锁。"""
+            return "ℹ️ /unlock 已弃用。\n\n系统默认就是 OS 模式，所有命令可直接执行，无需密码验证。"
 
         self.register(Skill(
-            id="system_unlock", title="解锁系统",
-            description="/unlock 或 /解锁：输入密码解锁会话(60分钟有效)",
+            id="system_unlock", title="解锁系统（已弃用）",
+            description="/unlock：已弃用，系统默认无需密码",
             schema={
                 "type": "function",
                 "function": {
                     "name": "system_unlock",
-                    "description": "输入密码解锁会话(60分钟有效)",
+                    "description": "已弃用：系统默认无需密码解锁",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "password": {"type": "string", "description": "密码"},
+                            "password": {"type": "string", "description": "已弃用，可留空"},
                         },
-                        "required": ["password"],
                     },
                 },
             },
             handler=system_unlock_handler,
         ))
 
-        # ---------- 锁定会话技能 ----------
+        # ---------- 锁定会话技能（已弃用） ----------
         async def system_lock_handler(args: Dict[str, Any]) -> str:
-            """撤销密码缓存，立即锁定。使用方式: /lock"""
-            executor = await self._get_system_executor()
-            try:
-                executor.invalidate_password()
-                return "🔒 已锁定。再次执行危险命令需要重新输入密码。"
-            except Exception as exc:
-                return f"锁定错误: {exc}"
+            """已弃用：系统默认无密码锁，无需锁定。"""
+            return "ℹ️ /lock 已弃用。\n\n系统默认无密码锁，无需锁定。"
 
         self.register(Skill(
-            id="system_lock", title="锁定系统",
-            description="/lock 或 /锁定：撤销密码授权，再次执行危险命令需要重新输入密码",
+            id="system_lock", title="锁定系统（已弃用）",
+            description="/lock：已弃用，系统默认无密码锁",
             schema={
                 "type": "function",
                 "function": {
                     "name": "system_lock",
-                    "description": "撤销密码授权，再次执行危险命令需要重新输入密码",
+                    "description": "已弃用：系统默认无密码锁",
                     "parameters": {
                         "type": "object",
                         "properties": {},
