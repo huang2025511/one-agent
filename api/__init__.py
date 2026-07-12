@@ -773,17 +773,58 @@ class RESTAPIGateway(Plugin):
 
                 try:
                     if _app_instance and hasattr(_app_instance, "chat_with_thinking"):
-                        # Full Coordinator pipeline: memory, skills, routing, tools.
-                        # 之前流式端点直接调 _llm.chat_completion_stream，绕过了
-                        # Coordinator → 无记忆、无技能、无路由，回复质量极差。
-                        # 现在统一走 chat_with_thinking，和非流式 /api/chat 一致。
-                        result = await _app_instance.chat_with_thinking(
-                            text, source="api", session_id=session_id
+                        # 订阅 turn_progress 事件，实时推送思考进度到客户端
+                        # 让用户在等待回复时能看到 agent 正在做什么
+                        import asyncio as _asyncio
+                        progress_queue: _asyncio.Queue = _asyncio.Queue()
+                        loop = _asyncio.get_event_loop()
+
+                        def _on_progress(evt) -> None:
+                            # 只推送当前 session 的进度
+                            if evt.get("session_id") != session_id:
+                                return
+                            try:
+                                msg = evt.get("message", "")
+                                phase = evt.get("phase", "")
+                                # loop.call_soon_threadsafe 让同步回调安全地跨线程投递
+                                loop.call_soon_threadsafe(progress_queue.put_nowait, (msg, phase))
+                            except Exception:
+                                pass
+
+                        _app_instance.bus.subscribe("turn_progress", _on_progress)
+
+                        # 并行运行 chat_with_thinking 和进度消费
+                        chat_task = _asyncio.create_task(
+                            _app_instance.chat_with_thinking(
+                                text, source="api", session_id=session_id
+                            )
                         )
+
+                        try:
+                            while True:
+                                # 每 500ms 检查一次：要么有进度事件，要么 chat 完成
+                                done, _pending = await _asyncio.wait(
+                                    [_asyncio.create_task(progress_queue.get())],
+                                    timeout=0.5,
+                                    return_when=_asyncio.FIRST_COMPLETED,
+                                )
+                                if done:
+                                    msg, phase = await done.pop()
+                                    if msg:
+                                        yield f"data: {json.dumps({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})}\n\n"
+                                if chat_task.done():
+                                    break
+                        finally:
+                            _app_instance.bus.unsubscribe("turn_progress", _on_progress)
+                            if not chat_task.done():
+                                chat_task.cancel()
+
+                        result = await chat_task
                         reply = result.get("reply", "")
                         thinking = result.get("thinking", "")
+                        # 最终的完整思考过程（7步计划）单独发送一次
                         if thinking:
-                            yield f"data: {json.dumps({'status': 'thinking', 'content': thinking, 'session_id': session_id})}\n\n"
+                            yield f"data: {json.dumps({'status': 'thinking', 'content': thinking, 'phase': 'plan', 'session_id': session_id})}\n\n"
                         if reply:
                             yield f"data: {json.dumps({'content': reply, 'session_id': session_id})}\n\n"
                     elif _llm is not None:

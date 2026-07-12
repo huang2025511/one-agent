@@ -1992,6 +1992,9 @@ class Coordinator(Plugin):
                 turn.meta["thinking"] = thinking_text
                 if reflect_text:
                     turn.meta["reflection"] = reflect_text
+                    # 实时推送思考计划到客户端
+                    self._emit_progress(turn, f"【执行计划】\n{thinking_text[:500]}", "planning")
+                    self._emit_progress(turn, f"【反思】\n{reflect_text[:300]}", "reflection")
                     header = "【我的反思与改进】\n" if zh else "[My reflection and improvements]\n"
                     reflect_message = {"role": "assistant", "content": header + reflect_text}
                     messages.append(reflect_message)
@@ -2006,6 +2009,8 @@ class Coordinator(Plugin):
                     turn.meta["reflection"] = ""
             else:
                 turn.meta["thinking"] = thinking_text
+                # 实时推送思考计划到客户端
+                self._emit_progress(turn, f"【执行计划】\n{thinking_text[:500]}", "planning")
 
             header = "【我的执行计划】\n" if self._is_zh() else "[My execution plan]\n"
             plan_message = {"role": "assistant", "content": header + thinking_text}
@@ -2544,7 +2549,8 @@ class Coordinator(Plugin):
                         # 将思考结果作为 assistant 消息加入上下文
                         # 修复：添加 _internal 标记，使其在最终清理时被移除，避免污染后续 LLM 调用
                         messages.append({"role": "assistant", "content": f"思考：{thought_text}", "_internal": True})
-                        self._emit_progress(turn, f"思考：{thought_text[:50]}...", "thinking")
+                        # 发送完整思考内容（截断到 500 字符避免 SSE 消息过长）
+                        self._emit_progress(turn, f"思考：{thought_text[:500]}", "thinking")
                         tokens_used = int(thought_resp.get("tokens_used") or 0)
                         total_tokens += tokens_used
                         total_cost += (tokens_used / 1000) * MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002))
@@ -3110,7 +3116,9 @@ class Coordinator(Plugin):
                 if not zh and result_text.startswith("Conclusion:"):
                     break
 
-                self._emit_progress(turn, f"[内部推理] 第 {round_num + 1} 轮完成...", "thinking")
+                # 发送完整推理内容（截断到 500 字符）
+                preview = result_text[:500] if result_text else ""
+                self._emit_progress(turn, f"[内部推理] 第 {round_num + 1} 轮：{preview}", "thinking")
 
             except asyncio.TimeoutError:
                 logger.debug(

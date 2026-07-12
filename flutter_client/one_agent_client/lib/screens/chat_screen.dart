@@ -280,7 +280,10 @@ class _MessageBubble extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (message.thinking != null && message.thinking!.isNotEmpty)
-                    _ThinkingExpansion(thinking: message.thinking!),
+                    _ThinkingExpansion(
+                      thinking: message.thinking!,
+                      isStreaming: message.isStreaming == true && message.content.isEmpty,
+                    ),
                   if (message.content.isNotEmpty)
                     MarkdownBody(
                       data: message.content,
@@ -293,7 +296,10 @@ class _MessageBubble extends StatelessWidget {
                         ),
                       ),
                     )
-                  else if (message.isStreaming == true)
+                  // 只在既无思考内容又无回复内容时显示"思考中..."占位
+                  // 有思考内容时由 _ThinkingExpansion 展示，不重复显示转圈
+                  else if (message.isStreaming == true &&
+                      (message.thinking == null || message.thinking!.isEmpty))
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -330,8 +336,9 @@ class _MessageBubble extends StatelessWidget {
 
 class _ThinkingExpansion extends StatefulWidget {
   final String thinking;
+  final bool isStreaming; // 是否正在流式接收思考内容
 
-  const _ThinkingExpansion({required this.thinking});
+  const _ThinkingExpansion({required this.thinking, this.isStreaming = false});
 
   @override
   State<_ThinkingExpansion> createState() => _ThinkingExpansionState();
@@ -339,6 +346,42 @@ class _ThinkingExpansion extends StatefulWidget {
 
 class _ThinkingExpansionState extends State<_ThinkingExpansion> {
   bool _expanded = false;
+  bool _userToggled = false; // 用户是否手动切换过展开状态
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void didUpdateWidget(_ThinkingExpansion oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 首次收到内容时自动展开（除非用户手动收起过）
+    if (!_userToggled && widget.thinking.isNotEmpty && !_expanded) {
+      _expanded = true;
+    }
+    // 流式更新时滚动到底部
+    if (_expanded && widget.thinking != oldWidget.thinking) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 100),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _toggle() {
+    setState(() {
+      _expanded = !_expanded;
+      _userToggled = true;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -348,7 +391,7 @@ class _ThinkingExpansionState extends State<_ThinkingExpansion> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         InkWell(
-          onTap: () => setState(() => _expanded = !_expanded),
+          onTap: _toggle,
           borderRadius: BorderRadius.circular(8),
           child: Padding(
             padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
@@ -368,15 +411,28 @@ class _ThinkingExpansionState extends State<_ThinkingExpansion> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                // 流式接收时显示动画指示器
+                if (widget.isStreaming) ...[
+                  const SizedBox(width: 6),
+                  SizedBox(
+                    width: 10,
+                    height: 10,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.5,
+                      color: theme.colorScheme.primary.withOpacity(0.6),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
         ),
-        if (_expanded)
+        if (_expanded && widget.thinking.isNotEmpty)
           Container(
             width: double.infinity,
             margin: const EdgeInsets.only(top: 4, bottom: 8),
             padding: const EdgeInsets.all(10),
+            constraints: const BoxConstraints(maxHeight: 300),
             decoration: BoxDecoration(
               color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.6),
               borderRadius: BorderRadius.circular(8),
@@ -384,11 +440,15 @@ class _ThinkingExpansionState extends State<_ThinkingExpansion> {
                 color: theme.colorScheme.outlineVariant.withOpacity(0.5),
               ),
             ),
-            child: Text(
-              widget.thinking,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-                fontStyle: FontStyle.italic,
+            child: SingleChildScrollView(
+              controller: _scrollController,
+              child: SelectableText(
+                widget.thinking,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontStyle: FontStyle.italic,
+                  height: 1.4,
+                ),
               ),
             ),
           ),
