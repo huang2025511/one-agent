@@ -1487,7 +1487,7 @@ class RESTAPIGateway(Plugin):
             CORSMiddleware,
             allow_origins=self._cors_origins,
             allow_credentials=False,
-            allow_methods=["GET", "POST"],
+            allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH"],
             allow_headers=["*"],
         )
 

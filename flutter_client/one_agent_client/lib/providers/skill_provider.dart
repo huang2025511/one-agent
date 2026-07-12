@@ -72,7 +72,9 @@ class SkillNotifier extends StateNotifier<SkillState> {
       final ok = await SkillApi.install(name);
       if (ok) {
         await loadSkills();
-        state = state.copyWith(clearError: true);
+        // 修复：loadSkills 可能因竞态提前 return 不设 isLoading，
+        // 此处必须显式重置 isLoading: false
+        state = state.copyWith(clearError: true, isLoading: false);
       } else {
         state = state.copyWith(error: '安装失败', isLoading: false);
       }

@@ -41,6 +41,7 @@ class ApprovalRequest:
             return False
 
     def to_dict(self) -> Dict[str, Any]:
+        # 修复：添加 status 字段，客户端 approval.dart 的 fromApi 期望读取此字段
         return {
             "id": self.id,
             "operation": self.operation,
@@ -48,6 +49,7 @@ class ApprovalRequest:
             "source": self.source,
             "risk_level": self.risk_level,
             "created_at": self.created_at,
+            "status": "pending" if self._approved is None else ("approved" if self._approved else "denied"),
         }
 
 

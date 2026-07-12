@@ -32,6 +32,10 @@ class SessionListState {
 class SessionListNotifier extends StateNotifier<SessionListState> {
   SessionListNotifier() : super(const SessionListState());
 
+  // 修复：将 _loadSeq 从全局变量改为实例字段，
+  // 避免 autoDispose 或多实例时共享序列号导致竞态保护失效
+  int _loadSeq = 0;
+
   Future<void> load() async {
     // 修复：清除竞态保护 — 记录请求序列号，回调时只接受最新请求
     final requestId = ++_loadSeq;
@@ -79,9 +83,6 @@ class SessionListNotifier extends StateNotifier<SessionListState> {
     }
   }
 }
-
-// 修复：用于 load() 竞态保护的请求序列号
-int _loadSeq = 0;
 
 final sessionListProvider = StateNotifierProvider<SessionListNotifier, SessionListState>(
   (ref) => SessionListNotifier(),

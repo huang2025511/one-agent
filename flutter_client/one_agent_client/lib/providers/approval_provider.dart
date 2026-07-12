@@ -34,9 +34,10 @@ class ApprovalNotifier extends StateNotifier<ApprovalState> {
 
   Timer? _pollTimer;
 
-  // 修复：竞态保护 + 错误退避
+  // 修复：竞态保护 + 错误退避 + 停止标志
   int _loadSeq = 0;
   int _consecutiveFailures = 0;
+  bool _isPolling = false; // 修复：防止 stopPolling 后仍调度新 Timer
   static const int _baseIntervalSec = 3;
   static const int _maxIntervalSec = 60; // 错误退避上限
 
@@ -58,23 +59,28 @@ class ApprovalNotifier extends StateNotifier<ApprovalState> {
   /// 开始轮询 — 修复：使用指数退避避免持续失败时浪费资源
   void startPolling() {
     _pollTimer?.cancel();
+    _isPolling = true; // 修复：设置轮询标志
     _scheduleNextPoll();
   }
 
   /// 修复：递归调度轮询，失败时指数退避
   void _scheduleNextPoll() {
+    // 修复：检查 _isPolling 标志，stopPolling 后不再调度新 Timer
+    if (!_isPolling) return;
     // 失败时按 2^n 退避，但不超过 _maxIntervalSec
     final backoff = _consecutiveFailures > 0
         ? (_baseIntervalSec * (1 << (_consecutiveFailures.clamp(1, 6) - 1)))
             .clamp(_baseIntervalSec, _maxIntervalSec)
         : _baseIntervalSec;
     _pollTimer = Timer(Duration(seconds: backoff), () async {
+      if (!_isPolling) return; // 修复：双重检查
       await load();
       _scheduleNextPoll();
     });
   }
 
   void stopPolling() {
+    _isPolling = false; // 修复：清除轮询标志
     _pollTimer?.cancel();
     _pollTimer = null;
     _consecutiveFailures = 0; // 停止时重置

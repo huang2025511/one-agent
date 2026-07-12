@@ -39,12 +39,13 @@ class ApiConstants {
 
   /// 审批
   static const String approvalsPending = '/api/approvals/pending';
-  static const String approvalsApprove = '/api/approvals';
-  static const String approvalsDeny = '/api/approvals';
+  // 修复：补全审批 approve/deny 端点路径
+  static const String approvalsApprove = '/api/approvals'; // 基础路径，使用时拼接 /{id}/approve
+  static const String approvalsDeny = '/api/approvals'; // 基础路径，使用时拼接 /{id}/deny
 
   /// MCP
   static const String mcpTools = '/api/mcp/tools';
-  static const String mcpStatus = '/api/mcp/status';
+  // 修复：移除不存在的 mcpStatus 端点（服务端无此路由）
 
   /// 成本
   static const String costsDaily = '/api/costs/daily';

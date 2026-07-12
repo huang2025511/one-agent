@@ -76,7 +76,9 @@ class MemoryNotifier extends StateNotifier<MemoryState> {
       final ok = await MemoryApi.add(text: text, tags: tags);
       if (ok) {
         await loadPage();
-        state = state.copyWith(clearError: true);
+        // 修复：loadPage 可能因竞态提前 return 不设 isLoading，
+        // 此处必须显式重置 isLoading: false
+        state = state.copyWith(clearError: true, isLoading: false);
       } else {
         state = state.copyWith(error: '添加失败', isLoading: false);
       }

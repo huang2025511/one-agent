@@ -61,8 +61,10 @@ android {
 
     buildTypes {
         release {
-            // 如果配置了 release 签名则使用 release 签名，否则使用 debug 签名（本地开发时）
-            signingConfig (keystorePath ? signingConfigs.release : signingConfigs.debug)
+            // 修复：使用与 signingConfigs 一致的完整条件判断
+            // 之前只检查 keystorePath 一个变量，若其他变量缺失会选择空的 release 签名导致构建失败
+            def hasSignConfig = keystorePath && keystorePassword && keyAlias && keyPassword
+            signingConfig (hasSignConfig ? signingConfigs.release : signingConfigs.debug)
             minifyEnabled false
             shrinkResources false
         }

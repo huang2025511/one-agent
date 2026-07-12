@@ -35,7 +35,9 @@ class SseClient {
     _client = HttpClient();
     _client!.connectionTimeout = const Duration(seconds: 15);
 
-    final uri = Uri.parse('$baseUrl${ApiConstants.chatStream}');
+    // 修复：处理 baseUrl 尾部斜杠，避免双斜杠导致 404
+    final cleanBaseUrl = baseUrl.replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.parse('$cleanBaseUrl${ApiConstants.chatStream}');
     debugPrint('🌐 SSE: POST $uri | baseUrl=$baseUrl | text=${text.substring(0, text.length > 30 ? 30 : text.length)}...');
 
     HttpClientRequest request;

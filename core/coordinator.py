@@ -2650,7 +2650,8 @@ class Coordinator(Plugin):
                     if thought_text:
                         thinking_history.append(thought_text)
                         # 将思考结果作为 assistant 消息加入上下文
-                        messages.append({"role": "assistant", "content": f"思考：{thought_text}"})
+                        # 修复：添加 _internal 标记，使其在最终清理时被移除，避免污染后续 LLM 调用
+                        messages.append({"role": "assistant", "content": f"思考：{thought_text}", "_internal": True})
                         self._emit_progress(turn, f"思考：{thought_text[:50]}...", "thinking")
                         tokens_used = int(thought_resp.get("tokens_used") or 0)
                         total_tokens += tokens_used
@@ -2787,7 +2788,7 @@ class Coordinator(Plugin):
                                 "Call them if needed; otherwise give the final answer based on current info.]"
                             )
                         messages.append({"role": "assistant", "content": final_text})
-                        messages.append({"role": "user", "content": nudge})
+                        messages.append({"role": "user", "content": nudge, "_internal": True})
                         nudged = True
                         turn.meta["plan_nudge_triggered"] = True
                         continue
@@ -2872,7 +2873,7 @@ class Coordinator(Plugin):
                                 "If it's a format issue, fix the format; if the value is wrong, adjust it; "
                                 "if this tool truly can't handle this task, switch tools or answer directly.]"
                             )
-                        messages.append({"role": "user", "content": retry_prompt})
+                        messages.append({"role": "user", "content": retry_prompt, "_internal": True})
                         turn.meta["auto_retry_count"] = retry_count + 1
                         turn.meta["auto_retry_triggered"] = True
                         logger.debug("auto-retry: triggered for %d failed tools (attempt %d)",
@@ -2899,7 +2900,7 @@ class Coordinator(Plugin):
                             "Re-evaluate and consider: switch to a different tool, change parameters, "
                             "or answer based on available information. Do not retry failed tools.]"
                         )
-                    messages.append({"role": "user", "content": replan_msg})
+                    messages.append({"role": "user", "content": replan_msg, "_internal": True})
                     turn.meta["replan_triggered"] = True
                     logger.debug("replan triggered after failures: %s", this_round_names)
 
