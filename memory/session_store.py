@@ -349,10 +349,14 @@ class SessionStore(BaseSQLiteStore):
                     # Preserve per-message token count so the forked session's
                     # total_tokens is accurate (was always 0 before tokens col).
                     msg_tokens = msg.get("tokens", 0) or 0
+                    # 修复：消息 id 必须显式生成 ——
+                    # 之前用 NULL 让 SQLite 自动生成，但 messages.id 是 TEXT PRIMARY KEY
+                    # （INTEGER 升 TEXT 迁移后），传 NULL 会被 NOT NULL 约束拦截导致 fork 后无消息
+                    msg_id = msg.get("id") or uuid.uuid4().hex
                     self._conn.execute(
                         "INSERT INTO messages(id, session_id, role, content, meta, created_at, tokens) "
-                        "VALUES (NULL, ?, ?, ?, ?, ?, ?)",
-                        (new_session_id, msg["role"], msg["content"], meta_json, msg["created_at"], msg_tokens),
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (msg_id, new_session_id, msg["role"], msg["content"], meta_json, msg["created_at"], msg_tokens),
                     )
 
                 # 更新消息计数和 token 统计

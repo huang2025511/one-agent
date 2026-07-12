@@ -156,8 +156,10 @@ class ContextCompressor:
                 compressed_conv.append(msg)
                 current_size += msg_size
 
-        # Sort back to original order
-        compressed_conv.sort(key=lambda m: conv_msgs.index(m))
+        # 修复：使用预构建的 index_map 避免 O(N²) 排序
+        # 之前用 conv_msgs.index(m) 在长对话中（5000+ 消息）会产生明显延迟
+        index_map = {id(m): i for i, m in enumerate(conv_msgs)}
+        compressed_conv.sort(key=lambda m: index_map.get(id(m), 0))
 
         # Build final result
         result = list(system_msgs) + compressed_conv if self._preserve_system else compressed_conv

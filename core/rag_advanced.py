@@ -169,6 +169,14 @@ class AdvancedRAG:
         )
         return fused[:top_k]
 
+    def _content_key(self, item: Dict[str, Any]) -> str:
+        """修复：使用内容 hash 作为唯一标识 ——
+        之前用 id(item) 是内存地址，不同 dict 实例即使内容相同也是不同 id，
+        导致 RRF 融合时不去重。
+        """
+        content = item.get("content", "") or item.get("text", "") or ""
+        return f"{item.get('id', '')}::{hash(content)}"[:200]
+
     def _rrf_fusion(
         self,
         list_a: List[Dict[str, Any]],
@@ -177,21 +185,23 @@ class AdvancedRAG:
         alpha: float = 0.5,
     ) -> List[Dict[str, Any]]:
         """Reciprocal Rank Fusion: combine two ranked lists."""
-        scores: Dict[int, float] = {}
-        id_to_item: Dict[int, Dict[str, Any]] = {}
+        scores: Dict[str, float] = {}
+        key_to_item: Dict[str, Dict[str, Any]] = {}
 
         for i, item in enumerate(list_a):
-            item_id = id(item)
-            id_to_item[item_id] = item
-            scores[item_id] = scores.get(item_id, 0) + alpha * (1.0 / (k + i + 1))
+            item_key = self._content_key(item)
+            key_to_item[item_key] = item
+            scores[item_key] = scores.get(item_key, 0) + alpha * (1.0 / (k + i + 1))
 
         for i, item in enumerate(list_b):
-            item_id = id(item)
-            id_to_item[item_id] = item
-            scores[item_id] = scores.get(item_id, 0) + (1 - alpha) * (1.0 / (k + i + 1))
+            item_key = self._content_key(item)
+            # 修复：保留来自 list_a 的更完整 item 信息（若有 meta 等）
+            if item_key not in key_to_item:
+                key_to_item[item_key] = item
+            scores[item_key] = scores.get(item_key, 0) + (1 - alpha) * (1.0 / (k + i + 1))
 
-        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
-        return [id_to_item[iid] for iid in sorted_ids if iid in id_to_item]
+        sorted_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+        return [key_to_item[k] for k in sorted_keys if k in key_to_item]
 
     # --------------------------------------------------- query expansion
 
@@ -298,13 +308,13 @@ class AdvancedRAG:
                 results = await self._direct_search(q, top_k * 2)
             all_results.extend(results)
 
-        # Deduplicate
+        # Deduplicate — 修复：使用 _content_key 基于内容去重，而非 id() 内存地址
         seen = set()
         deduped = []
         for r in all_results:
-            rid = id(r)
-            if rid not in seen:
-                seen.add(rid)
+            rkey = self._content_key(r)
+            if rkey not in seen:
+                seen.add(rkey)
                 deduped.append(r)
 
         if use_rerank and len(deduped) > top_k:

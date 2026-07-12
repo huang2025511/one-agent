@@ -350,6 +350,9 @@ class _InputBarState extends ConsumerState<_InputBar> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
 
+  // 修复：发送按钮防抖 — 记录上次发送时间，500ms 内重复点击忽略
+  DateTime? _lastSendTime;
+
   @override
   void dispose() {
     _controller.dispose();
@@ -360,6 +363,15 @@ class _InputBarState extends ConsumerState<_InputBar> {
   void _send() {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
+    // 修复：500ms 防抖，防止用户连续快速点击发送按钮
+    // 之前虽然 TextField 禁用，但发送按钮仍可点击，会触发重复请求
+    final now = DateTime.now();
+    if (_lastSendTime != null &&
+        now.difference(_lastSendTime!).inMilliseconds < 500) {
+      return;
+    }
+    _lastSendTime = now;
+
     ref.read(chatProvider.notifier).sendMessage(text);
     _controller.clear();
     _focusNode.requestFocus();

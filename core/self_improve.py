@@ -69,6 +69,7 @@ class SelfImprover:
         self._write_lock = threading.Lock()
         self._failures: List[FailureCase] = []
         self._improvements: List[Dict[str, Any]] = []
+        self._closed = False  # 修复：初始化 _closed 标志用于双重关闭保护
         self._migrate()
 
     def _migrate(self):
@@ -308,6 +309,10 @@ class SelfImprover:
 
     def close(self) -> None:
         """Close the database connection."""
+        # 修复：加 _closed 标志防止多线程 GC 时双重关闭
+        if getattr(self, '_closed', True):
+            return
+        self._closed = True
         try:
             if self._conn:
                 self._conn.close()
@@ -317,8 +322,8 @@ class SelfImprover:
 
     def __del__(self):
         """Ensure connection is closed on garbage collection."""
-        if hasattr(self, '_conn') and self._conn:
-            try:
-                self._conn.close()
-            except Exception as exc:
-                logger.debug("SelfImprover __del__ close error: %s", exc)
+        # 修复：使用 close() 走统一的 closed 检查路径
+        try:
+            self.close()
+        except Exception as exc:
+            logger.debug("SelfImprover __del__ close error: %s", exc)

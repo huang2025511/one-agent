@@ -13,6 +13,7 @@ proactively.
 from __future__ import annotations
 
 import asyncio
+import re
 import logging
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -261,7 +262,9 @@ class FailureRecovery:
             return "auth_error"
         if "404" in msg or "not found" in msg:
             return "not_found"
-        if "5" in msg[:6] and ("server" in msg or "error" in msg):
+        # 修复：使用正则匹配 5xx 状态码（覆盖 500/502/503/504 等），
+        # 之前用 `"5" in msg[:6] and ("server" in msg or "error" in msg)` 误判率极高
+        if re.search(r'\b5\d\d\b', msg[:200]) or re.search(r'\b5\d\d\b', str(error)[:200]):
             return "server_error"
         if "connect" in msg or "refused" in msg or "dns" in msg:
             return "connect_error"

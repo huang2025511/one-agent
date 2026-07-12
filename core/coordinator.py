@@ -3123,27 +3123,49 @@ class Coordinator(Plugin):
         self, messages: List[Dict[str, Any]], turn: TurnContext, max_rounds: int = 5,
     ) -> str:
         """多轮内部推理循环 — Agent 可以自己跟自己对话多轮。
-        
+
         在不需要调用外部工具的情况下，让 Agent 通过自我对话来深入分析问题。
         每轮推理都会基于上一轮的思考继续深入。
-        
+
         返回最终的推理结果。
+
+        修复：
+        - 加单轮 LLM 调用超时控制（_INTERNAL_REASONING_TIMEOUT），防止单轮卡死拖死整个 turn
+        - 加每轮输出字符数上限（_INTERNAL_REASONING_MAX_CHARS），防止 LLM 写入超大段
+          污染 messages 上下文导致 OOM
+        - 加总轮次时间上限，超出强制退出
         """
         if max_rounds <= 0:
             max_rounds = 3
-        
+
+        # 修复：单轮推理调用超时（60s），超过则跳过本轮
+        _INTERNAL_REASONING_TIMEOUT = 60.0
+        # 修复：每轮推理结果最大字符数（防止 LLM 输出超长结果污染 context）
+        _INTERNAL_REASONING_MAX_CHARS = 4000
+        # 修复：总时间上限（5分钟），超过强制退出
+        _TOTAL_REASONING_BUDGET = 300.0
+
         provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
         circuit = get_circuit_manager().get(f"llm:{provider}")
         llm_backoff_strategy = llm_backoff()
         rate_limiter = get_rate_limiter()
-        
+
         zh = self._is_zh()
         reasoning_results: List[str] = []
         user_question = (turn.input_text or "")[:500]
-        
+        loop_start = time.time()
+
         for round_num in range(max_rounds):
+            # 修复：总时间预算检查
+            if time.time() - loop_start > _TOTAL_REASONING_BUDGET:
+                logger.debug(
+                    "internal_reasoning_loop: total budget %.1fs exceeded at round %d",
+                    _TOTAL_REASONING_BUDGET, round_num,
+                )
+                break
+
             await rate_limiter.acquire(provider)
-            
+
             if zh:
                 reasoning_prompt = (
                     f"[内部推理第 {round_num + 1}/{max_rounds} 轮]\n"
@@ -3162,12 +3184,12 @@ class Coordinator(Plugin):
                     "Your analysis should become progressively deeper until you find an answer.\n"
                     "If you've reached a conclusion, start with 'Conclusion:' to summarize."
                 )
-            
+
             messages.append({"role": "user", "content": reasoning_prompt, "_internal": True})
-            
+
             if self._llm is None:
                 break
-            
+
             async def _do_reasoning_call():
                 return await self._llm.chat_completion(
                     messages=messages,
@@ -3175,30 +3197,42 @@ class Coordinator(Plugin):
                     max_tokens=1000,
                     temperature=0.7,
                 )
-            
+
             try:
-                resp = await circuit.acall(
-                    lambda: llm_backoff_strategy.retry(_do_reasoning_call),
+                # 修复：单轮推理加 asyncio.wait_for 超时控制
+                resp = await asyncio.wait_for(
+                    circuit.acall(lambda: llm_backoff_strategy.retry(_do_reasoning_call)),
+                    timeout=_INTERNAL_REASONING_TIMEOUT,
                 )
                 result_text = resp.get("text", "") or ""
+                # 修复：限制每轮输出字符数，防止超长结果污染 context
+                if len(result_text) > _INTERNAL_REASONING_MAX_CHARS:
+                    result_text = result_text[:_INTERNAL_REASONING_MAX_CHARS] + "\n[...已截断...]"
                 reasoning_results.append(result_text)
                 messages.append({"role": "assistant", "content": f"[推理结果 {round_num + 1}] {result_text}", "_internal": True})
-                
+
                 # 检查是否已经得出结论
                 if zh and result_text.startswith("结论："):
                     break
                 if not zh and result_text.startswith("Conclusion:"):
                     break
-                
+
                 self._emit_progress(turn, f"[内部推理] 第 {round_num + 1} 轮完成...", "thinking")
-                
+
+            except asyncio.TimeoutError:
+                logger.debug(
+                    "internal_reasoning_loop: round %d timed out after %.1fs",
+                    round_num, _INTERNAL_REASONING_TIMEOUT,
+                )
+                break
             except Exception as exc:
                 logger.debug("internal_reasoning_loop failed at round %d: %s", round_num, exc)
                 break
-        
+
         if reasoning_results:
             turn.meta["internal_reasoning"] = reasoning_results
-        
+
+
         # 提取最终结论
         final_conclusion = ""
         for result in reversed(reasoning_results):
@@ -3283,44 +3317,70 @@ class Coordinator(Plugin):
             )
         
         try:
-            resp = await circuit.acall(
-                lambda: llm_backoff_strategy.retry(_do_planning_call),
+            # 修复：加超时控制
+            resp = await asyncio.wait_for(
+                circuit.acall(lambda: llm_backoff_strategy.retry(_do_planning_call)),
+                timeout=60.0,
             )
             plan_text = resp.get("text", "") or ""
-            
+
+            # 修复：限制 plan_text 长度，防止 LLM 输出超大段污染 context
+            _PLAN_TEXT_MAX = 8000
+            if len(plan_text) > _PLAN_TEXT_MAX:
+                plan_text = plan_text[:_PLAN_TEXT_MAX] + "\n[...已截断...]"
+
             # 解析计划步骤
             steps = []
+            # 修复：单步字符数上限（防止 LLM 写长篇大论）
+            _STEP_TEXT_MAX = 500
+            # 修复：最大步骤数（防止 LLM 输出几千步骤撑爆 messages）
+            _MAX_PLAN_STEPS = 20
             if zh:
                 for line in plan_text.split("\n"):
+                    if len(steps) >= _MAX_PLAN_STEPS:
+                        logger.debug("task_planning: hit max steps cap %d, truncating", _MAX_PLAN_STEPS)
+                        break
                     line = line.strip()
                     if line.startswith("步骤") or line.startswith("Step"):
                         # 提取步骤内容 — 修复：使用 (?:步骤|Step) 而非 [步骤|Step]
                         # [步骤|Step] 是字符类，只匹配单个字符，不是匹配"步骤"或"Step"这个词
                         match = re.search(r'(?:步骤|Step)\s*\d+[：:]?\s*(.*)', line, re.IGNORECASE)
                         if match:
-                            steps.append(match.group(1).strip())
+                            step_text = match.group(1).strip()
+                            if len(step_text) > _STEP_TEXT_MAX:
+                                step_text = step_text[:_STEP_TEXT_MAX] + "..."
+                            steps.append(step_text)
             else:
                 for line in plan_text.split("\n"):
+                    if len(steps) >= _MAX_PLAN_STEPS:
+                        logger.debug("task_planning: hit max steps cap %d, truncating", _MAX_PLAN_STEPS)
+                        break
                     line = line.strip()
                     if line.startswith("Step") or line.startswith("step"):
                         match = re.search(r'Step\s*\d+[.:]?\s*(.*)', line, re.IGNORECASE)
                         if match:
-                            steps.append(match.group(1).strip())
-            
+                            step_text = match.group(1).strip()
+                            if len(step_text) > _STEP_TEXT_MAX:
+                                step_text = step_text[:_STEP_TEXT_MAX] + "..."
+                            steps.append(step_text)
+
             if steps:
                 turn.meta["task_plan"] = steps
                 self._emit_progress(turn, f"已生成 {len(steps)} 步执行计划", "planning")
                 logger.debug("task_planning: generated %d steps", len(steps))
-                
+
                 # 将计划注入上下文
                 if zh:
                     plan_summary = "任务计划：\n" + "\n".join([f"{i+1}. {step}" for i, step in enumerate(steps)])
                 else:
                     plan_summary = "Task Plan:\n" + "\n".join([f"{i+1}. {step}" for i, step in enumerate(steps)])
                 messages.append({"role": "assistant", "content": plan_summary})
-            
+
             return steps
-            
+
+        except asyncio.TimeoutError:
+            logger.debug("task_planning: LLM call timed out after 60s")
+            return []
         except Exception as exc:
             logger.debug("task_planning failed: %s", exc)
             return []
