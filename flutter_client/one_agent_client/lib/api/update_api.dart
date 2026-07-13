@@ -35,15 +35,17 @@ class UpdateApi {
   static const String _giteeRepo = 'huang20260511/one-agent';
 
   /// 获取最新 Release
-  /// 优先从 GitHub API 获取，失败时回退到 Gitee API（国内更稳定）
+  /// 国内用户优先从 Gitee API 获取（更快更稳定），失败时回退到 GitHub API
   /// [currentVersion] 当前应用版本号（用于无新版本时返回 null）
+  /// 两个源都不可用时抛异常（而非返回 null），让 UI 显示"检测失败"而非"最新版本"
   static Future<ReleaseInfo?> getLatestRelease({int? currentVersion}) async {
-    // 先尝试 GitHub API
-    ReleaseInfo? release = await _fetchFromGitHub();
-    // GitHub 失败则回退到 Gitee API
-    release ??= await _fetchFromGitee();
+    // 国内用户优先 Gitee（1-2秒即可响应），失败回退 GitHub
+    ReleaseInfo? release = await _fetchFromGitee();
+    release ??= await _fetchFromGitHub();
 
-    if (release == null) return null;
+    if (release == null) {
+      throw Exception('无法连接更新服务器（Gitee 和 GitHub 均不可达），请检查网络后重试');
+    }
 
     // 比较版本号：若当前版本 >= 最新版本，则无需更新
     if (currentVersion != null && currentVersion >= release.versionNumber) {
@@ -55,8 +57,8 @@ class UpdateApi {
   /// 从 GitHub API 获取最新 Release
   static Future<ReleaseInfo?> _fetchFromGitHub() async {
     final dio = Dio(BaseOptions(
-      connectTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 10),
+      connectTimeout: const Duration(seconds: 15),
+      receiveTimeout: const Duration(seconds: 15),
       headers: {'Accept': 'application/vnd.github+json'},
     ));
 
@@ -110,8 +112,8 @@ class UpdateApi {
   /// 从 Gitee API 获取最新 Release（国内网络更稳定）
   static Future<ReleaseInfo?> _fetchFromGitee() async {
     final dio = Dio(BaseOptions(
-      connectTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 10),
+      connectTimeout: const Duration(seconds: 15),
+      receiveTimeout: const Duration(seconds: 15),
     ));
 
     try {
