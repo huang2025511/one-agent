@@ -35,16 +35,32 @@ class UpdateApi {
   static const String _giteeRepo = 'huang20260511/one-agent';
 
   /// 获取最新 Release
+  /// 优先从 GitHub API 获取，失败时回退到 Gitee API（国内更稳定）
   /// [currentVersion] 当前应用版本号（用于无新版本时返回 null）
   static Future<ReleaseInfo?> getLatestRelease({int? currentVersion}) async {
+    // 先尝试 GitHub API
+    ReleaseInfo? release = await _fetchFromGitHub();
+    // GitHub 失败则回退到 Gitee API
+    release ??= await _fetchFromGitee();
+
+    if (release == null) return null;
+
+    // 比较版本号：若当前版本 >= 最新版本，则无需更新
+    if (currentVersion != null && currentVersion >= release.versionNumber) {
+      return null;
+    }
+    return release;
+  }
+
+  /// 从 GitHub API 获取最新 Release
+  static Future<ReleaseInfo?> _fetchFromGitHub() async {
     final dio = Dio(BaseOptions(
-      connectTimeout: const Duration(seconds: 15),
-      receiveTimeout: const Duration(seconds: 15),
+      connectTimeout: const Duration(seconds: 10),
+      receiveTimeout: const Duration(seconds: 10),
       headers: {'Accept': 'application/vnd.github+json'},
     ));
 
     try {
-      // 1. 从 GitHub 获取 Release 元信息（GitHub API 稳定，作为权威源）
       final resp = await dio.get(
         'https://api.github.com/repos/$_ghRepo/releases/latest',
       );
@@ -55,25 +71,27 @@ class UpdateApi {
       final publishedAt = data['published_at'] as String?;
 
       String? apkUrl;
+      String? apkAssetName;
       int apkSize = 0;
       for (final asset in (data['assets'] as List<dynamic>? ?? [])) {
         final assetName = asset['name'] as String? ?? '';
         if (assetName.endsWith('.apk')) {
           apkUrl = asset['browser_download_url'] as String?;
+          apkAssetName = assetName;
           apkSize = (asset['size'] as num?)?.toInt() ?? 0;
-          break;
+          // 优先取 arm64-v8a（主流架构）
+          if (assetName.contains('arm64-v8a')) break;
         }
       }
 
       if (apkUrl == null) return null;
 
-      // 2. 构造 Gitee 下载地址（同名 tag，附件名固定为 app-release.apk）
-      //    Gitee Release 附件 URL 格式：
-      //    https://gitee.com/{owner}/{repo}/releases/download/{tag}/{asset_name}
-      final giteeApkUrl =
-          'https://gitee.com/$_giteeRepo/releases/download/$tagName/app-release.apk';
+      // 用 GitHub 的 APK 文件名构造 Gitee 下载地址
+      final giteeApkUrl = apkAssetName != null
+          ? 'https://gitee.com/$_giteeRepo/releases/download/$tagName/$apkAssetName'
+          : null;
 
-      final release = ReleaseInfo(
+      return ReleaseInfo(
         tagName: tagName,
         name: name,
         body: body,
@@ -82,16 +100,60 @@ class UpdateApi {
         giteeApkUrl: giteeApkUrl,
         apkSize: apkSize,
       );
+    } on DioException {
+      return null; // GitHub 不可用，返回 null 让调用方回退 Gitee
+    } finally {
+      dio.close();
+    }
+  }
 
-      // 比较版本号：若当前版本 >= 最新版本，则无需更新
-      if (currentVersion != null &&
-          currentVersion >= release.versionNumber) {
-        return null;
+  /// 从 Gitee API 获取最新 Release（国内网络更稳定）
+  static Future<ReleaseInfo?> _fetchFromGitee() async {
+    final dio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 10),
+      receiveTimeout: const Duration(seconds: 10),
+    ));
+
+    try {
+      final resp = await dio.get(
+        'https://gitee.com/api/v5/repos/$_giteeRepo/releases/latest',
+      );
+      final data = resp.data as Map<String, dynamic>;
+      final tagName = data['tag_name'] as String? ?? '';
+      final name = data['name'] as String? ?? tagName;
+      final body = data['body'] as String?;
+      final publishedAt = data['created_at'] as String?;
+
+      String? apkUrl;
+      String? giteeApkUrl;
+      int apkSize = 0;
+      for (final asset in (data['assets'] as List<dynamic>? ?? [])) {
+        final assetName = asset['name'] as String? ?? '';
+        if (assetName.endsWith('.apk')) {
+          giteeApkUrl = asset['browser_download_url'] as String?;
+          apkSize = (asset['size'] as num?)?.toInt() ?? 0;
+          // 优先取 arm64-v8a（主流架构）
+          if (assetName.contains('arm64-v8a')) break;
+        }
       }
-      return release;
-    } on DioException catch (e) {
-      if (e.response?.statusCode == 404) return null;
-      rethrow;
+
+      if (giteeApkUrl == null) return null;
+
+      // 用 Gitee 文件名构造 GitHub 下载地址（作为备用）
+      final ghApkUrl = apkUrl ??
+          'https://github.com/$_ghRepo/releases/download/$tagName/${giteeApkUrl.split('/').last}';
+
+      return ReleaseInfo(
+        tagName: tagName,
+        name: name,
+        body: body,
+        publishedAt: publishedAt,
+        apkUrl: ghApkUrl,
+        giteeApkUrl: giteeApkUrl,
+        apkSize: apkSize,
+      );
+    } on DioException {
+      return null;
     } finally {
       dio.close();
     }
