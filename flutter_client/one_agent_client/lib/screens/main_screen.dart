@@ -58,13 +58,22 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   /// 启动时自动检查更新（延迟 3 秒，等网络连接建立）
   Future<void> _checkUpdateOnStartup() async {
     if (_updateCheckDone) return;
-    _updateCheckDone = true;
+    // 修复：先延迟，再做幂等标记 — 避免 widget 在 3 秒内 dispose 导致整个 turn 被永久跳过
     // 延迟确保网络和服务已就绪
     await Future.delayed(const Duration(seconds: 3));
-    if (!mounted) return;
+    if (!mounted) {
+      // widget 已 dispose，下次启动允许重新检查
+      return;
+    }
+    _updateCheckDone = true;
     await ref.read(updateProvider.notifier).checkForUpdate();
     if (!mounted) return;
     final updateState = ref.read(updateProvider);
+    if (updateState.error != null) {
+      // 静默失败 — 用户可在"设置 → 检查更新"手动重试
+      debugPrint('startup update check failed: ${updateState.error}');
+      return;
+    }
     if (updateState.hasUpdate && updateState.latestRelease != null) {
       _showUpdateNotification(updateState.latestRelease!.tagName);
     }

@@ -12,8 +12,24 @@ if (localPropertiesFile.exists()) {
     }
 }
 
-def flutterVersionCode = localProperties.getProperty('flutter.versionCode') ?: '1'
-def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '1.0'
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+def flutterVersionName = localProperties.getProperty('flutter.versionName')
+
+// 修复：当 CLI 和 local.properties 都没传时，从 pubspec.yaml 读取 version (如 1.0.62+62 → 62 / 1.0.62)
+// 避免之前 release APK 全部是 versionCode=1 的 bug，导致客户端自检不通过
+if (flutterVersionCode == null || flutterVersionName == null) {
+    def pubspecFile = file('../pubspec.yaml')
+    if (pubspecFile.exists()) {
+        def pubspecText = pubspecFile.text
+        def versionMatch = pubspecText =~ /^version:\s*([0-9.]+)\+(\d+)\s*$/
+        if (versionMatch.find()) {
+            if (flutterVersionName == null) flutterVersionName = versionMatch.group(1)
+            if (flutterVersionCode == null) flutterVersionCode = versionMatch.group(2)
+        }
+    }
+}
+if (flutterVersionCode == null) flutterVersionCode = '1'
+if (flutterVersionName == null) flutterVersionName = '1.0'
 
 // 从环境变量或 local.properties 读取 release 签名配置
 // 优先级：环境变量 > local.properties > 仓库内固定 keystore
