@@ -14,16 +14,26 @@ class SseClient {
   HttpClient? _client;
   StreamSubscription? _subscription;
 
-  /// 最大重试次数（连接建立失败时）
-  static const int _maxConnectRetries = 3;
+  /// 最大重试次数（连接建立失败时 + 流中断时）
+  static const int _maxRetries = 3;
 
   /// 重试初始延迟（毫秒）
   static const int _retryBaseDelayMs = 1000;
 
+  /// 流中断重连最大次数（仅在未收到任何内容时重连）
+  static const int _maxStreamReconnects = 2;
+
+  /// 流超时：超过此时间未收到任何事件则视为断线
+  static const Duration _streamIdleTimeout = Duration(seconds: 45);
+
   SseClient({required this.baseUrl, this.apiKey});
 
   /// 发送流式聊天请求，返回 Stream<StreamEvent>
-  /// 连接失败时会自动重试（指数退避），最多重试 _maxConnectRetries 次
+  ///
+  /// 断线重连策略：
+  /// - 连接建立阶段：指数退避重试，最多 _maxRetries 次
+  /// - 流传输阶段：若未收到任何内容就断线，自动重连最多 _maxStreamReconnects 次
+  /// - 已收到内容后断线：直接 yield error 事件，避免重复内容
   Stream<StreamEvent> chatStream({
     required String text,
     String? sessionId,
@@ -36,101 +46,175 @@ class SseClient {
     _client = HttpClient();
     _client!.connectionTimeout = const Duration(seconds: 15);
 
-    // 修复：处理 baseUrl 尾部斜杠，避免双斜杠导致 404
     final cleanBaseUrl = baseUrl.replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse('$cleanBaseUrl${ApiConstants.chatStream}');
     debugPrint('🌐 SSE: POST $uri | baseUrl=$baseUrl | text=${text.substring(0, text.length > 30 ? 30 : text.length)}...');
 
-    // 修复：使用 late 让编译器知道此变量在使用前一定已赋值
-    // （循环中要么 break 时已赋值，要么 rethrow 抛出异常不会执行到后续代码）
-    late HttpClientRequest request;
+    // 追踪是否已收到内容（用于判断是否允许重连）
+    bool hasReceivedContent = false;
+    int streamReconnectCount = 0;
     Exception? lastError;
 
-    for (int attempt = 0; attempt <= _maxConnectRetries; attempt++) {
+    for (int attempt = 0; attempt <= _maxRetries; attempt++) {
       if (attempt > 0) {
         final delay = _retryBaseDelayMs * (1 << (attempt - 1));
-        debugPrint('🔄 SSE: 连接重试第 $attempt/$_maxConnectRetries 次，等待 ${delay}ms...');
+        debugPrint('🔄 SSE: 重连第 $attempt/$_maxRetries 次，等待 ${delay}ms...');
+        // 通知客户端正在重连
+        yield StreamEvent(
+          type: 'thinking',
+          status: 'thinking',
+          content: '网络波动，正在重新连接...',
+          phase: 'reconnect',
+        );
         await Future.delayed(Duration(milliseconds: delay));
-        // 每次重试前重建 client，避免旧连接状态干扰
         _client?.close();
         _client = HttpClient();
         _client!.connectionTimeout = const Duration(seconds: 15);
       }
 
+      // ── 1. 建立连接 ──────────────────────────────────────
+      late HttpClientRequest request;
       try {
         request = await _client!.postUrl(uri);
-        break; // 连接成功，跳出重试循环
       } catch (e) {
         lastError = e is Exception ? e : Exception(e.toString());
-        debugPrint('❌ SSE: 连接失败 (尝试 ${attempt + 1}/${_maxConnectRetries + 1}) - $e');
-        if (attempt == _maxConnectRetries) {
-          rethrow; // 最后一次重试失败，抛出异常
+        debugPrint('❌ SSE: 连接失败 (尝试 ${attempt + 1}/${_maxRetries + 1}) - $e');
+        if (attempt == _maxRetries) {
+          yield StreamEvent(
+            type: 'error',
+            content: '连接失败，请检查网络后重试',
+            done: true,
+          );
+          return;
         }
+        continue;
       }
-    }
 
-    request.headers.set('Content-Type', 'application/json');
-    request.headers.set('Accept', 'text/event-stream');
-    if (apiKey != null && apiKey!.isNotEmpty) {
-      request.headers.set('X-API-Key', apiKey!);
-    }
+      request.headers.set('Content-Type', 'application/json');
+      request.headers.set('Accept', 'text/event-stream');
+      if (apiKey != null && apiKey!.isNotEmpty) {
+        request.headers.set('X-API-Key', apiKey!);
+      }
 
-    final body = jsonEncode({
-      'text': text,
-      // 只在有值时发送 session_id，避免发送 null 导致服务端
-      // body.get("session_id", default) 返回 None 而非默认值
-      if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
-      if (model != null) 'model': model,
-      if (temperature != null) 'temperature': temperature,
-      if (maxTokens != null) 'max_tokens': maxTokens,
-      // 传递客户端语言环境，让服务端用对应语言生成思考过程
-      if (language != null && language.isNotEmpty) 'language': language,
-    });
-    // 修复：request.write(body) 默认用 Latin1 编码，中文字符会报
-    // "Contains invalid characters" 错误。改用 utf8.encode + request.add
-    // 以 UTF-8 字节流发送，正确支持中文等非 ASCII 字符。
-    request.add(utf8.encode(body));
+      final body = jsonEncode({
+        'text': text,
+        if (sessionId != null && sessionId.isNotEmpty) 'session_id': sessionId,
+        if (model != null) 'model': model,
+        if (temperature != null) 'temperature': temperature,
+        if (maxTokens != null) 'max_tokens': maxTokens,
+        if (language != null && language.isNotEmpty) 'language': language,
+      });
+      request.add(utf8.encode(body));
 
-    HttpClientResponse response;
-    try {
-      response = await request.close();
-    } catch (e) {
-      debugPrint('❌ SSE: 请求失败 - $e');
-      rethrow;
-    }
+      HttpClientResponse response;
+      try {
+        response = await request.close();
+      } catch (e) {
+        lastError = e is Exception ? e : Exception(e.toString());
+        debugPrint('❌ SSE: 请求发送失败 - $e');
+        if (attempt == _maxRetries) {
+          yield StreamEvent(
+            type: 'error',
+            content: '请求发送失败: $e',
+            done: true,
+          );
+          return;
+        }
+        continue;
+      }
 
-    debugPrint('✅ SSE: 响应状态 ${response.statusCode}');
+      debugPrint('✅ SSE: 响应状态 ${response.statusCode}');
 
-    if (response.statusCode != 200) {
-      final responseBody = await response.transform(utf8.decoder).join();
-      debugPrint('❌ SSE: 错误响应体 - $responseBody');
-      throw Exception('SSE error: ${response.statusCode} - $responseBody');
-    }
+      if (response.statusCode != 200) {
+        final responseBody = await response.transform(utf8.decoder).join();
+        debugPrint('❌ SSE: 错误响应体 - $responseBody');
+        yield StreamEvent(
+          type: 'error',
+          content: '服务器错误: ${response.statusCode}',
+          done: true,
+        );
+        return;
+      }
 
-    String buffer = '';
-    await for (final chunk in response.transform(utf8.decoder)) {
-      buffer += chunk;
+      // ── 2. 读取流 ────────────────────────────────────────
+      String buffer = '';
+      bool receivedDone = false;
+      DateTime lastEventTime = DateTime.now();
 
-      // SSE 格式: data: {...}\n\n
-      while (buffer.contains('\n\n')) {
-        final idx = buffer.indexOf('\n\n');
-        final eventBlock = buffer.substring(0, idx);
-        buffer = buffer.substring(idx + 2);
+      try {
+        await for (final chunk in response.transform(utf8.decoder).timeout(_streamIdleTimeout)) {
+          lastEventTime = DateTime.now();
+          buffer += chunk;
 
-        final event = _parseSseBlock(eventBlock);
-        if (event != null) {
-          yield event;
+          while (buffer.contains('\n\n')) {
+            final idx = buffer.indexOf('\n\n');
+            final eventBlock = buffer.substring(0, idx);
+            buffer = buffer.substring(idx + 2);
 
-          // 检测到完成事件时结束
-          if (event.done == true) {
-            _client?.close();
-            _client = null;
-            return;
+            final event = _parseSseBlock(eventBlock);
+            if (event != null) {
+              // 追踪是否收到实际内容（非 thinking 占位事件）
+              if (!hasReceivedContent) {
+                if (event.type == 'text' || event.type == 'done' ||
+                    (event.type == 'thinking' && event.content != null && event.content!.isNotEmpty)) {
+                  hasReceivedContent = true;
+                }
+              }
+
+              yield event;
+
+              if (event.done == true) {
+                receivedDone = true;
+                _client?.close();
+                _client = null;
+                return; // 正常结束
+              }
+            }
           }
         }
+      } on TimeoutException {
+        debugPrint('⏰ SSE: 流超时（${_streamIdleTimeout.inSeconds}秒无数据）');
+      } catch (e) {
+        debugPrint('❌ SSE: 流读取中断 - $e');
+        lastError = e is Exception ? e : Exception(e.toString());
+      }
+
+      // ── 3. 流意外结束（未收到 done 事件）─────────────────
+      if (!receivedDone) {
+        debugPrint('⚠️ SSE: 流意外结束（未收到 done 事件），hasReceivedContent=$hasReceivedContent, streamReconnect=$streamReconnectCount');
+
+        // 已收到内容 → 不重连（避免重复内容），直接报错
+        if (hasReceivedContent) {
+          yield StreamEvent(
+            type: 'error',
+            content: '连接中断，已收到的内容可能不完整，请重试',
+            done: true,
+          );
+          _client?.close();
+          _client = null;
+          return;
+        }
+
+        // 未收到任何内容 → 尝试重连
+        if (streamReconnectCount < _maxStreamReconnects) {
+          streamReconnectCount++;
+          attempt--; // 不消耗外层重试次数
+          continue;
+        }
+
+        // 重连次数耗尽
+        yield StreamEvent(
+          type: 'error',
+          content: '连接失败，请检查网络后重试',
+          done: true,
+        );
+        _client?.close();
+        _client = null;
+        return;
       }
     }
 
+    // 理论上不会到这里（循环内各分支都有 return）
     _client?.close();
     _client = null;
   }
@@ -178,13 +262,12 @@ class SseClient {
           type: 'thinking',
           status: 'thinking',
           content: (json['content'] ?? json['text'] ?? json['thinking']) as String?,
-          phase: json['phase'] as String?, // planning/thinking/reflection/plan
+          phase: json['phase'] as String?,
           sessionId: json['session_id'] as String?,
         );
       }
 
       // 内容事件：识别 content / text / delta 三种字段名
-      // 服务端 LLM 层用 delta，Coordinator 层用 content，兼容两者
       final content = json['content'] ?? json['text'] ?? json['delta'];
       if (content != null && content.toString().isNotEmpty) {
         return StreamEvent(

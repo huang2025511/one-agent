@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/approval_provider.dart';
+import '../providers/update_provider.dart';
 import 'chat_screen.dart';
 import 'memory_screen.dart';
 import 'skill_screen.dart';
@@ -18,6 +19,7 @@ class MainScreen extends ConsumerStatefulWidget {
 
 class _MainScreenState extends ConsumerState<MainScreen> {
   int _currentIndex = 0;
+  bool _updateCheckDone = false;
 
   final _pages = const [
     ChatScreen(),
@@ -46,10 +48,50 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   @override
   void initState() {
     super.initState();
-    // 延迟启动审批轮询，等设置加载完成
+    // 延迟启动审批轮询和更新检查，等设置加载完成
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(approvalProvider.notifier).startPolling();
+      _checkUpdateOnStartup();
     });
+  }
+
+  /// 启动时自动检查更新（延迟 3 秒，等网络连接建立）
+  Future<void> _checkUpdateOnStartup() async {
+    if (_updateCheckDone) return;
+    _updateCheckDone = true;
+    // 延迟确保网络和服务已就绪
+    await Future.delayed(const Duration(seconds: 3));
+    if (!mounted) return;
+    await ref.read(updateProvider.notifier).checkForUpdate();
+    if (!mounted) return;
+    final updateState = ref.read(updateProvider);
+    if (updateState.hasUpdate && updateState.latestRelease != null) {
+      _showUpdateNotification(updateState.latestRelease!.tagName);
+    }
+  }
+
+  void _showUpdateNotification(String tagName) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('发现新版本'),
+        content: Text('新版本 $tagName 可用，建议更新。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('稍后'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              ref.read(updateProvider.notifier).downloadAndInstall();
+            },
+            child: const Text('立即更新'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
