@@ -920,9 +920,135 @@ class LLMProvider(RecommendationMixin, Plugin):
             self._circuit_breakers[provider] = CircuitBreaker()
         return self._circuit_breakers[provider]
 
+    def _get_tier_fallback_candidates(self, current_model: str) -> List[str]:
+        """获取同层其他模型 + 相邻层降级候选（实现真正的 4 层路由故障切换）。
+
+        策略（按优先级）：
+        1. 同层其他有可用 key 的模型（同层切换，不降级）
+        2. 相邻下层模型（complex→simple, expert→complex, simple→trivial）
+        3. 再下层（跨多层降级，最后兜底）
+
+        跳过：
+        - 当前模型本身
+        - 已标记 key 失效的 provider（_invalid_keys）
+        - 无可用 key 的 provider
+        - 已知不支持 tools 的模型（_no_tools_models，仅当当前调用带 tools 时）
+        """
+        from models.tiers import MODEL_TIERS
+
+        # 找到当前模型所在的 tier
+        current_tier = None
+        for tier_name, models in MODEL_TIERS.items():
+            if current_model in models:
+                current_tier = tier_name
+                break
+
+        if current_tier is None:
+            # 模型不在任何 tier 中（可能是用户自定义模型），
+            # 只返回 fallback_chain 中的候选（由 _try_fallback_chain 处理）
+            return []
+
+        # tier 降级顺序：expert → complex → simple → trivial
+        tier_order = ["expert", "complex", "simple", "trivial"]
+        try:
+            current_idx = tier_order.index(current_tier)
+        except ValueError:
+            current_idx = 0
+
+        candidates: List[str] = []
+        seen: set = {current_model}
+
+        # 1. 同层其他模型（保持当前 tier，不降级）
+        for model in MODEL_TIERS.get(current_tier, []):
+            if model in seen:
+                continue
+            provider = model.split("/", 1)[0] if "/" in model else ""
+            if not provider:
+                continue
+            if provider in self._invalid_keys:
+                continue
+            if not self._has_usable_key(provider):
+                continue
+            seen.add(model)
+            candidates.append(model)
+
+        # 2. 相邻下层模型（降级到下一个 tier）
+        for offset in range(1, len(tier_order) - current_idx):
+            lower_idx = current_idx + offset
+            if lower_idx >= len(tier_order):
+                break
+            lower_tier = tier_order[lower_idx]
+            for model in MODEL_TIERS.get(lower_tier, []):
+                if model in seen:
+                    continue
+                provider = model.split("/", 1)[0] if "/" in model else ""
+                if not provider:
+                    continue
+                if provider in self._invalid_keys:
+                    continue
+                if not self._has_usable_key(provider):
+                    continue
+                seen.add(model)
+                candidates.append(model)
+
+        if candidates:
+            logger.info(
+                "tier fallback: %s (tier=%s) → %d candidates: %s",
+                current_model, current_tier, len(candidates), candidates[:3],
+            )
+        return candidates
+
+    async def _try_tier_fallback(
+        self, messages, model, temperature, max_tokens, tools, use_cache,
+    ) -> Optional[Dict[str, Any]]:
+        """同层 + 跨层降级 fallback：遍历 tier 候选模型尝试调用。
+
+        这是真正的 4 层路由故障切换实现：
+        - 同层其他模型优先（如 expert 层 claude-4.5 挂了试 o3）
+        - 同层全挂则降级到下层（如 expert 全挂试 complex 层 claude-3.5）
+        - 每个候选模型最多尝试 1 次（不递归 fallback，避免雪崩）
+        """
+        candidates = self._get_tier_fallback_candidates(model)
+        for fb_model in candidates:
+            # 跳过已知不支持 tools 的模型（如果当前调用带 tools）
+            if tools:
+                bare = fb_model.split("/", 1)[1] if "/" in fb_model else fb_model
+                if not self.model_supports_tools(fb_model):
+                    logger.debug("tier fallback: skip %s (no tools support)", fb_model)
+                    continue
+
+            logger.info("tier fallback: trying %s", fb_model)
+            try:
+                result = await self.chat_completion(
+                    messages=messages,
+                    model=fb_model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    use_cache=use_cache,
+                    _skip_fallback=True,  # 防止递归
+                )
+                if not result.get("failed"):
+                    result["fallback_used"] = fb_model
+                    result["tier_fallback"] = True
+                    logger.info("tier fallback succeeded with %s", fb_model)
+                    return result
+            except Exception as exc:
+                logger.warning("tier fallback %s failed: %s", fb_model, exc)
+                continue
+        return None
+
     async def _handle_circuit_breaker_open(
         self, provider, model, messages, temperature, max_tokens, tools, use_cache,
     ) -> Optional[Dict[str, Any]]:
+        # 优先：同层 + 跨层降级（真正的 4 层路由故障切换）
+        tier_result = await self._try_tier_fallback(
+            messages, model, temperature, max_tokens, tools, use_cache,
+        )
+        if tier_result is not None:
+            return tier_result
+
+        # 其次：config 配置的 fallback_chain（用户显式配置的备选列表）
         for fb in self._fallback_chain:
             fb_model = fb.get("model")
             if not fb_model or fb_model == model:
@@ -940,7 +1066,14 @@ class LLMProvider(RecommendationMixin, Plugin):
     async def _try_fallback_chain(
         self, messages, model, temperature, max_tokens, tools, use_cache,
     ) -> Optional[Dict[str, Any]]:
-        # --- Fallback chain: try alternative providers if primary fails ---
+        # 优先：同层 + 跨层降级（真正的 4 层路由故障切换）
+        tier_result = await self._try_tier_fallback(
+            messages, model, temperature, max_tokens, tools, use_cache,
+        )
+        if tier_result is not None:
+            return tier_result
+
+        # 其次：config 配置的 fallback_chain（用户显式配置的备选列表）
         for fb in self._fallback_chain:
             fb_model = fb.get("model")
             if not fb_model or fb_model == model:
@@ -1031,11 +1164,18 @@ class LLMProvider(RecommendationMixin, Plugin):
         # 默认的 anthropic）而用户只配了 sensenova 时，能回退到可用 provider，
         # 而不是直接返回 no_api_key 错误。
         if not api_key:
-            if not _skip_fallback and self._fallback_chain:
+            if not _skip_fallback:
                 logger.warning(
-                    "no API key for provider %s (model=%s); trying fallback chain",
+                    "no API key for provider %s (model=%s); trying tier fallback + fallback chain",
                     provider, model,
                 )
+                # 优先：同层 + 跨层降级（tier fallback）
+                tier_result = await self._try_tier_fallback(
+                    messages, model, temperature, max_tokens, tools, use_cache,
+                )
+                if tier_result is not None:
+                    return tier_result
+                # 其次：config 配置的 fallback_chain
                 for fb in self._fallback_chain:
                     fb_model = fb.get("model")
                     if not fb_model or fb_model == model:
@@ -1098,8 +1238,8 @@ class LLMProvider(RecommendationMixin, Plugin):
             # Don't return immediately — break to the fallback chain below
             # so an alternative provider can handle the request. Returning
             # here would skip the fallback logic, defeating its purpose.
-            # Skip directly to fallback chain
-            if not _skip_fallback and self._fallback_chain:
+            # Skip directly to fallback (tier 降级 + config fallback_chain)
+            if not _skip_fallback:
                 cb_result = await self._handle_circuit_breaker_open(
                     provider, model, messages, temperature,
                     max_tokens, tools, use_cache,
@@ -1342,8 +1482,9 @@ class LLMProvider(RecommendationMixin, Plugin):
 
         from i18n import _
 
-        # --- Fallback chain: try alternative providers if primary fails ---
-        if not _skip_fallback and self._fallback_chain:
+        # --- Fallback: 同层/跨层降级 + config 配置的 fallback_chain ---
+        # 不再要求 fallback_chain 非空才调用——tier fallback 独立于 fallback_chain
+        if not _skip_fallback:
             result = await self._try_fallback_chain(
                 messages, model, temperature, max_tokens, tools, use_cache,
             )
