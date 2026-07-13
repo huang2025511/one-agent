@@ -786,7 +786,6 @@ class RESTAPIGateway(Plugin):
                         import asyncio as _asyncio
                         # maxsize 防止消费端卡住时无限增长 OOM
                         progress_queue: _asyncio.Queue = _asyncio.Queue(maxsize=100)
-                        loop = _asyncio.get_event_loop()
 
                         # 只推送这些 phase 到客户端思考卡片
                         # 过滤掉 streaming/tool_result/batch 等会污染思考卡片的 phase
@@ -809,9 +808,10 @@ class RESTAPIGateway(Plugin):
                                     return
                                 if not msg:
                                     return
-                                # put_nowait 满了直接丢弃（进度事件不要求可靠）
+                                # 直接放入队列（_on_progress 在同一个 event loop 中被调用，无需 call_soon_threadsafe）
+                                # 满了直接丢弃（进度事件不要求可靠）
                                 try:
-                                    loop.call_soon_threadsafe(progress_queue.put_nowait, (msg, phase))
+                                    progress_queue.put_nowait((msg, phase))
                                 except _asyncio.QueueFull:
                                     pass
                             except Exception:
