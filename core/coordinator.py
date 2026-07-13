@@ -2672,15 +2672,21 @@ class Coordinator(Plugin):
                             if delta:
                                 streamed_parts.append(delta)
                                 current_len += len(delta)
+                                # 每 50 字符推送一次增量（delta），不是累积全文
                                 if current_len - last_emit >= 50:
+                                    full_so_far = "".join(streamed_parts)
+                                    delta_text = full_so_far[last_emit:]
                                     last_emit = current_len
-                                    self._emit_progress(
-                                        turn, "".join(streamed_parts), "streaming"
-                                    )
+                                    self._emit_progress(turn, delta_text, "streaming")
                             if chunk.get("done") and chunk.get("tokens_used"):
                                 tokens_used = int(chunk["tokens_used"])
+                        # 推送剩余未发送的文本
                         if streamed_parts:
                             final_text = "".join(streamed_parts)
+                            remaining = final_text[last_emit:]
+                            if remaining:
+                                self._emit_progress(turn, remaining, "streaming")
+                            turn.meta["streaming_completed"] = True
                 except Exception as stream_err:
                     logger.debug("streaming failed, using non-streamed response: %s", stream_err)
 
@@ -2721,34 +2727,38 @@ class Coordinator(Plugin):
 
                     # 检测"只列计划不执行"：LLM 输出了计划/步骤，但没有调用工具
                     # 典型表现：包含"第X步"、"步骤X"、"开始执行"等字样，但没有 tool_calls
+                    # 只在首次迭代（未调用过任何工具）时检测，避免对正常的结构化回答误判
                     _zh = self._is_zh()
                     _has_plan_pattern = False
                     if _zh:
                         plan_patterns = [
                             "第 1 步", "第1步", "步骤 1", "步骤1",
-                            "第一步", "一、", "二、", "三、",
-                            "开始执行", "按计划", "执行计划",
-                            "### 第", "## 第",
+                            "第一步",
+                            "开始执行第", "开始执行第 1", "开始执行第1",
+                            "按计划一步一步", "按计划执行", "执行计划",
+                            "### 第 1 步", "### 第1步", "## 第 1 步", "## 第1步",
                         ]
                         _has_plan_pattern = any(p in final_text for p in plan_patterns)
                     else:
                         plan_patterns = [
-                            "Step 1", "step 1", "Step 1:", "step 1:",
-                            "step 1.", "Step 1.",
-                            "First step", "first step",
+                            "Step 1:", "step 1:", "Step 1.", "step 1.",
+                            "Step 1\n", "step 1\n",
                             "Let me start", "let me start",
-                            "### Step", "## Step",
-                            "I'll follow", "i'll follow",
-                            "start with step", "Start with step",
+                            "### Step 1", "## Step 1",
+                            "I'll follow the plan", "i'll follow the plan",
+                            "start with step 1", "Start with step 1",
+                            "begin with step 1", "Begin with step 1",
                         ]
                         _has_plan_pattern = any(p.lower() in final_text.lower() for p in plan_patterns)
 
-                    # 如果检测到计划模式，且还有工具可用，且不是最后一轮，则催促执行
+                    # 如果检测到计划模式，且还有工具可用，且不是最后一轮，且还没催促过，则催促执行
+                    # 关键：只在未调用过任何工具时触发（called_tools 为空说明 LLM 只列计划没执行）
                     _plan_nudged = turn.meta.get("plan_exec_nudged", False)
                     if (
                         _has_plan_pattern
                         and tools
                         and len(tools) > 0
+                        and len(called_tools) == 0  # 只在未调用过工具时催促
                         and i < self._max_tool_iterations - 1
                         and not _plan_nudged
                     ):

@@ -787,13 +787,16 @@ class RESTAPIGateway(Plugin):
                         # maxsize 防止消费端卡住时无限增长 OOM
                         progress_queue: _asyncio.Queue = _asyncio.Queue(maxsize=100)
 
-                        # 只推送这些 phase 到客户端思考卡片
-                        # 过滤掉 streaming/tool_result/batch 等会污染思考卡片的 phase
+                        # 推送这些 phase 到客户端：
+                        # thinking 类 phase → 客户端思考卡片
+                        # streaming phase → 客户端主聊天区（最终答案实时增量）
+                        # tool_result phase → 客户端思考卡片（工具执行结果）
                         _ALLOWED_PHASES = {
                             "planning", "thinking", "reflection", "plan",
                             "multi_agent", "deep_research", "comparison",
                             "reasoning", "tool_loop", "regeneration",
                             "skill_dispatch", "chart", "tool_result",
+                            "streaming",
                         }
 
                         def _on_progress(evt) -> None:
@@ -827,6 +830,7 @@ class RESTAPIGateway(Plugin):
                         )
 
                         result: Dict[str, Any] = {}
+                        _streamed_content = False  # 跟踪是否已通过 streaming phase 推送了最终答案
                         try:
                             while not chat_task.done():
                                 # 修复：检查客户端是否断连（避免 LLM token 浪费）
@@ -839,14 +843,24 @@ class RESTAPIGateway(Plugin):
                                     msg, phase = await _asyncio.wait_for(
                                         progress_queue.get(), timeout=0.5
                                     )
-                                    yield f"data: {json.dumps({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})}\n\n"
+                                    if phase == "streaming":
+                                        # streaming phase 是最终答案的实时增量，作为 content 推送
+                                        _streamed_content = True
+                                        yield f"data: {json.dumps({'content': msg, 'session_id': session_id})}\n\n"
+                                    else:
+                                        yield f"data: {json.dumps({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})}\n\n"
                                 except _asyncio.TimeoutError:
                                     pass  # 超时继续循环，检查 chat_task 是否完成
                             # chat_task 完成后，消费队列中剩余的事件
                             while not progress_queue.empty():
                                 try:
                                     msg, phase = progress_queue.get_nowait()
-                                    if msg:
+                                    if not msg:
+                                        continue
+                                    if phase == "streaming":
+                                        _streamed_content = True
+                                        yield f"data: {json.dumps({'content': msg, 'session_id': session_id})}\n\n"
+                                    else:
                                         yield f"data: {json.dumps({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})}\n\n"
                                 except _asyncio.QueueEmpty:
                                     break
@@ -866,7 +880,8 @@ class RESTAPIGateway(Plugin):
                         # 最终的完整思考计划用 phase=plan 标记（客户端会覆盖之前的截断版）
                         # 即使 thinking 为空也必须推送，否则客户端会一直保留初始占位"思考中..."
                         yield f"data: {json.dumps({'status': 'thinking', 'content': thinking, 'phase': 'plan', 'session_id': session_id})}\n\n"
-                        if reply:
+                        # 如果已通过 streaming phase 实时推送了最终答案，不再重复推送
+                        if reply and not _streamed_content:
                             yield f"data: {json.dumps({'content': reply, 'session_id': session_id})}\n\n"
                     elif _llm is not None:
                         # Fallback: direct LLM streaming (no Coordinator)
