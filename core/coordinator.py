@@ -2718,6 +2718,66 @@ class Coordinator(Plugin):
                     )
                     if continue_thinking:
                         continue
+
+                    # 检测"只列计划不执行"：LLM 输出了计划/步骤，但没有调用工具
+                    # 典型表现：包含"第X步"、"步骤X"、"开始执行"等字样，但没有 tool_calls
+                    _zh = self._is_zh()
+                    _has_plan_pattern = False
+                    if _zh:
+                        plan_patterns = [
+                            "第 1 步", "第1步", "步骤 1", "步骤1",
+                            "第一步", "一、", "二、", "三、",
+                            "开始执行", "按计划", "执行计划",
+                            "### 第", "## 第",
+                        ]
+                        _has_plan_pattern = any(p in final_text for p in plan_patterns)
+                    else:
+                        plan_patterns = [
+                            "Step 1", "step 1", "Step 1:", "step 1:",
+                            "step 1.", "Step 1.",
+                            "First step", "first step",
+                            "Let me start", "let me start",
+                            "### Step", "## Step",
+                            "I'll follow", "i'll follow",
+                            "start with step", "Start with step",
+                        ]
+                        _has_plan_pattern = any(p.lower() in final_text.lower() for p in plan_patterns)
+
+                    # 如果检测到计划模式，且还有工具可用，且不是最后一轮，则催促执行
+                    _plan_nudged = turn.meta.get("plan_exec_nudged", False)
+                    if (
+                        _has_plan_pattern
+                        and tools
+                        and len(tools) > 0
+                        and i < self._max_tool_iterations - 1
+                        and not _plan_nudged
+                    ):
+                        logger.debug("plan_execution: detected plan-only response, nudging LLM to execute")
+                        turn.meta["plan_exec_nudged"] = True
+                        if _zh:
+                            exec_nudge = (
+                                "[系统提示：你列出了计划，但还没有真正执行。"
+                                "请直接调用工具来执行这些步骤，不要只描述计划。"
+                                "使用 function_call / tool_call 来调用可用工具，"
+                                "而不是用文字描述你要做什么。]"
+                            )
+                        else:
+                            exec_nudge = (
+                                "[System: You listed a plan but haven't actually executed it. "
+                                "Call the available tools directly to execute the steps, "
+                                "don't just describe the plan in text. "
+                                "Use function_call / tool_call to invoke tools, "
+                                "not text descriptions of what you'll do.]"
+                            )
+                        messages.append({"role": "assistant", "content": final_text, "_internal": True})
+                        messages.append({"role": "user", "content": exec_nudge, "_internal": True})
+                        self._emit_progress(
+                            turn,
+                            "检测到计划已生成，正在催促执行..." if _zh else "Plan detected, prompting execution...",
+                            "reasoning"
+                        )
+                        continue
+
                     messages.append({"role": "assistant", "content": final_text})
                 break
 
