@@ -70,8 +70,10 @@ class CircuitBreaker:
 
     def __init__(self, failure_threshold: int = CIRCUIT_BREAKER_FAILURE_THRESHOLD,
                  recovery_timeout: float = CIRCUIT_BREAKER_RECOVERY_TIMEOUT):
-        assert failure_threshold > 0, "failure_threshold must be positive"
-        assert recovery_timeout >= 0, "recovery_timeout must be non-negative"
+        if failure_threshold <= 0:
+            raise ValueError("failure_threshold must be positive")
+        if recovery_timeout < 0:
+            raise ValueError("recovery_timeout must be non-negative")
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.failure_count = 0

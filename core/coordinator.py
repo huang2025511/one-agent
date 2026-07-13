@@ -3787,7 +3787,8 @@ class Coordinator(Plugin):
         extracting from error turns or empty results would pollute the
         KG with user questions or placeholder text like "(no reply produced)".
         """
-        assert turn is not None, "turn cannot be None"
+        if turn is None:
+            raise ValueError("turn cannot be None")
 
         if not (self.ctx and hasattr(self.ctx, 'memory') and hasattr(self.ctx.memory, '_kg') and self.ctx.memory._kg):
             return

@@ -26,7 +26,8 @@ async def record_self_improvement_async(coord, turn) -> None:
     3. apply_improvement 持久化到 DB
     4. 下一轮 _prepare_messages 通过 get_active_improvements 注入
     """
-    assert turn is not None, "turn cannot be None"
+    if turn is None:
+        raise ValueError("turn cannot be None")
 
     if not (coord.ctx and hasattr(coord.ctx, 'self_improver') and coord.ctx.self_improver):
         return
@@ -61,7 +62,8 @@ def record_self_improvement(coord, turn) -> None:
     Fire-and-forget: 启动异步版本，不等待结果，避免阻塞调用方。
     真正的闭环逻辑在 _record_self_improvement_async 里。
     """
-    assert turn is not None, "turn cannot be None"
+    if turn is None:
+        raise ValueError("turn cannot be None")
     if not (coord.ctx and hasattr(coord.ctx, 'self_improver') and coord.ctx.self_improver):
         return
     try:

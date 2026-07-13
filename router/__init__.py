@@ -58,7 +58,8 @@ class SmartRouter(Plugin):
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
         self._cfg = ctx.config.get("router", {}) or {}
-        assert self._cfg is not None, "Router configuration must be initialized"
+        if self._cfg is None:
+            raise ValueError("Router configuration must be initialized")
         # LLM will be bound via bind_llm() call in OneAgentApp.start()
         self._session_history: Dict[str, Any] = {}
         self._max_sessions = 500  # cap total sessions to prevent unbounded growth
