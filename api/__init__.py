@@ -856,8 +856,10 @@ class RESTAPIGateway(Plugin):
                                 chat_task.cancel()
                             try:
                                 result = await chat_task
-                            except (_asyncio.CancelledError, Exception):
+                            except _asyncio.CancelledError:
                                 pass
+                            except Exception as exc:
+                                logger.error("chat_task failed: %s", exc, exc_info=True)
 
                         reply = result.get("reply", "")
                         thinking = result.get("thinking", "")

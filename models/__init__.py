@@ -983,10 +983,15 @@ class LLMProvider(RecommendationMixin, Plugin):
                 {"type": "json_object"} to force JSON output.
                 Only supported by OpenAI-compatible providers.
         """
-        assert isinstance(messages, list), "messages must be a list"
-        assert len(messages) > 0, "messages cannot be empty"
-        assert temperature is None or (0.0 <= temperature <= 2.0), "temperature must be between 0 and 2"
-        assert max_tokens is None or max_tokens > 0, "max_tokens must be positive"
+        # 修复：assert 在 python -O 下被禁用，改用显式校验
+        if not isinstance(messages, list):
+            raise ValueError("messages must be a list")
+        if len(messages) == 0:
+            raise ValueError("messages cannot be empty")
+        if temperature is not None and not (0.0 <= temperature <= 2.0):
+            raise ValueError(f"temperature must be between 0 and 2, got {temperature}")
+        if max_tokens is not None and max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {max_tokens}")
 
         model = model or self._default_model
         temperature = self._default_temperature if temperature is None else temperature

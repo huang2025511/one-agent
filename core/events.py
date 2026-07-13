@@ -401,6 +401,8 @@ class EventBus:
             except asyncio.CancelledError:
                 # 修复：handler 内部被取消时不要吞掉 CancelledError
                 # 这通常是 bus shutdown 信号，需要传播到外层 _loop
+                # 但在 raise 前标记 event 状态，避免 event 永远停留在 PROCESSING
+                event.mark_failed("cancelled during handler execution")
                 raise
             except (ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
                 logger.error("handler %s failed on %s: %s", handler, event.type, exc, exc_info=True)
