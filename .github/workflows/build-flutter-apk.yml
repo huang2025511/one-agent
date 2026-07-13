@@ -93,55 +93,35 @@ jobs:
             echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
             echo "✅ 签名密钥已配置（来自 Secrets）"
           else
-            echo "⚠️ 未配置签名密钥 Secrets，将使用缓存的固定 keystore（确保签名一致性）"
-            echo "NEEDS_FALLBACK_KEYSTORE=true" >> $GITHUB_ENV
+            echo "🔐 使用仓库内固定 keystore（确保签名一致性）..."
+            # build.gradle 会自动检测 android/one-agent-release.keystore
+            echo "✅ 仓库内 keystore 已就绪"
           fi
-
-      - name: Restore fallback keystore from cache
-        if: github.ref == 'refs/heads/main' && env.NEEDS_FALLBACK_KEYSTORE == 'true'
-        id: fallback-keystore
-        uses: actions/cache@v4
-        with:
-          path: /tmp/one-agent-fallback.keystore
-          key: one-agent-fallback-keystore-v1
-
-      - name: Generate fallback keystore (if not cached)
-        if: github.ref == 'refs/heads/main' && env.NEEDS_FALLBACK_KEYSTORE == 'true' && steps.fallback-keystore.outputs.cache-hit != 'true'
-        run: |
-          echo "🔧 生成固定的 fallback keystore（首次运行，后续从缓存恢复）..."
-          keytool -genkey -v -keystore /tmp/one-agent-fallback.keystore \
-            -storepass oneagent2024 -keypass oneagent2024 \
-            -alias one-agent \
-            -keyalg RSA -keysize 2048 -validity 36500 \
-            -dname "CN=One-Agent, OU=Dev, O=One-Agent, L=Beijing, ST=Beijing, C=CN"
-
-      - name: Configure fallback keystore
-        if: github.ref == 'refs/heads/main' && env.NEEDS_FALLBACK_KEYSTORE == 'true'
-        run: |
-          echo "KEYSTORE_PATH=/tmp/one-agent-fallback.keystore" >> $GITHUB_ENV
-          echo "KEYSTORE_PASSWORD=oneagent2024" >> $GITHUB_ENV
-          echo "KEY_ALIAS=one-agent" >> $GITHUB_ENV
-          echo "KEY_PASSWORD=oneagent2024" >> $GITHUB_ENV
-          echo "✅ Fallback keystore 已配置"
 
       - name: Build APK
         working-directory: flutter_client/one_agent_client
-        run: flutter build apk --release --no-tree-shake-icons
+        run: flutter build apk --release --split-per-abi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: one-agent-app-apk
-          path: flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk
+          path: flutter_client/one_agent_client/build/app/outputs/flutter-apk/*.apk
 
       - name: Create GitHub Release
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: softprops/action-gh-release@v2
         with:
-          files: flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk
+          files: |
+            flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
           tag_name: app-v${{ steps.version.outputs.version_code }}
           name: One-Agent App v${{ steps.version.outputs.version_code }}
+          body: |
+            ## 下载说明
+            - **app-arm64-v8a-release.apk** — 64位设备（现代手机，推荐）
+            - **app-armeabi-v7a-release.apk** — 32位设备（旧手机）
           draft: false
           prerelease: false
         env:
@@ -156,10 +136,16 @@ jobs:
           VERSION_CODE: ${{ steps.version.outputs.version_code }}
         run: |
           set -e
-          APK_PATH="flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk"
+          APK_DIR="flutter_client/one_agent_client/build/app/outputs/flutter-apk"
+          # 优先上传 arm64（主流架构），如果失败则上传 armeabi-v7a
+          APK_PATH="${APK_DIR}/app-arm64-v8a-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "⚠️ arm64 APK 不存在，回退到 fat APK"
+            APK_PATH="${APK_DIR}/app-release.apk"
+          fi
           TAG="app-v${VERSION_CODE}"
           MAX_RETRIES=3
-          
+
           # 1. 创建 Gitee Release（target_commitish=main）— 带重试
           REL_ID=""
           for i in $(seq 1 $MAX_RETRIES); do
@@ -175,7 +161,7 @@ jobs:
               }")
             HTTP_CODE=$(echo "$RESP" | tail -n1)
             BODY=$(echo "$RESP" | sed '$d')
-            
+
             if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
               REL_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))")
               if [ -n "$REL_ID" ]; then
@@ -183,7 +169,7 @@ jobs:
                 break
               fi
             fi
-            
+
             # 422 通常表示 tag 已存在，尝试获取已存在的 release
             if [ "$HTTP_CODE" = "422" ]; then
               echo "Tag 已存在，尝试获取已有 Release..."
@@ -194,20 +180,20 @@ jobs:
                 break
               fi
             fi
-            
+
             echo "❌ 创建失败 (HTTP $HTTP_CODE): $BODY"
             if [ $i -lt $MAX_RETRIES ]; then
               echo "等待 $((i * 2)) 秒后重试..."
               sleep $((i * 2))
             fi
           done
-          
+
           if [ -z "$REL_ID" ]; then
             echo "::warning::Gitee Release 创建失败，跳过 Gitee 上传"
             echo "status=failed" >> $GITHUB_OUTPUT
             exit 0
           fi
-          
+
           # 2. 上传 APK 附件 — 带重试
           UPLOAD_SUCCESS=false
           for i in $(seq 1 $MAX_RETRIES); do
@@ -218,7 +204,7 @@ jobs:
               -F "file=@${APK_PATH}")
             HTTP_CODE=$(echo "$UPLOAD_RESP" | tail -n1)
             BODY=$(echo "$UPLOAD_RESP" | sed '$d')
-            
+
             if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
               DOWNLOAD_URL=$(echo "$BODY" | python3 -c "import sys,json; r=json.load(sys.stdin); a=r if isinstance(r,dict) else (r[0] if r else {}); print(a.get('browser_download_url',''))" 2>/dev/null || echo "")
               if [ -n "$DOWNLOAD_URL" ]; then
@@ -230,14 +216,14 @@ jobs:
                 break
               fi
             fi
-            
+
             echo "❌ 上传失败 (HTTP $HTTP_CODE)"
             if [ $i -lt $MAX_RETRIES ]; then
               echo "等待 $((i * 2)) 秒后重试..."
               sleep $((i * 2))
             fi
           done
-          
+
           if [ "$UPLOAD_SUCCESS" = false ]; then
             echo "::warning::Gitee APK 上传失败"
             echo "status=upload_failed" >> $GITHUB_OUTPUT

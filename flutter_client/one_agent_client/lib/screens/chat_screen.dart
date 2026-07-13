@@ -134,13 +134,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     );
                   },
           ),
-          Builder(
-            builder: (ctx) => IconButton(
-              icon: const Icon(Icons.history),
-              tooltip: l10n.sessionList,
-              onPressed: () => Scaffold.of(ctx).openDrawer(),
-            ),
-          ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: l10n.settings,

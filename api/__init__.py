@@ -789,8 +789,13 @@ class RESTAPIGateway(Plugin):
                         loop = _asyncio.get_event_loop()
 
                         # 只推送这些 phase 到客户端思考卡片
-                        # streaming/tool_result/batch 等会污染思考卡片，过滤掉
-                        _ALLOWED_PHASES = {"planning", "thinking", "reflection", "plan"}
+                        # 过滤掉 streaming/tool_result/batch 等会污染思考卡片的 phase
+                        _ALLOWED_PHASES = {
+                            "planning", "thinking", "reflection", "plan",
+                            "multi_agent", "deep_research", "comparison",
+                            "reasoning", "tool_loop", "regeneration",
+                            "skill_dispatch", "chart",
+                        }
 
                         def _on_progress(evt) -> None:
                             # 只推送当前 session 的进度

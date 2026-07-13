@@ -1207,8 +1207,13 @@ class Coordinator(Plugin):
             await self._think_phase(messages, turn, include_reflection=True)
         elif complexity >= THINK_MIN_COMPLEXITY:
             # Simple level: lightweight thinking for better reasoning
+            _zh = self._is_zh()
+            self._emit_progress(turn, "正在思考..." if _zh else "Thinking...", "thinking")
             await self._think_phase(messages, turn)
-        # else: trivial — skip thinking entirely for speed
+        else:
+            # Trivial level: 即使是简单任务也推送思考进度，避免客户端一直"思考中"无内容
+            _zh = self._is_zh()
+            self._emit_progress(turn, "正在思考..." if _zh else "Thinking...", "thinking")
 
         # If multi-agent handled the turn, it already published turn_completed.
         # Skip the rest to avoid double-publishing and wasted work.

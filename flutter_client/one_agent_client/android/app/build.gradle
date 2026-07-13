@@ -16,13 +16,23 @@ def flutterVersionCode = localProperties.getProperty('flutter.versionCode') ?: '
 def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '1.0'
 
 // 从环境变量或 local.properties 读取 release 签名配置
-// 支持通过 GitHub Secrets 注入签名信息，确保每次构建签名一致
-// 注意：变量名不能与 signingConfig 属性名相同（如 keyAlias），否则 Groovy 会把
-// "keyAlias keyAlias" 解释成方法调用而非属性赋值，导致构建失败。
+// 优先级：环境变量 > local.properties > 仓库内固定 keystore
+// 仓库内 keystore 保证每次构建签名一致，解决"签名不一致无法覆盖安装"问题
 def keystorePath = System.getenv("KEYSTORE_PATH") ?: localProperties.getProperty('keystore.path')
 def keystorePassword = System.getenv("KEYSTORE_PASSWORD") ?: localProperties.getProperty('keystore.password')
 def keystoreKeyAlias = System.getenv("KEY_ALIAS") ?: localProperties.getProperty('key.alias')
 def keystoreKeyPassword = System.getenv("KEY_PASSWORD") ?: localProperties.getProperty('key.password')
+
+// 如果没有配置外部签名，使用仓库内固定的 keystore（确保签名一致性）
+if (!keystorePath) {
+    def repoKeystore = rootProject.file('one-agent-release.keystore')
+    if (repoKeystore.exists()) {
+        keystorePath = repoKeystore.absolutePath
+        keystorePassword = 'oneagent2024'
+        keystoreKeyAlias = 'one-agent'
+        keystoreKeyPassword = 'oneagent2024'
+    }
+}
 
 android {
     namespace "com.oneagent"
@@ -64,11 +74,12 @@ android {
     buildTypes {
         release {
             // 修复：使用与 signingConfigs 一致的完整条件判断
-            // 之前只检查 keystorePath 一个变量，若其他变量缺失会选择空的 release 签名导致构建失败
             def hasSignConfig = keystorePath && keystorePassword && keystoreKeyAlias && keystoreKeyPassword
             signingConfig (hasSignConfig ? signingConfigs.release : signingConfigs.debug)
-            minifyEnabled false
-            shrinkResources false
+            // 开启代码压缩和资源压缩，减小 APK 体积
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 }
