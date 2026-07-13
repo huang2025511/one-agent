@@ -2640,7 +2640,8 @@ class Coordinator(Plugin):
             total_cost += (tokens_used / 1000) * model_cost_per_1k
 
             # 检测 LLM 调用失败（429/400/超时等），推送错误信息到思考卡片
-            if resp.get("failed"):
+            # 用 turn.meta 标志位防止跨迭代重复推送相同错误
+            if resp.get("failed") and not turn.meta.get("llm_failed_announced"):
                 _zh = self._is_zh()
                 _err_msg = resp.get("text", "")[:200]
                 if _zh:
@@ -2648,6 +2649,7 @@ class Coordinator(Plugin):
                 else:
                     _progress_msg = f"⚠️ LLM call failed: {_err_msg}\nAttempting recovery or fallback..."
                 self._emit_progress(turn, _progress_msg, "reasoning")
+                turn.meta["llm_failed_announced"] = True
 
             tool_calls = resp.get("tool_calls") or []
 

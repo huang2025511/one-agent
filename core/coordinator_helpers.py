@@ -192,21 +192,21 @@ def parse_markdown_tool_calls(text: str) -> List[Dict[str, Any]]:
     """
     import re as _re
     import json as _json
-    import shlex as _shlex
+    import codecs as _codecs
 
-    if not text or "```" not in text:
+    if not text:
         return []
 
     calls: List[Dict[str, Any]] = []
     # 匹配 ```lang\nfunc_name(args)\n``` 格式
-    # func_name 必须是已知工具名
+    # 使用平衡括号匹配支持嵌套括号（如 func(foo(1)) 或 func({"k":"v"})）
     block_pattern = _re.compile(
-        r'```(?:\w+)?\s*\n\s*(?P<call>[a-z_]\w*\s*\([^)]*\))\s*\n\s*```',
-        _re.IGNORECASE | _re.MULTILINE,
+        r'```(?:\w+)?\s*\n\s*(?P<call>[a-z_]\w*\s*\([^()]*?(?:\([^()]*\)[^()]*)*\))\s*\n\s*```',
+        _re.IGNORECASE | _re.MULTILINE | _re.DOTALL,
     )
-    # 也匹配不带代码块包裹的裸调用：func_name("...")
+    # 裸调用格式：func_name("...")（只匹配代码块内或独立的工具调用行）
     bare_pattern = _re.compile(
-        r'(?m)^\s*(?P<call>[a-z_]\w*\s*\([^)]*\))\s*$',
+        r'(?m)^\s*(?P<call>[a-z_]\w*\s*\([^()]*?(?:\([^()]*\)[^()]*)*\))\s*$',
         _re.IGNORECASE,
     )
 
@@ -222,7 +222,7 @@ def parse_markdown_tool_calls(text: str) -> List[Dict[str, Any]]:
     for pat in (block_pattern, bare_pattern):
         for m in pat.finditer(text):
             call_str = m.group("call").strip()
-            # 解析 func_name(args) 格式
+            # 解析 func_name(args) 格式（支持嵌套括号）
             parts = _re.match(r'(?P<name>[a-z_]\w*)\s*\((?P<args>.*)\)', call_str, _re.IGNORECASE | _re.DOTALL)
             if not parts:
                 continue
@@ -239,33 +239,43 @@ def parse_markdown_tool_calls(text: str) -> List[Dict[str, Any]]:
                 continue
             seen_calls.add(dedup_key)
 
-            # 解析参数：尝试 JSON 格式，再尝试 shlex，最后尝试裸字符串
+            # 解析参数
             args: Dict[str, Any] = {}
-            # 情况1：func_name("string") — 单个字符串参数
-            # 情况2：func_name(key="value", key2="value2") — 关键字参数
-            # 情况3：func_name({'key': 'value'}) — JSON 字典
 
             # 先尝试关键字参数解析：key="value" 或 key='value'
             kw_pattern = _re.compile(
-                r'(?P<key>[a-zA-Z_]\w*)\s*=\s*(?:"(?P<dval>[^"]*)"|\'(?P<sval>[^\']*)\'|(?P<nval>[^,)\s]+))',
+                r'(?P<key>[a-zA-Z_]\w*)\s*=\s*(?:"(?P<dval>(?:[^"\\]|\\.)*)"|\'(?P<sval>(?:[^\'\\]|\\.)*)\')',
             )
             kw_matches = list(kw_pattern.finditer(args_str))
+
+            def _unescape(s: str) -> str:
+                """反转义 \\\" \\\\ \\n 等转义序列"""
+                try:
+                    # codecs.decode 处理 \n \t \x.. \u....
+                    # 但不处理 \" → "（json 风格），需要单独处理
+                    s = s.replace('\\"', '"').replace("\\'", "'")
+                    return _codecs.decode(s, 'unicode_escape')
+                except Exception:
+                    return s
 
             if kw_matches:
                 for km in kw_matches:
                     key = km.group("key")
-                    val = km.group("dval") if km.group("dval") is not None else (
-                        km.group("sval") if km.group("sval") is not None else km.group("nval")
-                    )
+                    if km.group("dval") is not None:
+                        val = _unescape(km.group("dval"))
+                    elif km.group("sval") is not None:
+                        val = _unescape(km.group("sval"))
+                    else:
+                        val = km.group("nval") if km.group("nval") else ""
                     args[key] = val
             else:
-                # 单个位置参数：提取引号内的字符串
-                str_match = _re.match(r'^["\'](.*)["\']$', args_str, _re.DOTALL)
+                # 单个位置参数：提取引号内的字符串（支持转义引号）
+                str_match = _re.match(r'^"((?:[^"\\]|\\.)*)"$', args_str, _re.DOTALL)
+                if not str_match:
+                    str_match = _re.match(r"^'((?:[^'\\]|\\.)*)'$", args_str, _re.DOTALL)
                 if str_match:
-                    raw_val = str_match.group(1)
-                    # 参数名映射
+                    raw_val = _unescape(str_match.group(1))
                     if name in _MD_PARAM_MAP:
-                        # 取第一个映射目标
                         first_key = next(iter(_MD_PARAM_MAP[name].values()))
                         args[first_key] = raw_val
                     else:

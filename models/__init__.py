@@ -936,24 +936,21 @@ class LLMProvider(RecommendationMixin, Plugin):
         """
         from models.tiers import MODEL_TIERS
 
-        # 找到当前模型所在的 tier
+        # 找到当前模型所在的 tier（如果存在于多个 tier，取最高的那个，降级空间最大）
+        tier_order = ["expert", "complex", "simple", "trivial"]
         current_tier = None
-        for tier_name, models in MODEL_TIERS.items():
-            if current_model in models:
-                current_tier = tier_name
-                break
+        current_idx = len(tier_order)  # 初始化为最低层之下
+        for tier_name in tier_order:
+            if current_model in MODEL_TIERS.get(tier_name, []):
+                idx = tier_order.index(tier_name)
+                if idx < current_idx:
+                    current_idx = idx
+                    current_tier = tier_name
 
         if current_tier is None:
             # 模型不在任何 tier 中（可能是用户自定义模型），
             # 只返回 fallback_chain 中的候选（由 _try_fallback_chain 处理）
             return []
-
-        # tier 降级顺序：expert → complex → simple → trivial
-        tier_order = ["expert", "complex", "simple", "trivial"]
-        try:
-            current_idx = tier_order.index(current_tier)
-        except ValueError:
-            current_idx = 0
 
         candidates: List[str] = []
         seen: set = {current_model}
@@ -1007,17 +1004,33 @@ class LLMProvider(RecommendationMixin, Plugin):
         - 同层其他模型优先（如 expert 层 claude-4.5 挂了试 o3）
         - 同层全挂则降级到下层（如 expert 全挂试 complex 层 claude-3.5）
         - 每个候选模型最多尝试 1 次（不递归 fallback，避免雪崩）
+        - 最多尝试 3 个候选（防止 15 个候选串行导致 45 分钟超时）
         """
         candidates = self._get_tier_fallback_candidates(model)
+        max_attempts = 3  # 限制最大尝试次数，防止候选过多导致长时间超时
+        attempted = 0
         for fb_model in candidates:
+            if attempted >= max_attempts:
+                logger.warning(
+                    "tier fallback: reached max attempts (%d), stopping (total candidates: %d)",
+                    max_attempts, len(candidates),
+                )
+                break
             # 跳过已知不支持 tools 的模型（如果当前调用带 tools）
             if tools:
-                bare = fb_model.split("/", 1)[1] if "/" in fb_model else fb_model
                 if not self.model_supports_tools(fb_model):
                     logger.debug("tier fallback: skip %s (no tools support)", fb_model)
                     continue
+            # 跳过当前 provider 的熔断器已 OPEN 的模型
+            fb_provider = fb_model.split("/", 1)[0] if "/" in fb_model else ""
+            if fb_provider and fb_provider in self._circuit_breakers:
+                cb = self._circuit_breakers[fb_provider]
+                if not cb.can_execute():
+                    logger.debug("tier fallback: skip %s (circuit breaker OPEN for %s)", fb_model, fb_provider)
+                    continue
 
-            logger.info("tier fallback: trying %s", fb_model)
+            attempted += 1
+            logger.info("tier fallback: trying %s (attempt %d/%d)", fb_model, attempted, max_attempts)
             try:
                 result = await self.chat_completion(
                     messages=messages,
@@ -1054,13 +1067,17 @@ class LLMProvider(RecommendationMixin, Plugin):
             if not fb_model or fb_model == model:
                 continue
             logger.info("circuit open, trying fallback model %s", fb_model)
-            fb_result = await self.chat_completion(
-                messages, model=fb_model, temperature=temperature,
-                max_tokens=max_tokens, tools=tools,
-                use_cache=use_cache, _skip_fallback=True,
-            )
-            if not fb_result.get("failed"):
-                return fb_result
+            try:
+                fb_result = await self.chat_completion(
+                    messages, model=fb_model, temperature=temperature,
+                    max_tokens=max_tokens, tools=tools,
+                    use_cache=use_cache, _skip_fallback=True,
+                )
+                if not fb_result.get("failed"):
+                    return fb_result
+            except Exception as exc:
+                logger.warning("circuit open fallback %s failed: %s", fb_model, exc)
+                continue
         return None
 
     async def _try_fallback_chain(
