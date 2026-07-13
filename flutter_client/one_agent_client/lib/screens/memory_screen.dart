@@ -343,7 +343,7 @@ class _RoleTabState extends ConsumerState<_RoleTab> {
       );
     }
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 8, bottom: 80),
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 80),
       itemCount: state.roles.length,
       itemBuilder: (context, index) =>
           _RoleListTile(role: state.roles[index]),
