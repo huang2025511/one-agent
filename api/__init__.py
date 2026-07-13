@@ -797,6 +797,9 @@ class RESTAPIGateway(Plugin):
                             "reasoning", "tool_loop", "regeneration",
                             "skill_dispatch", "chart", "tool_result",
                             "streaming",
+                            # 补充：coordinator 实际使用的但之前遗漏的 phase
+                            "agent_mesh", "batch", "eval", "model_compare",
+                            "provider_resolve", "rewrite", "verification",
                         }
 
                         def _on_progress(evt) -> None:

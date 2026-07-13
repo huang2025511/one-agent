@@ -13,7 +13,7 @@ llm:
   primary_model: sensenova/deepseek-v4-flash
   lightweight_model: sensenova/sensenova-6.7-flash-lite
   timeout: 45
-  retries: 2
+  retries: 3                 # 429 限流时需要多次重试（带退避）
 
 router:
   enabled: true
