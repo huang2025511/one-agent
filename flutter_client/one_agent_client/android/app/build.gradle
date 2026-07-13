@@ -17,10 +17,12 @@ def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '
 
 // 从环境变量或 local.properties 读取 release 签名配置
 // 支持通过 GitHub Secrets 注入签名信息，确保每次构建签名一致
+// 注意：变量名不能与 signingConfig 属性名相同（如 keyAlias），否则 Groovy 会把
+// "keyAlias keyAlias" 解释成方法调用而非属性赋值，导致构建失败。
 def keystorePath = System.getenv("KEYSTORE_PATH") ?: localProperties.getProperty('keystore.path')
 def keystorePassword = System.getenv("KEYSTORE_PASSWORD") ?: localProperties.getProperty('keystore.password')
-def keyAlias = System.getenv("KEY_ALIAS") ?: localProperties.getProperty('key.alias')
-def keyPassword = System.getenv("KEY_PASSWORD") ?: localProperties.getProperty('key.password')
+def keystoreKeyAlias = System.getenv("KEY_ALIAS") ?: localProperties.getProperty('key.alias')
+def keystoreKeyPassword = System.getenv("KEY_PASSWORD") ?: localProperties.getProperty('key.password')
 
 android {
     namespace "com.oneagent"
@@ -50,11 +52,11 @@ android {
 
     signingConfigs {
         release {
-            if (keystorePath && keystorePassword && keyAlias && keyPassword) {
+            if (keystorePath && keystorePassword && keystoreKeyAlias && keystoreKeyPassword) {
                 storeFile file(keystorePath)
                 storePassword keystorePassword
-                keyAlias keyAlias
-                keyPassword keyPassword
+                keyAlias keystoreKeyAlias
+                keyPassword keystoreKeyPassword
             }
         }
     }
@@ -63,7 +65,7 @@ android {
         release {
             // 修复：使用与 signingConfigs 一致的完整条件判断
             // 之前只检查 keystorePath 一个变量，若其他变量缺失会选择空的 release 签名导致构建失败
-            def hasSignConfig = keystorePath && keystorePassword && keyAlias && keyPassword
+            def hasSignConfig = keystorePath && keystorePassword && keystoreKeyAlias && keystoreKeyPassword
             signingConfig (hasSignConfig ? signingConfigs.release : signingConfigs.debug)
             minifyEnabled false
             shrinkResources false
