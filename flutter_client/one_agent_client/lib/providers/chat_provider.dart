@@ -198,11 +198,12 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
         if (event.type == 'thinking') {
           final content = event.content ?? '';
-          if (content.isEmpty) {
-            // 初始 thinking 占位事件，无 content，忽略
-          } else if (event.phase == 'plan') {
+          if (event.phase == 'plan') {
             // phase=plan 是最终完整思考计划，覆盖之前截断的进度版
-            thinkingBuffer = content;
+            // 即使 content 为空也必须更新，消除客户端"思考中..."占位
+            thinkingBuffer = content.isEmpty ? null : content;
+          } else if (content.isEmpty) {
+            // 初始 thinking 占位事件，无 content，忽略
           } else {
             // phase=planning/thinking/reflection 是中间思考进度，追加
             thinkingBuffer = (thinkingBuffer ?? '') + content + '\n\n';

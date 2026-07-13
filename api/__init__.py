@@ -857,8 +857,8 @@ class RESTAPIGateway(Plugin):
                         reply = result.get("reply", "")
                         thinking = result.get("thinking", "")
                         # 最终的完整思考计划用 phase=plan 标记（客户端会覆盖之前的截断版）
-                        if thinking:
-                            yield f"data: {json.dumps({'status': 'thinking', 'content': thinking, 'phase': 'plan', 'session_id': session_id})}\n\n"
+                        # 即使 thinking 为空也必须推送，否则客户端会一直保留初始占位"思考中..."
+                        yield f"data: {json.dumps({'status': 'thinking', 'content': thinking, 'phase': 'plan', 'session_id': session_id})}\n\n"
                         if reply:
                             yield f"data: {json.dumps({'content': reply, 'session_id': session_id})}\n\n"
                     elif _llm is not None:
