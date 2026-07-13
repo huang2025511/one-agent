@@ -971,6 +971,111 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, _("skills_not_available"))
             return {"skills": _skills.all_skill_ids()}
 
+        # ── 角色 CRUD ──────────────────────────────────────────
+        def _get_role_store():
+            """从 MemoryPlugin 获取 RoleStore。"""
+            if _memory is None:
+                return None
+            return getattr(_memory, "roles", None)
+
+        @app.get("/api/roles")
+        async def roles_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            store = _get_role_store()
+            if store is None:
+                raise HTTPException(503, "role store not available")
+            return {"roles": store.list_all()}
+
+        @app.post("/api/roles")
+        async def role_create(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            store = _get_role_store()
+            if store is None:
+                raise HTTPException(503, "role store not available")
+            name = (body.get("name") or "").strip()
+            if not name:
+                raise HTTPException(400, "name is required")
+            try:
+                role = store.create(
+                    name=name,
+                    description=body.get("description", ""),
+                    system_prompt_override=body.get("system_prompt_override", ""),
+                    icon=body.get("icon", "🤖"),
+                    color=body.get("color", "#6750A4"),
+                )
+            except Exception as exc:
+                if "UNIQUE" in str(exc):
+                    raise HTTPException(409, f"role '{name}' already exists")
+                raise HTTPException(500, str(exc))
+            return {"role": role}
+
+        # 静态路由必须在动态路由 /api/roles/{role_id} 之前注册，
+        # 否则 "active"/"deactivate" 会被 {role_id} 匹配并触发 422 错误。
+        @app.get("/api/roles/active")
+        async def role_get_active(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            store = _get_role_store()
+            if store is None:
+                raise HTTPException(503, "role store not available")
+            role = store.get_active()
+            return {"role": role}
+
+        @app.post("/api/roles/deactivate")
+        async def role_deactivate(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            store = _get_role_store()
+            if store is None:
+                raise HTTPException(503, "role store not available")
+            store.deactivate_all()
+            return {"deactivated": True}
+
+        @app.get("/api/roles/{role_id}")
+        async def role_get(role_id: int, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            store = _get_role_store()
+            if store is None:
+                raise HTTPException(503, "role store not available")
+            role = store.get(role_id)
+            if role is None:
+                raise HTTPException(404, "role not found")
+            return {"role": role}
+
+        @app.put("/api/roles/{role_id}")
+        async def role_update(role_id: int, body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            store = _get_role_store()
+            if store is None:
+                raise HTTPException(503, "role store not available")
+            if store.get(role_id) is None:
+                raise HTTPException(404, "role not found")
+            try:
+                role = store.update(role_id, **body)
+            except Exception as exc:
+                if "UNIQUE" in str(exc):
+                    raise HTTPException(409, f"role name already exists")
+                raise HTTPException(500, str(exc))
+            return {"role": role}
+
+        @app.delete("/api/roles/{role_id}")
+        async def role_delete(role_id: int, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            store = _get_role_store()
+            if store is None:
+                raise HTTPException(503, "role store not available")
+            if not store.delete(role_id):
+                raise HTTPException(404, "role not found")
+            return {"deleted": True}
+
+        @app.post("/api/roles/{role_id}/activate")
+        async def role_activate(role_id: int, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            auth(x_api_key)
+            store = _get_role_store()
+            if store is None:
+                raise HTTPException(503, "role store not available")
+            if not store.activate(role_id):
+                raise HTTPException(404, "role not found")
+            return {"activated": role_id}
+
     def _register_marketplace_routes(self, app, auth, _ctx, _skills, _llm):
         _cp = self._get_plugin
         from fastapi import Header, HTTPException

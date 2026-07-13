@@ -2583,10 +2583,70 @@ class Coordinator(Plugin):
                     # 思考失败不阻断，继续执行
 
             async def _do_llm_call():
+                """Primary LLM call — streaming-first with non-streaming fallback.
+
+                Uses chat_completion_stream as the primary API to get both
+                the response text and tool_calls in a single call, while
+                emitting real-time progress to the user.  Falls back to
+                non-streaming chat_completion if streaming is unavailable
+                or fails (except CircuitOpenError which must propagate).
+                """
+                max_tok = turn.token_budget if i == 0 else self._max_tokens
+                if hasattr(self._llm, 'chat_completion_stream'):
+                    try:
+                        text_parts = []
+                        tool_calls_raw = []
+                        tokens_used = 0
+                        last_emit = 0
+                        done_chunk = {}
+                        async for chunk in self._llm.chat_completion_stream(
+                            messages=messages,
+                            model=turn.model,
+                            max_tokens=max_tok,
+                            tools=tools or None,
+                            temperature=dyn_temp,
+                        ):
+                            if chunk.get("circuit_breaker_open"):
+                                raise CircuitOpenError()
+                            if chunk.get("error"):
+                                raise RuntimeError(chunk["error"])
+                            delta = chunk.get("delta", "")
+                            if delta:
+                                text_parts.append(delta)
+                                current_len = sum(len(p) for p in text_parts)
+                                # 每 50 字符推送一次增量进度
+                                if current_len - last_emit >= 50:
+                                    delta_text = "".join(text_parts)[last_emit:]
+                                    last_emit = current_len
+                                    self._emit_progress(turn, delta_text, "streaming")
+                            if chunk.get("done"):
+                                done_chunk = chunk
+                                tokens_used = int(chunk.get("tokens_used") or 0)
+                                tool_calls_raw = chunk.get("tool_calls") or []
+                                break
+                        # 推送剩余未发送的文本
+                        if text_parts:
+                            full_text = "".join(text_parts)
+                            remaining = full_text[last_emit:]
+                            if remaining:
+                                self._emit_progress(turn, remaining, "streaming")
+                        turn.meta["_streaming_used"] = True  # 标记已通过流式推送进度
+                        return {
+                            "text": "".join(text_parts),
+                            "tool_calls": tool_calls_raw,
+                            "tool_calls_raw": done_chunk.get("tool_calls_raw") or tool_calls_raw,
+                            "tokens_used": tokens_used,
+                            "failed": False,
+                        }
+                    except CircuitOpenError:
+                        raise
+                    except Exception as e:
+                        logger.debug("streaming failed, falling back to non-streaming: %s", e)
+
                 return await self._llm.chat_completion(
                     messages=messages,
                     model=turn.model,
-                    max_tokens=turn.token_budget if i == 0 else self._max_tokens,
+                    max_tokens=max_tok,
                     tools=tools or None,
                     temperature=dyn_temp,
                 )
@@ -2653,6 +2713,11 @@ class Coordinator(Plugin):
 
             tool_calls = resp.get("tool_calls") or []
 
+            # 保存 LLM 返回的原始 tool_calls 格式（OpenAI 兼容）
+            # 后续 _execute_tool_calls 中 messages.append 需要此格式
+            if resp.get("tool_calls_raw"):
+                turn.meta["tool_calls_raw"] = resp["tool_calls_raw"]
+
             # Fallback 1: 解析 XML 工具标签
             if not tool_calls and resp.get("text"):
                 parsed_calls = self._parse_xml_tool_tags(resp["text"])
@@ -2686,47 +2751,37 @@ class Coordinator(Plugin):
                             len(tool_calls),
                         )
 
+            # 格式标准化：将 XML/markdown 解析的 tool_calls 转为 OpenAI 兼容格式
+            # 同时保留内部格式供 _execute_tool_calls 使用（tc.get("name") / tc.get("args")）
+            # 标准化后的格式存入 turn.meta["tool_calls_raw"] 供 messages.append 使用
+            if tool_calls and (turn.meta.get("xml_parsed_tool_calls") or turn.meta.get("md_parsed_tool_calls")):
+                import json as _json
+                normalized = []
+                for tc in tool_calls:
+                    if "function" not in tc:
+                        tc_id = tc.get("id", f"call_{len(normalized)}")
+                        tc_name = tc.get("name", "")
+                        tc_args = tc.get("args", {})
+                        # 保持内部格式用于 _execute_tool_calls
+                        # 同时生成 OpenAI 格式放入 tool_calls_raw
+                        normalized.append({
+                            "id": tc_id,
+                            "type": "function",
+                            "function": {
+                                "name": tc_name,
+                                "arguments": _json.dumps(tc_args, ensure_ascii=False),
+                            },
+                        })
+                    else:
+                        normalized.append(tc)
+                turn.meta["tool_calls_raw"] = normalized
+                # tool_calls 本身保持内部格式，让 _execute_tool_calls 的 tc.get("name") 正常工作
+
             # ========== ReAct Step 2: 决策 — 输出最终回复或调用工具 ==========
             if not tool_calls:
                 final_text = resp.get("text", "") or ""
-                try:
-                    if hasattr(self._llm, 'chat_completion_stream'):
-                        streamed_parts = []
-                        last_emit = 0
-                        current_len = 0
-                        chunk = {}
-                        async for chunk in self._llm.chat_completion_stream(
-                            messages=messages,
-                            model=turn.model,
-                            max_tokens=turn.token_budget if i == 0 else self._max_tokens,
-                            temperature=dyn_temp,
-                        ):
-                            delta = chunk.get("delta", "")
-                            if delta:
-                                streamed_parts.append(delta)
-                                current_len += len(delta)
-                                # 每 50 字符推送一次增量（delta），不是累积全文
-                                if current_len - last_emit >= 50:
-                                    full_so_far = "".join(streamed_parts)
-                                    delta_text = full_so_far[last_emit:]
-                                    last_emit = current_len
-                                    self._emit_progress(turn, delta_text, "streaming")
-                            if chunk.get("done") and chunk.get("tokens_used"):
-                                tokens_used = int(chunk["tokens_used"])
-                        # 推送剩余未发送的文本
-                        if streamed_parts:
-                            final_text = "".join(streamed_parts)
-                            remaining = final_text[last_emit:]
-                            if remaining:
-                                self._emit_progress(turn, remaining, "streaming")
-                            turn.meta["streaming_completed"] = True
-                except Exception as stream_err:
-                    logger.debug("streaming failed, using non-streamed response: %s", stream_err)
-
-                # 非流式或流式完成后的回复文本，立即推送到思考卡片
-                # 修复：之前用户在此阶段看不到 LLM 的回复内容，导致"一直思考中"的错觉
-                if final_text and not turn.meta.get("streaming_completed"):
-                    # 非流式回复：把 LLM 的完整回复推送到思考卡片，让用户看到
+                # 流式推送已在 _do_llm_call 中完成；非流式回退时才推送完整文本
+                if final_text and not turn.meta.get("_streaming_used"):
                     _zh = self._is_zh()
                     self._emit_progress(
                         turn,
@@ -3100,17 +3155,23 @@ class Coordinator(Plugin):
         tools: List[Dict[str, Any]], _failed_skills: Dict[str, int], iteration: int,
     ) -> bool:
         """检测并处理 Agent 的"继续思考"信号。
-        
+
         如果 Agent 的回复中包含特定模式（如"让我继续思考"、"让我再想想"等），
         则触发继续思考机制，让 Agent 在当前回合内继续推理，而不是直接结束。
-        
+
         返回 True 表示继续思考，False 表示结束回合。
         """
         if not final_text:
             return False
-        
+
         zh = self._is_zh()
-        
+
+        # 修复：每回合最多触发 1 次 continue_thinking，避免 LLM 反复触发循环
+        continue_count = turn.meta.get("continue_thinking_count", 0)
+        MAX_CONTINUE_THINKING_PER_TURN = 1
+        if continue_count >= MAX_CONTINUE_THINKING_PER_TURN:
+            return False
+
         # 检测继续思考信号
         continue_signal_patterns_zh = [
             "让我继续思考", "让我再想想", "继续思考", "我再想想",
@@ -3156,6 +3217,7 @@ class Coordinator(Plugin):
         
         logger.debug("continue_thinking: detected signal, triggering additional thought round")
         turn.meta["continue_thinking_triggered"] = True
+        turn.meta["continue_thinking_count"] = continue_count + 1
         
         # 注入继续思考提示
         if zh:

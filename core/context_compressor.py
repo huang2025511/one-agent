@@ -328,11 +328,21 @@ class ContextCompressor:
                         key_points.append(m.strip())
 
             # Look for fact patterns
+            # 修复：使用 pattern 变量实际匹配，避免所有 fact 共用同一"任意数字"正则
+            # 同时不在小数点处切句（避免 "8.0" 被切为 "8" 和 "0"）
             for pattern in IMPORTANCE_PATTERNS.get("fact", []):
-                matches = re.findall(f"[^.。]*[0-9]+[^.。]*", content)
-                for m in matches[:1]:
-                    if len(m) > 10 and len(m) < 200:
-                        key_points.append(m.strip())
+                try:
+                    # 切句：只切中英文句末标点和换行，保留小数点
+                    sentence_splits = re.split(r"[。!?！？\n]+", content)
+                    for sentence in sentence_splits:
+                        if not sentence:
+                            continue
+                        if re.search(pattern, sentence):
+                            s = sentence.strip()
+                            if 10 < len(s) < 200:
+                                key_points.append(s)
+                except re.error:
+                    logger.debug("fact pattern invalid: %s", pattern)
 
         return list(dict.fromkeys(key_points))[:5]  # Dedupe, keep order
 

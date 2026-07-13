@@ -1527,8 +1527,10 @@ class LLMProvider(RecommendationMixin, Plugin):
     ):
         """Stream chat completion via SSE. Yields dict chunks:
         {"delta": content, "done": False} for content chunks
-        {"delta": "", "done": True, "tokens_used": N} on completion
+        {"delta": "", "done": True, "tokens_used": N,
+         "tool_calls": [...], "tool_calls_raw": [...]} on completion
         {"error": "...", "done": True} on error
+        {"circuit_breaker_open": True, "done": True} on circuit breaker
         """
         model = model or self._default_model
         temperature = self._default_temperature if temperature is None else temperature
@@ -1642,7 +1644,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                             response_format=None,
                         )
                         yield {"delta": result.get("text", ""), "done": False}
-                        yield {"delta": "", "done": True, "tokens_used": result.get("tokens_used", 0)}
+                        yield {
+                            "delta": "", "done": True,
+                            "tokens_used": result.get("tokens_used", 0),
+                            "tool_calls": result.get("tool_calls") or [],
+                            "tool_calls_raw": result.get("tool_calls_raw") or result.get("tool_calls") or [],
+                        }
                         return
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
@@ -1710,6 +1717,10 @@ class LLMProvider(RecommendationMixin, Plugin):
             if tools:
                 payload["tools"] = tools
             url = f"{base.rstrip('/')}/chat/completions"
+            # Accumulate tool_calls across streaming chunks
+            # OpenAI streams tool_calls by index — each chunk may contain
+            # partial data (id, function.name, function.arguments fragments)
+            tool_call_chunks: Dict[int, Dict[str, Any]] = {}
             try:
                 async with self._client.stream("POST", url, headers=headers, json=payload, timeout=self._timeout) as resp:  # type: ignore[union-attr]
                     if resp.status_code == 400:
@@ -1722,7 +1733,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                             response_format=None,
                         )
                         yield {"delta": result.get("text", ""), "done": False}
-                        yield {"delta": "", "done": True, "tokens_used": result.get("tokens_used", 0)}
+                        yield {
+                            "delta": "", "done": True,
+                            "tokens_used": result.get("tokens_used", 0),
+                            "tool_calls": result.get("tool_calls") or [],
+                            "tool_calls_raw": result.get("tool_calls_raw") or result.get("tool_calls") or [],
+                        }
                         return
                     resp.raise_for_status()
                     async for line in resp.aiter_lines():
@@ -1742,24 +1758,58 @@ class LLMProvider(RecommendationMixin, Plugin):
                             content = delta.get("content", "") or ""
                             if content:
                                 yield {"delta": content, "done": False}
+                            # Accumulate tool_calls from delta (OpenAI streams
+                            # tool_calls across multiple chunks by index)
+                            delta_tool_calls = delta.get("tool_calls") or []
+                            for tc in delta_tool_calls:
+                                idx = tc.get("index", 0)
+                                if idx not in tool_call_chunks:
+                                    tool_call_chunks[idx] = {
+                                        "id": "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    }
+                                entry = tool_call_chunks[idx]
+                                if tc.get("id"):
+                                    entry["id"] = tc["id"]
+                                if tc.get("function", {}).get("name"):
+                                    entry["function"]["name"] += tc["function"]["name"]
+                                if tc.get("function", {}).get("arguments"):
+                                    entry["function"]["arguments"] += tc["function"]["arguments"]
                         usage = data.get("usage")
                         if usage:
                             tokens_used = usage.get("total_tokens", 0)
                             circuit_breaker.record_success()
                             self._call_stats.append({"model": model, "tokens_used": tokens_used, "t": time.time()})
-                            # Record cost (mirror non-streaming path)
                             self._record_cost(
                                 model,
                                 tokens_used,
                                 tokens_prompt=usage.get("prompt_tokens", 0),
                                 tokens_completion=usage.get("completion_tokens", 0),
                             )
-                            yield {"delta": "", "done": True, "tokens_used": tokens_used}
+                            # Assemble accumulated tool_calls sorted by index
+                            assembled_tool_calls = [
+                                tool_call_chunks[k]
+                                for k in sorted(tool_call_chunks.keys())
+                            ]
+                            yield {
+                                "delta": "", "done": True, "tokens_used": tokens_used,
+                                "tool_calls": assembled_tool_calls,
+                                "tool_calls_raw": assembled_tool_calls,
+                            }
                             return
                     # Stream ended without a usage chunk — yield final done.
                     circuit_breaker.record_success()
                     self._call_stats.append({"model": model, "tokens_used": 0, "t": time.time()})
-                    yield {"delta": "", "done": True, "tokens_used": 0}
+                    assembled_tool_calls = [
+                        tool_call_chunks[k]
+                        for k in sorted(tool_call_chunks.keys())
+                    ]
+                    yield {
+                        "delta": "", "done": True, "tokens_used": 0,
+                        "tool_calls": assembled_tool_calls,
+                        "tool_calls_raw": assembled_tool_calls,
+                    }
             except httpx.HTTPStatusError as exc:
                 circuit_breaker.record_failure()
                 yield {"delta": "", "done": True, "error": f"stream error: {exc.response.status_code}"}

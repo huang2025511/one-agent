@@ -158,6 +158,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
     // 开始 SSE 流式接收
     final buffer = StringBuffer();
     String? thinkingBuffer;
+    // 追踪 phase 顺序用于生成摘要时间线
+    final List<String> _phaseOrder = [];
+    String? _lastPhase;
 
     StreamChatResult result;
     try {
@@ -200,15 +203,26 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
         if (event.type == 'thinking') {
           final content = event.content ?? '';
+          final phase = event.phase ?? 'thinking';
           if (event.phase == 'plan') {
             // phase=plan 是最终完整思考计划，覆盖之前截断的进度版
-            // 即使 content 为空也必须更新，消除客户端"思考中..."占位
-            thinkingBuffer = content.isEmpty ? null : content;
+            // 追加换行符确保下一段 phase 标题能正确分行
+            thinkingBuffer = content.isEmpty ? null : content + '\n\n';
+            if (!_phaseOrder.contains('plan')) _phaseOrder.add('plan');
+            // 同步更新 _last_phase，plan 之后回到新 phase 时能正确生成标题
+            _lastPhase = 'plan';
           } else if (content.isEmpty) {
             // 初始 thinking 占位事件，无 content，忽略
           } else {
-            // phase=planning/thinking/reflection 是中间思考进度，追加
-            thinkingBuffer = (thinkingBuffer ?? '') + content + '\n\n';
+            // 按 phase 分类格式化：每个 phase 首次出现时添加标题行
+            if (_lastPhase != phase) {
+              _lastPhase = phase;
+              if (!_phaseOrder.contains(phase)) _phaseOrder.add(phase);
+              final icon = _phaseIcon(phase);
+              final label = _phaseLabel(phase);
+              thinkingBuffer = (thinkingBuffer ?? '') + '### $icon $label\n';
+            }
+            thinkingBuffer = (thinkingBuffer ?? '') + '$content\n\n';
           }
         } else if (event.content != null) {
           buffer.write(event.content);
@@ -221,6 +235,13 @@ class ChatNotifier extends StateNotifier<ChatState> {
           updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
             content: buffer.toString(),
             thinking: thinkingBuffer,
+            metadata: {
+              if (updatedMsgs[lastIdx].metadata != null)
+                ...updatedMsgs[lastIdx].metadata!,
+              'thinkingSummary': _phaseOrder
+                  .map((p) => '${_phaseIcon(p)} ${_phaseLabel(p)}')
+                  .join(' → '),
+            },
           );
           state = state.copyWith(messages: updatedMsgs);
         }
@@ -313,6 +334,105 @@ class ChatNotifier extends StateNotifier<ChatState> {
   void dispose() {
     _disposeStream();
     super.dispose();
+  }
+
+  /// Phase → 图标映射
+  static String _phaseIcon(String phase) {
+    switch (phase) {
+      case 'planning':
+      case 'plan':
+        return '📋';
+      case 'thinking':
+        return '💭';
+      case 'reflection':
+        return '🔄';
+      case 'reasoning':
+        return '🧠';
+      case 'tool_loop':
+        return '🔧';
+      case 'tool_result':
+        return '📊';
+      case 'skill_dispatch':
+        return '⚡';
+      case 'streaming':
+        return '💬';
+      case 'verification':
+        return '✅';
+      case 'regeneration':
+        return '♻️';
+      case 'rewrite':
+        return '✏️';
+      case 'agent_mesh':
+        return '🕸️';
+      case 'multi_agent':
+        return '🤝';
+      case 'deep_research':
+        return '🔍';
+      case 'comparison':
+        return '⚖️';
+      case 'chart':
+        return '📈';
+      case 'batch':
+        return '📦';
+      case 'eval':
+        return '📝';
+      case 'model_compare':
+        return '🔀';
+      case 'provider_resolve':
+        return '🔌';
+      default:
+        return '•';
+    }
+  }
+
+  /// Phase → 中文标签映射
+  static String _phaseLabel(String phase) {
+    switch (phase) {
+      case 'planning':
+        return '规划中';
+      case 'plan':
+        return '执行计划';
+      case 'thinking':
+        return '思考中';
+      case 'reflection':
+        return '反思';
+      case 'reasoning':
+        return '推理';
+      case 'tool_loop':
+        return '工具调用';
+      case 'tool_result':
+        return '工具结果';
+      case 'skill_dispatch':
+        return '技能调度';
+      case 'streaming':
+        return '生成回复';
+      case 'verification':
+        return '验证结果';
+      case 'regeneration':
+        return '重新生成';
+      case 'rewrite':
+        return '重写优化';
+      case 'agent_mesh':
+        return 'Agent网格';
+      case 'multi_agent':
+        return '多Agent协作';
+      case 'deep_research':
+        return '深度研究';
+      case 'comparison':
+        return '方案比较';
+      case 'chart':
+        return '图表生成';
+      case 'batch':
+        return '批量处理';
+      case 'eval':
+        return '评估';
+      case 'model_compare':
+        return '模型比较';
+      case 'provider_resolve':
+        return '服务商解析';
+      default:
+        return phase;
+    }
   }
 }
 

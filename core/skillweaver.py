@@ -586,58 +586,104 @@ class SkillWeaverRouter:
         on_progress: Optional[Callable[[str, str], None]] = None,
     ) -> Dict[str, Any]:
         """Execute DAG workflow with parallel support.
-        
+
         Args:
             workflow: DAGWorkflow to execute
             on_progress: Optional callback for progress updates
-            
+
         Returns:
             Dict with final result and execution metadata
         """
         if not workflow.nodes:
             return {"error": "empty workflow"}
-        
+
+        # 修复：先做静态环检测 — LLM 在 _compose 阶段可能生成循环依赖（如 A→B→A）
+        # 之前的 while 循环会永远等不到 completed
+        if self._has_cycle(workflow):
+            logger.error("SkillWeaver: detected cycle in workflow, aborting")
+            return {"error": "workflow has cycle (circular dependencies)"}
+
+        # 修复：等依赖时加超时（默认 30s），避免某个节点卡死时整个 turn hang
+        dep_wait_timeout_s = 30.0
+
         results: Dict[str, Any] = {}
         completed: set = set()
-        
+
         async def execute_node(node: SkillNode) -> None:
             """Execute a single node, respecting dependencies."""
-            # Wait for dependencies
+            # Wait for dependencies — 加超时保护
+            deadline = asyncio.get_event_loop().time() + dep_wait_timeout_s
             while not all(d in completed for d in node.dependencies):
+                if asyncio.get_event_loop().time() >= deadline:
+                    logger.error("SkillWeaver: node %s timed out waiting for deps %s",
+                                node.subtask_id, node.dependencies)
+                    node.status = "failed"
+                    node.error = f"dependency wait timeout ({dep_wait_timeout_s}s)"
+                    results[node.subtask_id] = f"Error: {node.error}"
+                    completed.add(node.subtask_id)
+                    if on_progress:
+                        on_progress(node.subtask_id, "failed")
+                    return
                 await asyncio.sleep(0.1)
-            
+
             # Execute skill
             if on_progress:
                 on_progress(node.subtask_id, "running")
-            
+
             try:
                 result = await self._skills.dispatch(node.skill_id, node.args)
                 node.result = result
                 node.status = "done"
                 results[node.subtask_id] = result
-                
+
                 if on_progress:
                     on_progress(node.subtask_id, "done")
-                    
+
             except Exception as exc:
                 node.status = "failed"
                 node.error = str(exc)
                 results[node.subtask_id] = f"Error: {exc}"
-                
+
                 if on_progress:
                     on_progress(node.subtask_id, "failed")
-            
+
             completed.add(node.subtask_id)
-        
+
         # Execute all nodes in parallel (dependencies handled internally)
         tasks = [execute_node(node) for node in workflow.nodes]
         await asyncio.gather(*tasks)
-        
+
         return {
             "results": results,
             "nodes": workflow.nodes,
             "success": all(n.status == "done" for n in workflow.nodes),
         }
+
+    @staticmethod
+    def _has_cycle(workflow: DAGWorkflow) -> bool:
+        """Detect cycle in DAG using DFS coloring. O(V+E)."""
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color: Dict[str, int] = {n.subtask_id: WHITE for n in workflow.nodes}
+        # 建邻接表
+        adj: Dict[str, List[str]] = {n.subtask_id: list(n.dependencies) for n in workflow.nodes}
+
+        def dfs(node_id: str) -> bool:
+            color[node_id] = GRAY
+            for dep in adj.get(node_id, []):
+                if dep not in color:
+                    # 依赖指向不存在的节点 — 视为坏图，跳过
+                    continue
+                if color[dep] == GRAY:
+                    return True  # back edge → cycle
+                if color[dep] == WHITE and dfs(dep):
+                    return True
+            color[node_id] = BLACK
+            return False
+
+        for nid in color:
+            if color[nid] == WHITE and dfs(nid):
+                return True
+        return False
 
 
 # ============================================================

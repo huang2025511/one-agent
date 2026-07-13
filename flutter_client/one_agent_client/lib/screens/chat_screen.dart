@@ -317,6 +317,7 @@ class _MessageBubble extends StatelessWidget {
                   if (message.thinking != null && message.thinking!.isNotEmpty)
                     _ThinkingExpansion(
                       thinking: message.thinking!,
+                      thinkingSummary: message.metadata?['thinkingSummary'] as String? ?? '',
                       isStreaming: message.isStreaming == true && message.content.isEmpty,
                     ),
                   if (message.content.isNotEmpty)
@@ -371,9 +372,14 @@ class _MessageBubble extends StatelessWidget {
 
 class _ThinkingExpansion extends StatefulWidget {
   final String thinking;
-  final bool isStreaming; // 是否正在流式接收思考内容
+  final String thinkingSummary; // 摘要时间线，如 "📋 规划中 → 💭 思考中 → 🔧 工具调用"
+  final bool isStreaming;
 
-  const _ThinkingExpansion({required this.thinking, this.isStreaming = false});
+  const _ThinkingExpansion({
+    required this.thinking,
+    this.thinkingSummary = '',
+    this.isStreaming = false,
+  });
 
   @override
   State<_ThinkingExpansion> createState() => _ThinkingExpansionState();
@@ -381,7 +387,7 @@ class _ThinkingExpansion extends StatefulWidget {
 
 class _ThinkingExpansionState extends State<_ThinkingExpansion> {
   bool _expanded = false;
-  bool _userToggled = false; // 用户是否手动切换过展开状态
+  bool _userToggled = false;
   final ScrollController _scrollController = ScrollController();
 
   @override
@@ -422,52 +428,83 @@ class _ThinkingExpansionState extends State<_ThinkingExpansion> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final l10n = AppLocalizations.of(context)!;
+    final hasSummary = widget.thinkingSummary.isNotEmpty;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // ── 可点击的标题栏 ──
         InkWell(
           onTap: _toggle,
           borderRadius: BorderRadius.circular(8),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: theme.colorScheme.outlineVariant.withOpacity(0.4),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(
-                  _expanded ? Icons.expand_less : Icons.expand_more,
-                  size: 18,
-                  color: theme.colorScheme.primary,
+                // 第一行：标题 + 展开/收起图标 + 流式动画
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 18,
+                      color: theme.colorScheme.primary,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      l10n.thinkingProcess,
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (widget.isStreaming) ...[
+                      const SizedBox(width: 6),
+                      SizedBox(
+                        width: 10,
+                        height: 10,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.5,
+                          color: theme.colorScheme.primary.withOpacity(0.6),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-                const SizedBox(width: 4),
-                Text(
-                  l10n.thinkingProcess,
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: theme.colorScheme.primary,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                // 流式接收时显示动画指示器
-                if (widget.isStreaming) ...[
-                  const SizedBox(width: 6),
-                  SizedBox(
-                    width: 10,
-                    height: 10,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 1.5,
-                      color: theme.colorScheme.primary.withOpacity(0.6),
+                // 第二行：摘要时间线（收起时显示，展开时也显示方便快速了解进度）
+                if (hasSummary)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4, left: 22),
+                    child: Text(
+                      widget.thinkingSummary,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontSize: 11,
+                        height: 1.3,
+                      ),
+                      maxLines: _expanded ? 3 : 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                ],
               ],
             ),
           ),
         ),
+
+        // ── 展开的内容区 ──
         if (_expanded && widget.thinking.isNotEmpty)
           Container(
             width: double.infinity,
-            margin: const EdgeInsets.only(top: 4, bottom: 8),
+            margin: const EdgeInsets.only(top: 6, bottom: 8),
             padding: const EdgeInsets.all(10),
-            constraints: const BoxConstraints(maxHeight: 300),
+            constraints: const BoxConstraints(maxHeight: 350),
             decoration: BoxDecoration(
               color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.6),
               borderRadius: BorderRadius.circular(8),
@@ -477,17 +514,123 @@ class _ThinkingExpansionState extends State<_ThinkingExpansion> {
             ),
             child: SingleChildScrollView(
               controller: _scrollController,
-              child: SelectableText(
-                widget.thinking,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                  fontStyle: FontStyle.italic,
-                  height: 1.4,
-                ),
-              ),
+              child: _buildStructuredContent(theme),
             ),
           ),
       ],
+    );
+  }
+
+  /// 构建结构化思考内容：按 `### icon label` 标题分组渲染
+  Widget _buildStructuredContent(ThemeData theme) {
+    final text = widget.thinking;
+    // 按 ### 标题分割内容
+    final sections = <_ThinkingSection>[];
+    final pattern = RegExp(r'^### (.+)$', multiLine: true);
+    final matches = pattern.allMatches(text).toList();
+
+    int lastEnd = 0;
+    int matchIdx = 0;
+    for (final match in matches) {
+      // 保存前一个 section 的内容
+      if (match.start > lastEnd) {
+        final beforeContent = text.substring(lastEnd, match.start).trim();
+        if (beforeContent.isNotEmpty && sections.isEmpty) {
+          // 第一个 ### 之前的内容，作为 preamble
+          sections.add(_ThinkingSection(title: '', content: beforeContent));
+        }
+      }
+      final title = match.group(1) ?? '';
+      final contentStart = match.end;
+      lastEnd = contentStart;
+      sections.add(_ThinkingSection(title: title, content: '', startOffset: contentStart));
+      matchIdx++;
+    }
+
+    // 填充每个 section 的内容：从 startOffset 到下一个 ### 标题
+    for (int i = 0; i < sections.length; i++) {
+      final section = sections[i];
+      if (section.startOffset == null) continue;
+
+      // 从 startOffset 开始搜索下一个 \n### 标题
+      final searchFrom = section.startOffset!;
+      final nextHeaderMatch = RegExp(r'\n### ').firstMatch(text.substring(searchFrom));
+      final endOffset = nextHeaderMatch != null
+          ? searchFrom + nextHeaderMatch.start
+          : text.length;
+
+      final rawContent = text.substring(searchFrom, endOffset).trim();
+      sections[i] = section.copyWith(content: rawContent);
+    }
+
+    if (sections.isEmpty) {
+      // 没有 ### 标题，直接显示纯文本
+      return SelectableText(
+        text,
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+          fontStyle: FontStyle.italic,
+          height: 1.4,
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: sections.map((section) {
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (section.title.isNotEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 3, horizontal: 6),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primaryContainer.withOpacity(0.4),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    section.title,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: theme.colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                ),
+              if (section.content.isNotEmpty) ...[
+                if (section.title.isNotEmpty) const SizedBox(height: 4),
+                SelectableText(
+                  section.content,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    fontStyle: FontStyle.italic,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
+/// 思考内容分区
+class _ThinkingSection {
+  final String title;
+  final String content;
+  final int? startOffset; // 在原始文本中的起始偏移
+
+  _ThinkingSection({required this.title, required this.content, this.startOffset});
+
+  _ThinkingSection copyWith({String? title, String? content, int? startOffset}) {
+    return _ThinkingSection(
+      title: title ?? this.title,
+      content: content ?? this.content,
+      startOffset: startOffset ?? this.startOffset,
     );
   }
 }

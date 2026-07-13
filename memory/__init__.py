@@ -25,6 +25,7 @@ from core.plugin import Plugin
 
 from .embeddings import EmbeddingStore  # noqa: F401
 from .knowledge_graph import KnowledgeGraph  # noqa: F401
+from .role_store import RoleStore  # noqa: F401
 from .session_store import SessionStore  # noqa: F401
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ __all__ = [
     "KnowledgeGraph",
     "SessionStore",
     "EmbeddingStore",
+    "RoleStore",
 ]
 
 
@@ -478,6 +480,7 @@ class MemoryPlugin(Plugin):
         self._procedural: Optional[ProceduralMemory] = None
         self._kg: Optional[KnowledgeGraph] = None
         self._embeddings: Optional[EmbeddingStore] = None
+        self._roles: Optional[RoleStore] = None
         self._max_results = 5
         self._auto_create_skills = True
         self._min_usage = 3
@@ -502,6 +505,7 @@ class MemoryPlugin(Plugin):
         )
         self._procedural = ProceduralMemory(os.path.join(data_dir, "memory/skills"))
         self._kg = KnowledgeGraph(os.path.join(data_dir, "memory/kg.db"))
+        self._roles = RoleStore(os.path.join(data_dir, "memory/roles.db"))
 
         # Initialize embedding store for semantic search
         self._hybrid_search = mem_cfg.get("hybrid_search", True)
@@ -524,6 +528,11 @@ class MemoryPlugin(Plugin):
         self.bus.subscribe("cron", self._on_cron)
         logger.info("memory plugin ready: long_term=%s, hybrid_search=%s",
                     self._long.stats(), self._hybrid_search)
+
+    @property
+    def roles(self) -> Optional[RoleStore]:
+        """角色存储，供 API 和 router 访问。"""
+        return self._roles
 
     async def _on_user_message(self, event: Event) -> None:
         turn: TurnContext | None = event.get("turn")
@@ -827,4 +836,9 @@ class MemoryPlugin(Plugin):
                 self._embeddings.close()
             except (OSError, RuntimeError) as exc:
                 logger.error("failed to close embedding store: %s", exc, exc_info=True)
+        if self._roles is not None:
+            try:
+                self._roles.close()
+            except Exception as exc:
+                logger.error("failed to close role store: %s", exc, exc_info=True)
         await super().stop()

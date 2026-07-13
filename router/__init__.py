@@ -664,6 +664,21 @@ class SmartRouter(Plugin):
         from i18n import get_language
         lang = (get_language() or "zh").lower()
 
+        # 角色注入：从 MemoryPlugin 获取活跃角色的 system_prompt_override
+        role_prompt = ""
+        role_info = None
+        if self.ctx is not None:
+            memory_plugin = getattr(self.ctx, "memory", None)
+            if memory_plugin is not None:
+                role_store = getattr(memory_plugin, "roles", None)
+                if role_store is not None:
+                    try:
+                        role_info = role_store.get_active()
+                        if role_info:
+                            role_prompt = role_info.get("system_prompt_override", "") or ""
+                    except Exception:
+                        pass
+
         # P1-2 fix: generate today's date dynamically instead of hardcoding.
         from datetime import datetime
         _now = datetime.now()
@@ -870,6 +885,10 @@ class SmartRouter(Plugin):
             recent_history = history[-6:]
             messages = [{"role": "system", "content": system}]
 
+            # 角色注入：活跃角色的 system_prompt_override 作为独立 system 消息
+            if role_prompt:
+                messages.append({"role": "system", "content": role_prompt})
+
             # Gap 5 修复：优先使用真摘要缓存（_refresh_session_summary 写入）。
             # 缓存缺失时回退到 [:80] 截断（LLM 不可用 / 首次未生成），
             # 保证不会因摘要失败而丢上下文。
@@ -895,6 +914,9 @@ class SmartRouter(Plugin):
             history = recent_history
         else:
             messages = [{"role": "system", "content": system}]
+            # 角色注入：活跃角色的 system_prompt_override 作为独立 system 消息
+            if role_prompt:
+                messages.append({"role": "system", "content": role_prompt})
 
         for h in history:
             messages.append({"role": "user", "content": h["input"]})
