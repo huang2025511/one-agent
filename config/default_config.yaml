@@ -22,7 +22,7 @@ llm:
   default_temperature: 0.3
   default_max_tokens: 2048
   timeout: 30
-  retries: 1
+  retries: 3                 # 429 限流时需要多次重试（带退避）
   cost_tracking:
     daily_budget: 1.0
     monthly_budget: 20.0

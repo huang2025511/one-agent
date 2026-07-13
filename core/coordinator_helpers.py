@@ -169,6 +169,137 @@ def parse_xml_tool_tags(text: str) -> List[Dict[str, Any]]:
     return calls
 
 
+def parse_markdown_tool_calls(text: str) -> List[Dict[str, Any]]:
+    """从 LLM 输出文本中解析 markdown 代码块格式的工具调用。
+
+    当 LLM 不使用 function_call 格式，而是用文字描述工具调用时，
+    常见格式是：
+
+    ```bash
+    web_search("Agnes AI API endpoint")
+    ```
+
+    或：
+
+    ```python
+    system_run("curl -s https://example.com/v1/models")
+    ```
+
+    本方法解析 ```` ```lang \\n func_name("args") \\n``` ```` 格式，
+    提取函数名和参数，转为 tool_calls 结构。
+
+    返回 [] 表示没有可解析的工具调用。
+    """
+    import re as _re
+    import json as _json
+    import shlex as _shlex
+
+    if not text or "```" not in text:
+        return []
+
+    calls: List[Dict[str, Any]] = []
+    # 匹配 ```lang\nfunc_name(args)\n``` 格式
+    # func_name 必须是已知工具名
+    block_pattern = _re.compile(
+        r'```(?:\w+)?\s*\n\s*(?P<call>[a-z_]\w*\s*\([^)]*\))\s*\n\s*```',
+        _re.IGNORECASE | _re.MULTILINE,
+    )
+    # 也匹配不带代码块包裹的裸调用：func_name("...")
+    bare_pattern = _re.compile(
+        r'(?m)^\s*(?P<call>[a-z_]\w*\s*\([^)]*\))\s*$',
+        _re.IGNORECASE,
+    )
+
+    # 参数名映射：和 XML 解析器保持一致
+    _MD_PARAM_MAP = {
+        "web_search": {"query": "input", "q": "input", "search": "input"},
+        "calc": {"expr": "input", "expression": "input"},
+        "system_run": {"command": "command", "cmd": "command"},
+    }
+
+    seen_calls: set = set()  # 去重
+
+    for pat in (block_pattern, bare_pattern):
+        for m in pat.finditer(text):
+            call_str = m.group("call").strip()
+            # 解析 func_name(args) 格式
+            parts = _re.match(r'(?P<name>[a-z_]\w*)\s*\((?P<args>.*)\)', call_str, _re.IGNORECASE | _re.DOTALL)
+            if not parts:
+                continue
+            name = parts.group("name").lower()
+            if name not in XML_TOOL_NAMES:
+                continue
+            args_str = parts.group("args").strip()
+            if not args_str:
+                continue
+
+            # 去重：同名同参数的调用只保留一个
+            dedup_key = f"{name}:{args_str[:200]}"
+            if dedup_key in seen_calls:
+                continue
+            seen_calls.add(dedup_key)
+
+            # 解析参数：尝试 JSON 格式，再尝试 shlex，最后尝试裸字符串
+            args: Dict[str, Any] = {}
+            # 情况1：func_name("string") — 单个字符串参数
+            # 情况2：func_name(key="value", key2="value2") — 关键字参数
+            # 情况3：func_name({'key': 'value'}) — JSON 字典
+
+            # 先尝试关键字参数解析：key="value" 或 key='value'
+            kw_pattern = _re.compile(
+                r'(?P<key>[a-zA-Z_]\w*)\s*=\s*(?:"(?P<dval>[^"]*)"|\'(?P<sval>[^\']*)\'|(?P<nval>[^,)\s]+))',
+            )
+            kw_matches = list(kw_pattern.finditer(args_str))
+
+            if kw_matches:
+                for km in kw_matches:
+                    key = km.group("key")
+                    val = km.group("dval") if km.group("dval") is not None else (
+                        km.group("sval") if km.group("sval") is not None else km.group("nval")
+                    )
+                    args[key] = val
+            else:
+                # 单个位置参数：提取引号内的字符串
+                str_match = _re.match(r'^["\'](.*)["\']$', args_str, _re.DOTALL)
+                if str_match:
+                    raw_val = str_match.group(1)
+                    # 参数名映射
+                    if name in _MD_PARAM_MAP:
+                        # 取第一个映射目标
+                        first_key = next(iter(_MD_PARAM_MAP[name].values()))
+                        args[first_key] = raw_val
+                    else:
+                        args["input"] = raw_val
+                else:
+                    # 尝试 JSON 解析
+                    try:
+                        parsed = _json.loads(args_str)
+                        if isinstance(parsed, dict):
+                            args = parsed
+                        elif isinstance(parsed, str):
+                            args["input"] = parsed
+                    except (_json.JSONDecodeError, ValueError):
+                        # 裸字符串
+                        args["input"] = args_str
+
+            # 参数名映射
+            if name in _MD_PARAM_MAP:
+                for md_key, mapped_key in _MD_PARAM_MAP[name].items():
+                    if md_key in args and mapped_key not in args:
+                        args[mapped_key] = args.pop(md_key)
+
+            if not args:
+                continue
+
+            calls.append({
+                "id": f"md_{len(calls)}_{name}",
+                "name": name,
+                "args": args,
+            })
+
+    return calls
+
+
 def strip_executed_xml_tags(text: str) -> str:
     """从输出文本中移除已解析执行过的 XML 工具标签，避免泄漏给用户。
 

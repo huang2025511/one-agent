@@ -241,11 +241,10 @@ class SystemExecutor(BaseExecutor):
         self._workdir = str(sec_cfg.get("command_workdir", "."))
 
         if not self._pwd_manager.is_configured():
-            logger.warning(
+            logger.info(
                 "system_executor: no password configured. "
-                "SAFE commands (level 0) will run without password. "
-                "Level 1-3 commands require a password. "
-                "使用 /unlock <password> 来解锁，或在 config 中设置 security.system_executor_password"
+                "All commands (including DANGEROUS) will execute without password. "
+                "如需启用密码保护，请在 config 中设置 security.system_executor_password"
             )
 
         # Register skill

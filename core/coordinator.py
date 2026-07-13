@@ -36,6 +36,7 @@ from .coordinator_helpers import (
     XML_TOOL_NAMES,
     sanitize_model_output,
     parse_xml_tool_tags,
+    parse_markdown_tool_calls,
     strip_executed_xml_tags,
     needs_web_search,
     needs_clarification_check as _needs_clarification_check_fn,
@@ -1433,6 +1434,9 @@ class Coordinator(Plugin):
     def _parse_xml_tool_tags(self, text: str) -> List[Dict[str, Any]]:
         return parse_xml_tool_tags(text)
 
+    def _parse_markdown_tool_calls(self, text: str) -> List[Dict[str, Any]]:
+        return parse_markdown_tool_calls(text)
+
     def _strip_executed_xml_tags(self, text: str) -> str:
         return strip_executed_xml_tags(text)
 
@@ -2635,9 +2639,19 @@ class Coordinator(Plugin):
             model_cost_per_1k = MODEL_COST.get(turn.model, MODEL_COST.get("default", 0.002))
             total_cost += (tokens_used / 1000) * model_cost_per_1k
 
+            # 检测 LLM 调用失败（429/400/超时等），推送错误信息到思考卡片
+            if resp.get("failed"):
+                _zh = self._is_zh()
+                _err_msg = resp.get("text", "")[:200]
+                if _zh:
+                    _progress_msg = f"⚠️ LLM 调用失败：{_err_msg}\n正在尝试恢复或降级处理..."
+                else:
+                    _progress_msg = f"⚠️ LLM call failed: {_err_msg}\nAttempting recovery or fallback..."
+                self._emit_progress(turn, _progress_msg, "reasoning")
+
             tool_calls = resp.get("tool_calls") or []
 
-            # Fallback: 解析 XML 工具标签
+            # Fallback 1: 解析 XML 工具标签
             if not tool_calls and resp.get("text"):
                 parsed_calls = self._parse_xml_tool_tags(resp["text"])
                 if parsed_calls:
@@ -2650,6 +2664,23 @@ class Coordinator(Plugin):
                         turn.meta["xml_parsed_tool_calls"] = True
                         logger.info(
                             "tool_loop: parsed %d tool call(s) from XML tags in text output",
+                            len(tool_calls),
+                        )
+
+            # Fallback 2: 解析 markdown 代码块格式的工具调用
+            # 当 LLM 不用 function_call 而是用 ```` ```bash\n web_search("...")\n``` ```` 格式时
+            if not tool_calls and resp.get("text"):
+                parsed_calls = self._parse_markdown_tool_calls(resp["text"])
+                if parsed_calls:
+                    if not (self._os_mode_enabled or turn.meta.get("needs_system_access")):
+                        parsed_calls = [
+                            c for c in parsed_calls if c["name"] != "system_run"
+                        ]
+                    if parsed_calls:
+                        tool_calls = parsed_calls
+                        turn.meta["md_parsed_tool_calls"] = True
+                        logger.info(
+                            "tool_loop: parsed %d tool call(s) from markdown code blocks",
                             len(tool_calls),
                         )
 
