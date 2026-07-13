@@ -793,7 +793,7 @@ class RESTAPIGateway(Plugin):
                             "planning", "thinking", "reflection", "plan",
                             "multi_agent", "deep_research", "comparison",
                             "reasoning", "tool_loop", "regeneration",
-                            "skill_dispatch", "chart",
+                            "skill_dispatch", "chart", "tool_result",
                         }
 
                         def _on_progress(evt) -> None:

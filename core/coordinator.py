@@ -2539,9 +2539,12 @@ class Coordinator(Plugin):
             # ========== ReAct Step 1: 思考（Reason） ==========
             # 对于复杂任务，每次迭代前都让 LLM 显式思考下一步
             complexity = getattr(turn, "estimated_complexity", 0.0)
-            if complexity >= 0.3 and i > 0:
+            if complexity >= 0.3:
                 _zh = self._is_zh()
-                self._emit_progress(turn, "正在思考下一步..." if _zh else "Thinking about next step...", "thinking")
+                if i == 0:
+                    self._emit_progress(turn, "正在分析任务并制定执行策略..." if _zh else "Analyzing task and formulating strategy...", "thinking")
+                else:
+                    self._emit_progress(turn, "正在思考下一步..." if _zh else "Thinking about next step...", "thinking")
                 thought_prompt = self._generate_react_thought_prompt(
                     turn, i, thinking_history, tools, _failed_skills
                 )
@@ -2745,6 +2748,27 @@ class Coordinator(Plugin):
                     called_tools.add(dedup_key)
 
             if deduped_calls:
+                # 工具调用前推送进度，让用户知道正在做什么
+                _zh = self._is_zh()
+                tool_names = [
+                    tc.get("name") or tc.get("function", {}).get("name", "unknown")
+                    for tc in deduped_calls
+                ]
+                if len(tool_names) == 1:
+                    self._emit_progress(
+                        turn,
+                        f"🔧 正在调用工具: {tool_names[0]}" if _zh else f"🔧 Calling tool: {tool_names[0]}",
+                        "tool_loop"
+                    )
+                else:
+                    preview = ", ".join(tool_names[:3])
+                    if len(tool_names) > 3:
+                        preview += f" 等 {len(tool_names)} 个"
+                    self._emit_progress(
+                        turn,
+                        f"🔧 正在并行调用工具: {preview}" if _zh else f"🔧 Calling tools in parallel: {preview}",
+                        "tool_loop"
+                    )
                 await self._execute_tool_calls(messages, turn, deduped_calls, _failed_skills, i)
 
             # ========== ReAct Step 4: 观察（Observe）— 分析结果并决定下一步 ==========
@@ -3297,6 +3321,12 @@ class Coordinator(Plugin):
                 else:
                     plan_summary = "Task Plan:\n" + "\n".join([f"{i+1}. {step}" for i, step in enumerate(steps)])
                 messages.append({"role": "assistant", "content": plan_summary})
+
+                # 将完整计划内容推送到客户端，让用户看到任务分解结果
+                # 分步骤推送，避免单条消息过长
+                for idx, step in enumerate(steps):
+                    step_msg = f"📋 步骤 {idx+1}: {step}"
+                    self._emit_progress(turn, step_msg, "planning")
 
             return steps
 
