@@ -106,61 +106,85 @@ class MemoryScreen extends ConsumerWidget {
   }
 
   void _showAddDialog(BuildContext context, WidgetRef ref) {
-    final textController = TextEditingController();
-    final tagsController = TextEditingController();
-
+    // 修复：把 controller 放在 stateful 子组件中，对话框关闭时自动释放
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('添加记忆'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: textController,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                hintText: '记忆内容',
-                border: OutlineInputBorder(),
-              ),
+      builder: (ctx) => _AddMemoryDialog(ref: ref),
+    );
+  }
+}
+
+/// 添加记忆对话框（独立 StatefulWidget，确保 controller 在 dispose 时释放）
+class _AddMemoryDialog extends ConsumerStatefulWidget {
+  final WidgetRef ref;
+  const _AddMemoryDialog({required this.ref});
+
+  @override
+  ConsumerState<_AddMemoryDialog> createState() => _AddMemoryDialogState();
+}
+
+class _AddMemoryDialogState extends ConsumerState<_AddMemoryDialog> {
+  final _textController = TextEditingController();
+  final _tagsController = TextEditingController();
+
+  @override
+  void dispose() {
+    _textController.dispose();
+    _tagsController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('添加记忆'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _textController,
+            maxLines: 4,
+            decoration: const InputDecoration(
+              hintText: '记忆内容',
+              border: OutlineInputBorder(),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: tagsController,
-              decoration: const InputDecoration(
-                hintText: '标签（可选，逗号分隔）',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
           ),
-          FilledButton(
-            onPressed: () async {
-              final text = textController.text.trim();
-              if (text.isEmpty) return;
-              final ok = await ref
-                  .read(memoryProvider.notifier)
-                  .add(text, tags: tagsController.text.trim());
-              if (ctx.mounted) {
-                Navigator.of(ctx).pop();
-              }
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(ok ? '添加成功' : '添加失败'),
-                  ),
-                );
-              }
-            },
-            child: const Text('添加'),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _tagsController,
+            decoration: const InputDecoration(
+              hintText: '标签（可选，逗号分隔）',
+              border: OutlineInputBorder(),
+            ),
           ),
         ],
       ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () async {
+            final text = _textController.text.trim();
+            if (text.isEmpty) return;
+            final ok = await ref
+                .read(memoryProvider.notifier)
+                .add(text, tags: _tagsController.text.trim());
+            if (context.mounted) {
+              Navigator.of(context).pop();
+            }
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(ok ? '添加成功' : '添加失败'),
+                ),
+              );
+            }
+          },
+          child: const Text('添加'),
+        ),
+      ],
     );
   }
 }

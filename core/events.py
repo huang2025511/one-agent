@@ -398,6 +398,10 @@ class EventBus:
                 result = handler(event)
                 if asyncio.iscoroutine(result):
                     await result
+            except asyncio.CancelledError:
+                # 修复：handler 内部被取消时不要吞掉 CancelledError
+                # 这通常是 bus shutdown 信号，需要传播到外层 _loop
+                raise
             except (ValueError, KeyError, TypeError, RuntimeError, asyncio.TimeoutError) as exc:
                 logger.error("handler %s failed on %s: %s", handler, event.type, exc, exc_info=True)
                 # 记录异常信息而非 handler 函数 repr —— 之前 str(handler)

@@ -40,7 +40,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
     // 预加载会话列表，供 Drawer 侧边栏使用
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(sessionListProvider.notifier).load();
+      if (mounted) ref.read(sessionListProvider.notifier).load();
     });
   }
 

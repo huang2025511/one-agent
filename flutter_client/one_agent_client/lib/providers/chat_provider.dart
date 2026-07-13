@@ -180,6 +180,8 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
     _streamSub = result.stream.listen(
       (event) {
+        // 修复：dispose 后 stream 回调可能仍在飞，state 写入会抛异常
+        if (_streamSub == null) return;
         // 错误事件：显示错误信息，不写入回复内容
         if (event.type == 'error') {
           final updatedMsgs = [...state.messages];
@@ -224,8 +226,13 @@ class ChatNotifier extends StateNotifier<ChatState> {
         }
 
         // 完成
-        if (event.done == true && event.sessionId != null) {
-          state = state.copyWith(currentSessionId: event.sessionId);
+        if (event.done == true) {
+          // 修复：无论是否有 sessionId，done 事件都应结束流式状态
+          // 否则若服务端漏发 sessionId，isLoading 会永久卡住
+          state = state.copyWith(
+            currentSessionId: event.sessionId ?? state.currentSessionId,
+            isLoading: false,
+          );
         }
       },
       onError: (err) {

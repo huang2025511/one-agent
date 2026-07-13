@@ -826,8 +826,14 @@ class RESTAPIGateway(Plugin):
                             )
                         )
 
+                        result: Dict[str, Any] = {}
                         try:
                             while not chat_task.done():
+                                # 修复：检查客户端是否断连（避免 LLM token 浪费）
+                                if await request.is_disconnected():
+                                    logger.info("Client disconnected during stream, cancelling chat task")
+                                    chat_task.cancel()
+                                    break
                                 try:
                                     # 用 wait_for 避免任务泄漏（超时自动取消 coroutine）
                                     msg, phase = await _asyncio.wait_for(
@@ -848,12 +854,11 @@ class RESTAPIGateway(Plugin):
                             _app_instance.bus.unsubscribe("turn_progress", _on_progress)
                             if not chat_task.done():
                                 chat_task.cancel()
-                                try:
-                                    await chat_task
-                                except _asyncio.CancelledError:
-                                    pass
+                            try:
+                                result = await chat_task
+                            except (_asyncio.CancelledError, Exception):
+                                pass
 
-                        result = await chat_task
                         reply = result.get("reply", "")
                         thinking = result.get("thinking", "")
                         # 最终的完整思考计划用 phase=plan 标记（客户端会覆盖之前的截断版）
@@ -1600,6 +1605,12 @@ class RESTAPIGateway(Plugin):
                 # Direct connection or untrusted proxy - use client IP directly
                 ip = client_ip
 
+            # 修复：验证 IP 格式防止恶意 header 撑爆 _rate_buckets 字典
+            # 合法 IP 长度不超过 45 字符（IPv6 全格式），只允许数字、字母、.:-
+            # 非法 IP 归一为 "unknown"，与无 IP 的请求共享 bucket
+            if not ip or len(ip) > 45 or not all(c.isalnum() or c in '.:-' for c in ip):
+                ip = "unknown"
+
             now = time.time()
             bucket = self._rate_buckets.setdefault(ip, [])
             # evict entries older than 60s
@@ -1621,7 +1632,10 @@ class RESTAPIGateway(Plugin):
         # 100 MB /chat posts.
         @app.middleware("http")
         async def body_size_middleware(request, call_next):
-            if request.url.path in ("/api/chat", "/api/chat/stream"):
+            # 修复：用 startswith 兼容尾斜杠和反向代理 rewrite
+            # 例如 /api/chat/、/api/chat/stream/、/chat（rewritten）都能匹配
+            path = request.url.path.rstrip("/")
+            if path in ("/api/chat", "/api/chat/stream"):
                 cl = request.headers.get("content-length")
                 try:
                     if cl is not None and int(cl) > self._max_chat_bytes:

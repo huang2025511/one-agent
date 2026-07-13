@@ -12,7 +12,6 @@ class SseClient {
   final String baseUrl;
   final String? apiKey;
   HttpClient? _client;
-  StreamSubscription? _subscription;
 
   /// 最大重试次数（连接建立失败时 + 流中断时）
   static const int _maxRetries = 3;
@@ -289,8 +288,6 @@ class SseClient {
   void cancel() {
     _client?.close();
     _client = null;
-    _subscription?.cancel();
-    _subscription = null;
   }
 
   void dispose() {

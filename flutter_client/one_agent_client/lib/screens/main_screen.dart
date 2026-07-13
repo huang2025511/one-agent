@@ -96,6 +96,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
   @override
   void dispose() {
+    // 在 super.dispose() 之前停止轮询，ref 仍有效
     ref.read(approvalProvider.notifier).stopPolling();
     super.dispose();
   }
