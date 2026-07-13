@@ -28,6 +28,11 @@ def test_plan_pattern_detection():
         "开始执行第", "开始执行第 1", "开始执行第1",
         "按计划一步一步", "按计划执行", "执行计划",
         "### 第 1 步", "### 第1步", "## 第 1 步", "## 第1步",
+        # 非编号步骤格式
+        "**下一步**", "**下一步：**", "下一步：", "下一步:",
+        "**当前决策**", "**当前决策：**", "当前决策：", "当前决策:",
+        "**Next step**", "**Next step:**", "Next step:", "next step:",
+        "**Current decision**", "Current decision:",
     ]
 
     # 应该匹配的文本（LLM 确实只列计划不执行）
@@ -38,6 +43,11 @@ def test_plan_pattern_detection():
         "## 第 1 步\n\n执行命令检查环境",
         "第 1 步\n\n执行网络测试",
         "开始执行第1步：检查环境变量",
+        # 用户实际案例：LLM 用"**下一步**"格式而非编号步骤
+        '明白了！上一个搜索调用遇到了"服务暂时不可用"的瞬态错误。\n\n**当前决策：** 不等待、不道歉，直接换备用路线。\n\n**下一步：** 立即用 system_run 执行 curl 请求。',
+        "**下一步：** 立即执行 python_execute 来验证结果",
+        "**下一步**\n\n用 web_search 查找相关信息",
+        "Next step: call the system_run tool to execute the command",
     ]
 
     # 不应该匹配的文本（正常结构化回答）
@@ -50,9 +60,13 @@ def test_plan_pattern_detection():
         "执行以下命令：\n```bash\nls -la\n```",
         "## 第一步\n\n这是对第一步的解释",  # 没有"第 1 步"格式
         "### 第一步\n\n解释说明",  # 没有"第 1 步"格式
+        "下一步我们应该优化代码结构",  # 正常描述，不是执行计划
+        "通过学习，我们可以进入下一步",  # 正常上下文
+        "以上是第一步的结果，接下来我们看第二步",  # 正常描述结果
     ]
 
-    results = {"match_correct": 0, "match_false_positive": 0, "no_match_correct": 0, "no_match_false_negative": 0}
+    results = {"match_correct": 0, "match_false_positive": 0, "no_match_correct": 0, "no_match_false_negative": 0,
+               "should_match_total": len(should_match), "should_not_match_total": len(should_not_match)}
 
     for text in should_match:
         matched = any(p in text for p in zh_patterns)
@@ -262,8 +276,8 @@ async def main():
     total_tests += 1
     print("\n📋 测试 1: 计划检测模式匹配")
     results = test_plan_pattern_detection()
-    print(f"  正确匹配: {results['match_correct']}/6")
-    print(f"  正确不匹配: {results['no_match_correct']}/7")
+    print(f"  正确匹配: {results['match_correct']}/{results['should_match_total']}")
+    print(f"  正确不匹配: {results['no_match_correct']}/{results['should_not_match_total']}")
     print(f"  误判: {results['match_false_positive']}")
     print(f"  漏判: {results['no_match_false_negative']}")
     test1_pass = results['match_false_positive'] == 0 and results['no_match_false_negative'] == 0

@@ -2690,6 +2690,17 @@ class Coordinator(Plugin):
                 except Exception as stream_err:
                     logger.debug("streaming failed, using non-streamed response: %s", stream_err)
 
+                # 非流式或流式完成后的回复文本，立即推送到思考卡片
+                # 修复：之前用户在此阶段看不到 LLM 的回复内容，导致"一直思考中"的错觉
+                if final_text and not turn.meta.get("streaming_completed"):
+                    # 非流式回复：把 LLM 的完整回复推送到思考卡片，让用户看到
+                    _zh = self._is_zh()
+                    self._emit_progress(
+                        turn,
+                        f"思考结果：{final_text[:300]}" if _zh else f"Thought: {final_text[:300]}",
+                        "thinking"
+                    )
+
                 # Gap 6：计划约束提醒
                 if (
                     not nudged
@@ -2736,6 +2747,11 @@ class Coordinator(Plugin):
                             "开始执行第", "开始执行第 1", "开始执行第1",
                             "按计划一步一步", "按计划执行", "执行计划",
                             "### 第 1 步", "### 第1步", "## 第 1 步", "## 第1步",
+                            # 非编号步骤格式 — LLM 常用"下一步"/"当前决策"等描述性格式
+                            "**下一步**", "**下一步：**", "下一步：", "下一步:",
+                            "**当前决策**", "**当前决策：**", "当前决策：", "当前决策:",
+                            "**Next step**", "**Next step:**", "Next step:", "next step:",
+                            "**Current decision**", "Current decision:",
                         ]
                         _has_plan_pattern = any(p in final_text for p in plan_patterns)
                     else:
