@@ -15,3 +15,7 @@
 # 保留泛型签名（JSON 序列化需要）
 -keepattributes InnerClasses
 -keep class **_Internal* { *; }
+
+# Play Core 缺失类（Flutter 引擎引用但不打包）
+-dontwarn com.google.android.play.core.**
+-keep class com.google.android.play.core.** { *; }
