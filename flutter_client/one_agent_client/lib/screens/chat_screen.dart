@@ -8,6 +8,7 @@ import 'package:intl/intl.dart';
 import '../l10n/app_localizations.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
+import '../widgets/typewriter_text.dart';
 import '../providers/session_provider.dart';
 import '../models/chat_message.dart';
 import '../models/session.dart';
@@ -321,16 +322,32 @@ class _MessageBubble extends StatelessWidget {
                       isStreaming: message.isStreaming == true && message.content.isEmpty,
                     ),
                   if (message.content.isNotEmpty)
-                    MarkdownBody(
-                      data: message.content,
-                      selectable: true,
-                      styleSheet: MarkdownStyleSheet.fromTheme(theme).copyWith(
-                        p: theme.textTheme.bodyMedium?.copyWith(
-                          color: isUser
-                              ? theme.colorScheme.onPrimaryContainer
-                              : theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 300),
+                      transitionBuilder: (child, anim) =>
+                          FadeTransition(opacity: anim, child: child),
+                      child: message.isStreaming == true
+                          ? TypewriterText(
+                              message.content,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                color: isUser
+                                    ? theme.colorScheme.onPrimaryContainer
+                                    : theme.colorScheme.onSurfaceVariant,
+                              ),
+                            )
+                          : MarkdownBody(
+                              key: ValueKey('markdown-${message.id}'),
+                              data: message.content,
+                              selectable: true,
+                              styleSheet:
+                                  MarkdownStyleSheet.fromTheme(theme).copyWith(
+                                p: theme.textTheme.bodyMedium?.copyWith(
+                                  color: isUser
+                                      ? theme.colorScheme.onPrimaryContainer
+                                      : theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
                     )
                   // 只在既无思考内容又无回复内容时显示"思考中..."占位
                   // 有思考内容时由 _ThinkingExpansion 展示，不重复显示转圈

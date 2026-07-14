@@ -2809,8 +2809,8 @@ class Coordinator(Plugin):
                             if delta:
                                 text_parts.append(delta)
                                 current_len = sum(len(p) for p in text_parts)
-                                # 每 50 字符推送一次增量进度
-                                if current_len - last_emit >= 50:
+                                # 每 20 字符推送一次增量进度，让流式效果更明显
+                                if current_len - last_emit >= 20:
                                     delta_text = "".join(text_parts)[last_emit:]
                                     last_emit = current_len
                                     self._emit_progress(turn, delta_text, "streaming")
