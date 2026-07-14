@@ -1,11 +1,11 @@
 agent:
-  name: One-Agent-Test
-  description: Test configuration for One-Agent
+  name: One-Agent
+  description: One-Agent - 自然语言智能体
   version: 2.0.0
   data_dir: ./data
-  log_level: WARNING
+  log_level: INFO
   timezone: Asia/Shanghai
-  language: en
+  language: zh-CN
   show_suggestions: true
 llm:
   primary_provider: sensenova
@@ -25,9 +25,9 @@ llm:
   timeout: 30
   retries: 3                 # 429 限流时需要多次重试（带退避）
   cost_tracking:
-    enabled: true
-    daily_budget: 1.0
-    monthly_budget: 20.0
+    enabled: false
+    daily_budget: 10.0
+    monthly_budget: 100.0
     db_path: data/memory/costs.db
   semantic_cache:
     enabled: true              # V69: 语义缓存（基于 embedding 余弦相似度），命中"意思相近但措辞不同"的查询
@@ -40,11 +40,11 @@ router:
     complex: 0.8
     expert: 1.0
   context_compression:
-    enabled: false
+    enabled: true
   skill_lazy_loading:
     enabled: false
   self_evolution:
-    enabled: false
+    enabled: true
 memory:
   short_term:
     max_turns: 20
@@ -100,7 +100,7 @@ gateways:
     enabled: false
 execution:
   local_shell:
-    enabled: false
+    enabled: true
     default_timeout: 60
     workdir: ./data/executions
     allowed_commands: []
