@@ -100,11 +100,28 @@ class DeepResearcher:
 
         for i, sq in enumerate(sub_questions):
             self._emit_progress("search", f"正在研究 ({i+1}/{len(sub_questions)}): {sq[:50]}...")
-            finding, sources, searches = await self._research_sub_question(
-                sq, model, depth,
-            )
+            # V67 P2-4：单子问题失败不中断整个研究
+            try:
+                finding, sources, searches = await self._research_sub_question(
+                    sq, model, depth,
+                )
+            except Exception as exc:
+                logger.warning("deep_research: sub-question '%s' failed: %s", sq[:50], exc)
+                finding = ResearchFinding(
+                    sub_question=sq,
+                    sources=[],
+                    answer=f"研究失败: {exc}",
+                    confidence=0.0,
+                )
+                sources = []
+                searches = 0
             findings.append(finding)
-            all_sources.extend(sources)
+            # V67 P2-5：跨子问题按 URL 去重，避免重复 fetch 同一 URL
+            existing_urls = {s.url for s in all_sources}
+            for s in sources:
+                if s.url and s.url not in existing_urls:
+                    all_sources.append(s)
+                    existing_urls.add(s.url)
             total_searches += searches
 
         report.findings = findings
@@ -189,7 +206,12 @@ class DeepResearcher:
                     break
 
             sources = await self._do_search(search_query)
-            all_sources.extend(sources)
+            # V67 P2-5：多轮搜索结果按 URL 去重，避免同一 URL 重复 fetch
+            existing_urls = {s.url for s in all_sources}
+            for s in sources:
+                if s.url and s.url not in existing_urls:
+                    all_sources.append(s)
+                    existing_urls.add(s.url)
             total_searches += 1
 
             if len(all_sources) >= self.MAX_SOURCES_PER_QUESTION * 2:
@@ -283,7 +305,7 @@ class DeepResearcher:
                     parts = result_text.split("\n\n", 2)
                     full_text = parts[2] if len(parts) >= 3 else result_text
                     if len(full_text) > 100:
-                        src.full_text = full_text  # type: ignore[attr-defined]
+                        src.full_text = full_text  # V67 P2-3：字段已在 dataclass 定义
                         logger.info(
                             "deep_research: fetched %d chars from %s",
                             len(full_text), src.url[:80],
@@ -306,7 +328,19 @@ class DeepResearcher:
             result = await web_search.run({"input": query})
             result_text = str(result) if result else ""
 
-            if not result_text or "无法" in result_text or "error" in result_text.lower():
+            # V67 P0-3：失败检测必须鲁棒。
+            # web_search 全源失败的诊断文本是 "[web_search: 全部源（...）均失败..."
+            # 既不含"无法"也不含"error"子串，旧条件会让诊断文本被当搜索结果解析，
+            # 从中提取出 example.com 等假 URL 污染 sources。
+            if not result_text:
+                return []
+            if result_text.startswith("[web_search"):
+                # 失败/超时诊断，直接返回空
+                return []
+            if "均失败" in result_text or "搜索超时" in result_text:
+                return []
+            # 兼容旧格式
+            if "error" in result_text.lower() and "搜索结果" not in result_text:
                 return []
 
             return self._parse_search_results(result_text)
@@ -329,6 +363,9 @@ class DeepResearcher:
             标题第一行
               ...
               https://url2.com
+
+        V67 P1-1：URL 提取改为优先取最后一行（结果链接行），
+                  避免 snippet 中出现的 URL 被误取。
         """
         sources = []
         import re
@@ -345,19 +382,31 @@ class DeepResearcher:
             if entry.startswith("搜索结果") or entry.startswith("[web_search"):
                 continue
 
-            # 提取 URL（每条结果的最后一行通常是 URL）
-            url_match = re.search(r'(https?://[^\s\)\]）]+)', entry)
-            url = url_match.group(1) if url_match else ""
+            lines = entry.split("\n")
+
+            # V67 P1-1：优先从最后一行提取 URL（结果链接行），
+            # 避免 snippet 中的 URL 被误取。
+            url = ""
+            for line in reversed(lines):
+                line_stripped = line.strip()
+                if line_stripped.startswith(("http://", "https://")):
+                    url = line_stripped.split()[0]
+                    # 去掉尾部可能的标点
+                    url = re.sub(r'[)\]）]+$', '', url)
+                    break
+            if not url:
+                # fallback：整条 entry 中搜索
+                url_match = re.search(r'(https?://[^\s\)\]）]+)', entry)
+                url = url_match.group(1) if url_match else ""
             if not url:
                 continue  # 无 URL 的条目跳过
 
             # 提取标题：第一行非缩进行
-            lines = entry.split("\n")
             title = lines[0].strip() if lines else ""
             # 去掉标题中的编号前缀
             title = re.sub(r'^\d+[\.\)]\s*', '', title)
 
-            # 摘要：中间的缩进行
+            # 摘要：中间的缩进行（排除标题行和 URL 行）
             snippet_lines = []
             for line in lines[1:]:
                 line = line.strip()
@@ -388,15 +437,18 @@ class DeepResearcher:
         if not sources:
             return "未找到相关信息", 0.0
 
+        # V67 P3-4：按 source 粒度分配字符额度，避免硬截断丢失后半来源。
+        # 总预算 4000 字符，平均分给前 5 个来源。
+        top_sources = sources[:5]
+        per_source_budget = 4000 // len(top_sources)
         sources_text = ""
-        for i, s in enumerate(sources[:5]):
+        for i, s in enumerate(top_sources):
             sources_text += f"\n[来源{i+1}] {s.title}\n"
-            # Prefer full_text over snippet when available
-            full_text = getattr(s, "full_text", "")
-            if full_text:
-                sources_text += full_text[:2000]
+            # V67 P2-3：ResearchSource 已有 full_text 字段，直接访问，删除 type:ignore
+            if s.full_text:
+                sources_text += s.full_text[:per_source_budget - 200]
             else:
-                sources_text += s.snippet[:300]
+                sources_text += s.snippet[:per_source_budget - 200]
             if s.url:
                 sources_text += f"\nURL: {s.url}"
 
@@ -505,3 +557,13 @@ def get_deep_researcher(llm=None, skills=None) -> DeepResearcher:
     elif _deep_researcher is None:
         _deep_researcher = DeepResearcher(None, None)
     return _deep_researcher
+
+
+def reset_deep_researcher() -> None:
+    """Reset the singleton — used by tests to ensure isolation.
+
+    V67 P1-6：单例会跨测试用例泄漏（测试先调用传入 mock，生产拿到 mock；
+    或生产先调用传入真实 llm，测试拿到真实 llm）。测试 setup/teardown 调用此函数。
+    """
+    global _deep_researcher
+    _deep_researcher = None

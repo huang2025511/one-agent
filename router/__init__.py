@@ -731,6 +731,7 @@ class SmartRouter(Plugin):
                 "- web_fetch：搜索到相关 URL 后，抓取网页全文获取详细信息。和 web_search 配合使用：\n"
                 "    先用 web_search 找到相关链接，再用 web_fetch 抓取最有价值的 1-2 篇全文，\n"
                 "    基于全文内容给出准确回答。不要只依赖搜索摘要。\n"
+                "    每次对话最多 fetch 2-3 篇全文，避免过度调用。deep_research 已内置此限制。\n"
                 "- python_execute：遇到数学计算、数据处理、代码验证、公式求解，直接写代码执行！不要心算或猜测。\n"
                 "- calc：简单计算可以用这个工具。\n"
                 "- now：需要当前时间/日期时调用。\n"

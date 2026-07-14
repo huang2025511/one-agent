@@ -1197,7 +1197,8 @@ class SkillManager(Plugin):
                             "r.bing.com", "go.microsoft.com"):
                     if own in href.lower():
                         return False
-                if not title or len(title) < 4:
+                # V67 P3-3：title 长度阈值放宽到 3（"API"/"Go" 等英文短标题放行）
+                if not title or len(title) < 3:
                     return False
                 # query 关键词至少有一个在 title 中（不区分大小写）
                 q_words = [w for w in _re.split(r"[\s,]+", query) if len(w) >= 2]
@@ -1264,10 +1265,18 @@ class SkillManager(Plugin):
                 line += "\n  " + url_r
                 return line
 
-            def _parse_result_blocks(html_text: str, patterns: list[str]) -> list[str]:
-                """通用 HTML 块解析（360/DDG 用），Bing 用 _extract_bing_block。"""
+            def _parse_result_blocks(
+                html_text: str,
+                patterns: list[str],
+                seen_urls: set[str] | None = None,
+            ) -> list[str]:
+                """通用 HTML 块解析（360/DDG 用），Bing 用 _extract_bing_block。
+
+                V67 P2-7：seen_urls 由调用方传入，跨源共享去重。
+                """
                 blocks = []
-                seen_urls: set[str] = set()  # 去重：同一 URL 不重复加入
+                if seen_urls is None:
+                    seen_urls = set()  # 兼容旧调用
                 for pat in patterns:
                     for m in _re.finditer(pat, html_text, _re.DOTALL | _re.IGNORECASE):
                         block = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
@@ -1309,16 +1318,20 @@ class SkillManager(Plugin):
 
                 V65 实测：cn.bing.com HTTP 200, 100KB, 10 个 b_algo 块，
                 每个 h2>a 含真实目标 URL（如 agnes-ai.com、zhihu.com）。
+                V67 P1-3：try 移到 for 循环内部，单 host 异常不中断下一个 host。
+                V67 P2-7：bing_seen_urls 用 handler 级 seen_urls 跨源去重。
                 """
                 nonlocal results
-                try:
-                    for host in ("https://cn.bing.com/search", "https://www.bing.com/search"):
+                bing_err = ""
+                for host in ("https://cn.bing.com/search", "https://www.bing.com/search"):
+                    try:
                         bing_url = host + "?q=" + _url_quote(query) + "&setlang=zh-cn"
                         if page > 1:
                             bing_url += "&first=" + str((page - 1) * 10 + 1)
                         async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                             resp = await client.get(bing_url, headers=headers)
                         if resp.status_code != 200:
+                            bing_err = "HTTP " + str(resp.status_code)
                             continue
                         # 提取 b_algo 块，用专用 Bing 解析器
                         algo_blocks = _re.findall(
@@ -1326,19 +1339,20 @@ class SkillManager(Plugin):
                             resp.text, _re.DOTALL | _re.IGNORECASE,
                         )
                         parsed = []
-                        bing_seen_urls: set[str] = set()
                         for blk in algo_blocks:
-                            line = _extract_bing_block(blk, bing_seen_urls)
+                            # V67 P2-7：用 handler 级 seen_urls 跨源去重
+                            line = _extract_bing_block(blk, seen_urls)
                             if line:
                                 parsed.append(line)
                         if parsed:
                             results.extend(parsed[:6])
                             return True
-                    source_errors["Bing"] = "0 results"
-                    return False
-                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
-                    source_errors["Bing"] = type(e).__name__ + ": " + str(e)[:100]
-                    return False
+                        bing_err = "0 results"
+                    except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
+                        bing_err = type(e).__name__ + ": " + str(e)[:100]
+                        continue  # V67 P1-3：单 host 失败继续尝试下一个 host
+                source_errors["Bing"] = bing_err or "0 results"
+                return False
 
             async def _try_360() -> bool:
                 """360 搜索 — 国内 fallback。注意：URL 是 ai.so.com/search 跳转包装。"""
@@ -1357,7 +1371,8 @@ class SkillManager(Plugin):
                         r'<a[^>]+class="[^"]*res-title[^"]*"[^>]*>(.*?)</a>',
                         r'<h3[^>]*>(.*?)</h3>',
                     ]
-                    blocks = _parse_result_blocks(resp.text, patterns)
+                    # V67 P2-7：_parse_result_blocks 传入 handler 级 seen_urls 跨源去重
+                    blocks = _parse_result_blocks(resp.text, patterns, seen_urls)
                     if blocks:
                         results.extend(blocks[:6])
                         return True
@@ -1387,7 +1402,8 @@ class SkillManager(Plugin):
                         r'<td[^>]*class="[^"]*result-link[^"]*"[^>]*>(.*?)</td>',
                         r'<a[^>]*class="[^"]*result-link[^"]*"[^>]*>(.*?)</a>',
                     ]
-                    blocks = _parse_result_blocks(resp.text, patterns)
+                    # V67 P2-7：_parse_result_blocks 传入 handler 级 seen_urls 跨源去重
+                    blocks = _parse_result_blocks(resp.text, patterns, seen_urls)
                     if not blocks:
                         for m in _re.finditer(
                             r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
@@ -1395,7 +1411,8 @@ class SkillManager(Plugin):
                         ):
                             url_r = m.group(1)
                             title = _strip_html(m.group(2))
-                            if _looks_like_real_link(url_r, title, query):
+                            if _looks_like_real_link(url_r, title, query) and url_r not in seen_urls:
+                                seen_urls.add(url_r)
                                 blocks.append(title + "\n  " + url_r)
                     if blocks:
                         results.extend(blocks[:6])
@@ -1406,39 +1423,52 @@ class SkillManager(Plugin):
                     source_errors["DuckDuckGo"] = type(e).__name__ + ": " + str(e)[:100]
                     return False
 
-            # 尝试顺序：Bing CN (直链) → 360 (跳转URL) → DuckDuckGo (国外)
-            for src_name, fn in [("Bing", _try_bing), ("360搜索", _try_360), ("DuckDuckGo", _try_ddg)]:
-                sources_tried.append(src_name)
-                if await fn():
-                    succeeded_source = src_name
-                    break
+            # V67 P2-7：handler 级 seen_urls，跨源共享去重
+            seen_urls: set[str] = set()
 
-            if results:
-                summary = "\n\n".join(results[:5])
-                src_label = succeeded_source or sources_tried[-1]
+            # V67 P1-4：整体超时保护（三源串行最坏 30s+，用 wait_for 限制到 25s）
+            async def _run_search_chain() -> str:
+                nonlocal succeeded_source
+                # 尝试顺序：Bing CN (直链) → 360 (跳转URL) → DuckDuckGo (国外)
+                for src_name, fn in [("Bing", _try_bing), ("360搜索", _try_360), ("DuckDuckGo", _try_ddg)]:
+                    sources_tried.append(src_name)
+                    if await fn():
+                        succeeded_source = src_name
+                        break
+                if results:
+                    summary = "\n\n".join(results[:5])
+                    src_label = succeeded_source or sources_tried[-1]
+                    return (
+                        "搜索结果（" + query + "，来源: " + src_label + "）：\n\n"
+                        + summary
+                        + "\n\n提示：基于上述结果直接回答用户。避免调用 web_search 多次。"
+                    )
+                # 全部源都失败时给 LLM 一个清晰诊断 + 替代方案
+                err_parts = []
+                for s in sources_tried:
+                    err = source_errors.get(s, "unknown")
+                    err_parts.append(s + "=" + err)
+                err_summary = "; ".join(err_parts)
+                sources_label = "、".join(sources_tried)
                 return (
-                    "搜索结果（" + query + "，来源: " + src_label + "）：\n\n"
-                    + summary
-                    + "\n\n提示：基于上述结果直接回答用户。避免调用 web_search 多次。"
+                    "[web_search: 全部源（" + sources_label + "）均失败。最后错误: " + err_summary + "。\n"
+                    "替代方案（任选其一）：\n"
+                    "1) 已知目标 URL → 用 system_run / python_execute 直接 curl 该 URL\n"
+                    "   例: system_run(\"curl -sL 'https://example.com' | head -c 2000\")\n"
+                    "2) 已知 API key → 用 python_execute 直接调 /v1/models 或 /v1/chat/completions\n"
+                    "   注意：不要在命令字符串中明文包含 API key，用环境变量引用。\n"
+                    "3) 无 URL/URL 都失败 → 直接基于已有知识回答，并在回复中说明「无实时网络信息」。\n"
+                    "4) 用户明确说「在浏览器中打开」或「自己看」→ 不要再尝试，告知用户去访问官网。]"
                 )
 
-            # 全部源都失败时给 LLM 一个清晰诊断 + 替代方案
-            err_parts = []
-            for s in sources_tried:
-                err = source_errors.get(s, "unknown")
-                err_parts.append(s + "=" + err)
-            err_summary = "; ".join(err_parts)
-            sources_label = "、".join(sources_tried)
-            return (
-                "[web_search: 全部源（" + sources_label + "）均失败。最后错误: " + err_summary + "。\n"
-                "替代方案（任选其一）：\n"
-                "1) 已知目标 URL → 用 system_run / python_execute 直接 curl 该 URL\n"
-                "   例: system_run(\"curl -sL 'https://example.com' | head -c 2000\")\n"
-                "2) 已知 API key → 用 python_execute 直接调 /v1/models 或 /v1/chat/completions\n"
-                "   注意：不要在命令字符串中明文包含 API key，用环境变量引用。\n"
-                "3) 无 URL/URL 都失败 → 直接基于已有知识回答，并在回复中说明「无实时网络信息」。\n"
-                "4) 用户明确说「在浏览器中打开」或「自己看」→ 不要再尝试，告知用户去访问官网。]"
-            )
+            try:
+                return await asyncio.wait_for(_run_search_chain(), timeout=25.0)
+            except asyncio.TimeoutError:
+                sources_label = "、".join(sources_tried) if sources_tried else "无"
+                return (
+                    "[web_search: 搜索超时（25s）。已尝试源: " + sources_label + "。"
+                    "建议用 system_run + curl 直接获取目标 URL。]"
+                )
 
         self.register(Skill(
             id="web_search", title="Web Search",
@@ -1474,6 +1504,9 @@ class SkillManager(Plugin):
 
             和 web_search 配合使用：先搜索找到相关 URL，再 fetch 获取全文。
             自动去除 HTML 标签、导航/广告噪声，提取正文内容。
+
+            V67：SSRF 防护升级（重定向每跳校验 + IPv4-mapped IPv6 + ipaddress 模块）、
+            charset 字节级检测、magic bytes 二进制检测、max_chars 上限。
             """
             url = str(args.get("url", "")).strip()
             if not url:
@@ -1481,44 +1514,66 @@ class SkillManager(Plugin):
             if not url.startswith(("http://", "https://")):
                 return "[web_fetch error: url must start with http:// or https://]"
 
-            # SSRF 防护：拒绝内网/回环/链路本地地址
+            # ---------- SSRF 防护 ----------
+            # V67：用 ipaddress 模块覆盖所有私网/保留/回环/链路本地地址，
+            # 支持 IPv4-mapped IPv6（::ffff:127.0.0.1）绕过检测。
             from urllib.parse import urlparse as _urlparse
+            import ipaddress as _ipaddress
             import socket as _socket
-            parsed = _urlparse(url)
-            hostname = parsed.hostname or ""
-            # 先检查主机名本身是否是 IP 或 localhost
-            _blocked_hostnames = {"localhost", "ip6-localhost", "ip6-loopback"}
-            if hostname.lower() in _blocked_hostnames:
-                return "[web_fetch error: 访问被拒绝 — 内网/回环地址不允许]"
-            try:
-                # 尝试解析主机名，检查是否解析到私网 IP
-                addrinfos = _socket.getaddrinfo(hostname, None)
-                for ai in addrinfos:
-                    ip = ai[4][0]
-                    # IPv6 检查
-                    if ":" in ip:
-                        ip_low = ip.lower()
-                        if ip_low in ("::1", "::") or ip_low.startswith("fe80") or ip_low.startswith("fc") or ip_low.startswith("fd"):
-                            return "[web_fetch error: 访问被拒绝 — 内网/回环地址不允许]"
-                    # IPv4 检查
-                    elif ip.startswith(("127.", "10.", "192.168.", "169.254.", "0.")) or ip.startswith("172."):
-                        # 172.16.0.0 - 172.31.255.255
-                        if ip.startswith("172."):
-                            try:
-                                second_octet = int(ip.split(".")[1])
-                                if 16 <= second_octet <= 31:
-                                    return "[web_fetch error: 访问被拒绝 — 内网/回环地址不允许]"
-                            except (IndexError, ValueError):
-                                pass
-                        else:
-                            return "[web_fetch error: 访问被拒绝 — 内网/回环地址不允许]"
-            except (_socket.gaierror, OSError):
-                pass  # DNS 解析失败，让 httpx 去报错
 
+            _BLOCKED_HOSTNAMES = {"localhost", "ip6-localhost", "ip6-loopback"}
+
+            def _is_blocked_ip(ip_str: str) -> bool:
+                """检查单个 IP 是否属于内网/回环/链路本地/保留地址。"""
+                try:
+                    addr = _ipaddress.ip_address(ip_str)
+                except ValueError:
+                    return False
+                # IPv4-mapped IPv6（::ffff:1.2.3.4）会被 ip_address 解析为 IPv4Address
+                return (
+                    addr.is_private
+                    or addr.is_loopback
+                    or addr.is_link_local
+                    or addr.is_reserved
+                    or addr.is_multicast
+                    or addr.is_unspecified
+                )
+
+            def _check_hostname_blocked(hostname: str) -> bool:
+                """对 hostname 做 DNS 解析并检查所有返回 IP。"""
+                if not hostname:
+                    return True
+                if hostname.lower() in _BLOCKED_HOSTNAMES:
+                    return True
+                # 如果 hostname 本身是 IP 字面量，直接检查
+                try:
+                    _ipaddress.ip_address(hostname)
+                    # 是合法 IP，检查是否被阻止
+                    return _is_blocked_ip(hostname)
+                except ValueError:
+                    pass  # 不是 IP 字面量，继续做 DNS 解析
+                # DNS 解析
+                try:
+                    addrinfos = _socket.getaddrinfo(hostname, None)
+                    for ai in addrinfos:
+                        if _is_blocked_ip(ai[4][0]):
+                            return True
+                    return False
+                except (_socket.gaierror, OSError):
+                    return False  # DNS 解析失败，让 httpx 报错
+
+            # 首次校验：原始 URL 的 hostname
+            parsed = _urlparse(url)
+            if _check_hostname_blocked(parsed.hostname or ""):
+                return "[web_fetch error: 访问被拒绝 — 内网/回环/保留地址不允许]"
+
+            # max_chars 上限保护（V67 P3-6）：防止 LLM 传超大值撑爆上下文
             try:
                 max_chars = int(args.get("max_chars", 6000))
                 if max_chars < 100:
                     max_chars = 6000
+                elif max_chars > 20000:
+                    max_chars = 20000
             except (ValueError, TypeError):
                 max_chars = 6000
 
@@ -1533,8 +1588,24 @@ class SkillManager(Plugin):
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             }
 
+            # V67 P0-1：重定向 SSRF 防护
+            # follow_redirects=True 但 httpx 内置 transport 不校验重定向目标。
+            # 用 event_hooks 在每个 request 发出前重新校验 hostname。
+            async def _ssrf_request_hook(request: _httpx2.Request) -> None:
+                redirect_host = _urlparse(str(request.url)).hostname or ""
+                if _check_hostname_blocked(redirect_host):
+                    raise _httpx2.RequestError(
+                        "SSRF blocked: redirect to private/loopback address",
+                        request=request,
+                    )
+
             try:
-                async with _httpx2.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                async with _httpx2.AsyncClient(
+                    timeout=15.0,
+                    follow_redirects=True,
+                    max_redirects=3,
+                    event_hooks={"request": [_ssrf_request_hook]},
+                ) as client:
                     resp = await client.get(url, headers=headers)
             except (_httpx2.HTTPStatusError, _httpx2.RequestError, _httpx2.TimeoutException) as e:
                 return "[web_fetch error: " + type(e).__name__ + ": " + str(e)[:200] + "]"
@@ -1544,18 +1615,46 @@ class SkillManager(Plugin):
 
             content_type = resp.headers.get("content-type", "")
 
-            # 二进制内容（图片/PDF/压缩包等）不解析，返回提示
-            if any(ct in content_type for ct in (
+            # 二进制内容检测（V67 P2-6：补充 magic bytes 检测）
+            # 1) 基于 Content-Type 头
+            _binary_ct = (
                 "image/", "video/", "audio/", "application/pdf",
                 "application/zip", "application/octet-stream",
                 "application/x-gzip", "application/x-tar",
-            )):
+                "application/x-7z", "application/x-rar",
+            )
+            is_binary_by_ct = any(ct in content_type for ct in _binary_ct)
+            # 2) 基于内容魔数（即使服务器没返回 Content-Type 也能识别）
+            raw_bytes = resp.content
+            _MAGIC = {
+                b"%PDF": "PDF",
+                b"PK\x03\x04": "ZIP",
+                b"\x1f\x8b": "GZIP",
+                b"\x89PNG\r\n\x1a\n": "PNG",
+                b"\xff\xd8\xff": "JPEG",
+                b"GIF8": "GIF",
+                b"BM": "BMP",
+                b"Rar!\x1a\x07": "RAR",
+                b"7z\xbc\xaf\x27\x1c": "7Z",
+                b"\x25\x50\x44\x46": "PDF",  # %PDF 备用
+            }
+            binary_kind = ""
+            if is_binary_by_ct:
+                binary_kind = content_type
+            else:
+                for sig, kind in _MAGIC.items():
+                    if raw_bytes[:len(sig)] == sig:
+                        binary_kind = kind
+                        break
+            if binary_kind:
                 return (
-                    "[web_fetch: 目标是二进制内容（" + content_type + "），"
+                    "[web_fetch: 目标是二进制内容（" + binary_kind + "），"
                     "无法提取文本。如需查看请用 system_run 下载。]\n\nURL: " + url
                 )
 
-            # 大页面提前截断：Content-Length > 2MB 时拒绝，>512KB 时只读前 512KB
+            # 大页面处理（V67 P1-5：修正注释 + 字节级截断避免全量解码）
+            # - Content-Length > 2MB 拒绝
+            # - 字节流 > 512KB 截断到 512KB 再 decode，避免 2MB HTML 完整解码
             content_length = resp.headers.get("content-length", "")
             if content_length:
                 try:
@@ -1568,22 +1667,28 @@ class SkillManager(Plugin):
                 except ValueError:
                     pass
 
-            # charset 处理：httpx 默认用 Content-Type 头的 charset
-            # 但很多中文老站只在 HTML <meta charset> 里声明，HTTP 头不带
-            # 先用 httpx 默认解码，如果检测到 <meta charset=gbk> 则重新解码
-            raw_bytes = resp.content  # 原始字节
-            raw = resp.text  # httpx 自动解码的文本
+            # 字节级截断：超过 512KB 只取前 512KB
+            _MAX_HTML_BYTES = 524_288  # 512KB
+            if len(raw_bytes) > _MAX_HTML_BYTES:
+                raw_bytes = raw_bytes[:_MAX_HTML_BYTES]
 
-            # 检测 HTML meta charset，如果不是 httpx 用的编码则重新解码
-            if "text/html" in content_type or "<html" in raw[:500].lower():
+            # charset 处理（V67 P1-2：在 raw_bytes 上做字节级正则，避免乱码文本匹配失败）
+            # httpx 默认用 Content-Type 头的 charset，但很多中文老站只在 <meta charset> 声明
+            raw = resp.text  # httpx 自动解码的文本（可能用错编码）
+            if "text/html" in content_type or "html" in content_type or raw_bytes[:500].lower().find(b"<html") >= 0:
+                # 字节级正则检测 <meta charset=xxx>
                 meta_match = _re2.search(
-                    r'<meta[^>]+charset=["\']?([\w-]+)', raw[:2000], _re2.IGNORECASE,
+                    rb'<meta[^>]+charset=["\']?([\w-]+)',
+                    raw_bytes[:2048],
+                    _re2.IGNORECASE,
                 )
                 if meta_match:
-                    meta_charset = meta_match.group(1).strip().lower()
-                    # httpx resp.encoding 是它实际用的编码
+                    try:
+                        meta_charset = meta_match.group(1).decode("ascii", errors="ignore").strip().lower()
+                    except Exception:
+                        meta_charset = ""
                     current_encoding = (resp.encoding or "").lower()
-                    if meta_charset != current_encoding and meta_charset in (
+                    if meta_charset and meta_charset != current_encoding and meta_charset in (
                         "gbk", "gb2312", "gb18030", "big5",
                         "utf-8", "utf8", "iso-8859-1", "latin-1",
                     ):
@@ -1592,7 +1697,7 @@ class SkillManager(Plugin):
                         except (LookupError, UnicodeDecodeError):
                             pass  # 未知编码，保持 httpx 默认
 
-            # 提前截断超大 HTML（>100KB），只处理前 100KB
+            # 提前截断超大 HTML（>100KB 字符），只处理前 100KB
             if len(raw) > 102400:
                 raw = raw[:102400]
 

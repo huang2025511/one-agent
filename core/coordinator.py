@@ -1828,9 +1828,10 @@ class Coordinator(Plugin):
         This reduces token consumption by 99% and improves accuracy by
         aligning subtask vocabulary with tool library.
 
-        Core tools (web_search, python_execute, calc) are always available
-        regardless of keyword relevance, because they are fundamental
-        capabilities that should never be missing from the LLM's tool set.
+        Core tools (web_search, web_fetch, python_execute, calc, send_message)
+        are always available regardless of keyword relevance, because they
+        are fundamental capabilities that should never be missing from the
+        LLM's tool set.
 
         When OS mode is enabled (via /os-on) or the router detects system
         access needs, system_run is also auto-added so the LLM can directly

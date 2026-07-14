@@ -59,6 +59,8 @@ class TestJsonResponse:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = json_body
+        fake_resp.content = json_body.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "application/json"}
 
         class FakeClient:
@@ -96,6 +98,8 @@ class TestHtmlExtraction:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -129,6 +133,8 @@ class TestHtmlExtraction:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -156,6 +162,8 @@ class TestHtmlExtraction:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -179,6 +187,8 @@ class TestHtmlExtraction:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -256,6 +266,8 @@ class TestMaxCharsValidation:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -285,6 +297,8 @@ class TestMaxCharsValidation:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -313,6 +327,8 @@ class TestMaxCharsValidation:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -442,6 +458,8 @@ class TestSSRFProtection:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = "<html><body><article><p>公网内容，确保足够长度通过检查。</p></article></body></html>"
+        fake_resp.content = fake_resp.text.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -466,6 +484,8 @@ class TestSSRFProtection:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = "<html><body><article><p>公网内容，确保足够长度通过检查。</p></article></body></html>"
+        fake_resp.content = fake_resp.text.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -496,6 +516,8 @@ class TestJsRenderedPage:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
@@ -535,6 +557,8 @@ class TestArticleExtraction:
         fake_resp = MagicMock()
         fake_resp.status_code = 200
         fake_resp.text = html
+        fake_resp.content = html.encode()
+        fake_resp.encoding = "utf-8"
         fake_resp.headers = {"content-type": "text/html"}
 
         class FakeClient:
