@@ -1141,6 +1141,7 @@ class SkillManager(Plugin):
             if not query:
                 return "[web_search error: empty query]"
 
+            import html as _htmlmod
             import re as _re
             from urllib.parse import quote as _url_quote
 
@@ -1158,8 +1159,9 @@ class SkillManager(Plugin):
             last_error: str = ""
 
             def _strip_html(s: str) -> str:
-                """Strip HTML tags and collapse whitespace."""
+                """Strip HTML tags, decode entities, collapse whitespace."""
                 s = _re.sub(r"<[^>]+>", " ", s)
+                s = _htmlmod.unescape(s)  # &amp; → &  &#0183; → ·  &ensp; → space
                 s = _re.sub(r"\s+", " ", s).strip()
                 return s
 
@@ -1174,13 +1176,14 @@ class SkillManager(Plugin):
                 for sp in skip_patterns:
                     if sp in href.lower():
                         return False
-                # 跳过本搜索域自身的导航链接
-                for own in ("so.com/link", "sogou.com/link", "baidu.com/link",
-                            "bing.com/ck/", "duckduckgo.com/?", "duckduckgo.com/html"):
+                # 跳过本搜索域自身的导航/跳转链接
+                for own in ("so.com/link", "ai.so.com/search", "sogou.com/link",
+                            "baidu.com/link", "bing.com/ck/", "bing.com/search?",
+                            "duckduckgo.com/?", "duckduckgo.com/html",
+                            "r.bing.com", "go.microsoft.com"):
                     if own in href.lower():
                         return False
-                # 标题必须与 query 有部分匹配（容许 1 字符容差）
-                if not title or len(title) < 6:
+                if not title or len(title) < 4:
                     return False
                 # query 关键词至少有一个在 title 中（不区分大小写）
                 q_words = [w for w in _re.split(r"[\s,]+", query) if len(w) >= 2]
@@ -1189,11 +1192,64 @@ class SkillManager(Plugin):
                 title_lower = title.lower()
                 return any(w.lower() in title_lower for w in q_words)
 
-            def _parse_result_blocks(html: str, patterns: list[str]) -> list[str]:
-                """Try multiple HTML patterns to extract result blocks (title + url + snippet)."""
+            def _extract_bing_block(block: str) -> str | None:
+                """Bing CN 专用：优先从 <h2><a> 提取标题+直链，摘要用 b_lineclamp/b_caption。
+
+                Bing 的 b_algo 块结构：
+                  <div class="b_tpcn"><a class="tilk" href="真实URL">...网站图标+cite...</a></div>
+                  <h2><a href="真实URL">真正标题</a></h2>
+                  <div class="b_caption"><p class="b_lineclamp2">摘要</p></div>
+
+                旧 pattern 先匹配到 b_tpcn 里的 a.tilk，把 cite 文本当成了标题。
+                """
+                # 优先 h2 > a（真正的标题链接）
+                h2_m = _re.search(
+                    r'<h2[^>]*>\s*<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>',
+                    block, _re.DOTALL,
+                )
+                if h2_m:
+                    url_r = h2_m.group(1)
+                    title = _strip_html(h2_m.group(2))
+                else:
+                    # fallback: 任意 a 标签（跳过 tilk 图标链接）
+                    link_m = _re.search(
+                        r'<a(?![^>]*class="[^"]*tilk)[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>',
+                        block, _re.DOTALL,
+                    )
+                    if not link_m:
+                        return None
+                    url_r = link_m.group(1)
+                    title = _strip_html(link_m.group(2))
+                # 摘要：b_lineclamp* 优先，其次 b_caption 内 p
+                snippet = ""
+                snip_m = _re.search(
+                    r'<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>(.*?)</p>',
+                    block, _re.DOTALL | _re.IGNORECASE,
+                )
+                if snip_m:
+                    snippet = _strip_html(snip_m.group(1))
+                if not snippet:
+                    cap_m = _re.search(
+                        r'<div[^>]*class="[^"]*b_caption[^"]*"[^>]*>(.*?)</div>',
+                        block, _re.DOTALL | _re.IGNORECASE,
+                    )
+                    if cap_m:
+                        p_m = _re.search(r"<p[^>]*>(.*?)</p>", cap_m.group(1), _re.DOTALL)
+                        if p_m:
+                            snippet = _strip_html(p_m.group(1))
+                if not _looks_like_real_link(url_r, title, query):
+                    return None
+                line = title
+                if snippet:
+                    line += "\n  " + snippet[:200]
+                line += "\n  " + url_r
+                return line
+
+            def _parse_result_blocks(html_text: str, patterns: list[str]) -> list[str]:
+                """通用 HTML 块解析（360/DDG 用），Bing 用 _extract_bing_block。"""
                 blocks = []
                 for pat in patterns:
-                    for m in _re.finditer(pat, html, _re.DOTALL | _re.IGNORECASE):
+                    for m in _re.finditer(pat, html_text, _re.DOTALL | _re.IGNORECASE):
                         block = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
                         link_m = _re.search(
                             r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>',
@@ -1203,10 +1259,9 @@ class SkillManager(Plugin):
                             continue
                         url_r = link_m.group(1)
                         title = _strip_html(link_m.group(2))
-                        # 描述：找 block 内 <p> 或 class 含 desc/snippet
                         snippet = ""
                         snip_m = _re.search(
-                            r'<p[^>]*class="[^"]*(?:desc|snippet|content|abstract)[^"]*"[^>]*>(.*?)</p>',
+                            r'<p[^>]*class="[^"]*(?:desc|snippet|content|abstract|res-desc)[^"]*"[^>]*>(.*?)</p>',
                             block, _re.DOTALL | _re.IGNORECASE,
                         )
                         if snip_m:
@@ -1221,20 +1276,53 @@ class SkillManager(Plugin):
                         if _looks_like_real_link(url_r, title, query):
                             line = title
                             if snippet:
-                                line += f"\n  {snippet[:200]}"
-                            line += f"\n  {url_r}"
+                                line += "\n  " + snippet[:200]
+                            line += "\n  " + url_r
                             blocks.append(line)
                 return blocks
 
-            async def _try_360() -> bool:
-                """360 搜索 — 国内可访问、HTML 含完整结果（h3.res-title 块）。"""
+            async def _try_bing() -> bool:
+                """Bing CN — 国内可访问、返回直链（非跳转URL）、标题准确、摘要完整。
+
+                V65 实测：cn.bing.com HTTP 200, 100KB, 10 个 b_algo 块，
+                每个 h2>a 含真实目标 URL（如 agnes-ai.com、zhihu.com）。
+                """
                 nonlocal results, last_error
                 try:
-                    url = f"https://www.so.com/s?q={_url_quote(query)}"
+                    for host in ("https://cn.bing.com/search", "https://www.bing.com/search"):
+                        bing_url = host + "?q=" + _url_quote(query) + "&setlang=zh-cn"
+                        async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                            resp = await client.get(bing_url, headers=headers)
+                        if resp.status_code != 200:
+                            continue
+                        # 提取 b_algo 块，用专用 Bing 解析器
+                        algo_blocks = _re.findall(
+                            r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>',
+                            resp.text, _re.DOTALL | _re.IGNORECASE,
+                        )
+                        parsed = []
+                        for blk in algo_blocks:
+                            line = _extract_bing_block(blk)
+                            if line:
+                                parsed.append(line)
+                        if parsed:
+                            results.extend(parsed[:6])
+                            return True
+                    last_error = "Bing 0 results"
+                    return False
+                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
+                    last_error = "Bing " + type(e).__name__ + ": " + str(e)[:100]
+                    return False
+
+            async def _try_360() -> bool:
+                """360 搜索 — 国内 fallback。注意：URL 是 ai.so.com/search 跳转包装。"""
+                nonlocal results, last_error
+                try:
+                    url = "https://www.so.com/s?q=" + _url_quote(query)
                     async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                         resp = await client.get(url, headers=headers)
                     if resp.status_code != 200:
-                        last_error = f"360 HTTP {resp.status_code}"
+                        last_error = "360 HTTP " + str(resp.status_code)
                         return False
                     patterns = [
                         r'<h3[^>]*class="[^"]*res-title[^"]*"[^>]*>(.*?)</h3>',
@@ -1248,7 +1336,7 @@ class SkillManager(Plugin):
                     last_error = "360 0 results"
                     return False
                 except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
-                    last_error = f"360 {type(e).__name__}: {str(e)[:100]}"
+                    last_error = "360 " + type(e).__name__ + ": " + str(e)[:100]
                     return False
 
             async def _try_ddg() -> bool:
@@ -1262,7 +1350,7 @@ class SkillManager(Plugin):
                             headers=headers,
                         )
                     if resp.status_code != 200:
-                        last_error = f"DDG HTTP {resp.status_code}"
+                        last_error = "DDG HTTP " + str(resp.status_code)
                         return False
                     patterns = [
                         r'<td[^>]*class="[^"]*result-link[^"]*"[^>]*>(.*?)</td>',
@@ -1270,7 +1358,6 @@ class SkillManager(Plugin):
                     ]
                     blocks = _parse_result_blocks(resp.text, patterns)
                     if not blocks:
-                        # fallback: extract from <a> tags directly
                         for m in _re.finditer(
                             r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
                             resp.text, _re.DOTALL,
@@ -1278,42 +1365,18 @@ class SkillManager(Plugin):
                             url_r = m.group(1)
                             title = _strip_html(m.group(2))
                             if _looks_like_real_link(url_r, title, query):
-                                blocks.append(f"{title}\n  {url_r}")
+                                blocks.append(title + "\n  " + url_r)
                     if blocks:
                         results.extend(blocks[:6])
                         return True
                     last_error = "DDG 0 results"
                     return False
                 except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
-                    last_error = f"DDG {type(e).__name__}: {str(e)[:100]}"
+                    last_error = "DDG " + type(e).__name__ + ": " + str(e)[:100]
                     return False
 
-            async def _try_bing() -> bool:
-                """Bing 搜索 — 国外环境 fallback（中文可能路由到 cn.bing.com）。"""
-                nonlocal results, last_error
-                try:
-                    for host in ("https://cn.bing.com/search", "https://www.bing.com/search"):
-                        bing_url = f"{host}?q={_url_quote(query)}&setlang=zh-cn"
-                        async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                            resp = await client.get(bing_url, headers=headers)
-                        if resp.status_code != 200:
-                            continue
-                        patterns = [
-                            r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>',
-                            r'<h2[^>]*>(.*?)</h2>',
-                        ]
-                        blocks = _parse_result_blocks(resp.text, patterns)
-                        if blocks:
-                            results.extend(blocks[:6])
-                            return True
-                    last_error = "Bing 0 results"
-                    return False
-                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
-                    last_error = f"Bing {type(e).__name__}: {str(e)[:100]}"
-                    return False
-
-            # 尝试顺序：360 (国内) → DuckDuckGo (国外) → Bing (国外)
-            for src_name, fn in [("360搜索", _try_360), ("DuckDuckGo", _try_ddg), ("Bing", _try_bing)]:
+            # 尝试顺序：Bing CN (直链) → 360 (跳转URL) → DuckDuckGo (国外)
+            for src_name, fn in [("Bing", _try_bing), ("360搜索", _try_360), ("DuckDuckGo", _try_ddg)]:
                 sources_tried.append(src_name)
                 if await fn():
                     succeeded_source = src_name
@@ -1323,9 +1386,9 @@ class SkillManager(Plugin):
                 summary = "\n\n".join(results[:5])
                 src_label = succeeded_source or sources_tried[-1]
                 return (
-                    f"搜索结果（{query}，来源: {src_label}）：\n\n"
-                    f"{summary}\n\n"
-                    f"提示：基于上述结果直接回答用户。避免调用 web_search 多次。"
+                    "搜索结果（" + query + "，来源: " + src_label + "）：\n\n"
+                    + summary
+                    + "\n\n提示：基于上述结果直接回答用户。避免调用 web_search 多次。"
                 )
 
             # 全部源都失败时给 LLM 一个清晰诊断 + 替代方案

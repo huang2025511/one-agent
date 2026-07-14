@@ -377,23 +377,22 @@ class Test360Success:
 
 
 # ============================================================
-# 9. 360 失败时 fallback 到 Bing（mock 360 fail + Bing OK）
+# 9. Bing 失败时 fallback 到 360（mock Bing fail + 360 OK）
 # ============================================================
 class TestFallbackChain:
-    """验证 360 失败时正确 fallback 到下一个源。"""
+    """验证源失败时正确 fallback 到下一个源。"""
 
-    def test_360_fail_ddg_fail_bing_ok(self):
+    def test_bing_fail_360_ok(self):
+        """Bing 主源失败时，fallback 到 360。"""
         handler = _get_web_search_handler()
 
-        bing_html = '''
-        <li class="b_algo">
-            <h2>
-                <a href="https://www.example.com/agnes-ai-guide">
-                    Agnes AI Complete Guide 2025
-                </a>
-            </h2>
-            <p>Complete tutorial on using Agnes AI free API access...</p>
-        </li>
+        html_360 = '''
+        <h3 class="res-title">
+            <a href="https://blog.csdn.net/test/123">
+                Agnes AI 无限期免费开放全模态核心API
+            </a>
+        </h3>
+        <p class="res-desc">Agnes AI 提供文本/图像/视频三大模态免费 API</p>
         '''
 
         import httpx
@@ -403,12 +402,12 @@ class TestFallbackChain:
             async def __aenter__(self): return self
             async def __aexit__(self, *a): return False
             async def get(self, url, **kw):
-                if "so.com" in url or "duckduckgo" in url:
+                if "bing.com" in url:
                     raise httpx.ConnectError("simulated network error")
-                # Bing
+                # 360
                 fake = MagicMock()
                 fake.status_code = 200
-                fake.text = bing_html
+                fake.text = html_360
                 return fake
             async def post(self, *a, **kw):
                 raise httpx.ConnectError("simulated network error")
@@ -417,7 +416,88 @@ class TestFallbackChain:
             result = asyncio.run(handler({"input": "Agnes AI"}))
 
         assert "搜索结果" in result
-        assert "example.com" in result
-        assert "Agnes AI Complete Guide" in result
-        # 来源标签应该是 Bing（不是 360）
+        assert "csdn" in result
+        # 来源标签应该是 360搜索（Bing 失败后 fallback）
+        assert "来源: 360搜索" in result
+
+    def test_bing_ok_uses_direct_url(self):
+        """Bing 成功时返回直链（非跳转URL），标题来自 h2>a。"""
+        handler = _get_web_search_handler()
+
+        bing_html = '''
+        <li class="b_algo">
+            <div class="b_tpcn">
+                <a class="tilk" href="https://agnes-ai.com/">
+                    <cite>https://agnes-ai.com</cite>
+                </a>
+            </div>
+            <h2>
+                <a href="https://agnes-ai.com/">Agnes AI | Free Omni-Modal AI API</a>
+            </h2>
+            <div class="b_caption">
+                <p class="b_lineclamp2">Agnes AI by Sapiens AI is an AI gateway, free AI API platform</p>
+            </div>
+        </li>
+        '''
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, **kw):
+                fake = MagicMock()
+                fake.status_code = 200
+                fake.text = bing_html
+                return fake
+            async def post(self, *a, **kw):
+                fake = MagicMock()
+                fake.status_code = 200
+                fake.text = "<html></html>"
+                return fake
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"input": "Agnes AI"}))
+
+        assert "搜索结果" in result
         assert "来源: Bing" in result
+        # h2>a 的标题，不是 tilk 链接的 cite 文本
+        assert "Agnes AI | Free Omni-Modal AI API" in result
+        assert "Sapiens AI" in result  # 摘要内容
+        # 直链
+        assert "https://agnes-ai.com/" in result
+
+    def test_bing_tilk_link_not_used_as_title(self):
+        """Bing 的 a.tilk（网站图标链接）不应被当作标题。"""
+        handler = _get_web_search_handler()
+
+        # 只有 tilk 链接，没有 h2>a — 应该被跳过
+        bing_html = '''
+        <li class="b_algo">
+            <div class="b_tpcn">
+                <a class="tilk" href="https://agnes-ai.com/">
+                    <cite>https://agnes-ai.com</cite>
+                </a>
+            </div>
+        </li>
+        '''
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, **kw):
+                fake = MagicMock()
+                fake.status_code = 200
+                fake.text = bing_html
+                return fake
+            async def post(self, *a, **kw):
+                fake = MagicMock()
+                fake.status_code = 200
+                fake.text = "<html></html>"
+                return fake
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"input": "Agnes AI"}))
+
+        # Bing 0 results → fallback → 全部失败
+        assert "[web_search: 全部源" in result
