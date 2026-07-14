@@ -302,8 +302,9 @@ class DeepResearcher:
                 if result_text and not result_text.startswith("[web_fetch"):
                     # Extract text after the URL/status header
                     # Format: "URL: ...\nHTTP 200\n\n<content>"
-                    parts = result_text.split("\n\n", 2)
-                    full_text = parts[2] if len(parts) >= 3 else result_text
+                    # V67 修复：split("\n\n", 1) 取第二部分（正文）
+                    parts = result_text.split("\n\n", 1)
+                    full_text = parts[1] if len(parts) >= 2 else result_text
                     if len(full_text) > 100:
                         src.full_text = full_text  # V67 P2-3：字段已在 dataclass 定义
                         logger.info(

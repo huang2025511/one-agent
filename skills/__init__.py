@@ -1426,17 +1426,49 @@ class SkillManager(Plugin):
             # V67 P2-7：handler 级 seen_urls，跨源共享去重
             seen_urls: set[str] = set()
 
-            # V67 P1-4：整体超时保护（三源串行最坏 30s+，用 wait_for 限制到 25s）
-            async def _run_search_chain() -> str:
+            # V67 P1-4：三源并发竞速 + 整体超时保护
+            # 之前串行最坏 30s+（每源 10s），改为三源同时发起，取第一个成功的。
+            # 总耗时 ≈ 单源超时 10s，而非累加。每个源返回 (bool, list[str]) 避免共享竞态。
+            async def _try_source(src_name: str, fn) -> tuple[str, list[str]]:
+                """运行单个源，返回 (源名, 结果列表)。失败返回 (源名, [])。"""
+                try:
+                    ok = await fn()
+                    if ok:
+                        return src_name, list(results)  # 快照当前 results
+                    return src_name, []
+                except Exception as e:
+                    source_errors[src_name] = type(e).__name__ + ": " + str(e)[:100]
+                    return src_name, []
+
+            async def _run_search_race() -> str:
                 nonlocal succeeded_source
-                # 尝试顺序：Bing CN (直链) → 360 (跳转URL) → DuckDuckGo (国外)
-                for src_name, fn in [("Bing", _try_bing), ("360搜索", _try_360), ("DuckDuckGo", _try_ddg)]:
-                    sources_tried.append(src_name)
-                    if await fn():
-                        succeeded_source = src_name
-                        break
-                if results:
-                    summary = "\n\n".join(results[:5])
+                sources_tried.extend(["Bing", "360搜索", "DuckDuckGo"])
+                # 三源并发
+                tasks = [
+                    asyncio.create_task(_try_source("Bing", _try_bing)),
+                    asyncio.create_task(_try_source("360搜索", _try_360)),
+                    asyncio.create_task(_try_source("DuckDuckGo", _try_ddg)),
+                ]
+                # 等所有完成，整体最多 12s（单源 10s + 余量）
+                done, pending = await asyncio.wait(tasks, timeout=12.0)
+                # 取消未完成的
+                for t in pending:
+                    t.cancel()
+                # 从完成的任务中找第一个成功且有结果的
+                # 优先级：Bing > 360 > DDG（按 tasks 顺序）
+                final_results: list[str] = []
+                for t in tasks:
+                    if t in done and not t.cancelled():
+                        try:
+                            src_name, src_results = t.result()
+                            if src_results:
+                                succeeded_source = src_name
+                                final_results = src_results
+                                break
+                        except Exception:
+                            pass
+                if final_results:
+                    summary = "\n\n".join(final_results[:5])
                     src_label = succeeded_source or sources_tried[-1]
                     return (
                         "搜索结果（" + query + "，来源: " + src_label + "）：\n\n"
@@ -1462,7 +1494,7 @@ class SkillManager(Plugin):
                 )
 
             try:
-                return await asyncio.wait_for(_run_search_chain(), timeout=25.0)
+                return await asyncio.wait_for(_run_search_race(), timeout=25.0)
             except asyncio.TimeoutError:
                 sources_label = "、".join(sources_tried) if sources_tried else "无"
                 return (

@@ -463,10 +463,10 @@ class TestBingHostFallback:
             async def __aexit__(self, *a): return False
             async def get(self, url, *a, **kw):
                 call_count["n"] += 1
-                if call_count["n"] == 1:
+                if "cn.bing.com" in str(url):
                     # 第一个 host 失败
                     raise httpx.ConnectError("SSL error")
-                # 第二个 host 返回结果
+                # 第二个 host (www.bing.com) 返回结果
                 resp = MagicMock()
                 resp.status_code = 200
                 resp.text = (
@@ -476,12 +476,14 @@ class TestBingHostFallback:
                     '</li>'
                 )
                 return resp
+            async def post(self, *a, **kw):
+                raise httpx.ConnectError("mock")
 
         with patch("httpx.AsyncClient", FakeClient):
             result = asyncio.run(handler({"input": "test query"}))
 
-        # 应该尝试了两次（两个 host）
-        assert call_count["n"] == 2, f"应有 2 次 host 尝试，实际 {call_count['n']}"
+        # V67 并发模式：cn.bing.com 失败后 www.bing.com 应被尝试
+        assert call_count["n"] >= 2, f"至少 2 次请求（cn.bing + www.bing），实际 {call_count['n']}"
         # 第二个 host 成功，结果应包含 result.com
         assert "result.com" in result or "Test Result" in result
 
