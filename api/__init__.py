@@ -1828,7 +1828,7 @@ class RESTAPIGateway(Plugin):
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             await _mcp_client.remove_server(server_name)
-        return {"success": True, "server": server_name}
+            return {"success": True, "server": server_name}
 
     def _register_webhook_routes(self, app, auth, _ctx):
         """Webhook 管理 CRUD + 测试触发端点。
