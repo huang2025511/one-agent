@@ -247,6 +247,23 @@ class Coordinator(Plugin):
         If a skill has failed too many times consecutively, return a hint
         to the model to stop retrying and use its own knowledge instead.
         """
+        # 修复：name 为空是上游 LLM 解析问题（流式累积丢失 / XML 解析失败 / 模型输出格式错误）
+        # 之前会得到 "[unknown skill: ]" 字符串，LLM 看不懂也不停下，反复重试导致整轮空转。
+        # 现在返回明确的 status=error 提示，让 LLM 立即改用其他格式或直接用知识回答。
+        if not name or not name.strip():
+            logger.warning("empty tool name from model: tc=%s args=%s", tc, args)
+            return ToolResult(
+                tool_name="<empty>",
+                status="error",
+                error=(
+                    "[工具调用格式错误：模型返回的 name 字段为空。"
+                    "可能原因：1) 流式 tool_call 累积丢失 name；"
+                    "2) XML/Markdown 解析未识别工具名；"
+                    "3) 模型输出格式不符合 OpenAI tool_call 规范。"
+                    "请改用 <invoke name=\"<skill_id}\">...</invoke> 标签格式，"
+                    "或直接用你的知识完成回答，不要再重试空 name 工具调用。]"
+                ),
+            )
         if failed_skills.get(name, 0) >= MAX_SKILL_FAILURES:
             return ToolResult(
                 tool_name=name,

@@ -1792,6 +1792,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                                 tool_call_chunks[k]
                                 for k in sorted(tool_call_chunks.keys())
                             ]
+                            # 修复：标记全程累积仍为空的 name，避免下游 dispatch 收到 "" 时只返回 [unknown skill: ]
+                            # LLM 看不懂这个错误会反复重试；显式标记让上层 (_execute_tool_calls) 能识别并提示 LLM 改用其他格式
+                            for atc in assembled_tool_calls:
+                                fn = atc.get("function") or {}
+                                if not (fn.get("name") or "").strip():
+                                    fn["name"] = "<empty>"
                             yield {
                                 "delta": "", "done": True, "tokens_used": tokens_used,
                                 "tool_calls": assembled_tool_calls,
@@ -1805,6 +1811,10 @@ class LLMProvider(RecommendationMixin, Plugin):
                         tool_call_chunks[k]
                         for k in sorted(tool_call_chunks.keys())
                     ]
+                    for atc in assembled_tool_calls:
+                        fn = atc.get("function") or {}
+                        if not (fn.get("name") or "").strip():
+                            fn["name"] = "<empty>"
                     yield {
                         "delta": "", "done": True, "tokens_used": 0,
                         "tool_calls": assembled_tool_calls,
