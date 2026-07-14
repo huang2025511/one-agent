@@ -1134,12 +1134,21 @@ class SkillManager(Plugin):
             环境下 SSL 握手全部失败。加入 360 搜索（国内可访问、HTML 含真实结果）作为
             主路径，保留 DuckDuckGo/Bing 作为国外环境 fallback。
 
+            V66：支持翻页参数 page（默认 1），Bing/360/DDG 都加翻页参数。
             不依赖任何 API key，纯 HTML 解析。任一源成功即返回结果。
             失败时返回明确诊断 + 建议用 system_run / python_execute 直接 curl 目标 URL。
             """
             query = str(args.get("input", "")).strip()
             if not query:
                 return "[web_search error: empty query]"
+
+            # 翻页支持：page=1（默认第一页），page=2 第二页，以此类推
+            try:
+                page = int(args.get("page", 1))
+                if page < 1:
+                    page = 1
+            except (ValueError, TypeError):
+                page = 1
 
             import html as _htmlmod
             import re as _re
@@ -1197,7 +1206,7 @@ class SkillManager(Plugin):
                 title_lower = title.lower()
                 return any(w.lower() in title_lower for w in q_words)
 
-            def _extract_bing_block(block: str) -> str | None:
+            def _extract_bing_block(block: str, seen_urls: set[str] | None = None) -> str | None:
                 """Bing CN 专用：优先从 <h2><a> 提取标题+直链，摘要用 b_lineclamp/b_caption。
 
                 Bing 的 b_algo 块结构：
@@ -1225,6 +1234,11 @@ class SkillManager(Plugin):
                         return None
                     url_r = link_m.group(1)
                     title = _strip_html(link_m.group(2))
+                # 去重：同一 URL 不重复加入
+                if seen_urls is not None:
+                    if url_r in seen_urls:
+                        return None
+                    seen_urls.add(url_r)
                 # 摘要：b_lineclamp* 优先，其次 b_caption 内 p
                 snippet = ""
                 snip_m = _re.search(
@@ -1300,6 +1314,8 @@ class SkillManager(Plugin):
                 try:
                     for host in ("https://cn.bing.com/search", "https://www.bing.com/search"):
                         bing_url = host + "?q=" + _url_quote(query) + "&setlang=zh-cn"
+                        if page > 1:
+                            bing_url += "&first=" + str((page - 1) * 10 + 1)
                         async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                             resp = await client.get(bing_url, headers=headers)
                         if resp.status_code != 200:
@@ -1310,8 +1326,9 @@ class SkillManager(Plugin):
                             resp.text, _re.DOTALL | _re.IGNORECASE,
                         )
                         parsed = []
+                        bing_seen_urls: set[str] = set()
                         for blk in algo_blocks:
-                            line = _extract_bing_block(blk)
+                            line = _extract_bing_block(blk, bing_seen_urls)
                             if line:
                                 parsed.append(line)
                         if parsed:
@@ -1328,6 +1345,8 @@ class SkillManager(Plugin):
                 nonlocal results
                 try:
                     url = "https://www.so.com/s?q=" + _url_quote(query)
+                    if page > 1:
+                        url += "&pn=" + str((page - 1) * 10 + 1)
                     async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                         resp = await client.get(url, headers=headers)
                     if resp.status_code != 200:
@@ -1353,9 +1372,12 @@ class SkillManager(Plugin):
                 nonlocal results
                 try:
                     async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                        post_data = {"q": query, "kl": "cn-zh"}
+                        if page > 1:
+                            post_data["s"] = str((page - 1) * 20)  # DDG Lite 用 s=offset
                         resp = await client.post(
                             "https://lite.duckduckgo.com/lite/",
-                            data={"q": query, "kl": "cn-zh"},
+                            data=post_data,
                             headers=headers,
                         )
                     if resp.status_code != 200:
@@ -1433,6 +1455,10 @@ class SkillManager(Plugin):
                             "input": {
                                 "type": "string",
                                 "description": "搜索关键词或问题",
+                            },
+                            "page": {
+                                "type": "integer",
+                                "description": "页码，默认1（第一页）。需要更多结果时用2、3等",
                             },
                         },
                         "required": ["input"],
@@ -1529,7 +1555,46 @@ class SkillManager(Plugin):
                     "无法提取文本。如需查看请用 system_run 下载。]\n\nURL: " + url
                 )
 
-            raw = resp.text
+            # 大页面提前截断：Content-Length > 2MB 时拒绝，>512KB 时只读前 512KB
+            content_length = resp.headers.get("content-length", "")
+            if content_length:
+                try:
+                    cl = int(content_length)
+                    if cl > 2_097_152:  # 2MB
+                        return (
+                            "[web_fetch: 页面过大（" + str(cl // 1024) + "KB），"
+                            "超过 2MB 限制。请用 system_run + curl 手动获取。]\n\nURL: " + url
+                        )
+                except ValueError:
+                    pass
+
+            # charset 处理：httpx 默认用 Content-Type 头的 charset
+            # 但很多中文老站只在 HTML <meta charset> 里声明，HTTP 头不带
+            # 先用 httpx 默认解码，如果检测到 <meta charset=gbk> 则重新解码
+            raw_bytes = resp.content  # 原始字节
+            raw = resp.text  # httpx 自动解码的文本
+
+            # 检测 HTML meta charset，如果不是 httpx 用的编码则重新解码
+            if "text/html" in content_type or "<html" in raw[:500].lower():
+                meta_match = _re2.search(
+                    r'<meta[^>]+charset=["\']?([\w-]+)', raw[:2000], _re2.IGNORECASE,
+                )
+                if meta_match:
+                    meta_charset = meta_match.group(1).strip().lower()
+                    # httpx resp.encoding 是它实际用的编码
+                    current_encoding = (resp.encoding or "").lower()
+                    if meta_charset != current_encoding and meta_charset in (
+                        "gbk", "gb2312", "gb18030", "big5",
+                        "utf-8", "utf8", "iso-8859-1", "latin-1",
+                    ):
+                        try:
+                            raw = raw_bytes.decode(meta_charset, errors="replace")
+                        except (LookupError, UnicodeDecodeError):
+                            pass  # 未知编码，保持 httpx 默认
+
+            # 提前截断超大 HTML（>100KB），只处理前 100KB
+            if len(raw) > 102400:
+                raw = raw[:102400]
 
             # 如果是 JSON API 响应，直接返回
             if "json" in content_type or raw.strip().startswith(("{", "[")):

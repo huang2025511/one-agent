@@ -26,6 +26,7 @@ class ResearchSource:
     title: str = ""
     snippet: str = ""
     relevance: float = 0.0  # 0-1
+    full_text: str = ""  # populated by web_fetch when available
 
 
 @dataclass
@@ -59,6 +60,7 @@ class DeepResearcher:
     MAX_SUB_QUESTIONS = 5
     MAX_SOURCES_PER_QUESTION = 3
     MAX_SEARCH_DEPTH = 2  # how many rounds of refinement per sub-question
+    MAX_FULLTEXT_FETCHES = 2  # top-N most relevant URLs to fetch full text
 
     def __init__(self, llm_provider, skills_manager=None):
         self._llm = llm_provider
@@ -193,6 +195,11 @@ class DeepResearcher:
             if len(all_sources) >= self.MAX_SOURCES_PER_QUESTION * 2:
                 break
 
+        # Fetch full text for top-N most relevant sources
+        if all_sources:
+            self._emit_progress("fetch", f"正在抓取详细内容...")
+            await self._enrich_sources_with_fulltext(all_sources)
+
         # Answer the sub-question based on sources
         answer, confidence = await self._answer_from_sources(
             sub_question, all_sources, model,
@@ -241,6 +248,51 @@ class DeepResearcher:
         except Exception:
             return ""
 
+    async def _enrich_sources_with_fulltext(
+        self, sources: List[ResearchSource],
+    ) -> None:
+        """Fetch full text for the top-N most relevant sources via web_fetch.
+
+        Mutates sources in-place: sets ResearchSource.full_text for those fetched.
+        Skips sources without URL or already enriched.
+        """
+        if self._skills is None:
+            return
+
+        web_fetch = self._skills.get("web_fetch")
+        if web_fetch is None:
+            return
+
+        # Sort by relevance descending, pick top-N with URLs and no full_text yet
+        candidates = [
+            s for s in sorted(sources, key=lambda x: x.relevance, reverse=True)
+            if s.url and not getattr(s, "full_text", "")
+        ][:self.MAX_FULLTEXT_FETCHES]
+
+        for src in candidates:
+            try:
+                result = await asyncio.wait_for(
+                    web_fetch.run({"url": src.url, "max_chars": 4000}),
+                    timeout=15.0,
+                )
+                result_text = str(result) if result else ""
+                # web_fetch returns "[web_fetch error: ..." on failure
+                if result_text and not result_text.startswith("[web_fetch"):
+                    # Extract text after the URL/status header
+                    # Format: "URL: ...\nHTTP 200\n\n<content>"
+                    parts = result_text.split("\n\n", 2)
+                    full_text = parts[2] if len(parts) >= 3 else result_text
+                    if len(full_text) > 100:
+                        src.full_text = full_text  # type: ignore[attr-defined]
+                        logger.info(
+                            "deep_research: fetched %d chars from %s",
+                            len(full_text), src.url[:80],
+                        )
+            except asyncio.TimeoutError:
+                logger.warning("deep_research: fetch timeout for %s", src.url[:80])
+            except Exception as exc:
+                logger.warning("deep_research: fetch failed for %s: %s", src.url[:80], exc)
+
     async def _do_search(self, query: str) -> List[ResearchSource]:
         """Execute a web search and return structured sources."""
         if self._skills is None:
@@ -264,46 +316,68 @@ class DeepResearcher:
             return []
 
     def _parse_search_results(self, text: str) -> List[ResearchSource]:
-        """Parse web_search output into structured sources."""
+        """Parse web_search output into structured sources.
+
+        web_search 当前输出格式：
+            搜索结果（query，来源: Bing）：
+
+            标题第一行
+              摘要第二行
+              摘要第三行
+              https://url1.com
+
+            标题第一行
+              ...
+              https://url2.com
+        """
         sources = []
         import re
 
-        # Try to find URL + title + snippet patterns
-        # Pattern 1: [title](url) — snippet
-        entries = re.split(r"\n(?=\d+[\.\)])", text)
-        if len(entries) < 2:
-            entries = text.split("\n\n")
+        # 跳过头部行（搜索结果（...）...）
+        # 按双换行分割条目
+        entries = text.split("\n\n")
 
-        for entry in entries[:self.MAX_SOURCES_PER_QUESTION]:
+        for entry in entries[:10]:
             entry = entry.strip()
             if not entry or len(entry) < 10:
                 continue
+            # 跳过头部行
+            if entry.startswith("搜索结果") or entry.startswith("[web_search"):
+                continue
 
-            # Extract URL
+            # 提取 URL（每条结果的最后一行通常是 URL）
             url_match = re.search(r'(https?://[^\s\)\]）]+)', entry)
             url = url_match.group(1) if url_match else ""
+            if not url:
+                continue  # 无 URL 的条目跳过
 
-            # Extract title
-            title_match = re.search(r'(?:^|\n)\s*(?:\d+[\.\)]\s*)?(?:\[([^\]]+)\]|【([^】]+)】|"([^"]+)"|《([^》]+)》)', entry)
-            if title_match:
-                title = next(g for g in title_match.groups() if g)
-            else:
-                title = entry[:80].split("\n")[0]
+            # 提取标题：第一行非缩进行
+            lines = entry.split("\n")
+            title = lines[0].strip() if lines else ""
+            # 去掉标题中的编号前缀
+            title = re.sub(r'^\d+[\.\)]\s*', '', title)
 
-            # Rest is snippet
-            snippet = entry
-            if url:
-                snippet = snippet.replace(url, "")
-            if title and title in snippet:
-                snippet = snippet.replace(title, "", 1)
-            snippet = snippet.strip(" -:：[]()（）\n")[:300]
+            # 摘要：中间的缩进行
+            snippet_lines = []
+            for line in lines[1:]:
+                line = line.strip()
+                if line and not line.startswith("http"):
+                    snippet_lines.append(line)
+            snippet = " ".join(snippet_lines)[:300]
+
+            # 去重：相同 URL 不重复加入
+            if any(s.url == url for s in sources):
+                continue
 
             sources.append(ResearchSource(
                 url=url,
-                title=title[:100],
+                title=title[:100] if title else url[:80],
                 snippet=snippet,
                 relevance=0.7,
             ))
+
+            if len(sources) >= self.MAX_SOURCES_PER_QUESTION:
+                break
 
         return sources
 
@@ -316,7 +390,13 @@ class DeepResearcher:
 
         sources_text = ""
         for i, s in enumerate(sources[:5]):
-            sources_text += f"\n[来源{i+1}] {s.title}\n{s.snippet[:300]}"
+            sources_text += f"\n[来源{i+1}] {s.title}\n"
+            # Prefer full_text over snippet when available
+            full_text = getattr(s, "full_text", "")
+            if full_text:
+                sources_text += full_text[:2000]
+            else:
+                sources_text += s.snippet[:300]
             if s.url:
                 sources_text += f"\nURL: {s.url}"
 
