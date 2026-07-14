@@ -4098,9 +4098,21 @@ class Coordinator(Plugin):
 
         # 提取所有工具调用信息
         tc_info = []
+        import json as _json_tc
         for idx, tc in enumerate(tool_calls):
-            name = tc.get("name") or ""
-            args = tc.get("args") or {}
+            name = tc.get("name") or tc.get("function", {}).get("name", "")
+            args = tc.get("args")
+            if args is None:
+                args_str = tc.get("function", {}).get("arguments", "{}")
+                if isinstance(args_str, str):
+                    try:
+                        args = _json_tc.loads(args_str)
+                    except (_json_tc.JSONDecodeError, ValueError):
+                        args = {}
+                elif isinstance(args_str, dict):
+                    args = args_str
+                else:
+                    args = {}
             tc_id = tc.get("id") or f"call_{idx}"
             tc_info.append((idx, tc, name, args, tc_id))
 
