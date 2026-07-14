@@ -39,9 +39,9 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
     state = state.copyWith(isLoading: true, error: null);
     try {
       final result = await SystemApi.getConfig();
-      if (result != null && result['config'] != null) {
+      if (result != null && result.config != null) {
         state = state.copyWith(
-          config: result['config'] as Map<String, dynamic>,
+          config: result.config,
           isLoading: false,
         );
       } else {
