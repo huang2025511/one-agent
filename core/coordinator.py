@@ -1365,6 +1365,50 @@ class Coordinator(Plugin):
             if result_length >= 400:
                 await self._post_reflect(turn)
 
+        # ========== V68 P3：记录成功策略到跨会话记忆 ==========
+        # 任务成功完成后，记录"任务特征 → 成功工具链"供下次复用。
+        if turn.result and not turn.error:
+            try:
+                tool_results = turn.meta.get("tool_results", [])
+                if tool_results:
+                    # 提取工具链（按调用顺序）
+                    tool_names = []
+                    for tr in tool_results:
+                        nm = getattr(tr, "tool_name", "")
+                        if nm and nm not in tool_names:
+                            tool_names.append(nm)
+                    if tool_names:
+                        tool_chain = "→".join(tool_names[:5])
+                        # 任务签名：意图分类 + 输入前50字符的哈希
+                        task_type = turn.meta.get("task_type", "general")
+                        input_hash = str(hash(turn.input_text[:50]) % 100000)
+                        task_signature = f"{task_type}:{input_hash}"
+                        # 效果评分：基于是否有工具失败 + 结果长度
+                        failed_count = sum(
+                            1 for tr in tool_results
+                            if getattr(tr, "status", "") == "error"
+                        )
+                        total_count = len(tool_results)
+                        success_rate = (total_count - failed_count) / total_count if total_count else 0
+                        # 结果长度因子（300+字符视为完整回答）
+                        length_factor = min(1.0, len(turn.result) / 300)
+                        effect_score = (success_rate * 0.6 + length_factor * 0.4)
+                        # 记录到 SelfImprover
+                        improver = getattr(self.ctx, 'self_improver', None) if self.ctx else None
+                        if improver:
+                            improver.record_success_strategy(
+                                task_signature=task_signature,
+                                tool_chain=tool_chain,
+                                task_type=task_type,
+                                effect_score=effect_score,
+                            )
+                            logger.debug(
+                                "strategy_memory: recorded %s→%s (score=%.2f)",
+                                task_type, tool_chain, effect_score,
+                            )
+            except Exception as exc:
+                logger.debug("strategy_memory: record failed: %s", exc)
+
         # Auto-extract entities (offload SQLite writes to worker thread)
         await asyncio.to_thread(self._extract_entities, turn)
 
@@ -1709,6 +1753,37 @@ class Coordinator(Plugin):
                     turn.meta["active_improvements"] = len(active_improvements)
             except Exception as exc:
                 logger.debug("加载持久化改进失败: %s", exc)
+
+        # ========== V68 P3：注入历史成功策略 ==========
+        # 任务开始前查询相似任务的历史成功工具链，提示 LLM 优先复用。
+        if self.ctx and hasattr(self.ctx, 'self_improver') and self.ctx.self_improver:
+            try:
+                task_type = turn.meta.get("task_type", "general")
+                input_hash = str(hash(turn.input_text[:50]) % 100000)
+                task_signature = f"{task_type}:{input_hash}"
+                strategy = self.ctx.self_improver.get_success_strategy(task_signature)
+                if strategy:
+                    tool_chain = strategy["tool_chain"]
+                    score = strategy["effect_score"]
+                    zh = self._is_zh()
+                    if zh:
+                        strategy_msg = (
+                            f"[策略记忆] 类似任务历史成功策略：{tool_chain}（效果评分 {score:.2f}）\n"
+                            "可优先参考此工具链顺序完成任务。"
+                        )
+                    else:
+                        strategy_msg = (
+                            f"[Strategy Memory] Successful strategy for similar tasks: {tool_chain} (score {score:.2f})\n"
+                            "Consider following this tool chain order."
+                        )
+                    strat_insert = {"role": "system", "content": strategy_msg}
+                    if messages and messages[0].get("role") == "system":
+                        messages.insert(1, strat_insert)
+                    else:
+                        messages.insert(0, strat_insert)
+                    turn.meta["strategy_memory_hit"] = True
+            except Exception as exc:
+                logger.debug("策略记忆查询失败: %s", exc)
 
         # 注入重启感知：如果刚重启过，告诉 LLM 已成功重启
         if self.ctx and getattr(self.ctx, "recent_restart", 0):
@@ -2962,6 +3037,72 @@ class Coordinator(Plugin):
                     )
                 await self._execute_tool_calls(messages, turn, deduped_calls, _failed_skills, i)
 
+            # ========== V68 P1: 每步工具调用后即时反思（目标达成度评估）==========
+            # 之前只在最终答案生成后反思，现在每步工具调用后都评估结果质量。
+            # 如果工具成功但结果不足以回答用户问题，自动注入调整策略提示。
+            if i < self._max_tool_iterations - 1 and i >= 1:
+                # 只在有成功工具调用时评估（失败的由后面的重试逻辑处理）
+                recent_results = turn.meta.get("tool_results", [])
+                successful_results = [
+                    r for r in recent_results[-3:]
+                    if getattr(r, "status", "") == "success"
+                ]
+                if successful_results and self._llm:
+                    # 构建评估 prompt
+                    tool_summary = ""
+                    for r in successful_results[-2:]:
+                        nm = getattr(r, "tool_name", "")
+                        data = str(getattr(r, "data", ""))[:300]
+                        tool_summary += f"- {nm}: {data}\n"
+                    user_goal = turn.input_text[:200]
+                    zh = self._is_zh()
+                    if zh:
+                        eval_prompt = (
+                            f"用户目标：{user_goal}\n"
+                            f"刚执行的工具结果：\n{tool_summary}\n"
+                            "评估：这些结果是否足以完整回答用户问题？\n"
+                            "回复格式：SUFFICIENT 或 INSUFFICIENT: <缺少什么/下一步建议>"
+                        )
+                    else:
+                        eval_prompt = (
+                            f"User goal: {user_goal}\n"
+                            f"Tool results just executed:\n{tool_summary}\n"
+                            "Evaluate: Are these results sufficient to fully answer the user?\n"
+                            "Reply: SUFFICIENT or INSUFFICIENT: <what's missing/next step>"
+                        )
+                    try:
+                        eval_resp = await asyncio.wait_for(
+                            self._llm.chat_completion(
+                                messages=[{"role": "user", "content": eval_prompt}],
+                                model=None,
+                                temperature=0.1,
+                                max_tokens=150,
+                                tools=None,
+                            ),
+                            timeout=5.0,
+                        )
+                        eval_text = (eval_resp.get("text") or "").strip()
+                        if eval_text.upper().startswith("INSUFFICIENT"):
+                            # 结果不足，注入调整策略提示
+                            suggestion = eval_text.split(":", 1)[-1].strip() if ":" in eval_text else ""
+                            if zh:
+                                adjust_msg = (
+                                    f"[系统提示：工具结果评估为「不足」。{suggestion}\n"
+                                    "请调整策略：换查询词、换工具、翻页获取更多结果，或抓取全文补充信息。]"
+                                )
+                            else:
+                                adjust_msg = (
+                                    f"[System: Tool results evaluated as INSUFFICIENT. {suggestion}\n"
+                                    "Adjust strategy: change query, switch tool, paginate, or fetch full text.]"
+                                )
+                            messages.append({"role": "user", "content": adjust_msg, "_internal": True})
+                            turn.meta["reflection_triggered"] = True
+                            logger.info("reflection: tool results insufficient, suggesting adjustment")
+                    except asyncio.TimeoutError:
+                        logger.debug("reflection: eval timed out, skipping")
+                    except Exception as exc:
+                        logger.debug("reflection: eval failed: %s", exc)
+
             # ========== ReAct Step 4: 观察（Observe）— 分析结果并决定下一步 ==========
             # 自我修正：工具调用失败时自动分析错误并重试
             if i < self._max_tool_iterations - 1:
@@ -3009,6 +3150,93 @@ class Coordinator(Plugin):
                         logger.debug("auto-retry: triggered for %d failed tools (attempt %d)",
                                    len(failed_in_round), retry_count + 1)
                         continue
+
+            # ========== V68 P0: failure_recovery 系统级策略恢复 ==========
+            # 之前只把错误喂回 LLM 让它自己想，现在按错误类型自动执行恢复策略。
+            # failure_recovery.get_recovery_strategy 已存在但从未被调用。
+            if i < self._max_tool_iterations - 1:
+                failed_for_recovery = [
+                    (tc, _failed_skills.get(
+                        tc.get("name") or tc.get("function", {}).get("name", ""), 0
+                    ))
+                    for tc in tool_calls
+                    if _failed_skills.get(
+                        tc.get("name") or tc.get("function", {}).get("name", ""), 0
+                    ) > 0
+                ]
+                if failed_for_recovery:
+                    try:
+                        from core.failure_recovery import get_failure_recovery, FailureRecovery
+                        fr = get_failure_recovery()
+                        recovery_actions: list[str] = []
+                        for tc, _fail_count in failed_for_recovery[:3]:
+                            nm = tc.get("name") or tc.get("function", {}).get("name", "")
+                            # 获取该工具最近的错误
+                            recent_results = turn.meta.get("tool_results", [])
+                            err_msg = ""
+                            for r in reversed(recent_results):
+                                if getattr(r, "tool_name", "") == nm and getattr(r, "status", "") in ("error", "unavailable"):
+                                    err_msg = getattr(r, "error", "") or getattr(r, "data", "") or ""
+                                    break
+                            # 分类错误并获取恢复策略
+                            if err_msg:
+                                # 构造异常对象用于 classify_error
+                                mock_exc = RuntimeError(err_msg)
+                                error_type = FailureRecovery.classify_error(mock_exc)
+                                strategy = fr.get_recovery_strategy(error_type)
+                                action = strategy.get("action", "retry")
+                                suggestion = strategy.get("suggestion", "")
+                                retry_delay = strategy.get("retry_delay", 0)
+
+                                recovery_actions.append(
+                                    f"- {nm}: error_type={error_type}, action={action}, suggestion={suggestion}"
+                                )
+
+                                # 执行系统级恢复策略
+                                if action == "switch_model" and turn.model:
+                                    # 切换到备用模型
+                                    available = self._llm.list_models() if self._llm and hasattr(self._llm, "list_models") else []
+                                    fallback = fr.get_fallback_model(turn.model, available)
+                                    if fallback and fallback != turn.model:
+                                        old_model = turn.model
+                                        turn.model = fallback
+                                        logger.info(
+                                            "recovery: switch_model %s→%s for %s (error: %s)",
+                                            old_model, fallback, nm, error_type,
+                                        )
+                                        recovery_actions.append(f"  → 已切换模型 {old_model}→{fallback}")
+                                elif action == "simplify":
+                                    # 上下文压缩：截断历史消息
+                                    if len(messages) > 6:
+                                        # 保留 system + 最近 4 条
+                                        compressed = messages[:1] + messages[-4:]
+                                        removed = len(messages) - len(compressed)
+                                        messages[:] = compressed
+                                        logger.info("recovery: simplify context, removed %d messages for %s", removed, nm)
+                                        recovery_actions.append(f"  → 已压缩上下文（移除{removed}条历史）")
+                                elif action == "retry" and retry_delay > 0:
+                                    await asyncio.sleep(min(retry_delay, 3.0))
+                                    recovery_actions.append(f"  → 等待{min(retry_delay, 3.0):.1f}s后重试")
+
+                        if recovery_actions:
+                            zh = self._is_zh()
+                            if zh:
+                                recovery_msg = (
+                                    "[系统提示：已执行自动错误恢复策略：\n"
+                                    + "\n".join(recovery_actions)
+                                    + "\n请基于恢复后的状态继续完成任务。]"
+                                )
+                            else:
+                                recovery_msg = (
+                                    "[System: Auto error recovery executed:\n"
+                                    + "\n".join(recovery_actions)
+                                    + "\nContinue the task with recovered state.]"
+                                )
+                            messages.append({"role": "user", "content": recovery_msg, "_internal": True})
+                            turn.meta["recovery_triggered"] = True
+                            logger.info("recovery: executed %d strategies", len(recovery_actions))
+                    except Exception as exc:
+                        logger.warning("recovery: strategy execution failed: %s", exc)
 
             # 动态重规划
             if i < self._max_tool_iterations - 1:

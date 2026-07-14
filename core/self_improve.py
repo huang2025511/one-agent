@@ -90,6 +90,18 @@ class SelfImprover:
                 success_count INTEGER DEFAULT 0,
                 created_at REAL
             );
+            -- V68 P3：成功策略记忆表 — 记录"任务特征 → 成功工具链 + 效果评分"
+            CREATE TABLE IF NOT EXISTS success_strategies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_signature TEXT NOT NULL,
+                tool_chain TEXT NOT NULL,
+                task_type TEXT,
+                effect_score REAL DEFAULT 0.5,
+                use_count INTEGER DEFAULT 1,
+                created_at REAL,
+                last_used_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_success_sig ON success_strategies(task_signature);
         """)
         self._conn.commit()
 
@@ -281,6 +293,86 @@ class SelfImprover:
                 (limit,)
             )
             return [row["suggestion"] for row in cur.fetchall() if row["suggestion"]]
+
+    # ========== V68 P3：成功策略记忆 ==========
+    def record_success_strategy(
+        self,
+        task_signature: str,
+        tool_chain: str,
+        task_type: str = "",
+        effect_score: float = 0.5,
+    ) -> None:
+        """记录一个成功的工具链策略。
+
+        V68 P3：跨会话记住"任务特征 → 成功工具链 + 效果评分"。
+        下次遇到相似任务可直接复用历史成功路径。
+
+        Args:
+            task_signature: 任务特征签名（如意图分类+关键词哈希）
+            tool_chain: 成功使用的工具链（如 "web_search→web_fetch→python_execute"）
+            task_type: 任务类型（code/analysis/research 等）
+            effect_score: 效果评分 0-1（由反思评估给出）
+        """
+        if not task_signature or not tool_chain:
+            return
+        with self._write_lock:
+            now = time.time()
+            # 检查是否已有相同签名+工具链的记录
+            cur = self._conn.execute(
+                "SELECT id, use_count FROM success_strategies "
+                "WHERE task_signature = ? AND tool_chain = ?",
+                (task_signature, tool_chain),
+            )
+            row = cur.fetchone()
+            if row:
+                # 已有记录：更新使用计数和效果评分（加权平均）
+                new_count = row["use_count"] + 1
+                # 效果评分用指数移动平均
+                cur_score = self._conn.execute(
+                    "SELECT effect_score FROM success_strategies WHERE id = ?",
+                    (row["id"],),
+                ).fetchone()["effect_score"]
+                updated_score = cur_score * 0.7 + effect_score * 0.3
+                self._conn.execute(
+                    "UPDATE success_strategies SET use_count = ?, effect_score = ?, last_used_at = ? "
+                    "WHERE id = ?",
+                    (new_count, updated_score, now, row["id"]),
+                )
+            else:
+                # 新记录
+                self._conn.execute(
+                    "INSERT INTO success_strategies "
+                    "(task_signature, tool_chain, task_type, effect_score, use_count, created_at, last_used_at) "
+                    "VALUES (?, ?, ?, ?, 1, ?, ?)",
+                    (task_signature, tool_chain, task_type, effect_score, now, now),
+                )
+            self._conn.commit()
+
+    def get_success_strategy(self, task_signature: str) -> Optional[Dict[str, Any]]:
+        """查询相似任务的历史成功策略。
+
+        V68 P3：遇到相似任务时直接复用历史成功路径。
+
+        Returns:
+            {"tool_chain": str, "effect_score": float, "use_count": int} 或 None
+        """
+        if not task_signature:
+            return None
+        with self._write_lock:
+            cur = self._conn.execute(
+                "SELECT tool_chain, effect_score, use_count FROM success_strategies "
+                "WHERE task_signature = ? AND effect_score >= 0.4 "
+                "ORDER BY effect_score DESC, use_count DESC LIMIT 1",
+                (task_signature,),
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "tool_chain": row["tool_chain"],
+                    "effect_score": row["effect_score"],
+                    "use_count": row["use_count"],
+                }
+            return None
 
     def get_stats(self) -> Dict[str, Any]:
         """Get improvement statistics."""

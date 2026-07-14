@@ -98,13 +98,14 @@ class DeepResearcher:
         all_sources: List[ResearchSource] = []
         findings: List[ResearchFinding] = []
 
-        for i, sq in enumerate(sub_questions):
-            self._emit_progress("search", f"正在研究 ({i+1}/{len(sub_questions)}): {sq[:50]}...")
-            # V67 P2-4：单子问题失败不中断整个研究
+        # V68 P2：子问题并行执行（之前串行，N 个子问题 = N × 单问题耗时）
+        # 用 asyncio.gather 并行，总耗时 = max(单问题耗时) 而非累加。
+        self._emit_progress("search", f"并行研究 {len(sub_questions)} 个子问题...")
+
+        async def _safe_research(sq: str) -> tuple:
+            """V67 P2-4：单子问题失败不中断整个研究。"""
             try:
-                finding, sources, searches = await self._research_sub_question(
-                    sq, model, depth,
-                )
+                return await self._research_sub_question(sq, model, depth)
             except Exception as exc:
                 logger.warning("deep_research: sub-question '%s' failed: %s", sq[:50], exc)
                 finding = ResearchFinding(
@@ -113,8 +114,16 @@ class DeepResearcher:
                     answer=f"研究失败: {exc}",
                     confidence=0.0,
                 )
-                sources = []
-                searches = 0
+                return finding, [], 0
+
+        # 并行执行所有子问题
+        results_list = await asyncio.gather(
+            *[_safe_research(sq) for sq in sub_questions],
+            return_exceptions=False,  # _safe_research 已捕获异常
+        )
+
+        # 收集结果（顺序与 sub_questions 一致）
+        for finding, sources, searches in results_list:
             findings.append(finding)
             # V67 P2-5：跨子问题按 URL 去重，避免重复 fetch 同一 URL
             existing_urls = {s.url for s in all_sources}
