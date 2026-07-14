@@ -25,6 +25,7 @@ llm:
   timeout: 30
   retries: 3                 # 429 限流时需要多次重试（带退避）
   cost_tracking:
+    enabled: true
     daily_budget: 1.0
     monthly_budget: 20.0
     db_path: data/memory/costs.db

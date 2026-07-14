@@ -311,7 +311,7 @@ class LLMProvider(RecommendationMixin, Plugin):
         # 修复：默认放到 {data_dir}/memory/costs.db，与其它持久化数据共用
         # data_dir；只有当用户显式指定 db_path 时才用绝对路径覆盖。
         cost_cfg = (ctx.config.get("llm") or {}).get("cost_tracking") or {}
-        if cost_cfg:
+        if cost_cfg and cost_cfg.get("enabled", True):
             data_dir = ctx.config.get("agent", {}).get("data_dir", "./data")
             db_path = cost_cfg.get("db_path") or os.path.join(data_dir, "memory", "costs.db")
             self._cost_tracker = CostTracker(
