@@ -90,6 +90,13 @@ KNOWN_PROVIDERS: Dict[str, str] = {
     "wenxin": "https://qianfan.baidubce.com/v2",
     "qianfan": "https://qianfan.baidubce.com/v2",
     "ernie": "https://qianfan.baidubce.com/v2",
+    # --- Singapore / global free API ---
+    # Agnes AI (by Sapiens AI) — 文本/图像/视频 三大模型长期免费
+    # Base URL: apihub.agnes-ai.com (注意 -ai 后缀)
+    "agnes": "https://apihub.agnes-ai.com/v1",
+    "agnes-ai": "https://apihub.agnes-ai.com/v1",
+    "sapiens": "https://apihub.agnes-ai.com/v1",
+    "apihub-agnes": "https://apihub.agnes-ai.com/v1",
     # --- local / self-hosted ---
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
@@ -293,6 +300,8 @@ _PROVIDER_ALIASES: Dict[str, str] = {
     "wenxin": "wenxin", "qianfan": "wenxin", "ernie": "wenxin", "文心": "wenxin",
     "baichuan": "baichuan", "百川": "baichuan",
     "stepfun": "stepfun", "阶跃": "stepfun",
+    "agnes": "agnes", "agnes-ai": "agnes", "sapiens": "agnes",
+    "apihub-agnes": "agnes", "agnes ai": "agnes", "安吉": "agnes", "安吉斯": "agnes", "sapiens ai": "agnes", "sapien": "agnes",
     "minimax": "minimax", "minimaxi": "minimax", "abab": "minimax",
     "ollama": "ollama", "local": "ollama", "本地": "ollama",
     "openrouter": "openrouter",
