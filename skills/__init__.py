@@ -1429,6 +1429,136 @@ class SkillManager(Plugin):
             handler=web_search_handler,
         ))
 
+        # ---------- 网页抓取技能 ----------
+        async def web_fetch_handler(args: Dict[str, Any]) -> str:
+            """抓取指定 URL 的网页内容，提取正文并转为可读文本。
+
+            和 web_search 配合使用：先搜索找到相关 URL，再 fetch 获取全文。
+            自动去除 HTML 标签、导航/广告噪声，提取正文内容。
+            """
+            url = str(args.get("url", "")).strip()
+            if not url:
+                return "[web_fetch error: empty url]"
+            if not url.startswith(("http://", "https://")):
+                return "[web_fetch error: url must start with http:// or https://]"
+
+            max_chars = int(args.get("max_chars", 6000))
+
+            import html as _htmlmod
+            import re as _re2
+            import httpx as _httpx2
+
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            }
+
+            try:
+                async with _httpx2.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                    resp = await client.get(url, headers=headers)
+            except (_httpx2.HTTPStatusError, _httpx2.RequestError, _httpx2.TimeoutException) as e:
+                return "[web_fetch error: " + type(e).__name__ + ": " + str(e)[:200] + "]"
+
+            if resp.status_code != 200:
+                return "[web_fetch error: HTTP " + str(resp.status_code) + "]"
+
+            content_type = resp.headers.get("content-type", "")
+            raw = resp.text
+
+            # 如果是 JSON API 响应，直接返回
+            if "json" in content_type or raw.strip().startswith(("{", "[")):
+                try:
+                    import json as _json
+                    parsed = _json.loads(raw)
+                    return "URL: " + url + "\n\n" + _json.dumps(parsed, ensure_ascii=False, indent=2)[:max_chars]
+                except Exception:
+                    pass
+
+            # HTML → 可读文本
+            text = raw
+
+            # 1. 移除 script/style/nav/footer/aside/header 标签及内容
+            for tag in ("script", "style", "nav", "footer", "aside", "header",
+                        "noscript", "iframe", "svg", "form"):
+                text = _re2.sub(
+                    r"<" + tag + r"[^>]*>.*?</" + tag + r">",
+                    " ",
+                    text,
+                    flags=_re2.DOTALL | _re2.IGNORECASE,
+                )
+
+            # 2. 提取 <article> 或 <main> 正文（如果有）
+            article_m = _re2.search(
+                r"<(?:article|main)[^>]*>(.*?)</(?:article|main)>",
+                text, _re2.DOTALL | _re2.IGNORECASE,
+            )
+            if article_m and len(article_m.group(1)) > 200:
+                text = article_m.group(1)
+
+            # 3. 段落和标题保留结构：把 </p>、<br>、</h*> 换成换行
+            text = _re2.sub(r"</(?:p|div|h[1-6]|li|tr|blockquote)>", "\n", text, flags=_re2.IGNORECASE)
+            text = _re2.sub(r"<br\s*/?>", "\n", text, flags=_re2.IGNORECASE)
+
+            # 4. 去掉所有剩余 HTML 标签
+            text = _re2.sub(r"<[^>]+>", " ", text)
+
+            # 5. HTML 实体解码
+            text = _htmlmod.unescape(text)
+
+            # 6. 清理多余空行和空格
+            lines = text.split("\n")
+            cleaned_lines = []
+            for line in lines:
+                line = _re2.sub(r"[ \t]+", " ", line).strip()
+                if line:
+                    cleaned_lines.append(line)
+            text = "\n".join(cleaned_lines)
+
+            # 7. 如果正文太短，可能是 JS 渲染页面
+            if len(text) < 50:
+                return (
+                    "[web_fetch: 页面内容过短（" + str(len(text)) + " 字符），"
+                    "可能是 JS 渲染页面。尝试用 system_run + curl 获取原始 HTML，"
+                    "或用 web_search 搜索其他来源。]\n\nURL: " + url
+                )
+
+            # 截断到 max_chars
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n\n[... 已截断，原文共 " + str(len(text)) + " 字符]"
+
+            return "URL: " + url + "\nHTTP " + str(resp.status_code) + "\n\n" + text
+
+        self.register(Skill(
+            id="web_fetch", title="Web Fetch",
+            description="抓取指定 URL 的网页内容，提取正文并转为可读文本。"
+                        "和 web_search 配合：先搜索找到 URL，再 fetch 获取全文。"
+                        "参数 url 为目标网址，max_chars 为最大返回字符数（默认 6000）。",
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "description": "抓取指定 URL 的网页正文内容，自动去除 HTML 标签和噪声",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "要抓取的目标网址（必须以 http:// 或 https:// 开头）",
+                            },
+                            "max_chars": {
+                                "type": "integer",
+                                "description": "最大返回字符数（默认 6000）",
+                            },
+                        },
+                        "required": ["url"],
+                    },
+                },
+            },
+            handler=web_fetch_handler,
+        ))
+
     def _seed_media_skills(self) -> None:
         # ---------- 语音转文字技能 ----------
         self.register(Skill(
