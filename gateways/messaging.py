@@ -118,6 +118,16 @@ class BaseMessagingGateway(Plugin):
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
+        # 取消 _loop_tasks（TelegramGateway 等使用）
+        loop_tasks = list(getattr(self, "_loop_tasks", set()))
+        for t in loop_tasks:
+            if not t.done():
+                t.cancel()
+        for t in loop_tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
         await self._close_client()
         await super().stop()
 

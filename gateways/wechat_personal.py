@@ -365,6 +365,16 @@ class WeChatPersonalGateway(Plugin):
         # 清理所有心跳任务
         for chat_id in list(self._heartbeat_tasks.keys()):
             self._stop_heartbeat(chat_id)
+        # 清理所有消息处理任务
+        for task in list(self._msg_tasks):
+            if not task.done():
+                task.cancel()
+        for task in list(self._msg_tasks):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._msg_tasks.clear()
         await self._disconnect()
         await super().stop()
 

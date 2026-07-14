@@ -52,10 +52,18 @@ class RoleStore(BaseSQLiteStore):
         self._conn.commit()
 
     def close(self) -> None:
+        """Close the database connection."""
+        if getattr(self, "_closed", False):
+            return
         with self._lock:
-            if self._conn:
-                self._conn.close()
-                self._conn = None  # type: ignore[assignment]
+            try:
+                if self._conn:
+                    self._conn.close()
+                    self._conn = None  # type: ignore[assignment]
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("role_store close error: %s", exc)
+            finally:
+                self._closed = True
 
     # ── CRUD ──────────────────────────────────────────────────
 
