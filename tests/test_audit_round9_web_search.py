@@ -78,18 +78,25 @@ class TestLooksLikeRealLink:
         """复制 _looks_like_real_link 的逻辑（因为是闭包无法直接 import）。"""
         if not href.startswith("http"):
             return False
+        # 静态资源扩展名（.js 后必须跟 ?/#/$，避免误杀 .json）
+        if re.search(
+            r'\.(css|js|png|jpe?g|gif|svg|ico|woff2?|bmp|tiff?)(\?|#|$)',
+            href.lower(),
+        ):
+            return False
         skip_patterns = [
             "javascript:", "mailto:", "#", "/login", "/reg",
-            ".css", ".js", ".png", ".jpg", ".svg", ".ico",
         ]
         for sp in skip_patterns:
             if sp in href.lower():
                 return False
-        for own in ("so.com/link", "sogou.com/link", "baidu.com/link",
-                    "bing.com/ck/", "duckduckgo.com/?", "duckduckgo.com/html"):
+        for own in ("so.com/link", "ai.so.com/search", "sogou.com/link",
+                    "baidu.com/link", "bing.com/ck/", "bing.com/search?",
+                    "duckduckgo.com/?", "duckduckgo.com/html",
+                    "r.bing.com", "go.microsoft.com"):
             if own in href.lower():
                 return False
-        if not title or len(title) < 6:
+        if not title or len(title) < 4:
             return False
         q_words = [w for w in re.split(r"[\s,]+", query) if len(w) >= 2]
         if not q_words:
@@ -135,6 +142,22 @@ class TestLooksLikeRealLink:
         assert self._check(
             "https://example.com/logo.png",
             "Agnes AI Platform Logo",
+            "Agnes AI",
+        ) is False
+
+    def test_json_url_not_filtered(self):
+        """Bug5 回归：.json URL 不应被 .js 过滤误杀。"""
+        assert self._check(
+            "https://api.example.com/v1/models.json",
+            "Agnes AI Models API JSON",
+            "Agnes AI",
+        ) is True
+
+    def test_js_url_with_query_filtered(self):
+        """带 query 的 .js URL 也应被过滤。"""
+        assert self._check(
+            "https://example.com/script.js?v=1.2",
+            "Agnes AI Script",
             "Agnes AI",
         ) is False
 
@@ -307,6 +330,39 @@ class TestAllSourcesFail:
         assert "DuckDuckGo" in result
         assert "Bing" in result
         assert "均失败" in result
+
+    def test_each_source_shows_own_error(self):
+        """Bug1 回归：每个源应显示各自的错误，不是都用最后一个 last_error。"""
+        handler = _get_web_search_handler()
+        import httpx
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, url, **kw):
+                if "bing.com" in url:
+                    raise httpx.ConnectError("BING_SSL_ERROR")
+                if "so.com" in url:
+                    # 360 返回 403
+                    fake = MagicMock()
+                    fake.status_code = 403
+                    fake.text = "Forbidden"
+                    return fake
+                # DDG: 超时
+                raise httpx.TimeoutException("DDG_TIMEOUT")
+            async def post(self, *a, **kw):
+                raise httpx.TimeoutException("DDG_TIMEOUT")
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"input": "Agnes AI"}))
+
+        # 每个源应显示各自的错误
+        assert "Bing=ConnectError" in result
+        assert "360搜索=HTTP 403" in result
+        assert "DuckDuckGo=TimeoutException" in result
+        # 不应该所有源都显示同一个错误
+        assert result.count("DDG_TIMEOUT") == 1  # 只在 DDG 那一项
 
 
 # ============================================================

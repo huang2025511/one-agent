@@ -1155,8 +1155,8 @@ class SkillManager(Plugin):
             }
             results: list[str] = []
             sources_tried: list[str] = []
+            source_errors: dict[str, str] = {}  # 每个源各自的错误信息
             succeeded_source: str = ""
-            last_error: str = ""
 
             def _strip_html(s: str) -> str:
                 """Strip HTML tags, decode entities, collapse whitespace."""
@@ -1169,9 +1169,14 @@ class SkillManager(Plugin):
                 """过滤明显是导航/广告/登录的链接，要求标题与查询相关。"""
                 if not href.startswith("http"):
                     return False
+                # 静态资源扩展名（.js 后必须跟 ?/#/$，避免误杀 .json）
+                if _re.search(
+                    r'\.(css|js|png|jpe?g|gif|svg|ico|woff2?|bmp|tiff?)(\?|#|$)',
+                    href.lower(),
+                ):
+                    return False
                 skip_patterns = [
                     "javascript:", "mailto:", "#", "/login", "/reg",
-                    ".css", ".js", ".png", ".jpg", ".svg", ".ico",
                 ]
                 for sp in skip_patterns:
                     if sp in href.lower():
@@ -1248,6 +1253,7 @@ class SkillManager(Plugin):
             def _parse_result_blocks(html_text: str, patterns: list[str]) -> list[str]:
                 """通用 HTML 块解析（360/DDG 用），Bing 用 _extract_bing_block。"""
                 blocks = []
+                seen_urls: set[str] = set()  # 去重：同一 URL 不重复加入
                 for pat in patterns:
                     for m in _re.finditer(pat, html_text, _re.DOTALL | _re.IGNORECASE):
                         block = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
@@ -1258,6 +1264,8 @@ class SkillManager(Plugin):
                         if not link_m:
                             continue
                         url_r = link_m.group(1)
+                        if url_r in seen_urls:
+                            continue
                         title = _strip_html(link_m.group(2))
                         snippet = ""
                         snip_m = _re.search(
@@ -1274,6 +1282,7 @@ class SkillManager(Plugin):
                                     snippet = cleaned
                                     break
                         if _looks_like_real_link(url_r, title, query):
+                            seen_urls.add(url_r)
                             line = title
                             if snippet:
                                 line += "\n  " + snippet[:200]
@@ -1287,7 +1296,7 @@ class SkillManager(Plugin):
                 V65 实测：cn.bing.com HTTP 200, 100KB, 10 个 b_algo 块，
                 每个 h2>a 含真实目标 URL（如 agnes-ai.com、zhihu.com）。
                 """
-                nonlocal results, last_error
+                nonlocal results
                 try:
                     for host in ("https://cn.bing.com/search", "https://www.bing.com/search"):
                         bing_url = host + "?q=" + _url_quote(query) + "&setlang=zh-cn"
@@ -1308,21 +1317,21 @@ class SkillManager(Plugin):
                         if parsed:
                             results.extend(parsed[:6])
                             return True
-                    last_error = "Bing 0 results"
+                    source_errors["Bing"] = "0 results"
                     return False
                 except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
-                    last_error = "Bing " + type(e).__name__ + ": " + str(e)[:100]
+                    source_errors["Bing"] = type(e).__name__ + ": " + str(e)[:100]
                     return False
 
             async def _try_360() -> bool:
                 """360 搜索 — 国内 fallback。注意：URL 是 ai.so.com/search 跳转包装。"""
-                nonlocal results, last_error
+                nonlocal results
                 try:
                     url = "https://www.so.com/s?q=" + _url_quote(query)
                     async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                         resp = await client.get(url, headers=headers)
                     if resp.status_code != 200:
-                        last_error = "360 HTTP " + str(resp.status_code)
+                        source_errors["360搜索"] = "HTTP " + str(resp.status_code)
                         return False
                     patterns = [
                         r'<h3[^>]*class="[^"]*res-title[^"]*"[^>]*>(.*?)</h3>',
@@ -1333,15 +1342,15 @@ class SkillManager(Plugin):
                     if blocks:
                         results.extend(blocks[:6])
                         return True
-                    last_error = "360 0 results"
+                    source_errors["360搜索"] = "0 results"
                     return False
                 except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
-                    last_error = "360 " + type(e).__name__ + ": " + str(e)[:100]
+                    source_errors["360搜索"] = type(e).__name__ + ": " + str(e)[:100]
                     return False
 
             async def _try_ddg() -> bool:
                 """DuckDuckGo Lite — 国外环境 fallback。"""
-                nonlocal results, last_error
+                nonlocal results
                 try:
                     async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                         resp = await client.post(
@@ -1350,7 +1359,7 @@ class SkillManager(Plugin):
                             headers=headers,
                         )
                     if resp.status_code != 200:
-                        last_error = "DDG HTTP " + str(resp.status_code)
+                        source_errors["DuckDuckGo"] = "HTTP " + str(resp.status_code)
                         return False
                     patterns = [
                         r'<td[^>]*class="[^"]*result-link[^"]*"[^>]*>(.*?)</td>',
@@ -1369,10 +1378,10 @@ class SkillManager(Plugin):
                     if blocks:
                         results.extend(blocks[:6])
                         return True
-                    last_error = "DDG 0 results"
+                    source_errors["DuckDuckGo"] = "0 results"
                     return False
                 except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
-                    last_error = "DDG " + type(e).__name__ + ": " + str(e)[:100]
+                    source_errors["DuckDuckGo"] = type(e).__name__ + ": " + str(e)[:100]
                     return False
 
             # 尝试顺序：Bing CN (直链) → 360 (跳转URL) → DuckDuckGo (国外)
@@ -1392,7 +1401,11 @@ class SkillManager(Plugin):
                 )
 
             # 全部源都失败时给 LLM 一个清晰诊断 + 替代方案
-            err_summary = "; ".join(f"{s}={last_error}" for s in sources_tried if last_error)
+            err_parts = []
+            for s in sources_tried:
+                err = source_errors.get(s, "unknown")
+                err_parts.append(s + "=" + err)
+            err_summary = "; ".join(err_parts)
             sources_label = "、".join(sources_tried)
             return (
                 "[web_search: 全部源（" + sources_label + "）均失败。最后错误: " + err_summary + "。\n"
@@ -1442,7 +1455,12 @@ class SkillManager(Plugin):
             if not url.startswith(("http://", "https://")):
                 return "[web_fetch error: url must start with http:// or https://]"
 
-            max_chars = int(args.get("max_chars", 6000))
+            try:
+                max_chars = int(args.get("max_chars", 6000))
+                if max_chars < 100:
+                    max_chars = 6000
+            except (ValueError, TypeError):
+                max_chars = 6000
 
             import html as _htmlmod
             import re as _re2
@@ -1465,6 +1483,18 @@ class SkillManager(Plugin):
                 return "[web_fetch error: HTTP " + str(resp.status_code) + "]"
 
             content_type = resp.headers.get("content-type", "")
+
+            # 二进制内容（图片/PDF/压缩包等）不解析，返回提示
+            if any(ct in content_type for ct in (
+                "image/", "video/", "audio/", "application/pdf",
+                "application/zip", "application/octet-stream",
+                "application/x-gzip", "application/x-tar",
+            )):
+                return (
+                    "[web_fetch: 目标是二进制内容（" + content_type + "），"
+                    "无法提取文本。如需查看请用 system_run 下载。]\n\nURL: " + url
+                )
+
             raw = resp.text
 
             # 如果是 JSON API 响应，直接返回

@@ -1874,7 +1874,7 @@ class Coordinator(Plugin):
                 chosen = self._skills.pick_relevant(turn.input_text, limit=6)
             
             # Core tools — always available regardless of keyword match
-            for core_id in ("web_search", "python_execute", "calc", "send_message"):
+            for core_id in ("web_search", "web_fetch", "python_execute", "calc", "send_message"):
                 core = self._skills.get(core_id)
                 if core and core not in chosen:
                     chosen.insert(0, core)

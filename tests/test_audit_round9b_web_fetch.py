@@ -236,6 +236,162 @@ class TestNetworkError:
 
 
 # ============================================================
+# 4b. max_chars 无效值处理（Bug3 回归）
+# ============================================================
+class TestMaxCharsValidation:
+    def test_non_integer_max_chars_uses_default(self):
+        handler = _get_web_fetch_handler()
+
+        html = (
+            "<html><body><article>"
+            "<h1>Agnes AI 免费 API 接入完整指南</h1>"
+            "<p>正文第一段：Agnes AI 是由 Sapiens AI 开发的全模态 AI 平台，"
+            "提供文本生成、图像生成和视频生成三大核心 API 服务。</p>"
+            "<p>正文第二段：该平台长期免费开放，用户只需注册即可获取 API Key，"
+            "支持 OpenAI 兼容格式，可直接接入 Claude Code 等工具。</p>"
+            "<p>正文第三段：接入方式简单，Base URL 为 apihub.agnes-ai.com/v1，"
+            "与 OpenAI SDK 完全兼容。</p>"
+            "</article></body></html>"
+        )
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = html
+        fake_resp.headers = {"content-type": "text/html"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **kw): return fake_resp
+
+        with patch("httpx.AsyncClient", FakeClient):
+            # LLM 传入字符串 "abc" 而非整数
+            result = asyncio.run(handler({"url": "https://example.com/page", "max_chars": "abc"}))
+
+        assert "Agnes AI" in result  # 正常返回，不崩溃
+
+    def test_negative_max_chars_uses_default(self):
+        handler = _get_web_fetch_handler()
+
+        html = (
+            "<html><body><article>"
+            "<h1>Agnes AI 免费 API 接入完整指南</h1>"
+            "<p>正文第一段：Agnes AI 是由 Sapiens AI 开发的全模态 AI 平台，"
+            "提供文本生成、图像生成和视频生成三大核心 API 服务。</p>"
+            "<p>正文第二段：该平台长期免费开放，用户只需注册即可获取 API Key，"
+            "支持 OpenAI 兼容格式，可直接接入 Claude Code 等工具。</p>"
+            "</article></body></html>"
+        )
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = html
+        fake_resp.headers = {"content-type": "text/html"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **kw): return fake_resp
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"url": "https://example.com/page", "max_chars": -1}))
+
+        assert "Agnes AI" in result
+
+    def test_zero_max_chars_uses_default(self):
+        handler = _get_web_fetch_handler()
+
+        html = (
+            "<html><body><article>"
+            "<h1>Agnes AI 免费 API 接入完整指南</h1>"
+            "<p>正文第一段：Agnes AI 是由 Sapiens AI 开发的全模态 AI 平台，"
+            "提供文本生成、图像生成和视频生成三大核心 API 服务。</p>"
+            "<p>正文第二段：该平台长期免费开放，用户只需注册即可获取 API Key，"
+            "支持 OpenAI 兼容格式，可直接接入 Claude Code 等工具。</p>"
+            "</article></body></html>"
+        )
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = html
+        fake_resp.headers = {"content-type": "text/html"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **kw): return fake_resp
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"url": "https://example.com/page", "max_chars": 0}))
+
+        assert "Agnes AI" in result
+
+
+# ============================================================
+# 4c. 二进制内容检测（Bug4 回归）
+# ============================================================
+class TestBinaryContent:
+    def test_pdf_returns_binary_warning(self):
+        handler = _get_web_fetch_handler()
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = "%PDF-1.4 binary..."
+        fake_resp.headers = {"content-type": "application/pdf"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **kw): return fake_resp
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"url": "https://example.com/doc.pdf"}))
+
+        assert "二进制内容" in result
+        assert "application/pdf" in result
+
+    def test_image_returns_binary_warning(self):
+        handler = _get_web_fetch_handler()
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = "binary image data..."
+        fake_resp.headers = {"content-type": "image/png"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **kw): return fake_resp
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"url": "https://example.com/photo.png"}))
+
+        assert "二进制内容" in result
+        assert "image/png" in result
+
+    def test_zip_returns_binary_warning(self):
+        handler = _get_web_fetch_handler()
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = "PK\x03\x04 binary..."
+        fake_resp.headers = {"content-type": "application/zip"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **kw): return fake_resp
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"url": "https://example.com/file.zip"}))
+
+        assert "二进制内容" in result
+
+
+# ============================================================
 # 5. JS 渲染页面检测
 # ============================================================
 class TestJsRenderedPage:
