@@ -1128,9 +1128,14 @@ class SkillManager(Plugin):
     def _seed_web_search_skill(self) -> None:
         # ---------- 网页搜索技能 ----------
         async def web_search_handler(args: Dict[str, Any]) -> str:
-            """搜索互联网获取最新信息。多源自动切换：DuckDuckGo → Bing → 自给。
+            """搜索互联网获取最新信息。多源自动切换。
+
+            修复 (V65)：原 handler 只有 DuckDuckGo Lite + Bing 两个源，在当前 sandbox
+            环境下 SSL 握手全部失败。加入 360 搜索（国内可访问、HTML 含真实结果）作为
+            主路径，保留 DuckDuckGo/Bing 作为国外环境 fallback。
 
             不依赖任何 API key，纯 HTML 解析。任一源成功即返回结果。
+            失败时返回明确诊断 + 建议用 system_run / python_execute 直接 curl 目标 URL。
             """
             query = str(args.get("input", "")).strip()
             if not query:
@@ -1149,71 +1154,193 @@ class SkillManager(Plugin):
             }
             results: list[str] = []
             sources_tried: list[str] = []
+            succeeded_source: str = ""
+            last_error: str = ""
+
+            def _strip_html(s: str) -> str:
+                """Strip HTML tags and collapse whitespace."""
+                s = _re.sub(r"<[^>]+>", " ", s)
+                s = _re.sub(r"\s+", " ", s).strip()
+                return s
+
+            def _looks_like_real_link(href: str, title: str, query: str) -> bool:
+                """过滤明显是导航/广告/登录的链接，要求标题与查询相关。"""
+                if not href.startswith("http"):
+                    return False
+                skip_patterns = [
+                    "javascript:", "mailto:", "#", "/login", "/reg",
+                    ".css", ".js", ".png", ".jpg", ".svg", ".ico",
+                ]
+                for sp in skip_patterns:
+                    if sp in href.lower():
+                        return False
+                # 跳过本搜索域自身的导航链接
+                for own in ("so.com/link", "sogou.com/link", "baidu.com/link",
+                            "bing.com/ck/", "duckduckgo.com/?", "duckduckgo.com/html"):
+                    if own in href.lower():
+                        return False
+                # 标题必须与 query 有部分匹配（容许 1 字符容差）
+                if not title or len(title) < 6:
+                    return False
+                # query 关键词至少有一个在 title 中（不区分大小写）
+                q_words = [w for w in _re.split(r"[\s,]+", query) if len(w) >= 2]
+                if not q_words:
+                    return True
+                title_lower = title.lower()
+                return any(w.lower() in title_lower for w in q_words)
+
+            def _parse_result_blocks(html: str, patterns: list[str]) -> list[str]:
+                """Try multiple HTML patterns to extract result blocks (title + url + snippet)."""
+                blocks = []
+                for pat in patterns:
+                    for m in _re.finditer(pat, html, _re.DOTALL | _re.IGNORECASE):
+                        block = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
+                        link_m = _re.search(
+                            r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>',
+                            block, _re.DOTALL,
+                        )
+                        if not link_m:
+                            continue
+                        url_r = link_m.group(1)
+                        title = _strip_html(link_m.group(2))
+                        # 描述：找 block 内 <p> 或 class 含 desc/snippet
+                        snippet = ""
+                        snip_m = _re.search(
+                            r'<p[^>]*class="[^"]*(?:desc|snippet|content|abstract)[^"]*"[^>]*>(.*?)</p>',
+                            block, _re.DOTALL | _re.IGNORECASE,
+                        )
+                        if snip_m:
+                            snippet = _strip_html(snip_m.group(1))
+                        if not snippet:
+                            any_p = _re.findall(r"<p[^>]*>(.*?)</p>", block, _re.DOTALL)
+                            for p in any_p:
+                                cleaned = _strip_html(p)
+                                if len(cleaned) > 30:
+                                    snippet = cleaned
+                                    break
+                        if _looks_like_real_link(url_r, title, query):
+                            line = title
+                            if snippet:
+                                line += f"\n  {snippet[:200]}"
+                            line += f"\n  {url_r}"
+                            blocks.append(line)
+                return blocks
+
+            async def _try_360() -> bool:
+                """360 搜索 — 国内可访问、HTML 含完整结果（h3.res-title 块）。"""
+                nonlocal results, last_error
+                try:
+                    url = f"https://www.so.com/s?q={_url_quote(query)}"
+                    async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                        resp = await client.get(url, headers=headers)
+                    if resp.status_code != 200:
+                        last_error = f"360 HTTP {resp.status_code}"
+                        return False
+                    patterns = [
+                        r'<h3[^>]*class="[^"]*res-title[^"]*"[^>]*>(.*?)</h3>',
+                        r'<a[^>]+class="[^"]*res-title[^"]*"[^>]*>(.*?)</a>',
+                        r'<h3[^>]*>(.*?)</h3>',
+                    ]
+                    blocks = _parse_result_blocks(resp.text, patterns)
+                    if blocks:
+                        results.extend(blocks[:6])
+                        return True
+                    last_error = "360 0 results"
+                    return False
+                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
+                    last_error = f"360 {type(e).__name__}: {str(e)[:100]}"
+                    return False
 
             async def _try_ddg() -> bool:
-                """DuckDuckGo Lite — clean HTML, no JS."""
-                nonlocal results
+                """DuckDuckGo Lite — 国外环境 fallback。"""
+                nonlocal results, last_error
                 try:
-                    async with _httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+                    async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                         resp = await client.post(
                             "https://lite.duckduckgo.com/lite/",
                             data={"q": query, "kl": "cn-zh"},
                             headers=headers,
                         )
-                        if resp.status_code != 200:
-                            return False
-                        html = resp.text
-                    for m in _DDG_RESULT_PATTERN.finditer(html):
-                        url_r = m.group(1)
-                        title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
-                        snippet = _re.sub(r"<[^>]+>", "", m.group(3)).strip()
-                        if title and snippet:
-                            results.append(f"{title}\n  {snippet}\n  {url_r}")
-                    if not results:
-                        for m in _DDG_LINK_PATTERN.finditer(html):
+                    if resp.status_code != 200:
+                        last_error = f"DDG HTTP {resp.status_code}"
+                        return False
+                    patterns = [
+                        r'<td[^>]*class="[^"]*result-link[^"]*"[^>]*>(.*?)</td>',
+                        r'<a[^>]*class="[^"]*result-link[^"]*"[^>]*>(.*?)</a>',
+                    ]
+                    blocks = _parse_result_blocks(resp.text, patterns)
+                    if not blocks:
+                        # fallback: extract from <a> tags directly
+                        for m in _re.finditer(
+                            r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                            resp.text, _re.DOTALL,
+                        ):
                             url_r = m.group(1)
-                            title = _re.sub(r"<[^>]+>", "", m.group(2)).strip()
-                            if title and "duckduckgo" not in url_r.lower():
-                                results.append(f"{title}\n  {url_r}")
-                    return bool(results)
-                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException):
+                            title = _strip_html(m.group(2))
+                            if _looks_like_real_link(url_r, title, query):
+                                blocks.append(f"{title}\n  {url_r}")
+                    if blocks:
+                        results.extend(blocks[:6])
+                        return True
+                    last_error = "DDG 0 results"
+                    return False
+                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
+                    last_error = f"DDG {type(e).__name__}: {str(e)[:100]}"
                     return False
 
             async def _try_bing() -> bool:
-                """Bing HTML search — broader coverage."""
-                nonlocal results
+                """Bing 搜索 — 国外环境 fallback（中文可能路由到 cn.bing.com）。"""
+                nonlocal results, last_error
                 try:
-                    bing_url = f"https://www.bing.com/search?q={_url_quote(query)}&setlang=zh-cn"
-                    async with _httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
-                        resp = await client.get(bing_url, headers=headers)
+                    for host in ("https://cn.bing.com/search", "https://www.bing.com/search"):
+                        bing_url = f"{host}?q={_url_quote(query)}&setlang=zh-cn"
+                        async with _httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                            resp = await client.get(bing_url, headers=headers)
                         if resp.status_code != 200:
-                            return False
-                        html = resp.text
-                    # Bing: results are in <li class="b_algo"> blocks
-                    for block in _BING_ALGO_PATTERN.finditer(html):
-                        block_html = block.group(1)
-                        link_m = _re.search(r'<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', block_html, _re.DOTALL)
-                        snippet_m = _re.search(r'<p[^>]*>(.*?)</p>', block_html, _re.DOTALL)
-                        if link_m:
-                            title = _re.sub(r"<[^>]+>", "", link_m.group(2)).strip()
-                            url_r = link_m.group(1)
-                            snippet = _re.sub(r"<[^>]+>", "", snippet_m.group(1)).strip() if snippet_m else ""
-                            if title and "bing.com" not in url_r.lower():
-                                results.append(f"{title}\n  {snippet}\n  {url_r}")
-                    return bool(results)
-                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException):
+                            continue
+                        patterns = [
+                            r'<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>(.*?)</li>',
+                            r'<h2[^>]*>(.*?)</h2>',
+                        ]
+                        blocks = _parse_result_blocks(resp.text, patterns)
+                        if blocks:
+                            results.extend(blocks[:6])
+                            return True
+                    last_error = "Bing 0 results"
+                    return False
+                except (_httpx.HTTPStatusError, _httpx.RequestError, _httpx.TimeoutException) as e:
+                    last_error = f"Bing {type(e).__name__}: {str(e)[:100]}"
                     return False
 
-            # Try sources in order
-            for name, fn in [("DuckDuckGo", _try_ddg), ("Bing", _try_bing)]:
-                sources_tried.append(name)
+            # 尝试顺序：360 (国内) → DuckDuckGo (国外) → Bing (国外)
+            for src_name, fn in [("360搜索", _try_360), ("DuckDuckGo", _try_ddg), ("Bing", _try_bing)]:
+                sources_tried.append(src_name)
                 if await fn():
+                    succeeded_source = src_name
                     break
 
             if results:
                 summary = "\n\n".join(results[:5])
-                return f"搜索结果（{query}，来源: {' → '.join(sources_tried)}）：\n\n{summary}"
-            return f"[web_search: {'、'.join(sources_tried)} 均无法访问。建议直接基于已有知识回答。]"
+                src_label = succeeded_source or sources_tried[-1]
+                return (
+                    f"搜索结果（{query}，来源: {src_label}）：\n\n"
+                    f"{summary}\n\n"
+                    f"提示：基于上述结果直接回答用户。避免调用 web_search 多次。"
+                )
+
+            # 全部源都失败时给 LLM 一个清晰诊断 + 替代方案
+            err_summary = "; ".join(f"{s}={last_error}" for s in sources_tried if last_error)
+            sources_label = "、".join(sources_tried)
+            return (
+                "[web_search: 全部源（" + sources_label + "）均失败。最后错误: " + err_summary + "。\n"
+                "替代方案（任选其一）：\n"
+                "1) 已知目标 URL → 用 system_run / python_execute 直接 curl 该 URL\n"
+                "   例: system_run(\"curl -sL 'https://example.com' | head -c 2000\")\n"
+                "2) 已知 API key → 用 python_execute 直接调 /v1/models 或 /v1/chat/completions\n"
+                "   例: python_execute(\"import urllib.request; req=urllib.request.Request('https://apihub.agnes-ai.com/v1/models', headers={'Authorization':'Bearer '+KEY}); print(urllib.request.urlopen(req).read())\")\n"
+                "3) 无 URL/URL 都失败 → 直接基于已有知识回答，并在回复中说明「无实时网络信息」。\n"
+                "4) 用户明确说「在浏览器中打开」或「自己看」→ 不要再尝试，告知用户去访问官网。]"
+            )
 
         self.register(Skill(
             id="web_search", title="Web Search",
