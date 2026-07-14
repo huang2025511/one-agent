@@ -204,6 +204,11 @@ def parse_markdown_tool_calls(text: str) -> List[Dict[str, Any]]:
         r'```(?:\w+)?\s*\n\s*(?P<call>[a-z_]\w*\s*\([^()]*?(?:\([^()]*\)[^()]*)*\))\s*\n\s*```',
         _re.IGNORECASE | _re.MULTILINE | _re.DOTALL,
     )
+    # 匹配 ```lang\ntool_name: 参数值\n``` 格式（免费模型常用）
+    block_colon_pattern = _re.compile(
+        r'```(?:\w+)?\s*\n\s*(?P<name>[a-z_]\w*)\s*:\s*(?P<arg>.+?)\s*\n\s*```',
+        _re.IGNORECASE | _re.MULTILINE | _re.DOTALL,
+    )
     # 裸调用格式：func_name("...")（只匹配代码块内或独立的工具调用行）
     bare_pattern = _re.compile(
         r'(?m)^\s*(?P<call>[a-z_]\w*\s*\([^()]*?(?:\([^()]*\)[^()]*)*\))\s*$',
@@ -218,6 +223,32 @@ def parse_markdown_tool_calls(text: str) -> List[Dict[str, Any]]:
     }
 
     seen_calls: set = set()  # 去重
+
+    # ---- 格式 1: tool_name: 参数值（代码块内，免费模型常用）----
+    for m in block_colon_pattern.finditer(text):
+        name = m.group("name").lower()
+        if name not in XML_TOOL_NAMES:
+            continue
+        arg_val = m.group("arg").strip()
+        if not arg_val:
+            continue
+        # 去重
+        dedup_key = f"{name}:{arg_val[:200]}"
+        if dedup_key in seen_calls:
+            continue
+        seen_calls.add(dedup_key)
+        # 参数名映射
+        args: Dict[str, Any] = {}
+        if name in _MD_PARAM_MAP:
+            first_key = next(iter(_MD_PARAM_MAP[name].values()))
+            args[first_key] = arg_val
+        else:
+            args["input"] = arg_val
+        calls.append({
+            "id": f"md_{len(calls)}_{name}",
+            "name": name,
+            "args": args,
+        })
 
     for pat in (block_pattern, bare_pattern):
         for m in pat.finditer(text):
