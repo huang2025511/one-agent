@@ -1413,7 +1413,7 @@ class SkillManager(Plugin):
                 "1) 已知目标 URL → 用 system_run / python_execute 直接 curl 该 URL\n"
                 "   例: system_run(\"curl -sL 'https://example.com' | head -c 2000\")\n"
                 "2) 已知 API key → 用 python_execute 直接调 /v1/models 或 /v1/chat/completions\n"
-                "   例: python_execute(\"import urllib.request; req=urllib.request.Request('https://apihub.agnes-ai.com/v1/models', headers={'Authorization':'Bearer '+KEY}); print(urllib.request.urlopen(req).read())\")\n"
+                "   注意：不要在命令字符串中明文包含 API key，用环境变量引用。\n"
                 "3) 无 URL/URL 都失败 → 直接基于已有知识回答，并在回复中说明「无实时网络信息」。\n"
                 "4) 用户明确说「在浏览器中打开」或「自己看」→ 不要再尝试，告知用户去访问官网。]"
             )
@@ -1454,6 +1454,40 @@ class SkillManager(Plugin):
                 return "[web_fetch error: empty url]"
             if not url.startswith(("http://", "https://")):
                 return "[web_fetch error: url must start with http:// or https://]"
+
+            # SSRF 防护：拒绝内网/回环/链路本地地址
+            from urllib.parse import urlparse as _urlparse
+            import socket as _socket
+            parsed = _urlparse(url)
+            hostname = parsed.hostname or ""
+            # 先检查主机名本身是否是 IP 或 localhost
+            _blocked_hostnames = {"localhost", "ip6-localhost", "ip6-loopback"}
+            if hostname.lower() in _blocked_hostnames:
+                return "[web_fetch error: 访问被拒绝 — 内网/回环地址不允许]"
+            try:
+                # 尝试解析主机名，检查是否解析到私网 IP
+                addrinfos = _socket.getaddrinfo(hostname, None)
+                for ai in addrinfos:
+                    ip = ai[4][0]
+                    # IPv6 检查
+                    if ":" in ip:
+                        ip_low = ip.lower()
+                        if ip_low in ("::1", "::") or ip_low.startswith("fe80") or ip_low.startswith("fc") or ip_low.startswith("fd"):
+                            return "[web_fetch error: 访问被拒绝 — 内网/回环地址不允许]"
+                    # IPv4 检查
+                    elif ip.startswith(("127.", "10.", "192.168.", "169.254.", "0.")) or ip.startswith("172."):
+                        # 172.16.0.0 - 172.31.255.255
+                        if ip.startswith("172."):
+                            try:
+                                second_octet = int(ip.split(".")[1])
+                                if 16 <= second_octet <= 31:
+                                    return "[web_fetch error: 访问被拒绝 — 内网/回环地址不允许]"
+                            except (IndexError, ValueError):
+                                pass
+                        else:
+                            return "[web_fetch error: 访问被拒绝 — 内网/回环地址不允许]"
+            except (_socket.gaierror, OSError):
+                pass  # DNS 解析失败，让 httpx 去报错
 
             try:
                 max_chars = int(args.get("max_chars", 6000))

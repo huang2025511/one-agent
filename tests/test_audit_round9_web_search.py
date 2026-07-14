@@ -305,7 +305,7 @@ class TestAllSourcesFail:
         assert "system_run" in result
         assert "python_execute" in result
         assert "curl" in result
-        assert "agnes-ai.com" in result  # Agnes AI 的真实 URL 应被提到
+        assert "API key" in result  # 应提到 API key 替代方案
 
     def test_all_fail_lists_all_tried_sources(self):
         """验证 sources_tried 完整列出 360/DDG/Bing 三个源。"""

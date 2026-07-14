@@ -392,6 +392,95 @@ class TestBinaryContent:
 
 
 # ============================================================
+# 4d. SSRF 防护（P0 安全修复）
+# ============================================================
+class TestSSRFProtection:
+    """web_fetch 必须拒绝内网/回环/链路本地地址。"""
+
+    def test_localhost_rejected(self):
+        handler = _get_web_fetch_handler()
+        result = asyncio.run(handler({"url": "http://localhost:8080/admin"}))
+        assert "访问被拒绝" in result
+
+    def test_127_loopback_rejected(self):
+        handler = _get_web_fetch_handler()
+        result = asyncio.run(handler({"url": "http://127.0.0.1:8080/admin"}))
+        assert "访问被拒绝" in result
+
+    def test_127_subdomain_rejected(self):
+        handler = _get_web_fetch_handler()
+        result = asyncio.run(handler({"url": "http://127.0.0.1:6379/"}))
+        assert "访问被拒绝" in result
+
+    def test_192_168_private_rejected(self):
+        handler = _get_web_fetch_handler()
+        result = asyncio.run(handler({"url": "http://192.168.1.1/"}))
+        assert "访问被拒绝" in result
+
+    def test_10_private_rejected(self):
+        handler = _get_web_fetch_handler()
+        result = asyncio.run(handler({"url": "http://10.0.0.1/"}))
+        assert "访问被拒绝" in result
+
+    def test_169_254_metadata_rejected(self):
+        """AWS/阿里云元数据服务 — 最危险的 SSRF 目标。"""
+        handler = _get_web_fetch_handler()
+        result = asyncio.run(handler({
+            "url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+        }))
+        assert "访问被拒绝" in result
+
+    def test_172_16_private_rejected(self):
+        handler = _get_web_fetch_handler()
+        result = asyncio.run(handler({"url": "http://172.16.0.1/"}))
+        assert "访问被拒绝" in result
+
+    def test_172_32_public_allowed(self):
+        """172.32.x.x 是公网地址，不应被拒绝。"""
+        handler = _get_web_fetch_handler()
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = "<html><body><article><p>公网内容，确保足够长度通过检查。</p></article></body></html>"
+        fake_resp.headers = {"content-type": "text/html"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **kw): return fake_resp
+
+        # 172.32.x.x 不在 172.16-31 私网范围内，不应被拒绝
+        # 但 DNS 解析 172.32.0.1 可能不响应，这里 mock socket
+        with patch("socket.getaddrinfo") as mock_dns:
+            mock_dns.side_effect = OSError("no DNS")
+            with patch("httpx.AsyncClient", FakeClient):
+                result = asyncio.run(handler({"url": "http://172.32.0.1/"}))
+
+        assert "访问被拒绝" not in result
+
+    def test_public_domain_allowed(self):
+        """公网域名不应被拒绝。"""
+        handler = _get_web_fetch_handler()
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.text = "<html><body><article><p>公网内容，确保足够长度通过检查。</p></article></body></html>"
+        fake_resp.headers = {"content-type": "text/html"}
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def get(self, *a, **kw): return fake_resp
+
+        with patch("httpx.AsyncClient", FakeClient):
+            result = asyncio.run(handler({"url": "https://www.example.com/page"}))
+
+        assert "访问被拒绝" not in result
+
+
+# ============================================================
 # 5. JS 渲染页面检测
 # ============================================================
 class TestJsRenderedPage:
