@@ -55,7 +55,7 @@ class RoleStore(BaseSQLiteStore):
         """Close the database connection."""
         if getattr(self, "_closed", False):
             return
-        with self._lock:
+        with self._write_lock:
             try:
                 if self._conn:
                     self._conn.close()
@@ -71,7 +71,7 @@ class RoleStore(BaseSQLiteStore):
                icon: str = "🤖", color: str = "#6750A4") -> Dict[str, Any]:
         """创建角色，返回完整角色字典。"""
         now = time.time()
-        with self._lock:
+        with self._write_lock:
             cur = self._conn.execute(
                 """INSERT INTO roles (name, description, system_prompt_override, icon, color,
                                       is_active, created_at, updated_at)
@@ -83,14 +83,14 @@ class RoleStore(BaseSQLiteStore):
         return self.get(role_id)  # type: ignore[return-value]
 
     def get(self, role_id: int) -> Optional[Dict[str, Any]]:
-        with self._lock:
+        with self._write_lock:
             row = self._conn.execute(
                 "SELECT * FROM roles WHERE id = ?", (role_id,)
             ).fetchone()
         return dict(row) if row else None
 
     def list_all(self) -> List[Dict[str, Any]]:
-        with self._lock:
+        with self._write_lock:
             rows = self._conn.execute(
                 "SELECT * FROM roles ORDER BY is_active DESC, updated_at DESC"
             ).fetchall()
@@ -105,7 +105,7 @@ class RoleStore(BaseSQLiteStore):
         updates["updated_at"] = time.time()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         params = list(updates.values()) + [role_id]
-        with self._lock:
+        with self._write_lock:
             self._conn.execute(
                 f"UPDATE roles SET {set_clause} WHERE id = ?", params
             )
@@ -113,7 +113,7 @@ class RoleStore(BaseSQLiteStore):
         return self.get(role_id)
 
     def delete(self, role_id: int) -> bool:
-        with self._lock:
+        with self._write_lock:
             cur = self._conn.execute("DELETE FROM roles WHERE id = ?", (role_id,))
             self._conn.commit()
             return cur.rowcount > 0
@@ -122,7 +122,7 @@ class RoleStore(BaseSQLiteStore):
 
     def activate(self, role_id: int) -> bool:
         """设为活跃角色（触发器会自动取消其他角色的活跃状态）。"""
-        with self._lock:
+        with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE roles SET is_active = 1, updated_at = ? WHERE id = ?",
                 (time.time(), role_id),
@@ -132,13 +132,13 @@ class RoleStore(BaseSQLiteStore):
 
     def deactivate_all(self) -> None:
         """取消所有活跃角色（回到默认 One-Agent 人格）。"""
-        with self._lock:
+        with self._write_lock:
             self._conn.execute("UPDATE roles SET is_active = 0")
             self._conn.commit()
 
     def get_active(self) -> Optional[Dict[str, Any]]:
         """获取当前活跃角色，无则返回 None。"""
-        with self._lock:
+        with self._write_lock:
             row = self._conn.execute(
                 "SELECT * FROM roles WHERE is_active = 1 LIMIT 1"
             ).fetchone()
