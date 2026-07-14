@@ -29,6 +29,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from core.db import create_sqlite_connection
+
 logger = logging.getLogger(__name__)
 
 
@@ -289,8 +291,7 @@ class DataExporter:
 
         conn = None
         try:
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
+            conn = create_sqlite_connection(str(db_path))
 
             # Get sessions
             cur = conn.execute(
@@ -325,8 +326,7 @@ class DataExporter:
 
         conn = None
         try:
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
+            conn = create_sqlite_connection(str(db_path))
 
             cur = conn.execute(
                 "SELECT text, created_at FROM embeddings ORDER BY created_at DESC LIMIT 5000"
@@ -359,8 +359,7 @@ class DataExporter:
 
         conn = None
         try:
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
+            conn = create_sqlite_connection(str(db_path))
 
             # Get entities
             cur = conn.execute("SELECT name, entity_type, created_at FROM entities LIMIT 5000")
@@ -508,7 +507,7 @@ class DataImporter:
         count = 0
         conn = None
         try:
-            conn = sqlite3.connect(str(db_path))
+            conn = create_sqlite_connection(str(db_path))
             for session in data["sessions"]:
                 if merge:
                     conn.execute(
@@ -546,7 +545,7 @@ class DataImporter:
         count = 0
         conn = None
         try:
-            conn = sqlite3.connect(str(db_path))
+            conn = create_sqlite_connection(str(db_path))
             for entry in data["entries"]:
                 conn.execute(
                     "INSERT OR IGNORE INTO embeddings(text, created_at) VALUES (?, ?)",
@@ -574,7 +573,7 @@ class DataImporter:
         count = 0
         conn = None
         try:
-            conn = sqlite3.connect(str(db_path))
+            conn = create_sqlite_connection(str(db_path))
             for entity in data["entities"]:
                 conn.execute(
                     "INSERT OR IGNORE INTO entities(name, entity_type, created_at) VALUES (?, ?, ?)",

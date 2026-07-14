@@ -65,34 +65,15 @@ def _escape_fts5_query(query: str) -> str:
 
 
 # ---------- tier 2: long-term memory (cross-session FTS) ------------------
-class LongTermMemory:
+class LongTermMemory(BaseSQLiteStore):
     """FTS5-backed store with pagination and weight decay."""
 
     def __init__(self, path: str, decay_enabled: bool = True, decay_factor: float = 0.95) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._path = path
-        # Enable WAL so concurrent readers (e.g. /api/memory/page) don't
-        # block writers from the event-bus turn handler.
-        # Use default isolation_level (deferred) — autocommit mode
-        # (isolation_level=None) mixed with manual BEGIN IMMEDIATE caused
-        # transaction state inconsistency (P0-5 fix).
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        try:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            # Set busy timeout to wait up to 5 seconds for locks
-            self._conn.execute("PRAGMA busy_timeout=5000")
-        except sqlite3.DatabaseError:
-            pass
+        super().__init__(path)
         self._decay_enabled = decay_enabled
         self._decay_factor = decay_factor
-        # Write lock — serializes write operations across threads to
-        # prevent "database is locked" errors when multiple asyncio
-        # tasks (via asyncio.to_thread) access this connection.
-        self._write_lock = threading.RLock()
-        self._init_schema()
 
-    def _init_schema(self) -> None:
+    def _init_db(self) -> None:
         c = self._conn.cursor()
         try:
             c.execute(

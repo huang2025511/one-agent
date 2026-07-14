@@ -12,56 +12,44 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-import threading
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .base_store import BaseSQLiteStore
 
 logger = logging.getLogger(__name__)
 
 
-class RoleStore:
+class RoleStore(BaseSQLiteStore):
     """SQLite-backed role storage with CRUD + active role tracking."""
 
     def __init__(self, path: str) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._path = path
-        self._lock = threading.Lock()
-        self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        try:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-        except sqlite3.OperationalError:
-            pass  # WAL may not be available on all platforms
-        self._init_tables()
+        super().__init__(path)
 
-    def _init_tables(self) -> None:
-        with self._lock:
-            self._conn.execute("""
-                CREATE TABLE IF NOT EXISTS roles (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name        TEXT NOT NULL UNIQUE,
-                    description TEXT NOT NULL DEFAULT '',
-                    system_prompt_override TEXT NOT NULL DEFAULT '',
-                    icon        TEXT NOT NULL DEFAULT '🤖',
-                    color       TEXT NOT NULL DEFAULT '#6750A4',
-                    is_active   INTEGER NOT NULL DEFAULT 0,
-                    created_at  REAL NOT NULL,
-                    updated_at  REAL NOT NULL
-                )
-            """)
-            # 确保同一时刻只有一个活跃角色
-            self._conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS only_one_active_role
-                AFTER UPDATE OF is_active ON roles
-                WHEN NEW.is_active = 1
-                BEGIN
-                    UPDATE roles SET is_active = 0 WHERE id != NEW.id;
-                END
-            """)
-            self._conn.commit()
+    def _init_db(self) -> None:
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS roles (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                system_prompt_override TEXT NOT NULL DEFAULT '',
+                icon        TEXT NOT NULL DEFAULT '🤖',
+                color       TEXT NOT NULL DEFAULT '#6750A4',
+                is_active   INTEGER NOT NULL DEFAULT 0,
+                created_at  REAL NOT NULL,
+                updated_at  REAL NOT NULL
+            )
+        """)
+        # 确保同一时刻只有一个活跃角色
+        self._conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS only_one_active_role
+            AFTER UPDATE OF is_active ON roles
+            WHEN NEW.is_active = 1
+            BEGIN
+                UPDATE roles SET is_active = 0 WHERE id != NEW.id;
+            END
+        """)
+        self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

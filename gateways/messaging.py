@@ -178,6 +178,9 @@ class TelegramGateway(BaseMessagingGateway):
         if not self._client or not self._token:
             return
         offset = 0
+        # Maintain strong references to spawned tasks to prevent GC
+        if not hasattr(self, "_loop_tasks"):
+            self._loop_tasks: set = set()
         while True:
             try:
                 r = await self._client.get(
@@ -217,12 +220,14 @@ class TelegramGateway(BaseMessagingGateway):
                     })
                 # Spawn a background task to wait for the reply and send it,
                 # so the poll loop can continue processing other messages.
-                self._spawn(
+                task = self._spawn(
                     self._wait_and_reply,
                     msg_key=msg_key,
                     chat_id=chat_id,
                     send_fn=self._send,
                 )
+                self._loop_tasks.add(task)
+                task.add_done_callback(lambda t: self._loop_tasks.discard(t))
 
     async def _send(self, chat_id: int, text: str) -> None:
         if not self._client or not self._token:

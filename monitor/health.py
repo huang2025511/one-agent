@@ -22,6 +22,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.db import create_sqlite_connection
+
 logger = logging.getLogger(__name__)
 
 
@@ -135,7 +137,7 @@ def _check_database(db_path: str = "data/memory/sessions.db") -> ComponentCheck:
                 message=f"Database not found: {db_path}",
             )
 
-        conn = sqlite3.connect(db_path, timeout=1)
+        conn = create_sqlite_connection(db_path, busy_timeout_ms=1000)
         cur = conn.execute("SELECT COUNT(*) FROM sessions")
         count = cur.fetchone()[0]
         conn.close()
@@ -165,13 +167,13 @@ def _check_memory() -> ComponentCheck:
         emb_count = 0
 
         if kg_path.exists():
-            conn = sqlite3.connect(str(kg_path), timeout=1)
+            conn = create_sqlite_connection(str(kg_path), busy_timeout_ms=1000)
             cur = conn.execute("SELECT COUNT(*) FROM entities")
             kg_count = cur.fetchone()[0]
             conn.close()
 
         if emb_path.exists():
-            conn = sqlite3.connect(str(emb_path), timeout=1)
+            conn = create_sqlite_connection(str(emb_path), busy_timeout_ms=1000)
             cur = conn.execute("SELECT COUNT(*) FROM embeddings")
             emb_count = cur.fetchone()[0]
             conn.close()

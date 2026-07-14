@@ -6,6 +6,7 @@ agent:
   log_level: WARNING
   timezone: Asia/Shanghai
   language: en
+  show_suggestions: true
 llm:
   primary_provider: sensenova
   primary_model: sensenova/deepseek-v4-flash
@@ -68,8 +69,53 @@ gateways:
     allowed_users: []
     reply_prefix: ''
     hot_reload: false
-execution: {}
-scheduler: {}
+  telegram:
+    enabled: false
+    bot_token: ''
+    allowed_users: []
+  wecom:
+    enabled: false
+    corp_id: ''
+    agent_id: ''
+    secret: ''
+  dingtalk:
+    enabled: false
+    app_key: ''
+    app_secret: ''
+  feishu:
+    enabled: false
+    app_id: ''
+    app_secret: ''
+  discord:
+    enabled: false
+    bot_token: ''
+  slack:
+    enabled: false
+    bot_token: ''
+    signing_secret: ''
+  cli:
+    prompt: '> '
+  web:
+    enabled: false
+execution:
+  local_shell:
+    enabled: false
+    default_timeout: 60
+    workdir: ./data/executions
+    allowed_commands: []
+  docker:
+    enabled: false
+    image: python:3.11-slim
+    timeout: 120
+    memory_limit_mb: 512
+    cpu_quota: 50000
+  browser:
+    enabled: false
+    timeout: 30
+scheduler:
+  enabled: true
+  user_jobs_file: ''
+  builtin_jobs: []
 security:
   system_executor_password: ''
   password_cache_minutes: 15
@@ -87,9 +133,16 @@ rest:
   max_chat_bytes: 65536
   cors_origins:
   - '*'
-monitoring: {}
+monitoring:
+  enabled: true
+  port: 18793
 multimodal: {}
 marketplace:
   enabled: true
   registry_url: ''
-llm_cache: {}
+llm_cache:
+  enabled: true
+  ttl_seconds: 3600
+  max_size: 500
+api:
+  key: ''

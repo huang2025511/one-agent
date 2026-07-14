@@ -15,17 +15,16 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-import threading
 import time
 from collections import Counter
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from .base_store import BaseSQLiteStore
 
 logger = logging.getLogger(__name__)
 
 
-class UserProfileStore:
+class UserProfileStore(BaseSQLiteStore):
     """SQLite-backed user profile store with auto-learning.
 
     Schema:
@@ -36,23 +35,14 @@ class UserProfileStore:
     """
 
     def __init__(self, db_path: str = "data/memory/user_profile.db") -> None:
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._path = db_path
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._write_lock = threading.RLock()
-        self._init_schema()
-
+        super().__init__(db_path)
         # In-memory cache for fast access
         self._cache: Dict[str, Any] = {}
         self._load_cache()
 
-    def _init_schema(self) -> None:
+    def _init_db(self) -> None:
         """Create tables if they don't exist."""
-        with self._write_lock:
-            self._conn.executescript("""
+        self._conn.executescript("""
                 CREATE TABLE IF NOT EXISTS preferences (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
@@ -82,8 +72,8 @@ class UserProfileStore:
 
                 CREATE INDEX IF NOT EXISTS idx_skill_usage_count ON skill_usage(count DESC);
                 CREATE INDEX IF NOT EXISTS idx_topics_count ON topics(count DESC);
-            """)
-            self._conn.commit()
+        """)
+        self._conn.commit()
 
     def _load_cache(self) -> None:
         """Load preferences into memory cache."""
