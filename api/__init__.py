@@ -560,6 +560,114 @@ class RESTAPIGateway(Plugin):
                 logger.error("Failed to reload config: %s", e, exc_info=True)
                 raise HTTPException(500, f"Config reload failed: {str(e)}")
 
+        @app.put("/api/config")
+        async def update_config(
+            body: Dict[str, Any],
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """Update configuration values and save to file.
+
+            Accepts a partial config dict (only the fields to update),
+            deep-merges them into the current config, writes to the
+            config file, and triggers a hot reload.
+
+            Sensitive fields (api_keys, passwords) are validated but
+            not returned in the response.
+            """
+            auth(x_api_key)
+
+            if _ctx is None:
+                raise HTTPException(503, "Context not initialized")
+
+            try:
+                import copy
+                import os
+
+                from one_agent import load_config
+
+                config_path = os.environ.get(
+                    "ONE_AGENT_CONFIG",
+                    str(Path(__file__).resolve().parent.parent / "config" / "default_config.yaml"),
+                )
+
+                # Load raw config from file (not runtime config, which may
+                # have masked API keys) so we can safely merge and save.
+                raw_config = load_config(config_path)
+                config_dict = (
+                    raw_config.model_dump()
+                    if hasattr(raw_config, "model_dump")
+                    else copy.deepcopy(raw_config)
+                )
+
+                # Deep merge the incoming updates
+                def _deep_merge(target: dict, source: dict) -> dict:
+                    for key, value in source.items():
+                        if (
+                            key in target
+                            and isinstance(target[key], dict)
+                            and isinstance(value, dict)
+                        ):
+                            _deep_merge(target[key], value)
+                        else:
+                            target[key] = value
+                    return target
+
+                updates = body.get("config") or body  # accept both {config:{...}} and direct dict
+                _deep_merge(config_dict, updates)
+
+                # Validate through Pydantic if available
+                if hasattr(raw_config, "model_validate"):
+                    try:
+                        raw_config.model_validate(config_dict)
+                    except Exception as e:
+                        raise HTTPException(400, f"Config validation failed: {e}")
+
+                # Save to file
+                import yaml
+
+                with open(config_path, "w", encoding="utf-8") as f:
+                    yaml.dump(
+                        config_dict,
+                        f,
+                        default_flow_style=False,
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+
+                # Hot reload runtime config
+                new_config = load_config(config_path)
+                _ctx.config = (
+                    new_config.model_dump()
+                    if hasattr(new_config, "model_dump")
+                    else new_config
+                )
+
+                # Update API-specific settings
+                if hasattr(self, "_setup_from_config"):
+                    self._setup_from_config(new_config)
+
+                logger.info("Configuration updated and saved to %s", config_path)
+
+                # Return sanitized config
+                sanitized = copy.deepcopy(config_dict)
+                if "llm" in sanitized and "api_keys" in sanitized["llm"]:
+                    sanitized["llm"]["api_keys"] = {
+                        k: "***" if v else None
+                        for k, v in sanitized["llm"]["api_keys"].items()
+                    }
+
+                return {
+                    "status": "ok",
+                    "message": "Configuration updated",
+                    "config": sanitized,
+                    "timestamp": time.time(),
+                }
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error("Failed to update config: %s", e, exc_info=True)
+                raise HTTPException(500, f"Config update failed: {str(e)}")
+
         @app.get("/api/config")
         async def get_config(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """Get current runtime configuration (sanitized)."""

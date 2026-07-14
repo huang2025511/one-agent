@@ -3,10 +3,9 @@ agent:
   description: One-Agent - 自然语言智能体
   version: 2.0.0
   data_dir: ./data
-  log_level: INFO
+  log_level: DEBUG
   timezone: Asia/Shanghai
   language: zh-CN
-  show_suggestions: true
 llm:
   primary_provider: sensenova
   primary_model: sensenova/deepseek-v4-flash
@@ -23,15 +22,15 @@ llm:
   default_temperature: 0.3
   default_max_tokens: 2048
   timeout: 30
-  retries: 3                 # 429 限流时需要多次重试（带退避）
+  retries: 3
   cost_tracking:
     enabled: false
     daily_budget: 10.0
     monthly_budget: 100.0
     db_path: data/memory/costs.db
   semantic_cache:
-    enabled: true              # V69: 语义缓存（基于 embedding 余弦相似度），命中"意思相近但措辞不同"的查询
-    threshold: 0.92            # 余弦相似度命中阈值（0~1，越高越严格；低于此值视为不匹配）
+    enabled: true
+    threshold: 0.92
 router:
   enabled: true
   task_complexity_thresholds:
@@ -145,5 +144,3 @@ llm_cache:
   enabled: true
   ttl_seconds: 3600
   max_size: 500
-api:
-  key: ''

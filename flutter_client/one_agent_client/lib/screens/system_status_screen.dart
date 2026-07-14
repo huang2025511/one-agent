@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/system_provider.dart';
 import '../providers/settings_provider.dart';
+import 'settings_screen.dart';
 
 /// 系统状态页面
 class SystemStatusScreen extends ConsumerWidget {
@@ -21,6 +22,15 @@ class SystemStatusScreen extends ConsumerWidget {
             icon: const Icon(Icons.refresh),
             tooltip: '刷新',
             onPressed: () => ref.read(systemProvider.notifier).loadAll(),
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: '设置',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
+            },
           ),
         ],
       ),

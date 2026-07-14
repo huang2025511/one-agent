@@ -66,6 +66,16 @@ class SystemApi {
     }
   }
 
+  /// 更新配置
+  static Future<Map<String, dynamic>?> updateConfig(Map<String, dynamic> config) async {
+    try {
+      final resp = await ApiClient.dio.put('/api/config', data: {'config': config});
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 获取审计日志
   static Future<List<Map<String, dynamic>>> getAuditLogs({int limit = 50}) async {
     try {
