@@ -23,6 +23,7 @@ from core.context import TurnContext
 from core.events import Event
 from core.plugin import Plugin
 
+from .base_store import BaseSQLiteStore  # noqa: F401
 from .embeddings import EmbeddingStore  # noqa: F401
 from .knowledge_graph import KnowledgeGraph  # noqa: F401
 from .role_store import RoleStore  # noqa: F401
@@ -31,6 +32,7 @@ from .session_store import SessionStore  # noqa: F401
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "BaseSQLiteStore",
     "MemoryPlugin",
     "LongTermMemory",
     "ProceduralMemory",
@@ -550,6 +552,11 @@ class MemoryPlugin(Plugin):
             self._long.search, turn.input_text, limit=self._max_results
         )
 
+        try:
+            self.bus.publish({"type": "memory_searched", "query": turn.input_text[:100], "hits": len(fts_hits)})
+        except Exception:
+            pass
+
         # Hybrid search: combine FTS + embedding semantic search
         if self._hybrid_search and self._embeddings:
             try:
@@ -684,6 +691,11 @@ class MemoryPlugin(Plugin):
                     tags="interaction",
                     weight=imp_weight,
                 )
+                if memory_id is not None:
+                    try:
+                        self.bus.publish({"type": "memory_added", "content": content[:100]})
+                    except Exception:
+                        pass
                 # Store embedding vector for semantic search — this was missing,
                 # causing hybrid search to degenerate to FTS-only.
                 # Use the rowid returned by add() instead of a separate

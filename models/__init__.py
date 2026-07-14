@@ -189,6 +189,10 @@ class LLMProvider(RecommendationMixin, Plugin):
         # If setup() can't find an event loop, defer the first auto-classify
         # to the next chat_completion() / get_catalog() call.
         self._pending_auto_classify: bool = False
+        # Catalog-based tier enhancement: ModelCatalog instance for the
+        # primary provider, populated during setup() so the router can
+        # query per-model tier info directly (not just MODEL_TIERS).
+        self._catalog: Optional[Any] = None
         # Built-in registry of well-known providers.  The resolver
         # module ships a longer list (40+ aliases) that we merge in at
         # runtime so the user only needs to give a friendly name like
@@ -403,6 +407,34 @@ class LLMProvider(RecommendationMixin, Plugin):
                         await self._try_endpoint_fallback(provider)
             except (httpx.RequestError, httpx.TimeoutException) as exc:
                 logger.debug("endpoint check probe failed: %s", exc)
+
+        # ── Catalog-based tier enhancement ──────────────────────────
+        # Lightweight integration: try to initialize a ModelCatalog for
+        # the primary provider so the router can query per-model tier
+        # info directly (richer than static MODEL_TIERS).  If this
+        # fails — no base URL, no key, network error — we silently
+        # continue with the existing static tiers.
+        try:
+            from .catalog import ModelCatalog
+            primary_provider = self._infer_primary_provider()
+            base = self._provider_base_urls.get(primary_provider)
+            api_key = self._api_keys.get(primary_provider)
+            if base and api_key and "${" not in (api_key or ""):
+                cat = ModelCatalog(
+                    base_url=base, api_key=api_key, provider=primary_provider,
+                )
+                await cat.refresh()
+                n = len(cat.all())
+                if n > 0:
+                    self._catalog = cat
+                    logger.info(
+                        "ModelCatalog initialized for %s (%d models)",
+                        primary_provider, n,
+                    )
+                else:
+                    await cat.aclose()
+        except Exception:
+            self._catalog = None
 
     def model_supports_tools(self, model: str) -> bool:
         """Check whether a model likely supports tool/function calling.
@@ -646,6 +678,31 @@ class LLMProvider(RecommendationMixin, Plugin):
                     except (RuntimeError, AttributeError):
                         pass
         return ModelCatalog(base_url=base, api_key=api_key, provider=prov)
+
+    def get_catalog_tier(self, model: str) -> Optional[str]:
+        """Return the catalog-classified tier for *model*, or None.
+
+        Uses the ModelCatalog that was populated during setup().  This
+        is richer than the static MODEL_TIERS lookup because it runs
+        ``auto_classify_tier()`` on live provider metadata (context
+        length, pricing, capabilities, name hints).
+
+        Returns None when the catalog is unavailable (not yet loaded,
+        network error during setup, etc.) — callers must fall back to
+        the static MODEL_TIERS in that case.
+        """
+        cat = getattr(self, "_catalog", None)
+        if cat is None:
+            return None
+        # Match the bare model name (strip provider prefix if present)
+        bare = model.split("/", 1)[1] if "/" in model else model
+        info = cat.get(bare)
+        if info is None:
+            # Try with full model id (provider/model format)
+            info = cat.get(model)
+        if info is None:
+            return None
+        return info.tier or None
 
     def _infer_primary_provider(self) -> str:
         # 优先使用 config 显式声明的 primary_provider。

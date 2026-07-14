@@ -695,6 +695,7 @@ class RESTAPIGateway(Plugin):
                 "messages": {"total": total_messages},
                 "knowledge_graph": kg_data,
                 "skills": {"installed": len(_skills.all_skill_ids()) if _skills else 0},
+                "counters": _ctx.counters if _ctx else {},
             }
 
         @app.get("/api/metrics")

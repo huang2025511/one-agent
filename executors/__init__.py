@@ -210,6 +210,10 @@ class ShellExecutor(BaseExecutor):
             # Publish event so gateways (CLI/Web) can prompt the user
             self.publish("approval_needed", request=req.to_dict())
             approved = await req.wait(timeout=120.0)
+            try:
+                self.publish("approval_resolved", request=req.to_dict(), approved=approved)
+            except Exception:
+                pass
             if not approved:
                 result = {
                     "stdout": "",
@@ -354,6 +358,10 @@ class DockerExecutor(BaseExecutor):
             )
             self.publish("approval_needed", request=req.to_dict())
             approved = await req.wait(timeout=120.0)
+            try:
+                self.publish("approval_resolved", request=req.to_dict(), approved=approved)
+            except Exception:
+                pass
             if not approved:
                 return _to_executor_result({
                     "stdout": "",

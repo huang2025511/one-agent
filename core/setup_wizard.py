@@ -279,12 +279,17 @@ security:
 # ============================================================
 #  Auto-detect and trigger
 # ============================================================
-def setup_if_needed() -> bool:
+def setup_if_needed(force: bool = False) -> bool:
     """Entry point: auto-detect missing config and run setup if needed.
+
+    Args:
+        force: If True, skip the "already configured" check and always
+               run the setup wizard.  Useful for re-triggering setup
+               via environment variable or slash command.
 
     Returns True if setup was run (agent should restart), False otherwise.
     """
-    if _has_any_api_key():
+    if not force and _has_any_api_key():
         return False
 
     print("\n  ⚠  One-Agent needs an LLM API key to function.")

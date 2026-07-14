@@ -543,6 +543,8 @@ class Coordinator(Plugin):
         "branch": "_branch", "分支": "_branch", "fork": "_branch",
         "branch_switch": "_branch_switch", "切换分支": "_branch_switch",
         "branch_list": "_branch_list", "分支列表": "_branch_list",
+        # ---------- 设置向导 ----------
+        "setup": "_setup", "设置向导": "_setup", "setup-wizard": "_setup",
     }
 
     async def _maybe_direct_skill_dispatch(self, turn: TurnContext) -> bool:
@@ -590,6 +592,10 @@ class Coordinator(Plugin):
                 except Exception as exc:
                     logger.exception("coordinator: 自然语言直通 model_manage 失败: %s", exc)
                     turn.record_failure(f"模型拉取失败: {exc}")
+                    try:
+                        self.publish("turn_failed", turn=turn, error=f"模型拉取失败: {exc}")
+                    except Exception:
+                        pass
                 self.publish("turn_completed", turn=turn)
                 return True
 
@@ -608,6 +614,10 @@ class Coordinator(Plugin):
         except Exception as exc:
             logger.exception("coordinator: 自然语言直通 %s 失败: %s", skill_id, exc)
             turn.record_failure(f"{skill_id} 执行失败: {exc}")
+            try:
+                self.publish("turn_failed", turn=turn, error=f"{skill_id} 执行失败: {exc}")
+            except Exception:
+                pass
         self.publish("turn_completed", turn=turn)
         return True
 
@@ -960,6 +970,10 @@ class Coordinator(Plugin):
             await self._handle_branch_list(turn, args_text)
             self.publish("turn_completed", turn=turn)
             return True
+        if skill_id == "_setup":
+            await self._handle_setup(turn)
+            self.publish("turn_completed", turn=turn)
+            return True
 
         # Dispatch to skill
         if self._skills is None:
@@ -1016,6 +1030,11 @@ class Coordinator(Plugin):
         if turn is None or turn.result is not None or turn.error is not None:
             return
 
+        try:
+            self.publish("turn_start", turn=turn, session_id=turn.session_id)
+        except Exception:
+            pass
+
         # Handle slash commands first
         try:
             if turn.input_text and turn.input_text.strip().startswith("/"):
@@ -1024,6 +1043,10 @@ class Coordinator(Plugin):
         except Exception as exc:  # noqa: BLE001
             logger.error("slash command handler failed: %s", exc, exc_info=True)
             turn.record_failure(str(exc))
+            try:
+                self.publish("turn_failed", turn=turn, error=str(exc))
+            except Exception:
+                pass
             self.publish("turn_completed", turn=turn)
             return
 
@@ -1037,6 +1060,10 @@ class Coordinator(Plugin):
         except Exception as exc:  # noqa: BLE001
             logger.error("direct skill dispatch failed: %s", exc, exc_info=True)
             turn.record_failure(str(exc))
+            try:
+                self.publish("turn_failed", turn=turn, error=str(exc))
+            except Exception:
+                pass
             self.publish("turn_completed", turn=turn)
             return
 
@@ -1049,6 +1076,10 @@ class Coordinator(Plugin):
         except Exception as exc:  # noqa: BLE001
             logger.error("auto special task failed: %s", exc, exc_info=True)
             turn.record_failure(str(exc))
+            try:
+                self.publish("turn_failed", turn=turn, error=str(exc))
+            except Exception:
+                pass
             self.publish("turn_completed", turn=turn)
             return
 
@@ -1063,6 +1094,11 @@ class Coordinator(Plugin):
                 # Persist language preference to config (offload disk I/O)
                 await asyncio.to_thread(self._persist_language, detected_lang)
 
+        # Increment turn counters for self-evolution statistics
+        if self.ctx and hasattr(self.ctx, 'counters'):
+            self.ctx.counters['turns_processed'] = self.ctx.counters.get('turns_processed', 0) + 1
+            self.ctx.counters['tokens_used'] = self.ctx.counters.get('tokens_used', 0) + (turn.tokens_used or 0)
+
         # avoid double-processing — if something already published a reply,
         # skip this turn entirely
         try:
@@ -1070,6 +1106,10 @@ class Coordinator(Plugin):
         except Exception as exc:  # noqa: BLE001
             logger.error("coordinator failed: %s", exc, exc_info=True)
             turn.record_failure(str(exc))
+            try:
+                self.publish("turn_failed", turn=turn, error=str(exc))
+            except Exception:
+                pass
             self.publish("turn_completed", turn=turn)
 
     async def _on_external(self, event: Event) -> None:
@@ -1125,6 +1165,10 @@ class Coordinator(Plugin):
             # Mark the turn so _on_routed skips it if it hasn't started yet.
             if turn.result is None and turn.error is None:
                 turn.record_failure("turn completion timeout")
+                try:
+                    self.publish("turn_failed", turn=turn, error="turn completion timeout")
+                except Exception:
+                    pass
                 # 通知网关 turn 已失败（带 error），让用户收到超时提示而非一直等。
                 # 之前只 record_failure 不 publish，导致网关永远收不到
                 # turn_completed，心跳不停、用户干等。
@@ -1158,6 +1202,10 @@ class Coordinator(Plugin):
 
         if self._llm is None:
             turn.record_failure("LLM provider not bound")
+            try:
+                self.publish("turn_failed", turn=turn, error="LLM provider not bound")
+            except Exception:
+                pass
             self.publish("turn_completed", turn=turn)
             return
 
@@ -5196,6 +5244,10 @@ class Coordinator(Plugin):
             logger.info("rewrite_turn: regenerated response (attempt %d, temp=%.1f)", count + 1, alt_temp)
         except Exception as exc:
             turn.record_failure(f"regeneration failed: {exc}")
+            try:
+                self.publish("turn_failed", turn=turn, error=f"regeneration failed: {exc}")
+            except Exception:
+                pass
             turn.result = f"重新生成失败: {exc}" if zh else f"Regeneration failed: {exc}"
 
     # --------------------------------------------------- Round 8: Auto deep research
@@ -5321,6 +5373,10 @@ class Coordinator(Plugin):
                        report.duration_seconds, len(report.sources))
         except Exception as exc:
             turn.record_failure(f"deep research failed: {exc}")
+            try:
+                self.publish("turn_failed", turn=turn, error=f"deep research failed: {exc}")
+            except Exception:
+                pass
             turn.result = f"深度研究失败: {exc}" if zh else f"Deep research failed: {exc}"
 
     # --------------------------------------------------- Gap 4: Batch processing handler
@@ -5395,6 +5451,10 @@ class Coordinator(Plugin):
             logger.info("batch: %d/%d succeeded", result.succeeded, result.total)
         except Exception as exc:
             turn.record_failure(f"batch processing failed: {exc}")
+            try:
+                self.publish("turn_failed", turn=turn, error=f"batch processing failed: {exc}")
+            except Exception:
+                pass
             turn.result = f"批量处理失败: {exc}" if zh else f"Batch processing failed: {exc}"
 
     # --------------------------------------------------- Gap 8: Model comparison handler
@@ -5456,6 +5516,10 @@ class Coordinator(Plugin):
             logger.info("model_compare: %s vs %s → %s", model_a, model_b, result.winner)
         except Exception as exc:
             turn.record_failure(f"model comparison failed: {exc}")
+            try:
+                self.publish("turn_failed", turn=turn, error=f"model comparison failed: {exc}")
+            except Exception:
+                pass
             turn.result = f"模型对比失败: {exc}" if zh else f"Model comparison failed: {exc}"
 
     # --------------------------------------------------- Gap 1: Eval handler
@@ -5509,6 +5573,10 @@ class Coordinator(Plugin):
             logger.info("eval: overall=%.1f", eval_result.overall)
         except Exception as exc:
             turn.record_failure(f"eval failed: {exc}")
+            try:
+                self.publish("turn_failed", turn=turn, error=f"eval failed: {exc}")
+            except Exception:
+                pass
             turn.result = f"评估失败: {exc}" if zh else f"Evaluation failed: {exc}"
 
     # --------------------------------------------------- Gap 5: Multi-turn proactive planning
@@ -5612,6 +5680,28 @@ class Coordinator(Plugin):
 
     async def _handle_branch_list(self, turn: TurnContext, args_text: str = "") -> None:
         await handle_branch_list(self, turn, args_text)
+
+    async def _handle_setup(self, turn: TurnContext) -> None:
+        """Re-trigger the setup wizard via /setup slash command."""
+        try:
+            from core.setup_wizard import setup_if_needed
+            # Force re-run even if keys are already configured
+            _ran = setup_if_needed(force=True)
+            if _ran:
+                turn.result = (
+                    "设置向导已完成。请重启 One-Agent 使新配置生效。\n"
+                    "Setup wizard completed. Please restart One-Agent to apply changes."
+                )
+            else:
+                turn.result = (
+                    "设置向导已取消或无法在非交互环境中运行。\n"
+                    "提示：设置 ONE_AGENT_SETUP=1 环境变量后重启也可触发设置向导。\n"
+                    "Setup wizard skipped (non-interactive or cancelled).\n"
+                    "Tip: Set ONE_AGENT_SETUP=1 and restart to force the wizard."
+                )
+        except Exception as exc:
+            logger.exception("_handle_setup failed: %s", exc)
+            turn.result = f"[设置向导出错: {exc}]"
 
     # --------------------------------------------------- Branch auto-tracking (Round 7)
     def _record_conversation_branch(self, turn: TurnContext) -> None:

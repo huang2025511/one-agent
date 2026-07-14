@@ -450,6 +450,7 @@ class OneAgentApp:
         self.ctx.marketplace = Marketplace(marketplace_dir)
 
         # Subscribe to turn_completed so every turn is auto-persisted
+        _seen_sessions = set()
         async def _persist_turn(event):
             from core.events import Event as _Event
             turn = event.get("turn") if isinstance(event, _Event) else None
@@ -459,6 +460,10 @@ class OneAgentApp:
             _store = self.ctx.session_store
             if _store is None:
                 return
+            # Track session creation
+            is_new_session = sid not in _seen_sessions
+            if is_new_session:
+                _seen_sessions.add(sid)
             # Save user message
             _store.add_message(sid, "user", turn.input_text,
                                meta={"source": turn.source, "turn_id": turn.turn_id},
@@ -477,6 +482,13 @@ class OneAgentApp:
                                    meta={"model": turn.model or "", "turn_id": turn.turn_id,
                                          "error": True},
                                    tokens=turn.tokens_used)
+            # Publish session events
+            try:
+                if is_new_session:
+                    self.bus.publish({"type": "session_created", "session_id": sid})
+                self.bus.publish({"type": "session_updated", "session_id": sid})
+            except Exception:
+                pass
         self.bus.subscribe("turn_completed", _persist_turn)
 
         self.ctx._plugins = [
@@ -572,6 +584,12 @@ class OneAgentApp:
             self._alert_manager.set_metrics_getter(self.monitor.collect_metrics)
 
         await self._pm.start_all()
+
+        # Publish startup event
+        try:
+            self.bus.publish({"type": "startup", "timestamp": time.time()})
+        except Exception:
+            pass
 
         # 接入 webhook_trigger 到事件总线 — 关键业务事件自动触发已注册的 webhook
         # 修复审计发现的"WebhookTrigger 已写好但未启用"问题：
@@ -712,6 +730,11 @@ class OneAgentApp:
         return {"reply": reply, "session_id": session_id, "thinking": thinking_text}
 
     async def stop(self) -> None:
+        # Publish shutdown event
+        try:
+            self.bus.publish({"type": "shutdown", "timestamp": time.time()})
+        except Exception:
+            pass
         # 修复：关闭 WebhookTrigger 的 httpx 连接池, 之前 close() 定义了但无调用方
         # 导致进程退出时 keepalive 连接挂在服务端, 频繁重启场景 fd 泄漏。
         try:
@@ -806,7 +829,7 @@ async def _interactive(app: OneAgentApp) -> None:
         if intent == "settings":
             # 将设置请求路由到 settings 技能
             from skills import _process_settings_command
-            result = _process_settings_command(line, app.config)
+            result = _process_settings_command(line, app.config, bus=app.bus)
             print(result)
             continue
         if intent == "models":
@@ -918,9 +941,12 @@ async def main(interactive: bool = True) -> None:
     # ── auto-detect missing API key and run setup wizard ──
     # This runs BEFORE the agent starts, so the user sees a clean
     # guided setup instead of confusing error messages.
+    # ONE_AGENT_SETUP=1 forces re-running the wizard even if keys
+    # are already configured (e.g. to switch providers).
     try:
         from core.setup_wizard import setup_if_needed
-        _setup_ran = setup_if_needed()
+        _force_setup = os.environ.get("ONE_AGENT_SETUP", "").strip() == "1"
+        _setup_ran = setup_if_needed(force=_force_setup)
     except Exception as exc:  # noqa: BLE001
         _setup_ran = False
         logger.warning("setup wizard unavailable: %s", exc)

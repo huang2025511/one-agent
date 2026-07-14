@@ -322,6 +322,19 @@ class AlertManager(Plugin):
                     except Exception:
                         logger.exception("alert channel failed")
 
+                # Publish alert_triggered event
+                try:
+                    self.publish("alert_triggered", alert={
+                        "rule_name": alert.rule_name,
+                        "severity": alert.severity,
+                        "message": alert.message,
+                        "metric_value": alert.metric_value,
+                        "threshold": alert.threshold,
+                        "timestamp": alert.timestamp,
+                    })
+                except Exception:
+                    pass
+
     @staticmethod
     def _extract_metric(metrics: Dict[str, Any], path: str) -> Optional[float]:
         """Extract a metric value from nested dict using dot notation."""

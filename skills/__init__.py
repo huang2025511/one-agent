@@ -249,7 +249,24 @@ class SkillManager(Plugin):
         skill = self._skills.get(skill_id)
         if skill is None:
             return f"[unknown skill: {skill_id}]"
-        return await skill.run(args)
+        try:
+            result = await skill.run(args)
+            try:
+                self.bus.publish({"type": "skill_executed", "skill_id": skill_id, "status": "success"})
+            except Exception:
+                pass
+            if skill_id == "python_execute":
+                try:
+                    self.bus.publish({"type": "python_executed", "status": "success"})
+                except Exception:
+                    pass
+            return result
+        except Exception as exc:
+            try:
+                self.bus.publish({"type": "skill_failed", "skill_id": skill_id, "error": str(exc)})
+            except Exception:
+                pass
+            raise
 
     async def _on_cron(self, event: Event) -> None:
         """Handle skill_pattern_mining: re-scan skill directories for new skills."""
@@ -1103,7 +1120,7 @@ class SkillManager(Plugin):
             ctx_ref = getattr(self, "_ctx_ref", None)
             config = ctx_ref.config if ctx_ref else {}
 
-            result = _process_settings_command(input_text, config)
+            result = _process_settings_command(input_text, config, bus=self.bus)
             return result
 
         self.register(Skill(
@@ -2275,6 +2292,10 @@ class SkillManager(Plugin):
                         api_key=server_cfg.get("api_key"),
                     )
                 result = await client.call_tool(server_name, tool_name, tool_args)
+                try:
+                    self.bus.publish({"type": "mcp_tool_called", "tool": tool_name, "server": server_name})
+                except Exception:
+                    pass
                 return str(result)[:2000] if result else "[MCP 调用无返回]"
             except Exception as exc:
                 return f"[MCP call 失败: {exc}]"
@@ -2580,7 +2601,7 @@ def _parse_value(text: str, value_type: type):
     return text  # str
 
 
-def _process_settings_command(input_text: str, config: dict) -> str:
+def _process_settings_command(input_text: str, config: dict, bus=None) -> str:
     """解析自然语言设置命令，读取或修改配置。"""
 
     lower = input_text.lower()
@@ -2702,12 +2723,12 @@ def _process_settings_command(input_text: str, config: dict) -> str:
     _set_nested(config, matched_path, new_value)
 
     # 持久化到配置文件
-    _save_config(config)
+    _save_config(config, bus=bus)
 
     return f"已将 {matched_alias} 修改为 {new_value}"
 
 
-def _save_config(config: dict) -> None:
+def _save_config(config: dict, bus=None) -> None:
     """将配置写回 YAML 文件（原子写入，带文件锁）。
 
     安全修复：
@@ -2770,6 +2791,12 @@ def _save_config(config: dict) -> None:
             # Atomic rename
             os.replace(temp_path, config_path)
             temp_path = None  # 已成功 rename，无需清理
+            # Publish config_changed event
+            if bus is not None:
+                try:
+                    bus.publish({"type": "config_changed"})
+                except Exception:
+                    pass
         finally:
             if use_fcntl and lock_fd:
                 try:

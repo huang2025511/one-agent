@@ -128,6 +128,20 @@ class SmartRouter(Plugin):
                 )
         # 5) 选模型 + cap token budget
         model = self._llm.model_for_tier(tier) if self._llm else None
+        # 5.0) Catalog-based tier verification: if the catalog has richer
+        #       per-model tier info (from live provider metadata), prefer
+        #       it over the static MODEL_TIERS classification.
+        if model and self._llm:
+            catalog_tier = self._llm.get_catalog_tier(model)
+            if catalog_tier and catalog_tier != tier:
+                logger.info(
+                    "router: catalog tier override for %s: %s → %s",
+                    model, tier, catalog_tier,
+                )
+                alt_model = self._llm.model_for_tier(catalog_tier)
+                if alt_model and alt_model != model:
+                    model = alt_model
+                    tier = catalog_tier
         # 5.1) 工具支持检测：如果任务需要工具但模型不支持，自动升级 tier
         needs_tools = intent_meta.get("needs_tools", False)
         if needs_tools and model and self._llm and not self._llm.model_supports_tools(model):
