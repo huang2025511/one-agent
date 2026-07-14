@@ -204,7 +204,12 @@ def scan_output(text: str) -> SafetyReport:
 
 
 def sanitize_for_log(text: str) -> str:
-    """Sanitize text for logging (PII redaction only)."""
+    """Sanitize text for logging (PII redaction only).
+
+    未启用：本函数无业务调用方。日志脱敏实际由 ``core/log_sanitizer.py``
+    负责（独立的日志脱敏模块，覆盖更完整的敏感字段与格式）。本函数保留
+    供未来需要复用 safety 模块 PII 规则做轻量日志脱敏时使用。
+    """
     result = text
     for pattern, _pii_type, replacement in _PII_PATTERNS:
         if replacement is not None:

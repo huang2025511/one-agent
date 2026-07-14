@@ -374,6 +374,7 @@ class OneAgentApp:
             from core.webhook_trigger import get_webhook_trigger
             from core.chart_gen import get_chart_generator
             from core.conv_branch import get_branch_manager
+            from core.streaming import StreamingBuffer
 
             mgr = get_alert_manager()
             mgr.setup_default_rules()
@@ -384,6 +385,13 @@ class OneAgentApp:
             get_webhook_trigger()
             get_chart_generator()
             get_branch_manager()
+            # 预热 StreamingBuffer：触发 core/streaming.py 模块加载与
+            # 默认参数构造，避免首个流式请求时才初始化（与其它单例一致）。
+            StreamingBuffer()
+            # 预热分布式追踪单例：coordinator 关键路径已接入 span，
+            # 启动阶段同步创建，避免首个请求时才初始化。
+            from monitor.tracing import get_tracer
+            get_tracer()
             logger.debug("singletons pre-warmed at startup")
         except Exception as exc:
             logger.warning("singleton pre-warm failed (non-fatal): %s", exc)
@@ -564,6 +572,55 @@ class OneAgentApp:
             self._alert_manager.set_metrics_getter(self.monitor.collect_metrics)
 
         await self._pm.start_all()
+
+        # 接入 webhook_trigger 到事件总线 — 关键业务事件自动触发已注册的 webhook
+        # 修复审计发现的"WebhookTrigger 已写好但未启用"问题：
+        # 之前 get_webhook_trigger() 单例在 start() 中预热、close() 在 stop()
+        # 中调用，但 register()/trigger() 从未被业务代码调用，事件→HTTP webhook
+        # 链路完全断开。此处订阅关键事件并转发到 trigger_all()。
+        #
+        # 注意：coordinator 只 publish "turn_completed"（成功/失败都走它，失败时
+        # turn.error 非空）和 "user_message"；不存在 "turn_error" 事件
+        # （EventBus._ALLOWED_EVENT_TYPES 里有 turn_failed 但 coordinator
+        # 从未发布）。approval_needed 由 executors 在请求人工审批时发布。
+        try:
+            from core.webhook_trigger import get_webhook_trigger
+            webhook_trigger = get_webhook_trigger()
+
+            async def _on_turn_completed(evt):
+                """turn_completed 事件触发 webhook；turn.error 时额外触发 error 事件。"""
+                try:
+                    # Event 没有 items() 方法，通过 payload 拷贝并剔除不可序列化的
+                    # turn 对象（TurnContext 含 asyncio.Event 等无法 json.dumps）
+                    payload = dict(evt.payload)
+                    payload.pop("turn", None)
+                    turn = evt.get("turn")
+                    if turn is not None:
+                        payload["session_id"] = getattr(turn, "session_id", "")
+                        payload["source"] = getattr(turn, "source", "")
+                        payload["success"] = bool(getattr(turn, "result", None))
+                        payload["error"] = getattr(turn, "error", "") or ""
+                    # 总是触发 turn_completed 类 webhook
+                    await webhook_trigger.trigger_all("turn_completed", payload)
+                    # 失败时额外触发 error 类 webhook（webhook name/id 含 "error"）
+                    if payload.get("error"):
+                        await webhook_trigger.trigger_all("error", payload)
+                except Exception as exc:
+                    logger.debug("webhook trigger failed for turn_completed: %s", exc)
+
+            async def _on_approval_needed(evt):
+                """approval_needed 事件触发 webhook。"""
+                try:
+                    payload = dict(evt.payload)
+                    await webhook_trigger.trigger_all("approval_needed", payload)
+                except Exception as exc:
+                    logger.debug("webhook trigger failed for approval_needed: %s", exc)
+
+            self.bus.subscribe("turn_completed", _on_turn_completed)
+            self.bus.subscribe("approval_needed", _on_approval_needed)
+            logger.info("webhook_trigger subscribed to event bus (turn_completed, approval_needed)")
+        except Exception as exc:
+            logger.warning("webhook_trigger event bus subscription failed (non-fatal): %s", exc)
 
         # 启动 AsyncTaskScheduler — 后台任务/延迟任务/定时任务的执行引擎
         # 之前未启动，导致所有 schedule_delayed / schedule_background 的任务都是死的

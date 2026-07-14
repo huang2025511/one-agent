@@ -61,6 +61,12 @@ class FailureRecovery:
     ) -> Any:
         """Execute an async function with retry and backoff.
 
+        未启用：当前业务代码（V68）未调用此方法，错误恢复走
+        ``classify_error`` + ``get_recovery_strategy`` 路径（先分类错误类型，
+        再返回针对性策略 dict，由调用方决定如何处理）。本方法保留供未来
+        需要统一的"重试+退避"封装时使用，重试退避实际由 ``core/backoff.py``
+        的 ``ExponentialBackoff.retry`` 提供。
+
         Args:
             func: Async function to call
             operation_id: Identifier for tracking failure rates

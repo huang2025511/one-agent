@@ -32,6 +32,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from typing import Any, Dict, Optional
@@ -217,18 +218,32 @@ class PythonExecutor(BaseExecutor):
         sandbox_script = self._build_sandbox_script(timeout)
         env = self._build_sandbox_env()
 
+        # 统一收口到 run_subprocess_async（core/subprocess_utils.py）：
+        # 内部用 asyncio.to_thread + subprocess.run，不阻塞事件循环。
+        # text=False 保留字节级输出，由下方 decode 还原（与原实现一致）。
+        # start_new_session=True 让子进程独立成进程组；超时时 subprocess.run
+        # 会 SIGKILL 直接子进程（沙箱 import 白名单已阻断 subprocess/os，
+        # 用户代码无法派生子进程，因此无需 os.killpg 杀整个进程组）。
+        from core.subprocess_utils import run_subprocess_async
         try:
-            # start_new_session=True creates a new process group so
-            # we can kill the whole tree (including any forked children)
-            # on timeout.
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-I", "-c", sandbox_script,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            completed = await run_subprocess_async(
+                [sys.executable, "-I", "-c", sandbox_script],
+                timeout=timeout,
+                capture_output=True,
+                text=False,
+                input=code.encode("utf-8"),
                 env=env,
                 start_new_session=True,
             )
+        except subprocess.TimeoutExpired:
+            duration_ms = (time.time() - start) * 1000
+            return {
+                "success": False,
+                "output": "",
+                "error": f"Execution timed out after {timeout}s",
+                "result": None,
+                "duration_ms": duration_ms,
+            }
         except Exception as exc:
             duration_ms = (time.time() - start) * 1000
             return {
@@ -239,39 +254,12 @@ class PythonExecutor(BaseExecutor):
                 "duration_ms": duration_ms,
             }
 
-        try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(input=code.encode("utf-8")),
-                timeout=timeout,
-            )
-        except asyncio.TimeoutError:
-            # Kill the entire process group (subprocess + any children)
-            self._kill_process_group(proc)
-            await proc.wait()
-            duration_ms = (time.time() - start) * 1000
-            return {
-                "success": False,
-                "output": "",
-                "error": f"Execution timed out after {timeout}s",
-                "result": None,
-                "duration_ms": duration_ms,
-            }
-        except Exception as exc:
-            self._kill_process_group(proc)
-            await proc.wait()
-            duration_ms = (time.time() - start) * 1000
-            return {
-                "success": False,
-                "output": "",
-                "error": str(exc),
-                "result": None,
-                "duration_ms": duration_ms,
-            }
-
         duration_ms = (time.time() - start) * 1000
+        stdout_bytes = completed.stdout or b""
+        stderr_bytes = completed.stderr or b""
         output = stdout_bytes.decode("utf-8", errors="replace")
         error = stderr_bytes.decode("utf-8", errors="replace")
-        success = proc.returncode == 0
+        success = completed.returncode == 0
 
         # Extract expression result if present (last line with marker)
         result: Any = None

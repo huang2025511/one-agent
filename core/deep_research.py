@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from core.backoff import search_backoff
+
 logger = logging.getLogger(__name__)
 
 
@@ -335,7 +337,11 @@ class DeepResearcher:
             if web_search is None:
                 return []
 
-            result = await web_search.run({"input": query})
+            # 用 search_backoff 包裹 web_search 调用：对瞬时网络失败
+            # （超时、连接重置等）自动重试 3 次（1s/2s/4s + jitter），
+            # 指数退避避免雪崩。永久性失败重试耗尽后仍会抛出，由外层
+            # except 捕获并返回 []，行为与之前一致。
+            result = await search_backoff().retry(web_search.run, {"input": query})
             result_text = str(result) if result else ""
 
             # V67 P0-3：失败检测必须鲁棒。

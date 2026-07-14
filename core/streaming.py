@@ -117,6 +117,17 @@ class SSEFormatter:
     """Format streaming content as Server-Sent Events."""
 
     @staticmethod
+    def format_data(payload: Dict[str, Any]) -> str:
+        """Format an arbitrary dict payload as an SSE ``data`` frame.
+
+        收口 SSE 数据帧的 JSON 序列化 + ``data: ...\\n\\n`` 包装，
+        让业务代码（如 ``api/__init__.py`` 的流式端点）不再手动拼
+        ``f"data: {json.dumps(data)}\\n\\n"``，统一走本模块以保证
+        ``ensure_ascii=False``、转义与换行一致。
+        """
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    @staticmethod
     def format(chunk: StreamChunk) -> str:
         """Format a chunk as SSE data."""
         data = {
@@ -127,7 +138,7 @@ class SSEFormatter:
         if chunk.metadata:
             data["metadata"] = chunk.metadata
 
-        return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+        return SSEFormatter.format_data(data)
 
     @staticmethod
     def format_comment(message: str) -> str:

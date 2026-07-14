@@ -25,6 +25,7 @@ import asyncio
 import logging
 import re
 import time
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 from core.context import TurnContext
@@ -114,9 +115,38 @@ from core.rag_advanced import get_advanced_rag
 from core.agent_mesh import get_agent_mesh
 from core.workflow_engine import get_workflow_engine
 from core.chart_gen import get_chart_generator
-from core.conv_branch import get_branch_manager
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _trace_span(name: str, attributes: Optional[Dict[str, Any]] = None):
+    """Best-effort tracing span. Yields a ``Span`` or ``None``.
+
+    Tracing is optional: if the tracer cannot be loaded, yields ``None``
+    and the wrapped business logic runs unaffected. Business exceptions
+    raised inside the ``with`` block propagate normally (and are recorded
+    on the span as an error status).
+    """
+    try:
+        from monitor.tracing import get_tracer
+        _tracer = get_tracer()
+        _cm = _tracer.start_as_current_span(name, attributes=attributes)
+        _span = _cm.__enter__()
+    except Exception:
+        yield None
+        return
+    _exc = (None, None, None)
+    try:
+        yield _span
+    except BaseException as exc:  # propagate but record on span
+        _exc = (type(exc), exc, exc.__traceback__)
+        raise
+    finally:
+        try:
+            _cm.__exit__(*_exc)
+        except Exception:
+            pass
 
 # Coordinator configuration constants
 MAX_TOOL_ITERATIONS = 15  # 从5增加到15，支持更复杂的多步任务
@@ -178,7 +208,6 @@ class Coordinator(Plugin):
         self._failure_recovery: Optional[Any] = None
         self._dialog_summarizer: Optional[Any] = None
         # Round 6: new feature instances
-        self._eval: Optional[Any] = None
         self._batch: Optional[Any] = None
         self._deep_researcher: Optional[Any] = None
         self._model_comparer: Optional[Any] = None
@@ -273,10 +302,13 @@ class Coordinator(Plugin):
         start = time.time()
         try:
             if self._skills is not None:
-                result = await asyncio.wait_for(
-                    self._skills.dispatch(name, args),
-                    timeout=SKILL_EXECUTION_TIMEOUT,
-                )
+                with _trace_span("tool.dispatch") as _span:
+                    if _span is not None:
+                        _span.set_attribute("tool_name", name)
+                    result = await asyncio.wait_for(
+                        self._skills.dispatch(name, args),
+                        timeout=SKILL_EXECUTION_TIMEOUT,
+                    )
                 if isinstance(result, ToolResult):
                     result_str = str(result.data) if result.data is not None else str(result)
                     is_error = result.status in ("error", "unavailable")
@@ -383,12 +415,16 @@ class Coordinator(Plugin):
             {"role": "user", "content": early_text[:4000]},
         ]
         try:
-            resp = await self._llm.chat_completion(
-                messages=prompt,
-                model=model,
-                max_tokens=200,
-                tools=None,
-            )
+            with _trace_span("llm.chat_completion") as _span:
+                if _span is not None:
+                    _span.set_attribute("model", model or "")
+                    _span.set_attribute("messages_count", len(prompt))
+                resp = await self._llm.chat_completion(
+                    messages=prompt,
+                    model=model,
+                    max_tokens=200,
+                    tools=None,
+                )
             return resp.get("text", "").strip()
         except Exception as exc:
             logger.debug("context compression LLM call failed: %s", exc)
@@ -1440,6 +1476,16 @@ class Coordinator(Plugin):
         # 1. Record user preferences and patterns
         await _safe_step("record_intelligence", self._record_intelligence(turn))
 
+        # 1b. Extract topics from user input — coordinator_intelligence.extract_topics
+        # 之前 _extract_topics 包装器从未在主流水线被调用（死代码），
+        # 现在把提取出的话题写入 turn.meta["topics"] 供下游消费。
+        _topics = _safe_step_sync(
+            "extract_topics",
+            lambda: self._extract_topics(turn.input_text),
+        )
+        if _topics:
+            turn.meta["topics"] = _topics
+
         # 2. Generate proactive suggestions (inject into result if enabled)
         suggestions = await _safe_step("generate_suggestions", self._generate_suggestions(turn))
         if suggestions and self._should_show_suggestions():
@@ -1855,7 +1901,11 @@ class Coordinator(Plugin):
             try:
                 query_vec = await asyncio.to_thread(embeddings.embed, query)
                 if query_vec is not None:
-                    sem = await asyncio.to_thread(embeddings.search, query_vec, 5) or []
+                    with _trace_span("memory.search") as _span:
+                        if _span is not None:
+                            _span.set_attribute("memory.type", "embeddings")
+                            _span.set_attribute("query_len", len(query))
+                        sem = await asyncio.to_thread(embeddings.search, query_vec, 5) or []
                     seen_contents = {h.split("] ", 1)[1][:40] for h in hits}
                     # Batch-fetch all semantic hits in one query (was N+1).
                     sem_ids = [mid for mid, _score in sem]
@@ -2648,12 +2698,16 @@ class Coordinator(Plugin):
                 messages.append({"role": "user", "content": thought_prompt, "_internal": True})
 
                 async def _do_thought_call():
-                    return await self._llm.chat_completion(
-                        messages=messages,
-                        model=turn.model,
-                        max_tokens=500,
-                        temperature=dyn_temp,
-                    )
+                    with _trace_span("llm.chat_completion") as _span:
+                        if _span is not None:
+                            _span.set_attribute("model", turn.model or "")
+                            _span.set_attribute("messages_count", len(messages))
+                        return await self._llm.chat_completion(
+                            messages=messages,
+                            model=turn.model,
+                            max_tokens=500,
+                            temperature=dyn_temp,
+                        )
 
                 try:
                     thought_resp = await circuit.acall(

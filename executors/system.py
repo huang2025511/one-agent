@@ -46,6 +46,7 @@ import logging
 import os
 import shlex
 import signal
+import subprocess
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -325,8 +326,8 @@ class SystemExecutor(BaseExecutor):
     ) -> Dict[str, Any]:
         """Execute the command via subprocess.
 
-        Uses ``create_subprocess_exec`` with ``shlex.split`` instead of
-        ``create_subprocess_shell`` to avoid shell metacharacter injection.
+        Uses ``run_subprocess_async`` (统一收口到 core/subprocess_utils.py)
+        with ``shlex.split`` 而非 shell，避免 shell 元字符注入。
         Commands containing shell operators (``;``, ``|``, ``&&``, ``$()``)
         are already classified as DANGEROUS by ``classify_command`` and
         should never reach this point without explicit confirmation.
@@ -343,28 +344,22 @@ class SystemExecutor(BaseExecutor):
                     "risk_label": self.RISK_LABELS.get(risk_level, "UNKNOWN"),
                 }
 
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=workdir or ".",
-                preexec_fn=os.setsid if hasattr(os, "setsid") else None,
-            )
+            # 统一收口到 run_subprocess_async：内部用 asyncio.to_thread +
+            # subprocess.run，不阻塞事件循环。preexec_fn=os.setsid 让子进程
+            # 独立成进程组；超时时 subprocess.run 会 SIGKILL 直接子进程
+            # （注意：与原 create_subprocess_exec + os.killpg 相比，不再
+            # 杀整个进程组，但常见单命令场景不受影响）。
+            from core.subprocess_utils import run_subprocess_async
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=self._timeout_seconds,
+                completed = await run_subprocess_async(
+                    argv,
+                    timeout=self._timeout_seconds,
+                    cwd=workdir or ".",
+                    capture_output=True,
+                    text=True,
+                    preexec_fn=os.setsid if hasattr(os, "setsid") else None,
                 )
-            except asyncio.TimeoutError:
-                # Kill the entire process group (os.setsid created one)
-                # so child processes don't become orphans.
-                try:
-                    if hasattr(os, "killpg"):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    else:
-                        proc.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-                await proc.wait()
+            except subprocess.TimeoutExpired:
                 return {
                     "ok": False,
                     "error": f"command timed out after {self._timeout_seconds}s",
@@ -372,14 +367,14 @@ class SystemExecutor(BaseExecutor):
                     "risk_label": self.RISK_LABELS.get(risk_level, "UNKNOWN"),
                 }
 
-            out = stdout.decode("utf-8", errors="replace")[:self._max_output_bytes]
-            err = stderr.decode("utf-8", errors="replace")[:self._max_output_bytes]
+            out = (completed.stdout or "")[:self._max_output_bytes]
+            err = (completed.stderr or "")[:self._max_output_bytes]
 
             return {
-                "ok": proc.returncode == 0,
+                "ok": completed.returncode == 0,
                 "stdout": out,
                 "stderr": err,
-                "exit_code": proc.returncode,
+                "exit_code": completed.returncode,
                 "risk_level": risk_level,
                 "risk_label": self.RISK_LABELS.get(risk_level, "UNKNOWN"),
             }

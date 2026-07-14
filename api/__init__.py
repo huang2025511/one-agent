@@ -214,42 +214,177 @@ class RESTAPIGateway(Plugin):
 
     def _register_health_routes(self, app, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin):
         _cp = self._get_plugin
+
+        # ===== 接入 HealthChecker：注册基于实际实例的检查函数 =====
+        # monitor/health.py 中 HealthChecker 完整实现了检查框架，
+        # 但 get_health_checker() 默认注册的内置检查使用硬编码路径。
+        # 这里用实际的 _ctx/_llm/_memory_plugin 实例覆盖默认检查，
+        # 让 /health 和 /ready 端点调用真实的子系统状态而非静态 dict。
+        from monitor.health import (
+            ComponentCheck,
+            HealthStatus,
+            _check_disk_space,
+            get_health_checker,
+        )
+
+        _health_checker = get_health_checker()
+
+        def _check_db_with_ctx() -> ComponentCheck:
+            try:
+                _session_store = _cp("session_store")
+                if _session_store:
+                    count = _session_store.get_session_count()
+                    return ComponentCheck(
+                        name="database",
+                        status=HealthStatus.HEALTHY,
+                        message=f"Accessible, {count} sessions",
+                        details={"session_count": count},
+                    )
+                return ComponentCheck(
+                    name="database",
+                    status=HealthStatus.DEGRADED,
+                    message="session_store not available",
+                )
+            except sqlite3.Error as e:
+                return ComponentCheck(
+                    name="database",
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Database error: {e}",
+                )
+            except Exception as e:
+                return ComponentCheck(
+                    name="database",
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Database check failed: {e}",
+                )
+
+        def _check_memory_with_ctx() -> ComponentCheck:
+            try:
+                if _memory_plugin is None:
+                    return ComponentCheck(
+                        name="memory",
+                        status=HealthStatus.DEGRADED,
+                        message="Memory plugin not available",
+                    )
+                stats = _memory_plugin.stats() if hasattr(_memory_plugin, "stats") else {}
+                rows = stats.get("rows", 0) if isinstance(stats, dict) else 0
+                return ComponentCheck(
+                    name="memory",
+                    status=HealthStatus.HEALTHY,
+                    message=f"Memory OK, {rows} rows",
+                    details={"rows": rows},
+                )
+            except Exception as e:
+                return ComponentCheck(
+                    name="memory",
+                    status=HealthStatus.DEGRADED,
+                    message=f"Memory check failed: {e}",
+                )
+
+        def _check_llm_with_ctx() -> ComponentCheck:
+            try:
+                if _llm is None:
+                    return ComponentCheck(
+                        name="llm_provider",
+                        status=HealthStatus.DEGRADED,
+                        message="LLM provider not available",
+                    )
+                stats = _llm.stats() if hasattr(_llm, "stats") else {}
+                calls = stats.get("calls", 0) if isinstance(stats, dict) else 0
+                provider = getattr(_llm, "_primary_provider", "unknown")
+                return ComponentCheck(
+                    name="llm_provider",
+                    status=HealthStatus.HEALTHY,
+                    message=f"LLM OK, provider={provider}, calls={calls}",
+                    details={"provider": provider, "calls": calls},
+                )
+            except Exception as e:
+                return ComponentCheck(
+                    name="llm_provider",
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"LLM check failed: {e}",
+                )
+
+        def _check_config_with_ctx() -> ComponentCheck:
+            try:
+                if _ctx is None or not getattr(_ctx, "config", None):
+                    return ComponentCheck(
+                        name="config",
+                        status=HealthStatus.UNHEALTHY,
+                        message="Context or config not available",
+                    )
+                return ComponentCheck(
+                    name="config",
+                    status=HealthStatus.HEALTHY,
+                    message="Config loaded",
+                )
+            except Exception as e:
+                return ComponentCheck(
+                    name="config",
+                    status=HealthStatus.UNHEALTHY,
+                    message=f"Config error: {e}",
+                )
+
+        # 覆盖默认检查（同名注册会替换 get_health_checker() 中的内置版本）
+        _health_checker.register_check("database", _check_db_with_ctx)
+        _health_checker.register_check("memory", _check_memory_with_ctx)
+        _health_checker.register_check("llm_provider", _check_llm_with_ctx)
+        _health_checker.register_check("config", _check_config_with_ctx)
+        _health_checker.register_check("disk_space", _check_disk_space)
+
         @app.get("/health")
         async def health_check():
-            """Basic health check - service is alive"""
-            return {
-                "status": "healthy",
-                "timestamp": time.time(),
-                "version": "2.0.0"
-            }
+            """Basic health check - service is alive.
+
+            调用 HealthChecker.check_all() 获取真实的子系统状态；
+            若 HealthChecker 抛异常则 fallback 到原有的静态返回。
+            """
+            try:
+                return _health_checker.check_all()
+            except Exception as exc:
+                logger.warning("HealthChecker.check_all() failed, fallback to static: %s", exc)
+                return {
+                    "status": "healthy",
+                    "timestamp": time.time(),
+                    "version": "2.0.0"
+                }
 
         @app.get("/ready")
         async def readiness_check():
-            """Readiness check - service can handle requests"""
-            def _check_database():
-                """Check database connectivity."""
-                try:
-                    _session_store = _cp("session_store")
-                    if _session_store:
-                        _session_store.get_session_count()
-                        return True
-                except sqlite3.Error as e:
-                    logger.error("Database check failed: %s", e)
-                except Exception as e:
-                    logger.error("Database check failed with unexpected error: %s", e)
-                return False
+            """Readiness check - service can handle requests.
 
-            checks = {
-                "database": _check_database(),
-                "llm_configured": bool(_ctx.config.get("llm", {}).get("api_keys", {}).get("sensenova")) if _ctx else False,
-                "memory_available": _memory_plugin is not None,
-            }
-            all_ok = all(checks.values())
-            return {
-                "status": "ready" if all_ok else "not_ready",
-                "checks": checks,
-                "timestamp": time.time()
-            }
+            使用 HealthChecker.check_readiness() 的检查结果；
+            若 HealthChecker 抛异常则 fallback 到原有的静态检查逻辑。
+            """
+            try:
+                return _health_checker.check_readiness()
+            except Exception as exc:
+                logger.warning("HealthChecker.check_readiness() failed, fallback to static: %s", exc)
+
+                def _check_database():
+                    """Check database connectivity."""
+                    try:
+                        _session_store = _cp("session_store")
+                        if _session_store:
+                            _session_store.get_session_count()
+                            return True
+                    except sqlite3.Error as e:
+                        logger.error("Database check failed: %s", e)
+                    except Exception as e:
+                        logger.error("Database check failed with unexpected error: %s", e)
+                    return False
+
+                checks = {
+                    "database": _check_database(),
+                    "llm_configured": bool(_ctx.config.get("llm", {}).get("api_keys", {}).get("sensenova")) if _ctx else False,
+                    "memory_available": _memory_plugin is not None,
+                }
+                all_ok = all(checks.values())
+                return {
+                    "status": "ready" if all_ok else "not_ready",
+                    "checks": checks,
+                    "timestamp": time.time()
+                }
 
         @app.get("/api/health")
         async def health():
@@ -581,6 +716,29 @@ class RESTAPIGateway(Plugin):
             """
             # 修复：同 stats 路由，auth() 成功返回 None，不能用 if not 检查。
             auth(x_api_key)
+
+            # ===== 接入 MetricsRegistry =====
+            # monitor/prometheus.py 的 MetricsRegistry 完整实现了
+            # Counter/Gauge/Histogram 及 Prometheus 文本格式化。
+            # 若注册表中已有实际指标值（被其它代码 inc/set/observe 过），
+            # 用注册表的格式化输出；否则 fallback 到下面的手拼文本。
+            try:
+                from monitor.prometheus import get_metrics_registry
+                _metrics_reg = get_metrics_registry()
+                _collected = _metrics_reg.collect_all()
+                _has_real_metrics = any(
+                    len(values) > 0 for _, _, _, values in _collected
+                )
+                if _has_real_metrics:
+                    from fastapi.responses import PlainTextResponse
+                    return PlainTextResponse(
+                        _metrics_reg.format_prometheus(),
+                        media_type="text/plain; version=0.0.4",
+                    )
+            except Exception as exc:
+                logger.warning("MetricsRegistry failed, fallback to hand-written metrics: %s", exc)
+
+            # ===== Fallback：原有手拼文本逻辑（保留不变）=====
             lines = []
 
             # System metrics
@@ -776,8 +934,14 @@ class RESTAPIGateway(Plugin):
 
             from fastapi.responses import StreamingResponse
 
+            # 接入 core/streaming.py 的 SSEFormatter：收口 SSE 数据帧的
+            # JSON 序列化 + ``data: ...\n\n`` 包装，替代手动拼
+            # ``f"data: {json.dumps(data)}\n\n"``。FastAPI 的 StreamingResponse
+            # 仍负责传输层，这里只在数据格式化层走 SSEFormatter。
+            from core.streaming import SSEFormatter
+
             async def event_generator():
-                yield f"data: {json.dumps({'status': 'thinking', 'session_id': session_id})}\n\n"
+                yield SSEFormatter.format_data({'status': 'thinking', 'session_id': session_id})
 
                 try:
                     if _app_instance and hasattr(_app_instance, "chat_with_thinking"):
@@ -849,9 +1013,9 @@ class RESTAPIGateway(Plugin):
                                     if phase == "streaming":
                                         # streaming phase 是最终答案的实时增量，作为 content 推送
                                         _streamed_content = True
-                                        yield f"data: {json.dumps({'content': msg, 'session_id': session_id})}\n\n"
+                                        yield SSEFormatter.format_data({'content': msg, 'session_id': session_id})
                                     else:
-                                        yield f"data: {json.dumps({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})}\n\n"
+                                        yield SSEFormatter.format_data({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})
                                 except _asyncio.TimeoutError:
                                     pass  # 超时继续循环，检查 chat_task 是否完成
                             # chat_task 完成后，消费队列中剩余的事件
@@ -862,9 +1026,9 @@ class RESTAPIGateway(Plugin):
                                         continue
                                     if phase == "streaming":
                                         _streamed_content = True
-                                        yield f"data: {json.dumps({'content': msg, 'session_id': session_id})}\n\n"
+                                        yield SSEFormatter.format_data({'content': msg, 'session_id': session_id})
                                     else:
-                                        yield f"data: {json.dumps({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})}\n\n"
+                                        yield SSEFormatter.format_data({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})
                                 except _asyncio.QueueEmpty:
                                     break
                         finally:
@@ -882,10 +1046,10 @@ class RESTAPIGateway(Plugin):
                         thinking = result.get("thinking", "")
                         # 最终的完整思考计划用 phase=plan 标记（客户端会覆盖之前的截断版）
                         # 即使 thinking 为空也必须推送，否则客户端会一直保留初始占位"思考中..."
-                        yield f"data: {json.dumps({'status': 'thinking', 'content': thinking, 'phase': 'plan', 'session_id': session_id})}\n\n"
+                        yield SSEFormatter.format_data({'status': 'thinking', 'content': thinking, 'phase': 'plan', 'session_id': session_id})
                         # 如果已通过 streaming phase 实时推送了最终答案，不再重复推送
                         if reply and not _streamed_content:
-                            yield f"data: {json.dumps({'content': reply, 'session_id': session_id})}\n\n"
+                            yield SSEFormatter.format_data({'content': reply, 'session_id': session_id})
                     elif _llm is not None:
                         # Fallback: direct LLM streaming (no Coordinator)
                         msgs: List[Dict[str, Any]] = [{"role": "user", "content": text}]
@@ -907,15 +1071,15 @@ class RESTAPIGateway(Plugin):
                             # 但客户端只认 content/text 字段，不翻译会导致空回复。
                             if "delta" in chunk and "content" not in chunk:
                                 chunk["content"] = chunk.pop("delta")
-                            yield f"data: {json.dumps(chunk)}\n\n"
+                            yield SSEFormatter.format_data(chunk)
                             chunks_sent += 1
                     else:
-                        yield f"data: {json.dumps({'error': 'LLM provider not available', 'session_id': session_id})}\n\n"
+                        yield SSEFormatter.format_data({'error': 'LLM provider not available', 'session_id': session_id})
                 except Exception as exc:
                     logger.error("stream chat error: %s", exc, exc_info=True)
-                    yield f"data: {json.dumps({'error': str(exc), 'session_id': session_id})}\n\n"
+                    yield SSEFormatter.format_data({'error': str(exc), 'session_id': session_id})
 
-                yield f"data: {json.dumps({'done': True, 'session_id': session_id})}\n\n"
+                yield SSEFormatter.format_data({'done': True, 'session_id': session_id})
 
             return StreamingResponse(
                 event_generator(),
@@ -1663,7 +1827,222 @@ class RESTAPIGateway(Plugin):
             if _mcp_client is None:
                 raise HTTPException(503, _("mcp_client_not_available"))
             await _mcp_client.remove_server(server_name)
-            return {"success": True, "server": server_name}
+        return {"success": True, "server": server_name}
+
+    def _register_webhook_routes(self, app, auth, _ctx):
+        """Webhook 管理 CRUD + 测试触发端点。
+
+        对接 core.webhook_trigger 的 register/unregister/trigger 接口，
+        让"事件→HTTP webhook"链路可通过 REST API 配置。
+        """
+        from dataclasses import asdict
+        from fastapi import Header, HTTPException
+
+        def _webhook_to_dict(w):
+            """Serialize a Webhook to a dict, masking sensitive credentials."""
+            d = asdict(w)
+            # 安全：API key / secret 不明文回传，避免通过 GET /api/webhooks 泄露
+            if d.get("api_key"):
+                d["api_key"] = _mask_api_key(d["api_key"])
+            if d.get("secret_key"):
+                d["secret_key"] = "***"
+            return d
+
+        @app.get("/api/webhooks")
+        async def webhooks_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """列出所有已注册的 webhook。"""
+            auth(x_api_key)
+            from core.webhook_trigger import get_webhook_trigger
+            trigger = get_webhook_trigger()
+            return {
+                "webhooks": [_webhook_to_dict(w) for w in trigger.list_webhooks()],
+                "stats": trigger.get_stats(),
+            }
+
+        @app.post("/api/webhooks")
+        async def webhook_create(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """注册新 webhook。body 字段对应 core.webhook_trigger.Webhook。
+
+            必填: url。可选: name, method, auth_type, api_key, secret_key,
+            payload_template, event_filter, rate_limit, enabled, max_retries,
+            retry_delay。
+            """
+            auth(x_api_key)
+            from core.webhook_trigger import get_webhook_trigger, Webhook
+            trigger = get_webhook_trigger()
+            url = (body.get("url") or "").strip()
+            if not url:
+                raise HTTPException(400, "url is required")
+            if not (url.startswith("http://") or url.startswith("https://")):
+                raise HTTPException(400, "url must be a http(s) URL")
+            try:
+                wh = Webhook(
+                    name=body.get("name", ""),
+                    url=url,
+                    method=body.get("method", "POST"),
+                    auth_type=body.get("auth_type", "none"),
+                    api_key=body.get("api_key", ""),
+                    secret_key=body.get("secret_key", ""),
+                    payload_template=body.get("payload_template", "{}"),
+                    event_filter=body.get("event_filter", ""),
+                    rate_limit=int(body.get("rate_limit", 10)),
+                    enabled=bool(body.get("enabled", True)),
+                    max_retries=int(body.get("max_retries", 3)),
+                    retry_delay=float(body.get("retry_delay", 1.0)),
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(400, f"invalid webhook config: {exc}")
+            trigger.register(wh)
+            logger.info("webhook registered via API: %s (%s)", wh.id, wh.url)
+            return {"registered": True, "webhook": _webhook_to_dict(wh)}
+
+        @app.delete("/api/webhooks/{webhook_id}")
+        async def webhook_delete(webhook_id: str, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """删除指定 webhook。"""
+            auth(x_api_key)
+            from core.webhook_trigger import get_webhook_trigger
+            trigger = get_webhook_trigger()
+            ok = trigger.unregister(webhook_id)
+            if not ok:
+                raise HTTPException(404, "webhook not found")
+            return {"deleted": True, "webhook_id": webhook_id}
+
+        @app.post("/api/webhooks/{webhook_id}/test")
+        async def webhook_test(
+            webhook_id: str,
+            body: dict = None,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """测试触发一个 webhook。可选 body.event_data 自定义测试数据。"""
+            auth(x_api_key)
+            from core.webhook_trigger import get_webhook_trigger
+            trigger = get_webhook_trigger()
+            wh = trigger.get_webhook(webhook_id)
+            if wh is None:
+                raise HTTPException(404, "webhook not found")
+            event_data = (body or {}).get("event_data") or {
+                "test": True,
+                "timestamp": time.time(),
+            }
+            success = await trigger.trigger(webhook_id, event_data)
+            return {
+                "success": success,
+                "webhook_id": webhook_id,
+                "last_error": wh.last_error,
+                "success_count": wh.success_count,
+                "failure_count": wh.failure_count,
+            }
+
+    def _register_backup_routes(self, app, auth, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin):
+        """注册数据备份/导出/导入端点。
+
+        core/backup_export.py 的 DataExporter/DataImporter 完整实现了
+        导出（zip/tar.gz/json）与导入逻辑，但之前无任何 API 端点调用。
+        这里暴露 3 个端点让该模块真正生效。
+        """
+        from fastapi import Header, HTTPException
+        from core.backup_export import (
+            DataExporter,
+            DataImporter,
+            DataType,
+            ExportFormat,
+        )
+
+        @app.post("/api/backup/export")
+        async def backup_export(body: dict = None, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """导出全部 agent 数据到备份归档。
+
+            body 可选字段：
+              - format: "zip" | "tar.gz" | "json"（默认 zip）
+              - output_path: 自定义输出路径（不传则生成临时文件）
+              - include_config: 是否包含配置（默认 true）
+            """
+            auth(x_api_key)
+            if _ctx is None:
+                raise HTTPException(503, "Context not initialized")
+
+            body = body or {}
+            data_dir = _ctx.config.get("agent", {}).get("data_dir", "./data")
+            format_str = str(body.get("format", "zip")).lower()
+            try:
+                fmt = ExportFormat(format_str)
+            except ValueError:
+                raise HTTPException(400, f"Invalid format: {format_str}")
+
+            output_path = body.get("output_path")
+            if not output_path:
+                import tempfile
+                ext = {
+                    ExportFormat.ZIP: "zip",
+                    ExportFormat.TAR_GZ: "tar.gz",
+                    ExportFormat.JSON: "json",
+                }.get(fmt, "zip")
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f".{ext}")
+                tmp.close()
+                output_path = tmp.name
+
+            include_config = bool(body.get("include_config", True))
+            try:
+                exporter = DataExporter(data_dir=data_dir)
+                result = exporter.export_all(
+                    output_path=output_path,
+                    format=fmt,
+                    include_config=include_config,
+                )
+            except Exception as exc:
+                logger.error("Backup export failed: %s", exc, exc_info=True)
+                raise HTTPException(500, f"Export failed: {exc}")
+
+            return {
+                "success": result.success,
+                "format": result.format,
+                "file_path": result.file_path,
+                "size_bytes": result.size_bytes,
+                "items_exported": result.items_exported,
+                "duration_seconds": result.duration_seconds,
+                "error": result.error,
+            }
+
+        @app.post("/api/backup/import")
+        async def backup_import(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """从备份归档导入 agent 数据。
+
+            body 字段：
+              - file_path: 备份文件路径（必填）
+              - merge: 是否合并而非覆盖（默认 true）
+            """
+            auth(x_api_key)
+            if _ctx is None:
+                raise HTTPException(503, "Context not initialized")
+
+            file_path = body.get("file_path")
+            if not file_path:
+                raise HTTPException(400, "file_path is required")
+
+            merge = bool(body.get("merge", True))
+            data_dir = _ctx.config.get("agent", {}).get("data_dir", "./data")
+            try:
+                importer = DataImporter(data_dir=data_dir)
+                result = importer.import_from_file(file_path=file_path, merge=merge)
+            except Exception as exc:
+                logger.error("Backup import failed: %s", exc, exc_info=True)
+                raise HTTPException(500, f"Import failed: {exc}")
+
+            return {
+                "success": result.success,
+                "items_imported": result.items_imported,
+                "duration_seconds": result.duration_seconds,
+                "error": result.error,
+            }
+
+        @app.get("/api/backup/list")
+        async def backup_list(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """列出可导出的数据类型与支持的导出格式。"""
+            auth(x_api_key)
+            return {
+                "data_types": [t.value for t in DataType],
+                "formats": [f.value for f in ExportFormat],
+            }
 
     async def start(self) -> None:
         if not self._enabled:
@@ -1846,6 +2225,12 @@ class RESTAPIGateway(Plugin):
 
         # ── MCP (Model Context Protocol) 端点 ───────────────────────────────────────────────────────────
         self._register_mcp_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Webhook Management
+        self._register_webhook_routes(app, auth, _ctx)
+
+        # ---------------------------------------------------------------- Backup & Export
+        self._register_backup_routes(app, auth, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin)
 
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):

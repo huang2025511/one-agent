@@ -15,6 +15,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from core.backoff import db_backoff
+
 logger = logging.getLogger(__name__)
 
 # SQL injection prevention: block dangerous keywords
@@ -87,7 +89,11 @@ class DatabaseSkill:
             elif db_type == "mysql":
                 return await self._query_mysql(conn_info, sql, params)
             elif db_type == "sqlite":
-                return await self._query_sqlite(conn_info, sql, params)
+                # 用 db_backoff 包裹 sqlite 查询：sqlite3.OperationalError
+                # （如 "database is locked"）是典型瞬时错误，指数退避重试
+                # （0.5s/1s/2s + jitter）后通常可成功。重试耗尽仍失败则
+                # 由外层 except 捕获并返回错误 dict。
+                return await db_backoff().retry(self._query_sqlite, conn_info, sql, params)
             else:
                 return {"ok": False, "error": f"不支持的数据库类型: {db_type}"}
         except Exception as exc:

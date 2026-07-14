@@ -27,6 +27,9 @@ llm:
     daily_budget: 1.0
     monthly_budget: 20.0
     db_path: data/memory/costs.db
+  semantic_cache:
+    enabled: true              # V69: 语义缓存（基于 embedding 余弦相似度），命中"意思相近但措辞不同"的查询
+    threshold: 0.92            # 余弦相似度命中阈值（0~1，越高越严格；低于此值视为不匹配）
 router:
   enabled: true
   task_complexity_thresholds:

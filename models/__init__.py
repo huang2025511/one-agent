@@ -25,6 +25,7 @@ import httpx
 
 from core.plugin import Plugin
 from models.cache import LLMCache
+from models.semantic_cache import SemanticCache
 from models.cost_tracker import CostTracker
 from models.tiers import MODEL_TIERS, MODEL_COST
 from models.recommend import RecommendationMixin
@@ -137,6 +138,11 @@ class LLMProvider(RecommendationMixin, Plugin):
         self._cache: Optional[LLMCache] = None
         self._cache_enabled = True
         self._cache_ttl = DEFAULT_CACHE_TTL
+        # V69: 语义缓存 — 基于 embedding 余弦相似度的额外缓存层，
+        # 命中"意思相近但措辞不同"的查询。在 setup() 中按配置懒加载，
+        # 初始化失败则保持 None（降级为仅精确匹配，不影响主流程）。
+        self._semantic_cache: Optional[SemanticCache] = None
+        self._cache_stats: Dict[str, int] = {}
         self._call_stats: deque[Dict[str, Any]] = deque(maxlen=MAX_CALL_STATS_SIZE)
         self._cost_total: float = 0.0
         self._cost_tracker: Optional[CostTracker] = None
@@ -267,6 +273,30 @@ class LLMProvider(RecommendationMixin, Plugin):
             max_size = cache_cfg.get("max_size", llm_cfg.get("cache_max_size", 500))
             self._cache = LLMCache(max_size=max_size, ttl_seconds=self._cache_ttl)
             logger.info("LLM cache enabled (size=%d, ttl=%ds)", max_size, self._cache_ttl)
+
+        # V69: 语义缓存 — 基于 embedding 余弦相似度的 LLM 响应缓存。
+        # 在精确匹配 LLMCache 之外提供额外缓存层，命中"意思相近但措辞不同"的查询。
+        # embedding 模型由 SemanticCache 内部懒加载（优先外部 provider，回退
+        # sentence-transformers），不可用时自动降级为仅精确匹配。
+        # 初始化失败不影响主流程（try/except 包裹，保持 None）。
+        sem_cfg = (llm_cfg.get("semantic_cache") or {})
+        if sem_cfg.get("enabled", True):
+            try:
+                sem_threshold = float(sem_cfg.get("threshold", 0.92))
+                sem_max_size = int(cache_cfg.get("max_size", llm_cfg.get("cache_max_size", 500)))
+                self._semantic_cache = SemanticCache(
+                    max_size=sem_max_size,
+                    ttl_seconds=self._cache_ttl,
+                    semantic_threshold=sem_threshold,
+                    embedding_provider=None,
+                )
+                logger.info(
+                    "Semantic cache enabled (threshold=%.2f, size=%d, ttl=%ds)",
+                    sem_threshold, sem_max_size, self._cache_ttl,
+                )
+            except Exception as exc:
+                logger.warning("Semantic cache init failed, disabled: %s", exc)
+                self._semantic_cache = None
 
         # Cost tracking
         # 修复 bug：之前 db_path 默认 "data/memory/costs.db"（相对 CWD），
@@ -1162,6 +1192,24 @@ class LLMProvider(RecommendationMixin, Plugin):
                 logger.info("cache hit for model=%s (tools=%s)", model, bool(tools))
                 return cached
 
+        # V69: 语义缓存查询 — 基于 embedding 余弦相似度，能命中"意思相近但措辞不同"的查询。
+        # 在精确匹配 LLMCache 未命中后、实际 LLM 调用前查询，作为额外缓存层。
+        # SemanticCache.get 自身也含精确匹配 tier，但 LLMCache 已先行查询过，
+        # 这里主要走语义 tier（余弦相似度 ≥ threshold 即命中）。
+        if self._semantic_cache is not None and use_cache:
+            try:
+                sem_cached, hit_type = self._semantic_cache.get(
+                    messages, model, tools or [], temperature,
+                )
+                if sem_cached is not None:
+                    logger.debug("semantic cache hit (type=%s) for model=%s", hit_type, model)
+                    # 记录缓存命中（LLMProvider 级别计数，权威统计见 SemanticCache.stats()）
+                    if self._cache_stats is not None:
+                        self._cache_stats["semantic_hits"] = self._cache_stats.get("semantic_hits", 0) + 1
+                    return sem_cached
+            except Exception as exc:
+                logger.debug("semantic cache query failed: %s", exc)
+
         # Budget check: if exceeded, auto-downgrade to cheapest free model
         if self._cost_tracker:
             budget = self._cost_tracker.check_budget()
@@ -1298,6 +1346,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                 if use_cache and self._cache is not None:
                     self._cache.set(messages, model, tools or [], result, temperature)
 
+                # V69: 写入语义缓存（best-effort，失败不影响主流程）
+                if self._semantic_cache is not None and use_cache:
+                    try:
+                        self._semantic_cache.set(messages, model, tools or [], result, temperature)
+                    except Exception as exc:
+                        logger.debug("semantic cache write failed: %s", exc)
+
                 return result
             except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError, asyncio.TimeoutError, ConnectionError) as exc:
                 # Classify: non-retryable errors (4xx auth/bad-request) exit
@@ -1355,6 +1410,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                             )
                             if use_cache and self._cache is not None:
                                 self._cache.set(clean_msgs, model, [], result, temperature)
+                            # V69: 写入语义缓存（与精确缓存保持一致：clean_msgs + 空工具）
+                            if self._semantic_cache is not None and use_cache:
+                                try:
+                                    self._semantic_cache.set(clean_msgs, model, [], result, temperature)
+                                except Exception as exc:
+                                    logger.debug("semantic cache write failed: %s", exc)
                             return result
                         except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as retry_exc:
                             retry_status = getattr(getattr(retry_exc, "response", None), "status_code", None)
@@ -1462,6 +1523,12 @@ class LLMProvider(RecommendationMixin, Plugin):
                                 )
                                 if use_cache and self._cache is not None:
                                     self._cache.set(messages, model, tools or [], result, temperature)
+                                # V69: 写入语义缓存
+                                if self._semantic_cache is not None and use_cache:
+                                    try:
+                                        self._semantic_cache.set(messages, model, tools or [], result, temperature)
+                                    except Exception as exc:
+                                        logger.debug("semantic cache write failed: %s", exc)
                                 return result
                             except (httpx.RequestError, httpx.TimeoutException, httpx.HTTPStatusError) as exc:
                                 logger.error("fallback retry failed: %s", exc, exc_info=True)
@@ -1842,12 +1909,16 @@ class LLMProvider(RecommendationMixin, Plugin):
             "tokens_used": tokens,
             "total_cost_usd": round(self._cost_total, 6),
             "cache": self._cache.stats() if self._cache else {},
+            "semantic_cache": self._semantic_cache.stats() if self._semantic_cache else {},
             "recent": list(self._call_stats)[-30:],
         }
 
     def clear_cache(self) -> Dict[str, Any]:
         if self._cache:
             self._cache.clear()
+        # V69: 同步清除语义缓存，避免清除后语义缓存仍返回旧条目
+        if self._semantic_cache:
+            self._semantic_cache.clear()
         return {"cleared": True}
 
     # ----------------------------------------------------------- internal

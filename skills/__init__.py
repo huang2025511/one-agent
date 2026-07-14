@@ -265,6 +265,13 @@ class SkillManager(Plugin):
 
     def register(self, skill: Skill) -> None:
         self._skills[skill.id] = skill
+        # 注册/更新技能后失效该技能的工具结果缓存，避免旧缓存
+        # （如 system_run 的 30s TTL 缓存）返回过期结果。
+        try:
+            from core.tool_cache import get_tool_cache
+            get_tool_cache().invalidate(skill.id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("tool_cache invalidate for %s failed: %s", skill.id, exc)
         logger.info("registered skill: %s", skill.id)
 
     # --------------------------------------------------------- scan
@@ -2048,6 +2055,25 @@ class SkillManager(Plugin):
             handler=model_manage_handler,
         ))
 
+    def _auto_schema(self, handler: Callable, description: str = "") -> Dict[str, Any]:
+        """V69: 使用 auto_tool_schema 从 handler 函数签名/docstring 自动生成 JSON Schema。
+
+        与手写 _schema() 互补：handler 有完整类型注解和 docstring 时，
+        auto_tool_schema 能生成比手写更精确的参数描述。
+
+        Args:
+            handler: 技能处理函数（同步或异步）
+            description: 可选描述，覆盖 docstring 提取的描述
+
+        Returns:
+            OpenAI Function Calling 格式的 schema 字典
+        """
+        from skills.schema_gen import auto_tool_schema
+        schema = auto_tool_schema(handler)
+        if description:
+            schema.setdefault("function", {})["description"] = description
+        return schema
+
     def _seed_builtins(self) -> None:
         """Seed built-in skills that are always available."""
         self._seed_core_skills()
@@ -2064,7 +2090,14 @@ class SkillManager(Plugin):
     def _seed_tool_ecosystem_skills(self) -> None:
         """Register Round 7 tool ecosystem skills so the LLM can call them as tools."""
         # Email — handler 接收 dict (Skill.run 传 args dict)
-        async def _email_handler(args, llm=None, **kw):
+        async def _email_handler(args: dict) -> str:
+            """Read and send emails via IMAP/SMTP.
+
+            Args:
+                args: Email command dict, e.g. {"action": "read"},
+                    {"action": "send", "to": "...", "subject": "...", "body": "..."},
+                    or {"action": "search", "query": "..."}
+            """
             from skills.email import get_email_skill
             skill = get_email_skill()
             # args 可能是 dict 或 str
@@ -2087,12 +2120,23 @@ class SkillManager(Plugin):
             id="email",
             title="Email",
             description="/email <read|send|search> — 读写邮件 (IMAP/SMTP)",
-            schema=_schema("email", "Read and send emails", []),
+            schema=_try_auto_schema(
+                _email_handler,
+                _schema("email", "Read and send emails", []),
+                description="Read and send emails",
+            ),
             handler=_email_handler,
         ))
 
         # Calendar
-        async def _calendar_handler(args, llm=None, **kw):
+        async def _calendar_handler(args: dict) -> str:
+            """Manage calendar events (Google Calendar / CalDAV).
+
+            Args:
+                args: Calendar command dict, e.g. {"action": "list"},
+                    {"action": "today"}, {"action": "week"},
+                    or {"action": "create", "title": "..."}
+            """
             from skills.calendar import get_calendar_skill
             skill = get_calendar_skill()
             if isinstance(args, str):
@@ -2109,12 +2153,22 @@ class SkillManager(Plugin):
             id="calendar",
             title="Calendar",
             description="/calendar <list|today|week|create> — 管理日程",
-            schema=_schema("calendar", "Manage calendar events", []),
+            schema=_try_auto_schema(
+                _calendar_handler,
+                _schema("calendar", "Manage calendar events", []),
+                description="Manage calendar events",
+            ),
             handler=_calendar_handler,
         ))
 
         # Database
-        async def _db_handler(args, llm=None, **kw):
+        async def _db_handler(args: dict) -> str:
+            """Query databases (PostgreSQL/MySQL/SQLite).
+
+            Args:
+                args: Database command dict, e.g. {"action": "tables"}
+                    or {"action": "query", "sql": "SELECT * FROM users"}
+            """
             from skills.database import get_database_skill
             skill = get_database_skill()
             if isinstance(args, str):
@@ -2131,7 +2185,11 @@ class SkillManager(Plugin):
             id="database",
             title="Database",
             description="/db <tables|query <sql>> — 查询数据库",
-            schema=_schema("database", "Query databases (PostgreSQL/MySQL/SQLite)", []),
+            schema=_try_auto_schema(
+                _db_handler,
+                _schema("database", "Query databases (PostgreSQL/MySQL/SQLite)", []),
+                description="Query databases (PostgreSQL/MySQL/SQLite)",
+            ),
             handler=_db_handler,
         ))
 
@@ -2353,6 +2411,32 @@ def _schema(name: str, description: str, required: List[str]) -> Dict[str, Any]:
             },
         },
     }
+
+
+def _try_auto_schema(handler: Callable, fallback_schema: Dict[str, Any], description: str = "") -> Dict[str, Any]:
+    """V69: 优先用 auto_tool_schema 自动生成 schema，失败/不完整则 fallback 到手写。
+
+    Args:
+        handler: 技能处理函数，需有类型注解和 docstring 才能生成完整 schema
+        fallback_schema: 手写 _schema() 生成的兜底 schema
+        description: 可选描述，覆盖 docstring 提取的描述
+
+    Returns:
+        自动生成的 schema（成功时）或 fallback_schema（失败时）
+    """
+    try:
+        from skills.schema_gen import auto_tool_schema
+        auto = auto_tool_schema(handler)
+        props = (auto or {}).get("function", {}).get("parameters", {}).get("properties")
+        if auto and props:
+            # auto_tool_schema 用 func.__name__ 作工具名，这里对齐 skill id 保持一致
+            auto["function"]["name"] = fallback_schema["function"]["name"]
+            if description:
+                auto["function"]["description"] = description
+            return auto
+    except Exception as exc:
+        logger.debug("auto_tool_schema failed for %s: %s", handler, exc)
+    return fallback_schema
 
 
 # ---------- 设置管理：自然语言配置读写 ----------

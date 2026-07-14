@@ -140,7 +140,14 @@ class SubAgent:
 
 
 class DelegationManager:
-    """Decompose complex tasks and run subtasks in parallel."""
+    """Decompose complex tasks and run subtasks in parallel.
+
+    未启用：当前 coordinator 的多 agent 委派走 ``core/agent_mesh.py``
+    的 ``AgentMesh``（基于角色的专家协作），单点子任务则直接用 ``SubAgent``
+    （如 search-summarizer）。本类提供了另一种"分解→并行 SubAgent→合成→
+    critic 审查"的实现，但无业务调用方。保留供未来需要 critic 审查闭环的
+    场景使用；当前 SubAgent + AgentMesh 已满足需求。
+    """
 
     def __init__(self, llm_provider, skills_manager=None):
         self._llm = llm_provider
