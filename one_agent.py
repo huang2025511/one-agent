@@ -449,6 +449,8 @@ class OneAgentApp:
         from marketplace import Marketplace
         marketplace_dir = str(_Path(self.config.agent.data_dir) / "marketplace")
         self.ctx.marketplace = Marketplace(marketplace_dir)
+        # 保留 MarketplacePlugin 引用（用于公开社区市场拉取）
+        self.ctx.marketplace_plugin = self.marketplace
 
         # Subscribe to turn_completed so every turn is auto-persisted
         _seen_sessions = set()

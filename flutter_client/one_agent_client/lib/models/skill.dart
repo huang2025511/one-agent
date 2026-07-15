@@ -13,6 +13,7 @@ class Skill with _$Skill {
     String? version,
     int? uses,
     DateTime? lastUsed,
+    String? directory,
     Map<String, dynamic>? schema,
     bool? isBuiltin,
     bool? isProcedural,
@@ -30,8 +31,20 @@ class Skill with _$Skill {
       description: detail?['description'],
       version: detail?['version'],
       uses: detail?['uses'],
+      lastUsed: _parseTs(detail?['last_used']),
+      directory: detail?['directory'],
       schema: detail?['schema'],
     );
+  }
+
+  static DateTime? _parseTs(dynamic v) {
+    if (v == null) return null;
+    if (v is num) {
+      return DateTime.fromMillisecondsSinceEpoch(
+        v > 1e12 ? v.toInt() : (v * 1000).toInt(),
+      );
+    }
+    return DateTime.tryParse(v.toString());
   }
 }
 

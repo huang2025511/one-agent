@@ -14,6 +14,7 @@ class Role with _$Role {
     @Default('🤖') String icon,
     @Default('#6750A4') String color,
     @Default(false) bool isActive,
+    @Default(false) bool isBuiltin,
     DateTime? createdAt,
     DateTime? updatedAt,
   }) = _Role;
@@ -37,6 +38,7 @@ class Role with _$Role {
       icon: json['icon'] as String? ?? '🤖',
       color: json['color'] as String? ?? '#6750A4',
       isActive: (json['is_active'] as int?) == 1,
+      isBuiltin: (json['is_builtin'] as int?) == 1,
       createdAt: _parseTs(json['created_at']),
       updatedAt: _parseTs(json['updated_at']),
     );

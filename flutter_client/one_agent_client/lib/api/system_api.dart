@@ -97,4 +97,82 @@ class SystemApi {
       return null;
     }
   }
+
+  /// 获取日志
+  static Future<Map<String, dynamic>?> getLogs({
+    int tail = 200,
+    String? level,
+    String? search,
+  }) async {
+    try {
+      final params = <String, dynamic>{'tail': tail};
+      if (level != null) params['level'] = level;
+      if (search != null) params['search'] = search;
+      final resp = await ApiClient.dio.get('/api/logs', queryParameters: params);
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 测试模型
+  static Future<Map<String, dynamic>?> testModel(String model, {String apiKey = ''}) async {
+    try {
+      final resp = await ApiClient.dio.post('/api/models/test', data: {
+        'model': model,
+        if (apiKey.isNotEmpty) 'api_key': apiKey,
+      });
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 列出所有已知服务商
+  static Future<Map<String, dynamic>?> listProviders() async {
+    try {
+      final resp = await ApiClient.dio.post('/api/models/providers');
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 测试服务商连通性
+  static Future<Map<String, dynamic>?> testProvider({
+    required String provider,
+    String apiKey = '',
+    String baseUrl = '',
+  }) async {
+    try {
+      final resp = await ApiClient.dio.post('/api/models/providers/test', data: {
+        'provider': provider,
+        if (apiKey.isNotEmpty) 'api_key': apiKey,
+        if (baseUrl.isNotEmpty) 'base_url': baseUrl,
+      });
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 浏览公开社区市场
+  static Future<Map<String, dynamic>?> browseMarketplace({String query = ''}) async {
+    try {
+      final resp = await ApiClient.dio.get('/api/marketplace/browse', queryParameters: {'query': query});
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 从 URL 安装技能
+  static Future<Map<String, dynamic>?> installFromUrl(String source) async {
+    try {
+      final resp = await ApiClient.dio.post('/api/marketplace/install_url', data: {'source': source});
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
 }

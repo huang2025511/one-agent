@@ -1,7 +1,7 @@
 name: one_agent_client
 description: One-Agent mobile client — full-featured Flutter app for Android/iOS
 publish_to: 'none'
-version: 1.0.68+2068
+version: 1.0.69+2069
 
 environment:
   sdk: '>=3.2.0 <4.0.0'

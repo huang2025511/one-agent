@@ -15,6 +15,7 @@ _$SkillImpl _$$SkillImplFromJson(Map<String, dynamic> json) => _$SkillImpl(
       lastUsed: json['lastUsed'] == null
           ? null
           : DateTime.parse(json['lastUsed'] as String),
+      directory: json['directory'] as String?,
       schema: json['schema'] as Map<String, dynamic>?,
       isBuiltin: json['isBuiltin'] as bool?,
       isProcedural: json['isProcedural'] as bool?,
@@ -28,6 +29,7 @@ Map<String, dynamic> _$$SkillImplToJson(_$SkillImpl instance) =>
       'version': instance.version,
       'uses': instance.uses,
       'lastUsed': instance.lastUsed?.toIso8601String(),
+      'directory': instance.directory,
       'schema': instance.schema,
       'isBuiltin': instance.isBuiltin,
       'isProcedural': instance.isProcedural,

@@ -74,4 +74,26 @@ class SessionApi {
       return null;
     }
   }
+
+  /// 批量删除会话
+  static Future<Map<String, dynamic>?> batchDeleteSessions(List<String> sessionIds) async {
+    try {
+      final resp = await ApiClient.dio.post('/api/sessions/batch_delete', data: {
+        'session_ids': sessionIds,
+      });
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 获取会话消息列表
+  static Future<Map<String, dynamic>?> getSessionMessages(String sessionId, {int limit = 100}) async {
+    try {
+      final resp = await ApiClient.dio.get('/api/sessions/$sessionId/messages', queryParameters: {'limit': limit});
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
 }

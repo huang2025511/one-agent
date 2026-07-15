@@ -14,6 +14,7 @@ _$RoleImpl _$$RoleImplFromJson(Map<String, dynamic> json) => _$RoleImpl(
       icon: json['icon'] as String? ?? '🤖',
       color: json['color'] as String? ?? '#6750A4',
       isActive: json['isActive'] as bool? ?? false,
+      isBuiltin: json['isBuiltin'] as bool? ?? false,
       createdAt: json['createdAt'] == null
           ? null
           : DateTime.parse(json['createdAt'] as String),
@@ -31,6 +32,7 @@ Map<String, dynamic> _$$RoleImplToJson(_$RoleImpl instance) =>
       'icon': instance.icon,
       'color': instance.color,
       'isActive': instance.isActive,
+      'isBuiltin': instance.isBuiltin,
       'createdAt': instance.createdAt?.toIso8601String(),
       'updatedAt': instance.updatedAt?.toIso8601String(),
     };

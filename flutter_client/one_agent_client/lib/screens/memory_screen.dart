@@ -342,11 +342,47 @@ class _RoleTabState extends ConsumerState<_RoleTab> {
         ),
       );
     }
-    return ListView.builder(
+    // 分组：内置角色 / 自定义角色
+    final builtinRoles = state.roles.where((r) => r.isBuiltin).toList();
+    final customRoles = state.roles.where((r) => !r.isBuiltin).toList();
+
+    return ListView(
       padding: const EdgeInsets.fromLTRB(8, 8, 8, 80),
-      itemCount: state.roles.length,
-      itemBuilder: (context, index) =>
-          _RoleListTile(role: state.roles[index]),
+      children: [
+        // 顶部说明文字
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Text(
+            '选择一个角色激活，或创建自定义角色',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+          ),
+        ),
+        if (builtinRoles.isNotEmpty) ...[
+          _buildSectionHeader(context, '内置角色'),
+          ...builtinRoles.map((r) => _RoleListTile(role: r)),
+        ],
+        if (builtinRoles.isNotEmpty && customRoles.isNotEmpty)
+          const Divider(height: 32),
+        if (customRoles.isNotEmpty) ...[
+          _buildSectionHeader(context, '自定义角色'),
+          ...customRoles.map((r) => _RoleListTile(role: r)),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildSectionHeader(BuildContext context, String title) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Text(
+        title,
+        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.w600,
+            ),
+      ),
     );
   }
 
@@ -375,7 +411,26 @@ class _RoleListTile extends ConsumerWidget {
         ),
         title: Row(
           children: [
-            Text(role.name, style: theme.textTheme.titleSmall),
+            Flexible(
+              child: Text(role.name,
+                  style: theme.textTheme.titleSmall,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+            ),
+            if (role.isBuiltin) ...[
+              const SizedBox(width: 8),
+              Chip(
+                label: const Text('内置'),
+                padding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                backgroundColor: Colors.blue,
+                labelStyle: theme.textTheme.labelSmall?.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
             if (role.isActive) ...[
               const SizedBox(width: 8),
               Container(
@@ -426,7 +481,8 @@ class _RoleListTile extends ConsumerWidget {
             if (role.isActive)
               const PopupMenuItem(value: 'deactivate', child: Text('取消激活')),
             const PopupMenuItem(value: 'edit', child: Text('编辑')),
-            const PopupMenuItem(value: 'delete', child: Text('删除')),
+            if (!role.isBuiltin)
+              const PopupMenuItem(value: 'delete', child: Text('删除')),
           ],
         ),
         onTap: () => showDialog(

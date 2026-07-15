@@ -10,6 +10,7 @@ import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/typewriter_text.dart';
 import '../providers/session_provider.dart';
+import '../api/session_api.dart';
 import '../models/chat_message.dart';
 import '../models/session.dart';
 import 'settings_screen.dart';
@@ -242,10 +243,19 @@ class _MessageBubble extends StatelessWidget {
 
   const _MessageBubble({required this.message});
 
-  /// 复制整条消息内容到剪贴板
+  /// 复制整条消息内容到剪贴板（包含思考过程+推理+结果）
   void _copyMessage(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
-    Clipboard.setData(ClipboardData(text: message.content));
+    // 整条消息复制：思考过程 + 最终回复
+    final parts = <String>[];
+    if (message.thinking != null && message.thinking!.isNotEmpty) {
+      parts.add('--- 思考过程 ---\n${message.thinking!}');
+    }
+    if (message.content.isNotEmpty) {
+      parts.add(message.content);
+    }
+    final fullText = parts.join('\n\n');
+    Clipboard.setData(ClipboardData(text: fullText));
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(l10n.copySuccess),
@@ -756,20 +766,101 @@ class _InputBarState extends ConsumerState<_InputBar> {
 
 /// 聊天页面的历史会话侧边栏（Drawer）
 /// 点击会话直接切换并关闭 Drawer，无需跳转到单独页面。
-class _SessionDrawer extends ConsumerWidget {
+class _SessionDrawer extends ConsumerStatefulWidget {
   const _SessionDrawer();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_SessionDrawer> createState() => _SessionDrawerState();
+}
+
+class _SessionDrawerState extends ConsumerState<_SessionDrawer> {
+  bool _batchMode = false;
+  Set<String> _selectedIds = {};
+
+  void _toggleBatchMode() {
+    setState(() {
+      _batchMode = !_batchMode;
+      _selectedIds.clear();
+    });
+  }
+
+  void _toggleSelection(String sessionId) {
+    setState(() {
+      if (_selectedIds.contains(sessionId)) {
+        _selectedIds.remove(sessionId);
+      } else {
+        _selectedIds.add(sessionId);
+      }
+    });
+  }
+
+  void _toggleSelectAll(List<Session> sessions) {
+    setState(() {
+      if (sessions.isNotEmpty &&
+          _selectedIds.length == sessions.length) {
+        _selectedIds.clear();
+      } else {
+        _selectedIds = sessions.map((s) => s.id).toSet();
+      }
+    });
+  }
+
+  Future<void> _batchDelete() async {
+    if (_selectedIds.isEmpty) return;
+    final count = _selectedIds.length;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('批量删除会话'),
+        content: Text('确定要删除选中的 $count 个会话吗？此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final result = await SessionApi.batchDeleteSessions(_selectedIds.toList());
+    if (!mounted) return;
+    if (result != null) {
+      await ref.read(sessionListProvider.notifier).load();
+      if (!mounted) return;
+      setState(() {
+        _batchMode = false;
+        _selectedIds.clear();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已删除 $count 个会话')),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('批量删除失败')),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final sessionState = ref.watch(sessionListProvider);
     final chatState = ref.watch(chatProvider);
     final currentSessionId = chatState.currentSessionId;
     final theme = Theme.of(context);
+    final allSelected = sessionState.sessions.isNotEmpty &&
+        _selectedIds.length == sessionState.sessions.length;
 
     return Drawer(
       child: Column(
         children: [
-          // 顶部标题栏 + 刷新/新建会话按钮
+          // 顶部标题栏 + 刷新/新建/批量管理按钮
           AppBar(
             title: const Text('历史会话'),
             automaticallyImplyLeading: false,
@@ -780,36 +871,90 @@ class _SessionDrawer extends ConsumerWidget {
                 onPressed: () => ref.read(sessionListProvider.notifier).load(),
               ),
               IconButton(
-                icon: const Icon(Icons.add_comment_outlined),
-                tooltip: '新会话',
-                onPressed: () {
-                  ref.read(chatProvider.notifier).setSession(null);
-                  Navigator.of(context).pop();
-                },
+                icon: Icon(_batchMode ? Icons.close : Icons.select_all),
+                tooltip: _batchMode ? '取消批量管理' : '批量管理',
+                onPressed: _toggleBatchMode,
               ),
+              if (!_batchMode)
+                IconButton(
+                  icon: const Icon(Icons.add_comment_outlined),
+                  tooltip: '新会话',
+                  onPressed: () {
+                    ref.read(chatProvider.notifier).setSession(null);
+                    Navigator.of(context).pop();
+                  },
+                ),
             ],
           ),
           Expanded(
-            child: _buildBody(context, ref, sessionState, currentSessionId),
+            child: _buildBody(context, sessionState, currentSessionId),
           ),
-          // 底部说明
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceContainerHighest,
-              border: Border(
-                top: BorderSide(color: theme.colorScheme.outlineVariant),
+          // 底部区域：批量模式显示操作栏，否则显示说明
+          if (_batchMode)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest,
+                border: Border(
+                  top: BorderSide(color: theme.colorScheme.outlineVariant),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '已选中 ${_selectedIds.length} 个会话',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      TextButton(
+                        onPressed: sessionState.sessions.isEmpty
+                            ? null
+                            : () => _toggleSelectAll(sessionState.sessions),
+                        child: Text(allSelected ? '取消全选' : '全选'),
+                      ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: _toggleBatchMode,
+                        child: const Text('取消'),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: theme.colorScheme.error,
+                        ),
+                        onPressed:
+                            _selectedIds.isEmpty ? null : _batchDelete,
+                        child: const Text('删除选中'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            )
+          else
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest,
+                border: Border(
+                  top: BorderSide(color: theme.colorScheme.outlineVariant),
+                ),
+              ),
+              child: Text(
+                '长按会话可 Fork · 左滑可删除',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                textAlign: TextAlign.center,
               ),
             ),
-            child: Text(
-              '长按会话可 Fork · 左滑可删除',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-              textAlign: TextAlign.center,
-            ),
-          ),
         ],
       ),
     );
@@ -817,7 +962,6 @@ class _SessionDrawer extends ConsumerWidget {
 
   Widget _buildBody(
     BuildContext context,
-    WidgetRef ref,
     SessionListState state,
     String? currentSessionId,
   ) {
@@ -884,20 +1028,29 @@ class _SessionDrawer extends ConsumerWidget {
         return _SessionDrawerTile(
           session: session,
           isSelected: session.id == currentSessionId,
+          batchMode: _batchMode,
+          batchSelected: _selectedIds.contains(session.id),
+          onToggleSelection: () => _toggleSelection(session.id),
         );
       },
     );
   }
 }
 
-/// Drawer 中的会话条目 — 支持选中高亮、左滑删除、长按 Fork
+/// Drawer 中的会话条目 — 支持选中高亮、左滑删除、长按 Fork、批量选中
 class _SessionDrawerTile extends ConsumerWidget {
   final Session session;
   final bool isSelected;
+  final bool batchMode;
+  final bool batchSelected;
+  final VoidCallback? onToggleSelection;
 
   const _SessionDrawerTile({
     required this.session,
     required this.isSelected,
+    this.batchMode = false,
+    this.batchSelected = false,
+    this.onToggleSelection,
   });
 
   String _formatTime(DateTime? dt) {
@@ -909,6 +1062,29 @@ class _SessionDrawerTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
 
+    // 批量模式：点击切换选中状态，显示 Checkbox，禁用左滑删除与长按 Fork
+    if (batchMode) {
+      return ListTile(
+        selected: batchSelected,
+        selectedTileColor: theme.colorScheme.primaryContainer.withOpacity(0.4),
+        leading: Checkbox(
+          value: batchSelected,
+          onChanged: (_) => onToggleSelection?.call(),
+        ),
+        title: Text(
+          session.title ?? '未命名会话',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(
+          '${_formatTime(session.updatedAt)} · ${session.messageCount ?? 0} 条消息',
+          style: theme.textTheme.bodySmall,
+        ),
+        onTap: onToggleSelection,
+      );
+    }
+
+    // 普通模式：保持原有行为（左滑删除、长按 Fork、点击切换会话）
     return Slidable(
       key: ValueKey(session.id),
       endActionPane: ActionPane(

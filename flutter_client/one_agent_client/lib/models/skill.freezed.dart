@@ -26,6 +26,7 @@ mixin _$Skill {
   String? get version => throw _privateConstructorUsedError;
   int? get uses => throw _privateConstructorUsedError;
   DateTime? get lastUsed => throw _privateConstructorUsedError;
+  String? get directory => throw _privateConstructorUsedError;
   Map<String, dynamic>? get schema => throw _privateConstructorUsedError;
   bool? get isBuiltin => throw _privateConstructorUsedError;
   bool? get isProcedural => throw _privateConstructorUsedError;
@@ -47,6 +48,7 @@ abstract class $SkillCopyWith<$Res> {
       String? version,
       int? uses,
       DateTime? lastUsed,
+      String? directory,
       Map<String, dynamic>? schema,
       bool? isBuiltin,
       bool? isProcedural});
@@ -71,6 +73,7 @@ class _$SkillCopyWithImpl<$Res, $Val extends Skill>
     Object? version = freezed,
     Object? uses = freezed,
     Object? lastUsed = freezed,
+    Object? directory = freezed,
     Object? schema = freezed,
     Object? isBuiltin = freezed,
     Object? isProcedural = freezed,
@@ -100,6 +103,10 @@ class _$SkillCopyWithImpl<$Res, $Val extends Skill>
           ? _value.lastUsed
           : lastUsed // ignore: cast_nullable_to_non_nullable
               as DateTime?,
+      directory: freezed == directory
+          ? _value.directory
+          : directory // ignore: cast_nullable_to_non_nullable
+              as String?,
       schema: freezed == schema
           ? _value.schema
           : schema // ignore: cast_nullable_to_non_nullable
@@ -130,6 +137,7 @@ abstract class _$$SkillImplCopyWith<$Res> implements $SkillCopyWith<$Res> {
       String? version,
       int? uses,
       DateTime? lastUsed,
+      String? directory,
       Map<String, dynamic>? schema,
       bool? isBuiltin,
       bool? isProcedural});
@@ -152,6 +160,7 @@ class __$$SkillImplCopyWithImpl<$Res>
     Object? version = freezed,
     Object? uses = freezed,
     Object? lastUsed = freezed,
+    Object? directory = freezed,
     Object? schema = freezed,
     Object? isBuiltin = freezed,
     Object? isProcedural = freezed,
@@ -181,6 +190,10 @@ class __$$SkillImplCopyWithImpl<$Res>
           ? _value.lastUsed
           : lastUsed // ignore: cast_nullable_to_non_nullable
               as DateTime?,
+      directory: freezed == directory
+          ? _value.directory
+          : directory // ignore: cast_nullable_to_non_nullable
+              as String?,
       schema: freezed == schema
           ? _value._schema
           : schema // ignore: cast_nullable_to_non_nullable
@@ -207,6 +220,7 @@ class _$SkillImpl extends _Skill {
       this.version,
       this.uses,
       this.lastUsed,
+      this.directory,
       final Map<String, dynamic>? schema,
       this.isBuiltin,
       this.isProcedural})
@@ -228,6 +242,8 @@ class _$SkillImpl extends _Skill {
   final int? uses;
   @override
   final DateTime? lastUsed;
+  @override
+  final String? directory;
   final Map<String, dynamic>? _schema;
   @override
   Map<String, dynamic>? get schema {
@@ -245,7 +261,7 @@ class _$SkillImpl extends _Skill {
 
   @override
   String toString() {
-    return 'Skill(id: $id, title: $title, description: $description, version: $version, uses: $uses, lastUsed: $lastUsed, schema: $schema, isBuiltin: $isBuiltin, isProcedural: $isProcedural)';
+    return 'Skill(id: $id, title: $title, description: $description, version: $version, uses: $uses, lastUsed: $lastUsed, directory: $directory, schema: $schema, isBuiltin: $isBuiltin, isProcedural: $isProcedural)';
   }
 
   @override
@@ -261,6 +277,8 @@ class _$SkillImpl extends _Skill {
             (identical(other.uses, uses) || other.uses == uses) &&
             (identical(other.lastUsed, lastUsed) ||
                 other.lastUsed == lastUsed) &&
+            (identical(other.directory, directory) ||
+                other.directory == directory) &&
             const DeepCollectionEquality().equals(other._schema, _schema) &&
             (identical(other.isBuiltin, isBuiltin) ||
                 other.isBuiltin == isBuiltin) &&
@@ -278,6 +296,7 @@ class _$SkillImpl extends _Skill {
       version,
       uses,
       lastUsed,
+      directory,
       const DeepCollectionEquality().hash(_schema),
       isBuiltin,
       isProcedural);
@@ -304,6 +323,7 @@ abstract class _Skill extends Skill {
       final String? version,
       final int? uses,
       final DateTime? lastUsed,
+      final String? directory,
       final Map<String, dynamic>? schema,
       final bool? isBuiltin,
       final bool? isProcedural}) = _$SkillImpl;
@@ -323,6 +343,8 @@ abstract class _Skill extends Skill {
   int? get uses;
   @override
   DateTime? get lastUsed;
+  @override
+  String? get directory;
   @override
   Map<String, dynamic>? get schema;
   @override

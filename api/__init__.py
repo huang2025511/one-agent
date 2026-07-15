@@ -887,6 +887,208 @@ class RESTAPIGateway(Plugin):
                 "models_by_category": models_by_category,
             }
 
+        @app.get("/api/logs")
+        async def get_logs(
+            tail: int = 200,
+            level: Optional[str] = None,
+            search: Optional[str] = None,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """查看 one-agent 启动以来的日志。
+            - tail: 返回最后 N 行（默认 200，最大 2000）
+            - level: 按级别过滤 (DEBUG/INFO/WARNING/ERROR)
+            - search: 关键词搜索（不区分大小写）
+            """
+            auth(x_api_key)
+            from pathlib import Path
+            data_dir = (_ctx.config.get("agent", {}).get("data_dir", "./data")) if _ctx else "./data"
+            log_path = Path(data_dir) / "logs" / "one_agent.log"
+            if not log_path.exists():
+                return {"lines": [], "total": 0, "filtered": 0}
+            tail = min(max(tail, 1), 2000)
+            try:
+                # 读取全部日志文件（含轮转备份按时间顺序）
+                log_files = sorted(log_path.parent.glob("one_agent.log*"))
+                all_lines: List[str] = []
+                for lf in log_files:
+                    try:
+                        all_lines.extend(lf.read_text(encoding="utf-8", errors="replace").splitlines())
+                    except Exception:
+                        continue
+                # 限制总行数避免内存爆炸
+                all_lines = all_lines[-50000:] if len(all_lines) > 50000 else all_lines
+                total = len(all_lines)
+                # 按级别过滤
+                if level:
+                    level_upper = level.upper()
+                    all_lines = [l for l in all_lines if f"| {level_upper:<7}" in l or f"| {level_upper} |" in l]
+                # 关键词搜索
+                if search:
+                    search_lower = search.lower()
+                    all_lines = [l for l in all_lines if search_lower in l.lower()]
+                filtered = len(all_lines)
+                # 取最后 tail 行
+                result_lines = all_lines[-tail:] if len(all_lines) > tail else all_lines
+            except Exception as exc:
+                logger.debug("read logs failed: %s", exc)
+                return {"lines": [], "total": 0, "filtered": 0, "error": str(exc)}
+            return {"lines": result_lines, "total": total, "filtered": filtered}
+
+        @app.post("/api/models/test")
+        async def test_model(
+            body: dict,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """测试模型是否可用。body: {"model": "provider/model", "api_key": "..."}"""
+            auth(x_api_key)
+            if _llm is None:
+                raise HTTPException(503, "LLM provider not available")
+            model = (body.get("model") or "").strip()
+            if not model:
+                raise HTTPException(400, "model is required")
+            test_key = body.get("api_key", "")
+            try:
+                # 发送一个简短的测试请求
+                import asyncio as _aio
+                test_messages = [{"role": "user", "content": "Hi"}]
+                # 如果提供了 api_key，临时设置
+                if test_key and "/" in model:
+                    provider = model.split("/")[0]
+                    _llm.set_api_key(provider, test_key)
+                # 尝试流式调用（最轻量）
+                chunks = []
+                async for chunk in _llm.chat_completion_stream(
+                    messages=test_messages,
+                    model=model,
+                    max_tokens=10,
+                    temperature=0.1,
+                ):
+                    delta = chunk.get("delta", "")
+                    if delta:
+                        chunks.append(delta)
+                    if len(chunks) >= 3:
+                        break
+                response_text = "".join(chunks)
+                return {
+                    "ok": True,
+                    "model": model,
+                    "response": response_text[:100],
+                    "message": "模型可用",
+                }
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "model": model,
+                    "error": str(exc)[:200],
+                    "message": f"模型测试失败: {exc}",
+                }
+
+        @app.post("/api/models/providers")
+        async def list_providers(
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """列出所有已知服务商及其 base_url。"""
+            auth(x_api_key)
+            from models.resolver import KNOWN_PROVIDERS
+            # 获取已配置的 api_keys
+            configured_keys = {}
+            if _llm:
+                configured_keys = getattr(_llm, "_api_keys", {})
+            providers = []
+            for name, base_url in KNOWN_PROVIDERS.items():
+                providers.append({
+                    "name": name,
+                    "base_url": base_url,
+                    "has_key": bool(configured_keys.get(name)),
+                })
+            return {"providers": providers}
+
+        @app.post("/api/models/providers/test")
+        async def test_provider(
+            body: dict,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """测试服务商连通性并拉取模型列表。body: {"provider": "openai", "api_key": "...", "base_url": "..."}"""
+            auth(x_api_key)
+            provider = (body.get("provider") or "").strip()
+            api_key = body.get("api_key", "")
+            base_url = (body.get("base_url") or "").strip()
+            if not provider:
+                raise HTTPException(400, "provider is required")
+            if not base_url:
+                from models.resolver import KNOWN_PROVIDERS
+                base_url = KNOWN_PROVIDERS.get(provider, "")
+            if not base_url:
+                raise HTTPException(400, f"unknown provider: {provider}, please provide base_url")
+            try:
+                import httpx
+                headers = {}
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
+                    if resp.status_code >= 400:
+                        return {"ok": False, "provider": provider, "error": f"HTTP {resp.status_code}"}
+                    data = resp.json()
+                    models_list = data.get("data") or data.get("models") or []
+                    return {
+                        "ok": True,
+                        "provider": provider,
+                        "base_url": base_url,
+                        "models_count": len(models_list),
+                        "models": [m.get("id", "") for m in models_list if isinstance(m, dict)][:50],
+                    }
+            except Exception as exc:
+                return {"ok": False, "provider": provider, "error": str(exc)[:200]}
+
+        @app.get("/api/marketplace/browse")
+        async def browse_marketplace(
+            query: str = "",
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """从公开社区市场浏览可用技能（GitHub one-agent-skills 仓库）。"""
+            auth(x_api_key)
+            mp_plugin = _ctx.marketplace_plugin if _ctx and hasattr(_ctx, "marketplace_plugin") else None
+            if mp_plugin is None and _ctx:
+                mp_plugin = getattr(_ctx, "marketplace_plugin", None)
+            if mp_plugin is None:
+                # 尝试直接创建临时实例拉取
+                try:
+                    from marketplace import MarketplacePlugin
+                    mp_plugin = MarketplacePlugin()
+                except Exception:
+                    return {"packages": [], "error": "marketplace plugin not available"}
+            try:
+                packages = await mp_plugin.browse_registry(query)
+                return {"packages": packages}
+            except Exception as exc:
+                return {"packages": [], "error": str(exc)[:200]}
+
+        @app.post("/api/marketplace/install_url")
+        async def install_from_url(
+            body: dict,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """从 GitHub URL 或 owner/repo/path 安装技能到社区目录。"""
+            auth(x_api_key)
+            source = (body.get("source") or "").strip()
+            if not source:
+                raise HTTPException(400, "source is required")
+            mp_plugin = _ctx.marketplace_plugin if _ctx and hasattr(_ctx, "marketplace_plugin") else None
+            if mp_plugin is None and _ctx:
+                mp_plugin = getattr(_ctx, "marketplace_plugin", None)
+            if mp_plugin is None:
+                try:
+                    from marketplace import MarketplacePlugin
+                    mp_plugin = MarketplacePlugin()
+                except Exception:
+                    raise HTTPException(503, "marketplace plugin not available")
+            try:
+                result = await mp_plugin.install(source)
+                return result
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)[:200]}
+
         @app.get("/api/metrics")
         async def metrics(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             # 修复：同 stats 路由，auth() 成功返回 None，不能用 if not 检查。
@@ -1335,7 +1537,22 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             if _skills is None:
                 raise HTTPException(503, _("skills_not_available"))
-            return {"skills": _skills.all_skill_ids()}
+            # 返回完整技能信息（含描述、版本、使用次数）而非仅 ID 列表
+            skills_info = []
+            for sid in _skills.all_skill_ids():
+                skill = _skills.get(sid)
+                if skill is None:
+                    continue
+                skills_info.append({
+                    "id": skill.id,
+                    "title": skill.title,
+                    "description": skill.description,
+                    "version": skill.version,
+                    "uses": skill.uses,
+                    "last_used": skill.last_used,
+                    "directory": skill.directory,
+                })
+            return {"skills": skills_info}
 
         # ── 角色 CRUD ──────────────────────────────────────────
         def _get_role_store():
@@ -1428,8 +1645,11 @@ class RESTAPIGateway(Plugin):
             store = _get_role_store()
             if store is None:
                 raise HTTPException(503, "role store not available")
-            if not store.delete(role_id):
-                raise HTTPException(404, "role not found")
+            try:
+                if not store.delete(role_id):
+                    raise HTTPException(404, "role not found")
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
             return {"deleted": True}
 
         @app.post("/api/roles/{role_id}/activate")
@@ -1691,6 +1911,49 @@ class RESTAPIGateway(Plugin):
             if not deleted:
                 raise HTTPException(404, _("session_not_found", session_id=session_id))
             return {"deleted": True, "session_id": session_id}
+
+        @app.post("/api/sessions/batch_delete")
+        async def batch_delete_sessions(
+            body: dict,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """批量删除会话。body: {"session_ids": ["id1", "id2", ...]}"""
+            auth(x_api_key)
+            store = _ctx.session_store if _ctx else None
+            if store is None:
+                raise HTTPException(503, _("session_store_not_available"))
+            session_ids = body.get("session_ids") or []
+            if not isinstance(session_ids, list):
+                raise HTTPException(400, "session_ids must be a list")
+            deleted_ids = []
+            failed_ids = []
+            for sid in session_ids:
+                try:
+                    if store.delete_session(str(sid)):
+                        deleted_ids.append(sid)
+                    else:
+                        failed_ids.append(sid)
+                except Exception:
+                    failed_ids.append(sid)
+            return {"deleted": deleted_ids, "failed": failed_ids,
+                    "deleted_count": len(deleted_ids), "failed_count": len(failed_ids)}
+
+        @app.get("/api/sessions/{session_id}/messages")
+        async def get_session_messages(
+            session_id: str,
+            limit: int = 100,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """获取指定会话的消息列表（用于状态页查看会话详情）。"""
+            auth(x_api_key)
+            store = _ctx.session_store if _ctx else None
+            if store is None:
+                raise HTTPException(503, _("session_store_not_available"))
+            session = store.get_session(session_id)
+            if session is None:
+                raise HTTPException(404, _("session_not_found", session_id=session_id))
+            messages = store.get_messages(session_id, limit=limit) if hasattr(store, "get_messages") else []
+            return {"session": session, "messages": messages}
 
     def _register_settings_routes(self, app, auth, _ctx, _get_backup_mgr):
         from fastapi import Header, HTTPException

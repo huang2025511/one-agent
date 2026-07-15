@@ -27,6 +27,7 @@ mixin _$Role {
   String get icon => throw _privateConstructorUsedError;
   String get color => throw _privateConstructorUsedError;
   bool get isActive => throw _privateConstructorUsedError;
+  bool get isBuiltin => throw _privateConstructorUsedError;
   DateTime? get createdAt => throw _privateConstructorUsedError;
   DateTime? get updatedAt => throw _privateConstructorUsedError;
 
@@ -48,6 +49,7 @@ abstract class $RoleCopyWith<$Res> {
       String icon,
       String color,
       bool isActive,
+      bool isBuiltin,
       DateTime? createdAt,
       DateTime? updatedAt});
 }
@@ -71,6 +73,7 @@ class _$RoleCopyWithImpl<$Res, $Val extends Role>
     Object? icon = null,
     Object? color = null,
     Object? isActive = null,
+    Object? isBuiltin = null,
     Object? createdAt = freezed,
     Object? updatedAt = freezed,
   }) {
@@ -103,6 +106,10 @@ class _$RoleCopyWithImpl<$Res, $Val extends Role>
           ? _value.isActive
           : isActive // ignore: cast_nullable_to_non_nullable
               as bool,
+      isBuiltin: null == isBuiltin
+          ? _value.isBuiltin
+          : isBuiltin // ignore: cast_nullable_to_non_nullable
+              as bool,
       createdAt: freezed == createdAt
           ? _value.createdAt
           : createdAt // ignore: cast_nullable_to_non_nullable
@@ -130,6 +137,7 @@ abstract class _$$RoleImplCopyWith<$Res> implements $RoleCopyWith<$Res> {
       String icon,
       String color,
       bool isActive,
+      bool isBuiltin,
       DateTime? createdAt,
       DateTime? updatedAt});
 }
@@ -151,6 +159,7 @@ class __$$RoleImplCopyWithImpl<$Res>
     Object? icon = null,
     Object? color = null,
     Object? isActive = null,
+    Object? isBuiltin = null,
     Object? createdAt = freezed,
     Object? updatedAt = freezed,
   }) {
@@ -183,6 +192,10 @@ class __$$RoleImplCopyWithImpl<$Res>
           ? _value.isActive
           : isActive // ignore: cast_nullable_to_non_nullable
               as bool,
+      isBuiltin: null == isBuiltin
+          ? _value.isBuiltin
+          : isBuiltin // ignore: cast_nullable_to_non_nullable
+              as bool,
       createdAt: freezed == createdAt
           ? _value.createdAt
           : createdAt // ignore: cast_nullable_to_non_nullable
@@ -206,6 +219,7 @@ class _$RoleImpl implements _Role {
       this.icon = '🤖',
       this.color = '#6750A4',
       this.isActive = false,
+      this.isBuiltin = false,
       this.createdAt,
       this.updatedAt});
 
@@ -232,13 +246,16 @@ class _$RoleImpl implements _Role {
   @JsonKey()
   final bool isActive;
   @override
+  @JsonKey()
+  final bool isBuiltin;
+  @override
   final DateTime? createdAt;
   @override
   final DateTime? updatedAt;
 
   @override
   String toString() {
-    return 'Role(id: $id, name: $name, description: $description, systemPromptOverride: $systemPromptOverride, icon: $icon, color: $color, isActive: $isActive, createdAt: $createdAt, updatedAt: $updatedAt)';
+    return 'Role(id: $id, name: $name, description: $description, systemPromptOverride: $systemPromptOverride, icon: $icon, color: $color, isActive: $isActive, isBuiltin: $isBuiltin, createdAt: $createdAt, updatedAt: $updatedAt)';
   }
 
   @override
@@ -256,6 +273,8 @@ class _$RoleImpl implements _Role {
             (identical(other.color, color) || other.color == color) &&
             (identical(other.isActive, isActive) ||
                 other.isActive == isActive) &&
+            (identical(other.isBuiltin, isBuiltin) ||
+                other.isBuiltin == isBuiltin) &&
             (identical(other.createdAt, createdAt) ||
                 other.createdAt == createdAt) &&
             (identical(other.updatedAt, updatedAt) ||
@@ -265,7 +284,7 @@ class _$RoleImpl implements _Role {
   @JsonKey(ignore: true)
   @override
   int get hashCode => Object.hash(runtimeType, id, name, description,
-      systemPromptOverride, icon, color, isActive, createdAt, updatedAt);
+      systemPromptOverride, icon, color, isActive, isBuiltin, createdAt, updatedAt);
 
   @JsonKey(ignore: true)
   @override
@@ -289,6 +308,7 @@ abstract class _Role implements Role {
       final String icon,
       final String color,
       final bool isActive,
+      final bool isBuiltin,
       final DateTime? createdAt,
       final DateTime? updatedAt}) = _$RoleImpl;
 
@@ -308,6 +328,8 @@ abstract class _Role implements Role {
   String get color;
   @override
   bool get isActive;
+  @override
+  bool get isBuiltin;
   @override
   DateTime? get createdAt;
   @override
