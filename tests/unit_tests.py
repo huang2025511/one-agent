@@ -199,6 +199,8 @@ def test_router_token_aware_upgrade():
     from unittest.mock import MagicMock
     mock_llm = MagicMock()
     mock_llm.model_for_tier = lambda tier: f"test/{tier}-model"
+    mock_llm.get_catalog_tier = lambda model: None
+    mock_llm.model_supports_tools = lambda model: True
     router._llm = mock_llm
     # mock bus publish
     from unittest.mock import MagicMock as MM
@@ -241,6 +243,8 @@ def test_router_token_aware_disabled():
     from unittest.mock import MagicMock
     mock_llm = MagicMock()
     mock_llm.model_for_tier = lambda tier: f"test/{tier}-model"
+    mock_llm.get_catalog_tier = lambda model: None
+    mock_llm.model_supports_tools = lambda model: True
     router._llm = mock_llm
     router.publish = MagicMock()
 
