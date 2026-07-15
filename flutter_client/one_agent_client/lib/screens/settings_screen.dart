@@ -713,9 +713,18 @@ class _ModelRoutingSection extends StatelessWidget {
                   title: '默认模型',
                   current: defaultModel,
                   notifier: notifier,
-                  onSubmit: (v) => notifier.updateConfig({
-                    'llm': {'primary_model': v}
-                  }),
+                  onSubmit: (v) {
+                    // 解析 provider 前缀，同时更新 primary_model 和 primary_provider
+                    final parts = v.split('/');
+                    final provider = parts.length > 1 ? parts.first : '';
+                    final updates = <String, dynamic>{
+                      'llm': {'primary_model': v}
+                    };
+                    if (provider.isNotEmpty) {
+                      (updates['llm'] as Map<String, dynamic>)['primary_provider'] = provider;
+                    }
+                    return notifier.updateConfig(updates);
+                  },
                 ),
               ),
               const Divider(height: 1, indent: 20, endIndent: 20),
@@ -882,9 +891,13 @@ class _ProviderManagementArea extends StatelessWidget {
   }
 
   /// 提取当前已配置的服务商列表
-  /// 来自 /api/models 的 primary_provider + available_models 中各模型的 provider 字段
+  /// 优先使用 config.llm.api_keys 中已配置 key 的服务商，
+  /// 再补充 available_models 中出现的 provider
   List<String> _extractConfiguredProviders() {
     final providers = <String>{};
+    // 1. 从已配置 API Key 的服务商中提取
+    providers.addAll(notifier.configuredProviders);
+    // 2. 从 primary_provider 和 available_models 补充
     final primary = notifier.catalogPrimaryProvider;
     if (primary.isNotEmpty) providers.add(primary);
     final models = notifier.availableModels ?? [];
@@ -1021,7 +1034,7 @@ class _TestModelButtonState extends State<_TestModelButton> {
   }
 }
 
-/// Tier 行 — 4 层路由每层一行，右侧带"选择模型"按钮
+/// Tier 行 — 4 层路由每层一行，横向展示模型列表，右侧"选择模型"按钮
 class _TierRow extends StatelessWidget {
   final String name;
   final int modelCount;
@@ -1060,35 +1073,73 @@ class _TierRow extends StatelessWidget {
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          // 第一行：tier 标签 + 元信息 + 选择按钮
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 10),
+              SizedBox(
+                width: 56,
+                child: Text(label, style: theme.textTheme.bodyMedium),
+              ),
+              Expanded(
+                child: Text(
+                  '阈值≥$threshold · ${tokenBudget}T · $picked 次',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontFamily: 'monospace',
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              if (onSelectModels != null)
+                _SelectModelsButton(
+                  count: modelCount,
+                  onPressed: onSelectModels!,
+                ),
+            ],
           ),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 56,
-            child: Text(label, style: theme.textTheme.bodyMedium),
-          ),
-          Expanded(
-            child: Text(
-              '$modelCount 模型 · 阈值≥$threshold · ${tokenBudget}T',
-              style: theme.textTheme.bodySmall?.copyWith(
-                fontFamily: 'monospace',
-                color: theme.colorScheme.onSurfaceVariant,
+          // 第二行：横向滚动展示该层已有模型列表
+          if (tierModels.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 18, top: 6),
+              child: SizedBox(
+                height: 28,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: tierModels.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (context, i) {
+                    final m = tierModels[i];
+                    // 简化显示：只取 model 名（去掉 provider 前缀）
+                    final short = m.contains('/') ? m.split('/').last : m;
+                    return Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: color.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: color.withOpacity(0.25)),
+                      ),
+                      child: Text(
+                        short,
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                          color: color,
+                        ),
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
-          ),
-          _InfoChip('$picked 次', color: color),
-          if (onSelectModels != null) ...[
-            const SizedBox(width: 8),
-            _SelectModelsButton(
-              count: modelCount,
-              onPressed: onSelectModels!,
-            ),
-          ],
         ],
       ),
     );
@@ -2368,9 +2419,11 @@ Future<void> _showProviderManagementDialog(
 }
 
 /// 提取当前已配置的服务商列表
-/// 来自 /api/models 的 primary_provider + available_models 中各模型的 provider 字段
+/// 优先使用 config.llm.api_keys 中已配置 key 的服务商，
+/// 再补充 available_models 中出现的 provider
 Set<String> _collectConfiguredProviders(ServerConfigNotifier notifier) {
   final providers = <String>{};
+  providers.addAll(notifier.configuredProviders);
   final primary = notifier.catalogPrimaryProvider;
   if (primary.isNotEmpty) providers.add(primary);
   final models = notifier.availableModels ?? [];
@@ -2383,7 +2436,8 @@ Set<String> _collectConfiguredProviders(ServerConfigNotifier notifier) {
   return providers;
 }
 
-/// 服务商配置对话框：输入 API Key + 可选自定义 base_url，测试连通后保存
+/// 服务商配置对话框：输入 API Key + base_url，测试连通后展示拉取到的模型列表供选择
+/// 选中模型后可设为默认模型或加入 tier。
 Future<void> _showProviderConfigDialog({
   required BuildContext context,
   required String name,
@@ -2391,152 +2445,388 @@ Future<void> _showProviderConfigDialog({
   required bool hasKey,
   required ServerConfigNotifier notifier,
 }) async {
-  final keyController = TextEditingController();
-  final urlController = TextEditingController(text: baseUrl);
-  bool obscure = true;
-  bool testing = false;
-  String savedKey = '';
-
-  final shouldSave = await showDialog<bool>(
+  await showDialog<void>(
     context: context,
-    builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setState) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.cloud,
-                size: 20, color: Theme.of(ctx).colorScheme.primary),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                '配置 $name',
-                style: const TextStyle(fontFamily: 'monospace'),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (hasKey)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: _InfoChip('已配置 Key',
-                    icon: Icons.check, color: Colors.green),
-              ),
-            TextField(
-              controller: keyController,
-              obscureText: obscure,
-              decoration: InputDecoration(
-                labelText: 'API Key',
-                hintText: '输入 API Key',
-                prefixIcon: const Icon(Icons.key, size: 18),
-                suffixIcon: IconButton(
-                  icon: Icon(
-                      obscure ? Icons.visibility_off : Icons.visibility,
-                      size: 18),
-                  onPressed: () => setState(() => obscure = !obscure),
-                ),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-                isDense: true,
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: urlController,
-              keyboardType: TextInputType.url,
-              decoration: InputDecoration(
-                labelText: 'Base URL（可选）',
-                hintText: baseUrl.isEmpty ? '使用默认地址' : baseUrl,
-                prefixIcon: const Icon(Icons.link, size: 18),
-                border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12)),
-                isDense: true,
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: testing ? null : () => Navigator.of(ctx).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton.tonal(
-            onPressed: testing
-                ? null
-                : () async {
-                    final key = keyController.text.trim();
-                    final url = urlController.text.trim();
-                    if (key.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('请输入 API Key'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                      return;
-                    }
-                    setState(() => testing = true);
-                    final testResult = await SystemApi.testProvider(
-                      provider: name,
-                      apiKey: key,
-                      baseUrl: url,
-                    );
-                    if (!ctx.mounted) return;
-                    setState(() => testing = false);
-                    final ok = testResult?['ok'] == true;
-                    if (ok) {
-                      final modelsCount = testResult?['models_count'] ?? 0;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('连接成功 — 发现 $modelsCount 个模型'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                      savedKey = key;
-                      Navigator.of(ctx).pop(true);
-                    } else {
-                      final err = testResult?['error'] ?? '连接失败';
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('连接失败: $err'),
-                          behavior: SnackBarBehavior.floating,
-                        ),
-                      );
-                    }
-                  },
-            child: testing
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('测试并保存'),
-          ),
-        ],
-      ),
+    barrierDismissible: false,
+    builder: (ctx) => _ProviderConfigDialog(
+      providerName: name,
+      defaultBaseUrl: baseUrl,
+      hasKey: hasKey,
+      notifier: notifier,
     ),
   );
+}
 
-  keyController.dispose();
-  urlController.dispose();
+/// 服务商配置对话框（StatefulWidget）
+/// 流程：输入 Key → 测试连通 → 展示模型列表 → 选择模型 → 保存
+class _ProviderConfigDialog extends StatefulWidget {
+  final String providerName;
+  final String defaultBaseUrl;
+  final bool hasKey;
+  final ServerConfigNotifier notifier;
 
-  if (shouldSave == true && savedKey.isNotEmpty) {
-    final ok = await notifier.updateConfig({
-      'llm': {'api_keys': {name: savedKey}}
+  const _ProviderConfigDialog({
+    required this.providerName,
+    required this.defaultBaseUrl,
+    required this.hasKey,
+    required this.notifier,
+  });
+
+  @override
+  State<_ProviderConfigDialog> createState() => _ProviderConfigDialogState();
+}
+
+class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
+  final _keyController = TextEditingController();
+  final _urlController = TextEditingController();
+  bool _obscure = true;
+  bool _testing = false;
+  bool _saving = false;
+  String? _error;
+  // 测试成功后拉取到的模型列表
+  List<String> _fetchedModels = [];
+  String _modelQuery = '';
+  // 用户选中的模型（带 provider 前缀，如 "openai/gpt-4o"）
+  final Set<String> _selectedModels = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _urlController.text = widget.defaultBaseUrl;
+  }
+
+  @override
+  void dispose() {
+    _keyController.dispose();
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _testConnection() async {
+    final key = _keyController.text.trim();
+    final url = _urlController.text.trim();
+    if (key.isEmpty) {
+      setState(() => _error = '请输入 API Key');
+      return;
+    }
+    setState(() {
+      _testing = true;
+      _error = null;
+      _fetchedModels = [];
     });
-    if (context.mounted) {
+    try {
+      final result = await SystemApi.testProvider(
+        provider: widget.providerName,
+        apiKey: key,
+        baseUrl: url,
+      );
+      if (!mounted) return;
+      final ok = result?['ok'] == true;
+      if (ok) {
+        final models = (result?['models'] as List? ?? [])
+            .whereType<String>()
+            .where((m) => m.isNotEmpty)
+            .toList();
+        setState(() {
+          _testing = false;
+          _fetchedModels = models;
+          _error = null;
+        });
+      } else {
+        setState(() {
+          _testing = false;
+          _error = result?['error']?.toString() ?? '连接失败';
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  Future<void> _saveAndExit() async {
+    final key = _keyController.text.trim();
+    if (key.isEmpty) {
+      setState(() => _error = '请输入 API Key');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
+    // 1. 保存 API Key
+    final updates = <String, dynamic>{
+      'llm': {'api_keys': {widget.providerName: key}}
+    };
+    // 2. 如果用户选了模型，将第一个设为默认模型（provider/model 格式）
+    if (_selectedModels.isNotEmpty) {
+      final firstModel = _selectedModels.first;
+      // 确保带 provider 前缀
+      final fullId = firstModel.contains('/')
+          ? firstModel
+          : '${widget.providerName}/$firstModel';
+      (updates['llm'] as Map<String, dynamic>)['primary_model'] = fullId;
+      (updates['llm'] as Map<String, dynamic>)['primary_provider'] =
+          widget.providerName;
+    }
+    // 3. 可选 base_url 覆盖
+    final url = _urlController.text.trim();
+    if (url.isNotEmpty && url != widget.defaultBaseUrl) {
+      (updates['llm'] as Map<String, dynamic>)['base_urls'] = {
+        widget.providerName: url
+      };
+    }
+
+    final ok = await widget.notifier.updateConfig(updates);
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (ok) {
+      await widget.notifier.loadModels();
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(ok
-              ? '$name API Key 已保存'
-              : notifier.state.error ?? '保存失败'),
+          content: Text(_selectedModels.isEmpty
+              ? '${widget.providerName} API Key 已保存'
+              : '${widget.providerName} 已配置，默认模型已更新'),
           behavior: SnackBarBehavior.floating,
         ),
       );
+      Navigator.of(context).pop();
+    } else {
+      setState(() => _error = widget.notifier.state.error ?? '保存失败');
     }
-    if (ok) await notifier.loadModels();
+  }
+
+  String _fullModelId(String m) {
+    return m.contains('/') ? m : '${widget.providerName}/$m';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final filteredModels = _fetchedModels.where((m) {
+      if (_modelQuery.isEmpty) return true;
+      return m.toLowerCase().contains(_modelQuery.toLowerCase());
+    }).toList();
+
+    return AlertDialog(
+      title: Row(
+        children: [
+          Icon(Icons.cloud, size: 20, color: theme.colorScheme.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '配置 ${widget.providerName}',
+              style: const TextStyle(fontFamily: 'monospace'),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (widget.hasKey)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: _InfoChip('已配置 Key',
+                      icon: Icons.check, color: Colors.green),
+                ),
+              // API Key 输入
+              TextField(
+                controller: _keyController,
+                obscureText: _obscure,
+                decoration: InputDecoration(
+                  labelText: 'API Key',
+                  hintText: '输入 API Key',
+                  prefixIcon: const Icon(Icons.key, size: 18),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                        _obscure ? Icons.visibility_off : Icons.visibility,
+                        size: 18),
+                    onPressed: () => setState(() => _obscure = !_obscure),
+                  ),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              // Base URL 输入
+              TextField(
+                controller: _urlController,
+                keyboardType: TextInputType.url,
+                decoration: InputDecoration(
+                  labelText: 'Base URL',
+                  hintText: widget.defaultBaseUrl.isEmpty
+                      ? '使用默认地址'
+                      : widget.defaultBaseUrl,
+                  prefixIcon: const Icon(Icons.link, size: 18),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 12),
+              // 测试按钮
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  onPressed: _testing ? null : _testConnection,
+                  icon: _testing
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.wifi_find, size: 16),
+                  label: Text(_testing ? '测试中...' : '测试连接并拉取模型'),
+                ),
+              ),
+              // 错误提示
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.errorContainer.withOpacity(0.3),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      _error!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: theme.colorScheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ),
+              // 模型列表（测试成功后展示）
+              if (_fetchedModels.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Icon(Icons.list_alt,
+                        size: 14, color: theme.colorScheme.primary),
+                    const SizedBox(width: 6),
+                    Text(
+                      '可用模型 (${_fetchedModels.length})',
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: theme.colorScheme.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const Spacer(),
+                    if (_selectedModels.isNotEmpty)
+                      Text(
+                        '已选 ${_selectedModels.length}',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: theme.colorScheme.primary,
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                // 搜索框
+                TextField(
+                  decoration: InputDecoration(
+                    hintText: '搜索模型...',
+                    prefixIcon: const Icon(Icons.search, size: 16),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 8),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                  onChanged: (v) => setState(() => _modelQuery = v),
+                ),
+                const SizedBox(height: 8),
+                // 模型列表（可勾选）
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 260),
+                  child: ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: filteredModels.length,
+                    itemBuilder: (ctx, i) {
+                      final m = filteredModels[i];
+                      final fullId = _fullModelId(m);
+                      final isSelected = _selectedModels.contains(fullId);
+                      return CheckboxListTile(
+                        value: isSelected,
+                        dense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 0),
+                        title: Text(
+                          m,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          '${widget.providerName}/$m',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: theme.colorScheme.outline,
+                          ),
+                        ),
+                        onChanged: (v) {
+                          setState(() {
+                            if (v == true) {
+                              _selectedModels.add(fullId);
+                            } else {
+                              _selectedModels.remove(fullId);
+                            }
+                          });
+                        },
+                      );
+                    },
+                  ),
+                ),
+                if (_selectedModels.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      '提示：保存后，第一个选中的模型将设为默认模型',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.outline,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ),
+              ],
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: (_testing || _saving)
+              ? null
+              : () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: (_testing || _saving) ? null : _saveAndExit,
+          child: _saving
+              ? const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('保存'),
+        ),
+      ],
+    );
   }
 }
 

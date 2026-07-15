@@ -892,20 +892,26 @@ class RESTAPIGateway(Plugin):
             tail: int = 200,
             level: Optional[str] = None,
             search: Optional[str] = None,
+            since: Optional[float] = None,
             x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
         ):
-            """查看 one-agent 启动以来的日志。
+            """查看 one-agent 日志。
             - tail: 返回最后 N 行（默认 200，最大 2000）
             - level: 按级别过滤 (DEBUG/INFO/WARNING/ERROR)
             - search: 关键词搜索（不区分大小写）
+            - since: Unix 时间戳，只返回该时间之后的日志（用于"本次启动"过滤）
             """
             auth(x_api_key)
             from pathlib import Path
+            import re as _re
             data_dir = (_ctx.config.get("agent", {}).get("data_dir", "./data")) if _ctx else "./data"
             log_path = Path(data_dir) / "logs" / "one_agent.log"
             if not log_path.exists():
                 return {"lines": [], "total": 0, "filtered": 0}
             tail = min(max(tail, 1), 2000)
+            # 默认 since = 本次启动时间（如果未指定）
+            if since is None and _ctx:
+                since = getattr(_ctx, "started_at", None)
             try:
                 # 读取全部日志文件（含轮转备份按时间顺序）
                 log_files = sorted(log_path.parent.glob("one_agent.log*"))
@@ -918,6 +924,26 @@ class RESTAPIGateway(Plugin):
                 # 限制总行数避免内存爆炸
                 all_lines = all_lines[-50000:] if len(all_lines) > 50000 else all_lines
                 total = len(all_lines)
+                # 按时间过滤（since 之后的日志）
+                if since is not None:
+                    # 日志格式：2026-07-15 10:23:45 | LEVEL | logger | msg
+                    ts_pattern = _re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+                    from datetime import datetime as _dt
+                    cutoff_dt = _dt.fromtimestamp(since)
+                    filtered_by_time: List[str] = []
+                    for line in all_lines:
+                        m = ts_pattern.match(line)
+                        if m:
+                            try:
+                                line_dt = _dt.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                                if line_dt >= cutoff_dt:
+                                    filtered_by_time.append(line)
+                            except ValueError:
+                                filtered_by_time.append(line)
+                        else:
+                            # 无时间戳的行（多行日志的续行）保留
+                            filtered_by_time.append(line)
+                    all_lines = filtered_by_time
                 # 按级别过滤
                 if level:
                     level_upper = level.upper()
@@ -1750,27 +1776,59 @@ class RESTAPIGateway(Plugin):
 
         @app.delete("/api/marketplace/{name}")
         async def uninstall_skill(name: str, target_dir: str = "", x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """Uninstall a skill package from the target directory."""
-            auth(x_api_key)
-            mp = _cp("marketplace")
-            if mp is None:
-                raise HTTPException(503, _("marketplace_not_available"))
+            """Uninstall a skill package from the target directory.
 
-            # Security: restrict target_dir to prevent path traversal
+            支持两种调用方式：
+            1. 传 target_dir 为技能**自身目录路径**（即 skills list 返回的 directory
+               字段，如 /data/skills/builtin/web_search）— 直接删除该目录。
+            2. 传 target_dir 为**父目录**（如 /data/skills/marketplace）— 删除
+               target_dir/name（兼容旧版 marketplace 行为）。
+            """
+            auth(x_api_key)
+
+            from pathlib import Path as _Path
+            import shutil as _shutil
+
+            data_dir = _ctx.config.get("agent", {}).get("data_dir", "./data") if _ctx else "./data"
+            allowed_base = os.path.realpath(os.path.join(data_dir, "skills"))
+
+            # 校验并解析目标目录
             if not target_dir:
-                target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
+                # 未指定时回退到 marketplace 目录 + name
+                candidate = os.path.join(allowed_base, "marketplace", name)
             else:
-                # Validate path is within allowed directory.
-                # Use Path.relative_to instead of str.startswith to
-                # prevent "/data/skills_evil" bypassing "/data/skills".
-                allowed_base = os.path.realpath(os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
-                if not is_path_within(target_dir, allowed_base):
+                # target_dir 可能是技能自身目录，也可能是父目录
+                self_dir = os.path.realpath(target_dir)
+                parent_with_name = os.path.realpath(os.path.join(target_dir, name))
+                # 优先判断 target_dir/name 是否存在且在 skills 下（旧版兼容）
+                if is_path_within(parent_with_name, allowed_base) and _Path(parent_with_name).exists():
+                    candidate = parent_with_name
+                elif is_path_within(self_dir, allowed_base) and _Path(self_dir).exists():
+                    # target_dir 就是技能自身目录
+                    candidate = self_dir
+                else:
                     raise HTTPException(403, "target_dir must be within skills directory")
 
-            ok = mp.uninstall(name, target_dir)
-            if not ok:
+            candidate_path = _Path(candidate)
+            # 安全：禁止删除 skills 根目录本身
+            if os.path.realpath(candidate) == allowed_base:
+                raise HTTPException(403, "cannot delete skills root directory")
+            if not candidate_path.exists():
                 raise HTTPException(404, _("skill_not_found", name=name))
-            return {"uninstalled": True, "name": name}
+
+            try:
+                _shutil.rmtree(candidate_path)
+                logger.info("Uninstalled skill: %s -> %s", name, candidate)
+                # 从 SkillsRegistry 中卸载（运行时移除）
+                if _skills is not None:
+                    try:
+                        _skills.unregister(name)
+                    except Exception:
+                        pass
+                return {"uninstalled": True, "name": name, "directory": candidate}
+            except Exception as exc:
+                logger.error("Uninstall skill failed: %s", exc, exc_info=True)
+                raise HTTPException(500, f"uninstall failed: {exc}")
 
         @app.post("/api/cache/clear")
         async def cache_clear(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):

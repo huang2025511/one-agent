@@ -51,19 +51,34 @@ class SkillApi {
   }
 
   /// 卸载技能
-  /// 修复：使用 Dio 的 queryParameters 自动 URL 编码，之前手动拼接 `?target_dir=$targetDir`
-  /// 若 targetDir 含特殊字符会破坏 URL 结构
-  static Future<bool> uninstall(String name, {String? targetDir}) async {
+  /// targetDir 传技能的 directory 字段（技能自身目录路径）。
+  /// 返回 (success, message) 以便 UI 展示失败原因。
+  static Future<({bool success, String message})> uninstall(
+    String name, {
+    String? targetDir,
+  }) async {
     try {
       final queryParameters = <String, dynamic>{};
-      if (targetDir != null) queryParameters['target_dir'] = targetDir;
-      await ApiClient.dio.delete(
+      if (targetDir != null && targetDir.isNotEmpty) {
+        queryParameters['target_dir'] = targetDir;
+      }
+      final resp = await ApiClient.dio.delete(
         '/api/marketplace/$name',
         queryParameters: queryParameters.isNotEmpty ? queryParameters : null,
       );
-      return true;
-    } catch (_) {
-      return false;
+      if (resp.statusCode == 200) {
+        return (success: true, message: '卸载成功');
+      }
+      return (success: false, message: '卸载失败 (HTTP ${resp.statusCode})');
+    } on dynamic catch (e) {
+      String msg = '卸载失败';
+      try {
+        final data = (e as dynamic).response?.data;
+        if (data is Map) {
+          msg = data['detail'] ?? data['message'] ?? msg;
+        }
+      } catch (_) {}
+      return (success: false, message: msg);
     }
   }
 }

@@ -99,15 +99,19 @@ class SystemApi {
   }
 
   /// 获取日志
+  /// since: Unix 时间戳（秒）。传 0 表示查看全部历史日志；
+  /// 不传或传 null 表示只看本次启动以来的日志（服务端默认行为）。
   static Future<Map<String, dynamic>?> getLogs({
     int tail = 200,
     String? level,
     String? search,
+    double? since,
   }) async {
     try {
       final params = <String, dynamic>{'tail': tail};
       if (level != null) params['level'] = level;
       if (search != null) params['search'] = search;
+      if (since != null) params['since'] = since;
       final resp = await ApiClient.dio.get('/api/logs', queryParameters: params);
       return resp.data as Map<String, dynamic>?;
     } catch (_) {

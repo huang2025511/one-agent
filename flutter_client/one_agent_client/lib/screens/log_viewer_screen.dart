@@ -7,6 +7,9 @@ import '../api/system_api.dart';
 ///
 /// 支持关键词搜索、级别过滤（DEBUG/INFO/WARNING/ERROR）、行数控制，
 /// 按级别着色显示，时间戳使用 monospace 字体。
+/// 支持切换「本次启动 / 全部日志」——
+///   本次启动：仅展示 one-agent 本次启动以来的日志（默认）；
+///   全部日志：展示日志文件中所有历史日志。
 class LogViewerScreen extends ConsumerStatefulWidget {
   const LogViewerScreen({super.key});
 
@@ -21,6 +24,10 @@ class _LogViewerScreenState extends ConsumerState<LogViewerScreen> {
   String? _level;
   int _tail = 500;
   String _search = '';
+
+  /// true = 本次启动以来的日志（服务端默认 since=_ctx.started_at）
+  /// false = 全部历史日志（since=0）
+  bool _sinceBoot = true;
 
   List<String> _lines = [];
   int _total = 0;
@@ -54,6 +61,9 @@ class _LogViewerScreenState extends ConsumerState<LogViewerScreen> {
         tail: _tail,
         level: _level,
         search: _search.isEmpty ? null : _search,
+        // sinceBoot=true → null（服务端使用 _ctx.started_at）
+        // sinceBoot=false → 0（查看全部历史日志）
+        since: _sinceBoot ? null : 0,
       );
       if (!mounted) return;
       if (result == null) {
@@ -111,6 +121,30 @@ class _LogViewerScreenState extends ConsumerState<LogViewerScreen> {
       appBar: AppBar(
         title: const Text('日志查看'),
         actions: [
+          // 切换「本次启动 / 全部日志」
+          Tooltip(
+            message: _sinceBoot ? '当前：本次启动' : '当前：全部日志',
+            child: TextButton.icon(
+              onPressed: _isLoading
+                  ? null
+                  : () {
+                      setState(() => _sinceBoot = !_sinceBoot);
+                      _load();
+                    },
+              icon: Icon(
+                _sinceBoot ? Icons.flash_on : Icons.history,
+                size: 18,
+              ),
+              label: Text(
+                _sinceBoot ? '本次启动' : '全部日志',
+                style: const TextStyle(fontSize: 13),
+              ),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: '刷新',
@@ -291,6 +325,24 @@ class _LogViewerScreenState extends ConsumerState<LogViewerScreen> {
       ),
       child: Row(
         children: [
+          Icon(
+            _sinceBoot ? Icons.flash_on : Icons.history,
+            size: 14,
+            color: _sinceBoot
+                ? theme.colorScheme.primary
+                : theme.colorScheme.outline,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            _sinceBoot ? '本次启动' : '全部日志',
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: _sinceBoot
+                  ? theme.colorScheme.primary
+                  : theme.colorScheme.outline,
+              fontWeight: _sinceBoot ? FontWeight.w600 : null,
+            ),
+          ),
+          const SizedBox(width: 12),
           Icon(Icons.list_alt, size: 14, color: theme.colorScheme.outline),
           const SizedBox(width: 4),
           Text('总 $_total 行', style: theme.textTheme.labelSmall),

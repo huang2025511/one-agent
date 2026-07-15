@@ -247,6 +247,21 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
       state.models?['models_by_category'] as Map<String, dynamic>?;
   List<dynamic>? get availableModels =>
       state.models?['available_models'] as List<dynamic>?;
+
+  /// 已配置 API Key 的服务商列表（来自 config.llm.api_keys，值为 "***" 表示已配置）
+  List<String> get configuredProviders {
+    final keys = _get(['llm', 'api_keys']) as Map<String, dynamic>?;
+    if (keys == null) return [];
+    return keys.entries
+        .where((e) {
+          final v = e.value;
+          // v == "***"（脱敏）或非空字符串表示已配置
+          return v is String && v.isNotEmpty;
+        })
+        .map((e) => e.key)
+        .toList()
+      ..sort();
+  }
 }
 
 final serverConfigProvider =

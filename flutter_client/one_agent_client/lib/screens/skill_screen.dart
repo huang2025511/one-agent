@@ -235,15 +235,15 @@ class _SkillListTileState extends ConsumerState<_SkillListTile> {
     final ok = await _confirmUninstall(context);
     if (ok != true) return;
     if (!mounted) return;
-    final success = await SkillApi.uninstall(
+    final result = await SkillApi.uninstall(
       widget.skill.id,
       targetDir: widget.skill.directory,
     );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(success ? '卸载成功' : '卸载失败')),
+      SnackBar(content: Text(result.message)),
     );
-    if (success) {
+    if (result.success) {
       ref.read(skillProvider.notifier).loadSkills();
     }
   }

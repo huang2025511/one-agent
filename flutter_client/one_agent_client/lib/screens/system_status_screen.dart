@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -10,12 +12,34 @@ import '../providers/settings_provider.dart';
 import 'log_viewer_screen.dart';
 import 'settings_screen.dart';
 
-/// 系统状态页面
-class SystemStatusScreen extends ConsumerWidget {
+/// 系统状态页面 — 定时刷新保证会话数/消息数等实时
+class SystemStatusScreen extends ConsumerStatefulWidget {
   const SystemStatusScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SystemStatusScreen> createState() => _SystemStatusScreenState();
+}
+
+class _SystemStatusScreenState extends ConsumerState<SystemStatusScreen> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    // 每 10 秒自动刷新系统状态，保证会话数/消息数实时
+    _timer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (mounted) ref.read(systemProvider.notifier).loadAll();
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final systemState = ref.watch(systemProvider);
     final settingsState = ref.watch(settingsProvider);
 
@@ -48,13 +72,12 @@ class SystemStatusScreen extends ConsumerWidget {
           ),
         ],
       ),
-      body: _buildBody(context, ref, systemState, settingsState),
+      body: _buildBody(context, systemState, settingsState),
     );
   }
 
   Widget _buildBody(
     BuildContext context,
-    WidgetRef ref,
     SystemState state,
     SettingsState settings,
   ) {
@@ -205,7 +228,16 @@ class _StatsGrid extends StatelessWidget {
   int _sessionCount() {
     if (stats == null) return 0;
     final s = stats.sessions;
-    if (s is Map) return s.length;
+    if (s is Map) {
+      // 后端返回 {"active": N, "total": M}，显示 total（总会话数）
+      final total = s['total'];
+      if (total is int) return total;
+      if (total is num) return total.toInt();
+      final active = s['active'];
+      if (active is int) return active;
+      if (active is num) return active.toInt();
+      return 0;
+    }
     if (s is int) return s;
     return 0;
   }
@@ -213,7 +245,13 @@ class _StatsGrid extends StatelessWidget {
   int _messageCount() {
     if (stats == null) return 0;
     final m = stats.messages;
-    if (m is Map) return m.length;
+    if (m is Map) {
+      // 后端返回 {"total": N}，显示 total
+      final total = m['total'];
+      if (total is int) return total;
+      if (total is num) return total.toInt();
+      return 0;
+    }
     if (m is int) return m;
     return 0;
   }

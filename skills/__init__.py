@@ -291,6 +291,23 @@ class SkillManager(Plugin):
             logger.debug("tool_cache invalidate for %s failed: %s", skill.id, exc)
         logger.info("registered skill: %s", skill.id)
 
+    def unregister(self, skill_id: str) -> bool:
+        """从运行时注册表中移除一个技能（不删除文件）。
+
+        删除技能文件后调用此方法，使运行时立即生效而无需重启。
+        返回 True 表示原来存在并已移除。
+        """
+        if skill_id in self._skills:
+            del self._skills[skill_id]
+            try:
+                from core.tool_cache import get_tool_cache
+                get_tool_cache().invalidate(skill_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("tool_cache invalidate for %s failed: %s", skill_id, exc)
+            logger.info("unregistered skill: %s", skill_id)
+            return True
+        return False
+
     # --------------------------------------------------------- scan
     def _scan_directory(self, directory: str) -> None:
         root = Path(directory)

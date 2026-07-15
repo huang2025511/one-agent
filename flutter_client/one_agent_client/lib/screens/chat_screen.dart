@@ -13,7 +13,6 @@ import '../providers/session_provider.dart';
 import '../api/session_api.dart';
 import '../models/chat_message.dart';
 import '../models/session.dart';
-import 'settings_screen.dart';
 
 /// 聊天主页面
 class ChatScreen extends ConsumerStatefulWidget {
@@ -136,15 +135,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     );
                   },
           ),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: l10n.settings,
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const SettingsScreen()),
-              );
-            },
-          ),
         ],
       ),
       body: Column(
@@ -245,7 +235,6 @@ class _MessageBubble extends StatelessWidget {
 
   /// 复制整条消息内容到剪贴板（包含思考过程+推理+结果）
   void _copyMessage(BuildContext context) {
-    final l10n = AppLocalizations.of(context)!;
     // 整条消息复制：思考过程 + 最终回复
     final parts = <String>[];
     if (message.thinking != null && message.thinking!.isNotEmpty) {
@@ -256,10 +245,13 @@ class _MessageBubble extends StatelessWidget {
     }
     final fullText = parts.join('\n\n');
     Clipboard.setData(ClipboardData(text: fullText));
+    // 简短提示，模仿主流 IM 的「已复制」反馈
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(l10n.copySuccess),
-        duration: const Duration(seconds: 2),
+      const SnackBar(
+        content: Text('已复制'),
+        duration: Duration(milliseconds: 1200),
+        behavior: SnackBarBehavior.floating,
+        margin: EdgeInsets.only(bottom: 80),
       ),
     );
   }
@@ -273,55 +265,34 @@ class _MessageBubble extends StatelessWidget {
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
+        margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.8,
+          maxWidth: MediaQuery.of(context).size.width * 0.82,
         ),
         decoration: BoxDecoration(
           color: isUser
-              ? theme.colorScheme.primaryContainer
-              : theme.colorScheme.surfaceContainerHighest,
+              ? theme.colorScheme.primaryContainer.withOpacity(0.9)
+              : theme.colorScheme.surface,
           borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(16),
-            topRight: const Radius.circular(16),
-            bottomLeft: Radius.circular(isUser ? 16 : 4),
-            bottomRight: Radius.circular(isUser ? 4 : 16),
+            topLeft: const Radius.circular(18),
+            topRight: const Radius.circular(18),
+            bottomLeft: Radius.circular(isUser ? 18 : 4),
+            bottomRight: Radius.circular(isUser ? 4 : 18),
           ),
+          border: isUser
+              ? null
+              : Border.all(
+                  color: theme.colorScheme.outlineVariant.withOpacity(0.35),
+                  width: 0.8,
+                ),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            // 顶部操作栏 — 长按消息或点击复制按钮
-            if (message.content.isNotEmpty)
-              PopupMenuButton<String>(
-                icon: Icon(
-                  Icons.more_horiz,
-                  size: 18,
-                  color: isUser
-                      ? theme.colorScheme.onPrimaryContainer.withOpacity(0.6)
-                      : theme.colorScheme.onSurfaceVariant.withOpacity(0.6),
-                ),
-                padding: const EdgeInsets.only(top: 4, right: 4),
-                tooltip: l10n.copy,
-                itemBuilder: (context) => [
-                  PopupMenuItem(
-                    value: 'copy',
-                    child: Row(
-                      children: [
-                        const Icon(Icons.copy, size: 18),
-                        const SizedBox(width: 8),
-                        Text(l10n.copy),
-                      ],
-                    ),
-                  ),
-                ],
-                onSelected: (value) {
-                  if (value == 'copy') _copyMessage(context);
-                },
-              ),
             // 消息内容
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -340,9 +311,10 @@ class _MessageBubble extends StatelessWidget {
                           ? TypewriterText(
                               message.content,
                               style: theme.textTheme.bodyMedium?.copyWith(
+                                height: 1.5,
                                 color: isUser
                                     ? theme.colorScheme.onPrimaryContainer
-                                    : theme.colorScheme.onSurfaceVariant,
+                                    : theme.colorScheme.onSurface,
                               ),
                             )
                           : MarkdownBody(
@@ -352,9 +324,10 @@ class _MessageBubble extends StatelessWidget {
                               styleSheet:
                                   MarkdownStyleSheet.fromTheme(theme).copyWith(
                                 p: theme.textTheme.bodyMedium?.copyWith(
+                                  height: 1.5,
                                   color: isUser
                                       ? theme.colorScheme.onPrimaryContainer
-                                      : theme.colorScheme.onSurfaceVariant,
+                                      : theme.colorScheme.onSurface,
                                 ),
                               ),
                             ),
@@ -388,6 +361,62 @@ class _MessageBubble extends StatelessWidget {
                       ],
                     ),
                 ],
+              ),
+            ),
+            // 底部操作栏 — 复制按钮（轻量、贴底，不打断阅读）
+            if (message.content.isNotEmpty || (message.thinking != null && message.thinking!.isNotEmpty))
+              Padding(
+                padding: const EdgeInsets.only(right: 4, bottom: 2),
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: _CopyIconButton(
+                    onTap: () => _copyMessage(context),
+                    isUser: isUser,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 轻量的复制图标按钮 — 替代之前的 PopupMenu，更简洁
+class _CopyIconButton extends StatelessWidget {
+  final VoidCallback onTap;
+  final bool isUser;
+
+  const _CopyIconButton({required this.onTap, required this.isUser});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.copy_outlined,
+              size: 13,
+              color: (isUser
+                      ? theme.colorScheme.onPrimaryContainer
+                      : theme.colorScheme.onSurfaceVariant)
+                  .withOpacity(0.5),
+            ),
+            const SizedBox(width: 3),
+            Text(
+              '复制',
+              style: theme.textTheme.labelSmall?.copyWith(
+                fontSize: 11,
+                color: (isUser
+                        ? theme.colorScheme.onPrimaryContainer
+                        : theme.colorScheme.onSurfaceVariant)
+                    .withOpacity(0.5),
               ),
             ),
           ],
