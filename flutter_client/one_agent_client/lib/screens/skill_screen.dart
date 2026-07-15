@@ -1,3 +1,5 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -366,7 +368,7 @@ class _ExpandableDescription extends StatelessWidget {
         final tp = TextPainter(
           text: span,
           maxLines: maxLines,
-          textDirection: TextDirection.ltr,
+          textDirection: ui.TextDirection.ltr,
         )..layout(maxWidth: constraints.maxWidth);
         final isOverflow = tp.didExceedMaxLines;
         tp.dispose();

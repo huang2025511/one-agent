@@ -100,7 +100,7 @@ class SystemStatusScreen extends ConsumerWidget {
           onTapSessions: () => _showSessionsSheet(context),
         ),
         const SizedBox(height: 16),
-        _LlmStatsCard(stats: state.stats?.llmStats),
+        _LlmStatsCard(llmStats: state.stats?.llmStats),
         const SizedBox(height: 16),
         _RouterStatsCard(),
         const SizedBox(height: 16),
