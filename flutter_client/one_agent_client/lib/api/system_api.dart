@@ -87,4 +87,14 @@ class SystemApi {
       return [];
     }
   }
+
+  /// 获取模型目录（含分类、4层路由映射、路由统计）
+  static Future<Map<String, dynamic>?> getModels() async {
+    try {
+      final resp = await ApiClient.dio.get('/api/models');
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
 }

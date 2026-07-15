@@ -792,6 +792,22 @@ class RESTAPIGateway(Plugin):
                     logger.warning("stats query failed: %s", exc)
                     kg_data = {"entities": 0}
 
+            # Router statistics — tier distribution and routing counters
+            router_data = {}
+            _router = _ctx.get_plugin("router") if _ctx else None
+            if _router:
+                try:
+                    router_data = {
+                        "enabled": getattr(_router, "_cfg", {}).get("enabled", True),
+                        "tier_stats": getattr(_router, "_tier_stats", {}),
+                        "total_routed": sum(
+                            s.get("picked", 0)
+                            for s in getattr(_router, "_tier_stats", {}).values()
+                        ),
+                    }
+                except Exception as exc:
+                    logger.warning("router stats query failed: %s", exc)
+
             return {
                 "uptime_seconds": _ctx.uptime() if _ctx else 0,
                 "bus_metrics": _bus.metrics() if _bus else {},
@@ -804,6 +820,71 @@ class RESTAPIGateway(Plugin):
                 "knowledge_graph": kg_data,
                 "skills": {"installed": len(_skills.all_skill_ids()) if _skills else 0},
                 "counters": _ctx.counters if _ctx else {},
+                "router": router_data,
+            }
+
+        @app.get("/api/models")
+        async def models(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """Model catalog with classification, tier mapping, and routing status.
+
+            Returns the default model, 4-tier smart routing configuration,
+            available models grouped by capability (text/image/video/etc),
+            and per-tier statistics.
+            """
+            auth(x_api_key)
+
+            from models.tiers import MODEL_TIERS
+
+            default_model = getattr(_llm, "_default_model", "") if _llm else ""
+            primary_provider = getattr(_llm, "_primary_provider", "") if _llm else ""
+
+            # Routing status from SmartRouter
+            _router = _ctx.get_plugin("router") if _ctx else None
+            routing_enabled = True
+            tier_stats = {}
+            if _router:
+                routing_enabled = getattr(_router, "_cfg", {}).get("enabled", True)
+                tier_stats = getattr(_router, "_tier_stats", {})
+
+            # 4-tier model mapping with thresholds from config
+            router_cfg = (_ctx.config.get("router") or {}) if _ctx else {}
+            thresholds = router_cfg.get("task_complexity_thresholds", {})
+            token_budgets = {"trivial": 512, "simple": 1024, "complex": 2048, "expert": 4096}
+            tiers = {}
+            for tier_name in ["trivial", "simple", "complex", "expert"]:
+                tiers[tier_name] = {
+                    "models": MODEL_TIERS.get(tier_name, []),
+                    "threshold": thresholds.get(tier_name, 0.0),
+                    "token_budget": token_budgets.get(tier_name, 1024),
+                    "stats": tier_stats.get(tier_name, {"picked": 0, "rerouted_up": 0, "rerouted_down": 0}),
+                }
+
+            # Model catalog — best-effort, may be empty if no API key or network
+            available_models = []
+            models_by_category: Dict[str, List[str]] = {}
+            if _llm:
+                try:
+                    cat = _llm.get_catalog()
+                    if cat:
+                        await asyncio.wait_for(cat.refresh(), timeout=10.0)
+                        for m in cat.all_models():
+                            md = m.to_dict()
+                            md["supports_tools"] = _llm.model_supports_tools(m.id)
+                            available_models.append(md)
+                            for cap in m.capabilities:
+                                models_by_category.setdefault(cap, []).append(m.id)
+                except asyncio.TimeoutError:
+                    logger.debug("model catalog refresh timed out")
+                except Exception as exc:
+                    logger.debug("model catalog unavailable: %s", exc)
+
+            return {
+                "default_model": default_model,
+                "primary_provider": primary_provider,
+                "routing_enabled": routing_enabled,
+                "tiers": tiers,
+                "available_models": available_models,
+                "models_by_category": models_by_category,
             }
 
         @app.get("/api/metrics")
