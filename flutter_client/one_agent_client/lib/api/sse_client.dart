@@ -23,7 +23,9 @@ class SseClient {
   static const int _maxStreamReconnects = 2;
 
   /// 流超时：超过此时间未收到任何事件则视为断线
-  static const Duration _streamIdleTimeout = Duration(seconds: 45);
+  /// 设为 120 秒，因为 LLM 429 限流回退非流式时可能需要 60-120 秒
+  /// 配合服务端 10 秒心跳保活，正常情况下不会触发此超时
+  static const Duration _streamIdleTimeout = Duration(seconds: 120);
 
   SseClient({required this.baseUrl, this.apiKey});
 
@@ -254,6 +256,14 @@ class SseClient {
       // 处理不同格式的 SSE 事件
       if (json.containsKey('done') && json['done'] == true) {
         return StreamEvent(type: 'done', done: true, sessionId: json['session_id'] as String?);
+      }
+
+      // 心跳事件：服务端保活信号，不显示给用户
+      if (json.containsKey('status') && json['status'] == 'heartbeat') {
+        return StreamEvent(
+          type: 'heartbeat',
+          sessionId: json['session_id'] as String?,
+        );
       }
 
       if (json.containsKey('status') && json['status'] == 'thinking') {

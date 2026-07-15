@@ -1107,6 +1107,7 @@ class RESTAPIGateway(Plugin):
 
                         result: Dict[str, Any] = {}
                         _streamed_content = False  # 跟踪是否已通过 streaming phase 推送了最终答案
+                        _last_heartbeat = _asyncio.get_event_loop().time()
                         try:
                             while not chat_task.done():
                                 # 修复：检查客户端是否断连（避免 LLM token 浪费）
@@ -1119,6 +1120,7 @@ class RESTAPIGateway(Plugin):
                                     msg, phase = await _asyncio.wait_for(
                                         progress_queue.get(), timeout=0.5
                                     )
+                                    _last_heartbeat = _asyncio.get_event_loop().time()
                                     if phase == "streaming":
                                         # streaming phase 是最终答案的实时增量，作为 content 推送
                                         _streamed_content = True
@@ -1126,7 +1128,11 @@ class RESTAPIGateway(Plugin):
                                     else:
                                         yield SSEFormatter.format_data({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})
                                 except _asyncio.TimeoutError:
-                                    pass  # 超时继续循环，检查 chat_task 是否完成
+                                    # 心跳保活：长时间无进度事件时发送 heartbeat，防止客户端超时断连
+                                    now = _asyncio.get_event_loop().time()
+                                    if now - _last_heartbeat >= 10:
+                                        _last_heartbeat = now
+                                        yield SSEFormatter.format_data({'status': 'heartbeat', 'session_id': session_id})
                             # chat_task 完成后，消费队列中剩余的事件
                             while not progress_queue.empty():
                                 try:

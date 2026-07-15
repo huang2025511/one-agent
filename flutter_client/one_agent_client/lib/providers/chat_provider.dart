@@ -185,6 +185,10 @@ class ChatNotifier extends StateNotifier<ChatState> {
       (event) {
         // 修复：dispose 后 stream 回调可能仍在飞，state 写入会抛异常
         if (_streamSub == null) return;
+
+        // 心跳事件：服务端保活信号，忽略不处理
+        if (event.type == 'heartbeat') return;
+
         // 错误事件：显示错误信息，不写入回复内容
         if (event.type == 'error') {
           final updatedMsgs = [...state.messages];
