@@ -21,11 +21,15 @@ class ServerConfigState {
     bool? isLoading,
     String? error,
     bool? isSaving,
+    bool clearError = false,
   }) =>
       ServerConfigState(
         config: config ?? this.config,
         isLoading: isLoading ?? this.isLoading,
-        error: error ?? this.error,
+        // 修复：error ?? this.error 无法把 error 清空为 null（与其他 provider 一致
+        // 用 clearError 显式控制）。否则 loadConfig/updateConfig 失败后 error
+        // 永久残留在 UI 上，即使后续操作成功也无法清除。
+        error: clearError ? null : (error ?? this.error),
         isSaving: isSaving ?? this.isSaving,
       );
 }
@@ -36,13 +40,14 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
 
   /// 加载配置
   Future<void> loadConfig() async {
-    state = state.copyWith(isLoading: true, error: null);
+    state = state.copyWith(isLoading: true, clearError: true);
     try {
       final result = await SystemApi.getConfig();
       if (result != null && result.config != null) {
         state = state.copyWith(
           config: result.config,
           isLoading: false,
+          clearError: true,
         );
       } else {
         state = state.copyWith(
@@ -60,13 +65,14 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
 
   /// 更新配置
   Future<bool> updateConfig(Map<String, dynamic> updates) async {
-    state = state.copyWith(isSaving: true, error: null);
+    state = state.copyWith(isSaving: true, clearError: true);
     try {
       final result = await SystemApi.updateConfig(updates);
       if (result != null && result['status'] == 'ok') {
         state = state.copyWith(
           config: result['config'] as Map<String, dynamic>,
           isSaving: false,
+          clearError: true,
         );
         return true;
       }

@@ -43,7 +43,8 @@ class CostTracker:
         monthly_budget: float = 20.0,
     ) -> None:
         self._conn = create_sqlite_connection(db_path)
-        self._lock = threading.Lock()
+        # RLock 允许嵌套获取（check_budget 在锁内调用 daily_cost/monthly_cost）
+        self._lock = threading.RLock()
         self._daily_budget = daily_budget
         self._monthly_budget = monthly_budget
         self._migrate()
@@ -136,11 +137,13 @@ class CostTracker:
         return start.timestamp()
 
     def _cost_since(self, since: float) -> float:
+        # 修复：共享 sqlite3.Connection 的读操作也需持锁，避免与并发写冲突
         try:
-            row = self._conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_log WHERE created_at >= ?",
-                (since,),
-            ).fetchone()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_log WHERE created_at >= ?",
+                    (since,),
+                ).fetchone()
             return round(row["total"], 8) if row else 0.0
         except sqlite3.Error as exc:
             logger.exception("cost_tracker query failed: %s", exc)
@@ -175,36 +178,41 @@ class CostTracker:
         }
 
     def by_provider(self) -> Dict[str, float]:
-        rows = self._conn.execute(
-            "SELECT provider, COALESCE(SUM(cost_usd), 0) AS total "
-            "FROM cost_log GROUP BY provider ORDER BY total DESC"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT provider, COALESCE(SUM(cost_usd), 0) AS total "
+                "FROM cost_log GROUP BY provider ORDER BY total DESC"
+            ).fetchall()
         return {r["provider"]: round(r["total"], 8) for r in rows}
 
     def by_model(self) -> Dict[str, float]:
-        rows = self._conn.execute(
-            "SELECT model, COALESCE(SUM(cost_usd), 0) AS total "
-            "FROM cost_log GROUP BY model ORDER BY total DESC"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT model, COALESCE(SUM(cost_usd), 0) AS total "
+                "FROM cost_log GROUP BY model ORDER BY total DESC"
+            ).fetchall()
         return {r["model"]: round(r["total"], 8) for r in rows}
 
     def get_recent(self, limit: int = 50) -> List[Dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM cost_log ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM cost_log ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def total_cost(self) -> float:
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_log"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM cost_log"
+            ).fetchone()
         return round(row["total"], 8) if row else 0.0
 
     def total_tokens(self) -> int:
-        row = self._conn.execute(
-            "SELECT COALESCE(SUM(tokens_prompt + tokens_completion), 0) AS total FROM cost_log"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(tokens_prompt + tokens_completion), 0) AS total FROM cost_log"
+            ).fetchone()
         return int(row["total"]) if row else 0
 
     def close(self) -> None:

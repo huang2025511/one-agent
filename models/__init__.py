@@ -1422,11 +1422,16 @@ class LLMProvider(RecommendationMixin, Plugin):
                 )
 
                 # Only record circuit-breaker failures for retryable errors
-                # (server-side / network issues). Non-retryable 4xx errors
-                # (400 bad request, 401 unauthorized) are client-side problems
-                # and should NOT trip the breaker — otherwise repeated bad
-                # requests would block the provider for all callers.
-                if retryable:
+                # that indicate a SERVER-side fault (500/502/503/504) or
+                # network/timeout issues. 429 (rate limit) is retryable but
+                # is a CLIENT-side condition — tripping the breaker on 429
+                # would block the provider for ALL callers just because one
+                # caller hit the rate limit, defeating the breaker's purpose.
+                _is_server_or_network_fault = (
+                    status is None  # network/timeout error, no HTTP status
+                    or status in {500, 502, 503, 504, 408}
+                )
+                if retryable and _is_server_or_network_fault:
                     circuit_breaker.record_failure()
 
                 if not retryable:

@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -8,12 +11,23 @@ import 'providers/settings_provider.dart';
 import 'screens/main_screen.dart';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.portraitDown,
-  ]);
-  runApp(const ProviderScope(child: OneAgentApp()));
+  runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
+    // 捕获 Flutter 框架渲染异常（布局溢出、assert 失败等）
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+      debugPrint('🛑 FlutterError: ${details.exception}');
+    };
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+    runApp(const ProviderScope(child: OneAgentApp()));
+  }, (error, stack) {
+    // 捕获所有未处理的异步异常（未 await 的 Future 抛错、Isolate 异常等）
+    // 无此守卫时，这些异常静默丢失，用户遇到崩溃无从排查
+    debugPrint('🛑 Uncaught async error: $error\n$stack');
+  });
 }
 
 class OneAgentApp extends ConsumerWidget {

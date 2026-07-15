@@ -388,10 +388,11 @@ def create_otlp_exporter(
         processor = BatchSpanProcessor(exporter)
 
         def export_spans(spans: List[Span]) -> None:
-            for span in spans:
-                # Convert our Span to OpenTelemetry format
-                from opentelemetry.trace import Span as OTelSpan
-                # ... would need full OTel integration
+            # OTLP 集成未完成：需要把内部 Span 转换为 OTel Span 并提交给
+            # processor。当前实现仅记录日志，避免静默丢弃造成"已导出"错觉。
+            logger.warning(
+                "OTLP export not fully implemented: %d spans dropped", len(spans)
+            )
 
         return export_spans
 
@@ -411,11 +412,11 @@ def create_jaeger_exporter(
     try:
         from jaeger_client import JaegerTracer
 
-        # Simple export function
+        # Jaeger 集成未完成：需要完整客户端初始化 + Span 转换。
         def export_to_jaeger(spans: List[Span]) -> None:
-            for span in spans:
-                # Would need full Jaeger client integration
-                pass
+            logger.warning(
+                "Jaeger export not fully implemented: %d spans dropped", len(spans)
+            )
 
         return export_to_jaeger
 

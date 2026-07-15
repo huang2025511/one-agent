@@ -22,45 +22,50 @@ class TypewriterText extends StatefulWidget {
 
 class _TypewriterTextState extends State<TypewriterText> {
   String _displayText = '';
-  int _lastLength = 0;
+  String _targetText = '';
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    _animateTo(widget.text);
+    _targetText = widget.text;
+    _startTimer();
   }
 
   @override
   void didUpdateWidget(TypewriterText oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.text != oldWidget.text) {
-      _animateTo(widget.text);
+      _targetText = widget.text;
+      // 不取消 timer，让现有 timer 继续追赶新目标
+      // 如果已经追上了，重新启动 timer
+      if (_timer == null || !_timer!.isActive) {
+        _startTimer();
+      }
     }
   }
 
-  void _animateTo(String target) {
+  void _startTimer() {
     _timer?.cancel();
-    final startIdx = _displayText.length;
-    if (target.length <= startIdx) {
-      _displayText = target;
-      _lastLength = target.length;
+    // 如果已经显示完整文本，无需启动
+    if (_displayText.length >= _targetText.length) {
+      _displayText = _targetText;
       return;
     }
-    _lastLength = target.length;
     _timer = Timer.periodic(widget.speed, (timer) {
       if (!mounted) {
         timer.cancel();
         return;
       }
       final current = _displayText.length;
-      if (current >= target.length) {
+      if (current >= _targetText.length) {
         timer.cancel();
         return;
       }
-      final nextEnd = (current + 2).clamp(0, target.length);
+      // 每次显示2个字符，快速追赶目标文本
+      final nextEnd = (current + 2).clamp(0, _targetText.length);
       setState(() {
-        _displayText = target.substring(0, nextEnd);
+        _displayText = _targetText.substring(0, nextEnd);
       });
     });
   }

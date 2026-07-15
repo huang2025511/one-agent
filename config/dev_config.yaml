@@ -34,7 +34,5 @@ monitoring:
   tracing_enabled: true
   health_check_interval: 30  # 更频繁的健康检查
 
-# 开发环境功能开关
-features:
-  self_evolution: true       # 允许自进化
-  experimental: true         # 启用实验功能
+# 注：FullConfig 无 features 字段，原 `features:` 块被 Pydantic 静默忽略（死配置）。
+# 自进化/实验功能的真实开关在 router.self_evolution.enabled 与各模块配置中。

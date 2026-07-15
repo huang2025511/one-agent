@@ -131,21 +131,35 @@ _translations: Dict[str, Dict[str, str]] = {
 }
 
 
+def _normalize_lang(lang: str) -> str:
+    """Normalize a language code to a supported translation key.
+
+    Maps regional variants (zh-CN, zh-TW, zh-Hans, en-US, en-GB, …)
+    to the supported base codes ('en', 'zh'). Without this, configuring
+    `language: zh-CN` (as the Flutter client and some configs do) would
+    miss the `_translations` lookup and silently fall back to English.
+    """
+    if not lang:
+        return "en"
+    base = lang.strip().lower().split("-")[0]
+    return base if base in _translations else "en"
+
+
 def set_language(lang: str) -> None:
     """Set the current language.
 
     Args:
-        lang: Language code ('en' or 'zh')
+        lang: Language code ('en', 'zh', or regional variants like 'zh-CN')
     """
     global _current_lang, _auto_detected
     with _lock:
-        if lang in _translations:
-            _current_lang = lang
-            _auto_detected = False  # Manual set, not auto-detected
-            logger.info("language set to: %s", lang)
+        normalized = _normalize_lang(lang)
+        _current_lang = normalized
+        _auto_detected = False  # Manual set, not auto-detected
+        if normalized != lang:
+            logger.info("language set to: %s (normalized from %s)", normalized, lang)
         else:
-            logger.warning("unsupported language: %s, falling back to English", lang)
-            _current_lang = "en"
+            logger.info("language set to: %s", normalized)
 
 
 def get_language() -> str:
@@ -171,10 +185,7 @@ def set_thread_language(lang: str) -> None:
     用 ContextVar.set() 替换 threading.local, 在 asyncio.Task 间自动隔离,
     不会在线程池复用时串扰。
     """
-    if lang in _translations:
-        _current_lang_ctx.set(lang)
-    else:
-        _current_lang_ctx.set("en")
+    _current_lang_ctx.set(_normalize_lang(lang))
 
 
 def detect_language(text: str) -> str:

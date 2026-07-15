@@ -612,9 +612,9 @@ class SkillWeaverRouter:
         async def execute_node(node: SkillNode) -> None:
             """Execute a single node, respecting dependencies."""
             # Wait for dependencies — 加超时保护
-            deadline = asyncio.get_event_loop().time() + dep_wait_timeout_s
+            deadline = asyncio.get_running_loop().time() + dep_wait_timeout_s
             while not all(d in completed for d in node.dependencies):
-                if asyncio.get_event_loop().time() >= deadline:
+                if asyncio.get_running_loop().time() >= deadline:
                     logger.error("SkillWeaver: node %s timed out waiting for deps %s",
                                 node.subtask_id, node.dependencies)
                     node.status = "failed"

@@ -41,6 +41,12 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
   StreamSubscription<StreamEvent>? _streamSub;
   SseClient? _sseClient;
+  // 操作代际计数器：每次 setSession/sendMessage 递增。
+  // setSession 在 await 加载历史期间，用户可能调用 sendMessage 发送新消息并
+  // 开启流式请求。若无守卫，await 返回后 loadHistory 会整体替换 messages，
+  // 丢弃用户刚发的消息和进行中的流。用代际计数器让 setSession 在 await 后
+  // 检测到 sendMessage 已介入，从而放弃覆盖历史。
+  int _opGen = 0;
 
   /// 释放当前进行中的流式请求
   void _disposeStream() {
@@ -53,6 +59,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
   /// 设置当前会话，并加载该会话的历史消息
   Future<void> setSession(String? sessionId) async {
     _disposeStream();
+    final gen = ++_opGen;
 
     state = state.copyWith(
       currentSessionId: sessionId,
@@ -65,17 +72,17 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
     try {
       final detail = await SessionApi.getSession(sessionId);
-      // 加载期间用户可能又切换了会话，需校验
-      if (state.currentSessionId != sessionId) return;
+      // 加载期间用户可能又切换了会话，或发送了新消息（sendMessage 会递增 _opGen）
+      if (_opGen != gen) return;
       if (detail != null) {
         await loadHistory(detail.messages);
       }
     } catch (e) {
-      if (state.currentSessionId == sessionId) {
+      if (_opGen == gen) {
         state = state.copyWith(error: '加载会话历史失败: $e');
       }
     } finally {
-      if (state.currentSessionId == sessionId) {
+      if (_opGen == gen) {
         state = state.copyWith(isLoading: false);
       }
     }
@@ -125,6 +132,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
   Future<void> sendMessage(String text, {String? language}) async {
     if (text.trim().isEmpty) return;
 
+    // 递增代际：使进行中的 setSession 加载历史失效，避免 loadHistory 覆盖
+    // 用户刚发的消息和进行中的流式请求
+    ++_opGen;
     // 取消上一个进行中的流式请求，并标记上一条助手消息结束流式
     _disposeStream();
     final prevMsgs = [...state.messages];
@@ -189,13 +199,17 @@ class ChatNotifier extends StateNotifier<ChatState> {
         // 心跳事件：服务端保活信号，忽略不处理
         if (event.type == 'heartbeat') return;
 
-        // 错误事件：显示错误信息，不写入回复内容
+        // 错误事件：保留已流式生成的部分内容，追加错误提示
+        // 之前用错误消息整体覆盖 content，用户已看到的部分回复会消失
         if (event.type == 'error') {
           final updatedMsgs = [...state.messages];
           final lastIdx = updatedMsgs.length - 1;
           if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
+            final existing = updatedMsgs[lastIdx].content;
+            final errContent = event.content ?? '发生未知错误';
+            // 若已有内容，追加错误提示而非替换；错误信息存入 errorMessage
             updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
-              content: event.content ?? '发生未知错误',
+              content: existing.isNotEmpty ? '$existing\n\n⚠️ $errContent' : errContent,
               isError: true,
               errorMessage: event.content,
               isStreaming: false,
@@ -252,9 +266,14 @@ class ChatNotifier extends StateNotifier<ChatState> {
 
         // 完成
         if (event.done == true) {
-          // 修复：无论是否有 sessionId，done 事件都应结束流式状态
-          // 否则若服务端漏发 sessionId，isLoading 会永久卡住
+          // 修复：done 事件必须同时重置 isStreaming，否则流式指示器卡住
+          final doneMsgs = [...state.messages];
+          final doneIdx = doneMsgs.length - 1;
+          if (doneIdx >= 0 && doneMsgs[doneIdx].role == MessageRole.assistant) {
+            doneMsgs[doneIdx] = doneMsgs[doneIdx].copyWith(isStreaming: false);
+          }
           state = state.copyWith(
+            messages: doneMsgs,
             currentSessionId: event.sessionId ?? state.currentSessionId,
             isLoading: false,
           );
@@ -262,12 +281,15 @@ class ChatNotifier extends StateNotifier<ChatState> {
       },
       onError: (err) {
         debugPrint('❌ SSE stream onError: $err');
-        // 标记占位助手消息结束流式并显示错误
+        if (_streamSub == null) return; // dispose 后回调可能仍在飞
+        // 标记占位助手消息结束流式并显示错误，保留已收到的部分内容
         final updatedMsgs = [...state.messages];
         final lastIdx = updatedMsgs.length - 1;
         if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
+          final existing = updatedMsgs[lastIdx].content;
+          final errContent = '发送失败: $err';
           updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
-            content: '发送失败: $err',
+            content: existing.isNotEmpty ? '$existing\n\n⚠️ $errContent' : errContent,
             isStreaming: false,
             isError: true,
             errorMessage: err.toString(),
@@ -280,6 +302,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
         );
       },
       onDone: () {
+        if (_streamSub == null) return; // dispose 后回调可能仍在飞
         // 标记流结束
         final updatedMsgs = [...state.messages];
         final lastIdx = updatedMsgs.length - 1;
@@ -287,6 +310,9 @@ class ChatNotifier extends StateNotifier<ChatState> {
           updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(isStreaming: false);
         }
         state = state.copyWith(messages: updatedMsgs, isLoading: false);
+        // 清理引用：订阅已自动取消，但 _streamSub 仍持有已取消对象，
+        // 置空让后续判断（_streamSub == null 守卫）能正确识别流已结束
+        _streamSub = null;
         _sseClient?.dispose();
         _sseClient = null;
       },

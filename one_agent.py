@@ -17,6 +17,7 @@ import logging.handlers
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -488,7 +489,7 @@ class OneAgentApp:
                     self.bus.publish({"type": "session_created", "session_id": sid})
                 self.bus.publish({"type": "session_updated", "session_id": sid})
             except Exception:
-                pass
+                logger.debug("session event publish failed", exc_info=True)
         self.bus.subscribe("turn_completed", _persist_turn)
 
         self.ctx._plugins = [
@@ -589,7 +590,7 @@ class OneAgentApp:
         try:
             self.bus.publish({"type": "startup", "timestamp": time.time()})
         except Exception:
-            pass
+            logger.debug("startup event publish failed", exc_info=True)
 
         # 接入 webhook_trigger 到事件总线 — 关键业务事件自动触发已注册的 webhook
         # 修复审计发现的"WebhookTrigger 已写好但未启用"问题：
@@ -734,7 +735,7 @@ class OneAgentApp:
         try:
             self.bus.publish({"type": "shutdown", "timestamp": time.time()})
         except Exception:
-            pass
+            logger.debug("shutdown event publish failed", exc_info=True)
         # 修复：关闭 WebhookTrigger 的 httpx 连接池, 之前 close() 定义了但无调用方
         # 导致进程退出时 keepalive 连接挂在服务端, 频繁重启场景 fd 泄漏。
         try:

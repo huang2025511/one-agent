@@ -72,6 +72,10 @@ class CircuitBreaker:
         self._total_requests = 0
         self._total_failures = 0
         self._fallback: Optional[Callable] = None
+        # HALF_OPEN 状态下正在进行的试探请求数。
+        # half_open_max_requests 配置项之前定义但从未被检查，导致进入 HALF_OPEN
+        # 后任意数量的请求都能通过，达不到隔离故障的目的。
+        self._half_open_in_flight = 0
 
     @property
     def state(self) -> CircuitState:
@@ -104,11 +108,26 @@ class CircuitBreaker:
                     f"Last failure: {time.time() - self._last_failure_time:.0f}s ago"
                 )
 
+            # HALF_OPEN 状态下限制并发试探请求数，超过 half_open_max_requests
+            # 的请求视为 OPEN（走 fallback 或抛 CircuitOpenError）
+            if (self._state == CircuitState.HALF_OPEN
+                    and self._half_open_in_flight >= self._config.half_open_max_requests):
+                if self._fallback:
+                    logger.debug("circuit %s is HALF_OPEN (full), using fallback", self._name)
+                    return self._fallback()
+                raise CircuitOpenError(
+                    f"Circuit '{self._name}' is HALF_OPEN (testing, max requests reached)"
+                )
+
+            if self._state == CircuitState.HALF_OPEN:
+                self._half_open_in_flight += 1
             self._total_requests += 1
 
         try:
             result = func(*args, **kwargs)
             with self._lock:
+                if self._state == CircuitState.HALF_OPEN:
+                    self._half_open_in_flight = max(0, self._half_open_in_flight - 1)
                 self._successes += 1
                 self._last_success_time = time.time()
                 # Check if we should transition to CLOSED
@@ -116,6 +135,8 @@ class CircuitBreaker:
             return result
         except Exception as exc:
             with self._lock:
+                if self._state == CircuitState.HALF_OPEN:
+                    self._half_open_in_flight = max(0, self._half_open_in_flight - 1)
                 self._failures += 1
                 self._total_failures += 1
                 self._last_failure_time = time.time()
@@ -147,7 +168,19 @@ class CircuitBreaker:
                     raise CircuitOpenError(
                         f"Circuit '{self._name}' is OPEN"
                     )
+            elif (self._state == CircuitState.HALF_OPEN
+                    and self._half_open_in_flight >= self._config.half_open_max_requests):
+                # HALF_OPEN 试探请求数已满，多余请求走 fallback 或拒绝
+                if self._fallback:
+                    logger.debug("circuit %s is HALF_OPEN (full), using async fallback", self._name)
+                    need_fallback = True
+                else:
+                    raise CircuitOpenError(
+                        f"Circuit '{self._name}' is HALF_OPEN (testing, max requests reached)"
+                    )
             else:
+                if self._state == CircuitState.HALF_OPEN:
+                    self._half_open_in_flight += 1
                 self._total_requests += 1
 
         # 锁外：执行 fallback (可能是协程)
@@ -161,12 +194,16 @@ class CircuitBreaker:
         try:
             result = await func(*args, **kwargs)
             with self._lock:
+                if self._state == CircuitState.HALF_OPEN:
+                    self._half_open_in_flight = max(0, self._half_open_in_flight - 1)
                 self._successes += 1
                 self._last_success_time = time.time()
                 self._maybe_transition()
             return result
         except Exception as exc:
             with self._lock:
+                if self._state == CircuitState.HALF_OPEN:
+                    self._half_open_in_flight = max(0, self._half_open_in_flight - 1)
                 self._failures += 1
                 self._total_failures += 1
                 self._last_failure_time = time.time()
@@ -195,6 +232,11 @@ class CircuitBreaker:
             if now - self._open_since >= self._config.timeout_seconds:
                 self._state = CircuitState.HALF_OPEN
                 self._successes = 0
+                # 重置 failures：HALF_OPEN 的 _maybe_transition 用 _failures > 0
+                # 检测"试探请求是否失败"。若不重置，累积的 failures 会让
+                # HALF_OPEN 立即转回 OPEN，试探永远无法执行。
+                self._failures = 0
+                self._half_open_in_flight = 0
                 logger.info(
                     "circuit %s → HALF_OPEN (testing recovery)",
                     self._name,
@@ -206,18 +248,21 @@ class CircuitBreaker:
                 self._state = CircuitState.OPEN
                 self._open_since = now
                 self._successes = 0
+                self._half_open_in_flight = 0
                 logger.warning(
                     "circuit %s → OPEN (failed in HALF_OPEN)",
                     self._name,
                 )
             elif self._successes >= self._config.success_threshold:
                 # Enough successes → CLOSED
+                recovered = self._successes
                 self._state = CircuitState.CLOSED
                 self._failures = 0
                 self._successes = 0
+                self._half_open_in_flight = 0
                 logger.info(
                     "circuit %s → CLOSED (recovered with %d successes)",
-                    self._name, self._successes,
+                    self._name, recovered,
                 )
 
     def reset(self) -> None:

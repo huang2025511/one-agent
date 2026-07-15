@@ -130,8 +130,14 @@ class FailureRecovery:
         # Check if cooldown period has passed
         now = time.time()
         if now - breaker["last_failure"] > breaker["cooldown"]:
-            # Half-open: allow one attempt to test recovery
+            # Half-open: allow ONE attempt to test recovery.
+            # 修复：之前每次 cooldown 过期都返回 False，所有并发请求都会被放行，
+            # 达不到隔离故障的目的。现在用 half_open_probe_in_flight 标志确保
+            # 只有一个试探请求通过，其余视为 open。
+            if breaker.get("half_open_probe_in_flight"):
+                return True  # 已有试探请求在飞，拒绝其他请求
             breaker["state"] = "half-open"
+            breaker["half_open_probe_in_flight"] = True
             return False
 
         return breaker["state"] == "open"
@@ -160,6 +166,7 @@ class FailureRecovery:
             # Failed in half-open — re-open the circuit
             breaker["state"] = "open"
             breaker["failures"] = breaker["threshold"] + 1
+            breaker["half_open_probe_in_flight"] = False
             logger.warning("Circuit breaker re-opened for %s", key)
         elif breaker["failures"] >= breaker["threshold"] and breaker["state"] == "closed":
             # Trip the circuit breaker
@@ -180,6 +187,7 @@ class FailureRecovery:
             # Success in half-open — close the circuit
             breaker["state"] = "closed"
             breaker["failures"] = 0
+            breaker["half_open_probe_in_flight"] = False
             logger.info("Circuit breaker closed for %s", key)
 
     # ============================================================== Model fallback

@@ -188,6 +188,12 @@ class AlertManager:
         for channel in rule.channels:
             tasks.append(self._send(channel, alert, message))
 
+        # 修复：channels 为空时 all([]) 返回 True，误报"发送成功"。
+        # 空渠道列表意味着告警实际未送达任何目的地，应返回 False。
+        if not tasks:
+            logger.warning("alert rule %s has no channels, alert not sent", rule.name)
+            return False
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
         success = all(not isinstance(r, Exception) for r in results)
         return success
@@ -284,17 +290,27 @@ class AlertManager:
         import smtplib
         from email.mime.text import MIMEText
 
-        try:
-            msg = MIMEText(message, "plain", "utf-8")
-            msg["Subject"] = f"[{alert.severity.value.upper()}] {alert.title}"
-            msg["From"] = config.get("username", "one-agent@localhost")
-            msg["To"] = ", ".join(config.get("to_addrs", []))
+        # 构造消息对象可在当前协程完成（无 IO）
+        msg = MIMEText(message, "plain", "utf-8")
+        msg["Subject"] = f"[{alert.severity.value.upper()}] {alert.title}"
+        msg["From"] = config.get("username", "one-agent@localhost")
+        msg["To"] = ", ".join(config.get("to_addrs", []))
 
+        def _smtp_send() -> None:
+            # smtplib 是同步阻塞库，TCP 连接 + TLS 握手 + 认证 + 发送
+            # 全程阻塞事件循环。若 SMTP 服务器慢或不可达，整个 agent 卡死。
+            # 用 asyncio.to_thread 把阻塞调用丢到线程池执行。
             smtp = smtplib.SMTP(smtp_host, int(config.get("smtp_port", 587)))
-            smtp.starttls()
-            smtp.login(config.get("username", ""), config.get("password", ""))
-            smtp.send_message(msg)
-            smtp.quit()
+            try:
+                smtp.starttls()
+                smtp.login(config.get("username", ""), config.get("password", ""))
+                smtp.send_message(msg)
+            finally:
+                smtp.quit()
+
+        try:
+            import asyncio
+            await asyncio.to_thread(_smtp_send)
             logger.info("email alert sent: %s", alert.title)
         except Exception as exc:
             logger.warning("email alert failed: %s", exc)
@@ -421,10 +437,6 @@ class AlertManager:
         channels as the plugin.
         """
         try:
-            for channel_cfg in getattr(plugin_alert_manager, "_channels", []):
-                # Plugin channels are callable wrappers; we replicate the config
-                # by reading the plugin's raw config
-                pass
             # Copy raw channel configs if available
             raw_cfg = getattr(plugin_alert_manager, "_raw_channel_configs", None)
             if raw_cfg:

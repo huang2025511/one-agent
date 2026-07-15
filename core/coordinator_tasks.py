@@ -200,26 +200,27 @@ def maybe_schedule_followup(coord, turn):
     # 这里用 ensure_future fire-and-forget，不阻塞 turn 完成
     import asyncio
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # 通过 _run_coroutine_threadsafe 在后台调度
-            task_args = {
-                "session_id": turn.session_id,
-                "user_input": turn.input_text[:300],
-            }
-            # 延迟 5 分钟（300秒），检查 session 是否需要回顾
-            task_id = loop.create_task(
-                scheduler.schedule_delayed(
-                    func_name="followup_check",
-                    delay_seconds=300,
-                    args=task_args,
-                    name=f"followup-{turn.session_id[:20]}",
-                )
+        # get_running_loop() 仅在有运行中的事件循环时返回，否则抛
+        # RuntimeError（由下方 except 捕获）。等价于原 get_event_loop() +
+        # is_running() 检查，且不触发 3.12+ DeprecationWarning。
+        loop = asyncio.get_running_loop()
+        task_args = {
+            "session_id": turn.session_id,
+            "user_input": turn.input_text[:300],
+        }
+        # 延迟 5 分钟（300秒），检查 session 是否需要回顾
+        task_id = loop.create_task(
+            scheduler.schedule_delayed(
+                func_name="followup_check",
+                delay_seconds=300,
+                args=task_args,
+                name=f"followup-{turn.session_id[:20]}",
             )
-            coord._bg_tasks.add(task_id)
-            task_id.add_done_callback(lambda t: coord._bg_tasks.discard(t))
-            turn.meta["followup_scheduled"] = True
-            logger.debug("followup task scheduled for session %s", turn.session_id)
+        )
+        coord._bg_tasks.add(task_id)
+        task_id.add_done_callback(lambda t: coord._bg_tasks.discard(t))
+        turn.meta["followup_scheduled"] = True
+        logger.debug("followup task scheduled for session %s", turn.session_id)
     except Exception as exc:
         logger.debug("schedule_followup failed: %s", exc)
 

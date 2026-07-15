@@ -121,7 +121,10 @@ class Histogram:
     def observe(self, value: float, **labels) -> None:
         """Observe a value."""
         key = self._make_key(labels)
-        self._cumsum[key][value] += 1  # Individual observation
+        # 修复：删除 `self._cumsum[key][value] += 1`——把每次观测的浮点值当作
+        # dict key 存入 cumsum 既是语义错误（cumsum 应只含 bucket 边界累计计数），
+        # 又是内存泄漏（观测值种类无限增长）。collect() 只遍历 self.buckets，
+        # 这些浮点 key 永远不会被读出。
         self._sums[key] += value
         self._counts[key] += 1
 

@@ -380,6 +380,8 @@ class _ServerConfigCardState extends ConsumerState<_ServerConfigCard> {
       ),
     );
 
+    controller.dispose(); // 修复：释放 TextEditingController 避免内存泄漏
+
     if (result != null) {
       final ok = await notifier.updateConfig({
         'llm': {

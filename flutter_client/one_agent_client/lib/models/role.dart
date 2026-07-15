@@ -23,8 +23,14 @@ class Role with _$Role {
   const Role._();
 
   factory Role.fromApi(Map<String, dynamic> json) {
+    // id 可能是 int 也可能是字符串（不同 DB 驱动/序列化路径），
+    // 用健壮解析避免 TypeError 导致整个角色列表加载失败
+    final rawId = json['id'];
+    final id = rawId is int
+        ? rawId
+        : int.tryParse(rawId?.toString() ?? '') ?? 0;
     return Role(
-      id: json['id'] as int,
+      id: id,
       name: json['name'] as String? ?? '',
       description: json['description'] as String? ?? '',
       systemPromptOverride: json['system_prompt_override'] as String? ?? '',

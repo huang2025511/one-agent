@@ -13,14 +13,11 @@ class SseClient {
   final String? apiKey;
   HttpClient? _client;
 
-  /// 最大重试次数（连接建立失败时 + 流中断时）
+  /// 最大重试次数（仅连接建立阶段）
   static const int _maxRetries = 3;
 
   /// 重试初始延迟（毫秒）
   static const int _retryBaseDelayMs = 1000;
-
-  /// 流中断重连最大次数（仅在未收到任何内容时重连）
-  static const int _maxStreamReconnects = 2;
 
   /// 流超时：超过此时间未收到任何事件则视为断线
   /// 设为 120 秒，因为 LLM 429 限流回退非流式时可能需要 60-120 秒
@@ -33,8 +30,9 @@ class SseClient {
   ///
   /// 断线重连策略：
   /// - 连接建立阶段：指数退避重试，最多 _maxRetries 次
-  /// - 流传输阶段：若未收到任何内容就断线，自动重连最多 _maxStreamReconnects 次
-  /// - 已收到内容后断线：直接 yield error 事件，避免重复内容
+  /// - 流传输阶段：不重连。流意外结束直接 yield error，避免重复 POST
+  ///   同一消息导致服务端重复处理（双倍 token 成本、session 数据污染）。
+  /// - 已收到内容后断线：yield 提示"内容可能不完整"的 error 事件
   Stream<StreamEvent> chatStream({
     required String text,
     String? sessionId,
@@ -49,17 +47,20 @@ class SseClient {
 
     final cleanBaseUrl = baseUrl.replaceAll(RegExp(r'/+$'), '');
     final uri = Uri.parse('$cleanBaseUrl${ApiConstants.chatStream}');
-    debugPrint('🌐 SSE: POST $uri | baseUrl=$baseUrl | text=${text.substring(0, text.length > 30 ? 30 : text.length)}...');
+    // 仅 debug 模式打印，避免 release 构建把用户消息前缀泄漏到系统日志
+    if (kDebugMode) {
+      debugPrint('🌐 SSE: POST $uri');
+    }
 
-    // 追踪是否已收到内容（用于判断是否允许重连）
+    // 追踪是否已收到内容
     bool hasReceivedContent = false;
-    int streamReconnectCount = 0;
-    Exception? lastError;
 
     for (int attempt = 0; attempt <= _maxRetries; attempt++) {
       if (attempt > 0) {
         final delay = _retryBaseDelayMs * (1 << (attempt - 1));
-        debugPrint('🔄 SSE: 重连第 $attempt/$_maxRetries 次，等待 ${delay}ms...');
+        if (kDebugMode) {
+          debugPrint('🔄 SSE: 重连第 $attempt/$_maxRetries 次，等待 ${delay}ms...');
+        }
         // 通知客户端正在重连
         yield StreamEvent(
           type: 'thinking',
@@ -78,12 +79,13 @@ class SseClient {
       try {
         request = await _client!.postUrl(uri);
       } catch (e) {
-        lastError = e is Exception ? e : Exception(e.toString());
-        debugPrint('❌ SSE: 连接失败 (尝试 ${attempt + 1}/${_maxRetries + 1}) - $e');
+        if (kDebugMode) {
+          debugPrint('❌ SSE: 连接失败 (尝试 ${attempt + 1}/${_maxRetries + 1}) - $e');
+        }
         if (attempt == _maxRetries) {
           yield StreamEvent(
             type: 'error',
-            content: '连接失败，请检查网络后重试',
+            content: '连接失败: $e',
             done: true,
           );
           return;
@@ -111,8 +113,9 @@ class SseClient {
       try {
         response = await request.close();
       } catch (e) {
-        lastError = e is Exception ? e : Exception(e.toString());
-        debugPrint('❌ SSE: 请求发送失败 - $e');
+        if (kDebugMode) {
+          debugPrint('❌ SSE: 请求发送失败 - $e');
+        }
         if (attempt == _maxRetries) {
           yield StreamEvent(
             type: 'error',
@@ -124,11 +127,15 @@ class SseClient {
         continue;
       }
 
-      debugPrint('✅ SSE: 响应状态 ${response.statusCode}');
+      if (kDebugMode) {
+        debugPrint('✅ SSE: 响应状态 ${response.statusCode}');
+      }
 
       if (response.statusCode != 200) {
         final responseBody = await response.transform(utf8.decoder).join();
-        debugPrint('❌ SSE: 错误响应体 - $responseBody');
+        if (kDebugMode) {
+          debugPrint('❌ SSE: 错误响应体 - $responseBody');
+        }
         yield StreamEvent(
           type: 'error',
           content: '服务器错误: ${response.statusCode}',
@@ -140,11 +147,9 @@ class SseClient {
       // ── 2. 读取流 ────────────────────────────────────────
       String buffer = '';
       bool receivedDone = false;
-      DateTime lastEventTime = DateTime.now();
 
       try {
         await for (final chunk in response.transform(utf8.decoder).timeout(_streamIdleTimeout)) {
-          lastEventTime = DateTime.now();
           buffer += chunk;
 
           while (buffer.contains('\n\n')) {
@@ -174,41 +179,36 @@ class SseClient {
           }
         }
       } on TimeoutException {
-        debugPrint('⏰ SSE: 流超时（${_streamIdleTimeout.inSeconds}秒无数据）');
+        if (kDebugMode) {
+          debugPrint('⏰ SSE: 流超时（${_streamIdleTimeout.inSeconds}秒无数据）');
+        }
       } catch (e) {
-        debugPrint('❌ SSE: 流读取中断 - $e');
-        lastError = e is Exception ? e : Exception(e.toString());
+        if (kDebugMode) {
+          debugPrint('❌ SSE: 流读取中断 - $e');
+        }
       }
 
       // ── 3. 流意外结束（未收到 done 事件）─────────────────
       if (!receivedDone) {
-        debugPrint('⚠️ SSE: 流意外结束（未收到 done 事件），hasReceivedContent=$hasReceivedContent, streamReconnect=$streamReconnectCount');
+        if (kDebugMode) {
+          debugPrint('⚠️ SSE: 流意外结束，hasReceivedContent=$hasReceivedContent');
+        }
 
-        // 已收到内容 → 不重连（避免重复内容），直接报错
         if (hasReceivedContent) {
+          // 已收到部分内容 → 内容可能不完整
           yield StreamEvent(
             type: 'error',
-            content: '连接中断，已收到的内容可能不完整，请重试',
+            content: '连接中断，已收到的内容可能不完整',
             done: true,
           );
-          _client?.close();
-          _client = null;
-          return;
+        } else {
+          // 未收到任何内容 → 超时或连接中断
+          yield StreamEvent(
+            type: 'error',
+            content: '服务器响应超时，请稍后重试',
+            done: true,
+          );
         }
-
-        // 未收到任何内容 → 尝试重连
-        if (streamReconnectCount < _maxStreamReconnects) {
-          streamReconnectCount++;
-          attempt--; // 不消耗外层重试次数
-          continue;
-        }
-
-        // 重连次数耗尽
-        yield StreamEvent(
-          type: 'error',
-          content: '连接失败，请检查网络后重试',
-          done: true,
-        );
         _client?.close();
         _client = null;
         return;

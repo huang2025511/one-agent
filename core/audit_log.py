@@ -47,7 +47,8 @@ class AuditLog:
         # multiple threads — a threading.Lock prevents ProgrammingError and
         # data corruption when the event bus, background tasks, and request
         # handlers all log concurrently.
-        self._write_lock = threading.Lock()
+        # RLock 允许嵌套获取（_check_rotation 可能从 log 的锁内调用）
+        self._write_lock = threading.RLock()
         # 性能优化：rotation 检查频率控制 — 每 ROTATION_CHECK_EVERY 次写入才检查一次
         # 之前每次 log() 都触发 SELECT COUNT(*) + 可能的 DELETE, 在锁内执行
         # 高频审计写入场景下严重串行化。现在每 100 次才检查, 持锁时间大幅下降。
@@ -122,22 +123,25 @@ class AuditLog:
 
     def _check_rotation(self) -> None:
         """Delete old entries if table exceeds max size."""
+        # 修复：共享 sqlite3.Connection (check_same_thread=False) 的所有读写都必须
+        # 持锁，否则并发操作同一连接会触发 ProgrammingError 或读到半提交状态。
         try:
-            count = self._conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
-            if count > AUDIT_MAX_ENTRIES:
-                # Keep only the most recent 80% of entries
-                keep_count = int(AUDIT_MAX_ENTRIES * 0.8)
-                self._conn.execute(
-                    """DELETE FROM audit_log
-                       WHERE id NOT IN (
-                           SELECT id FROM audit_log
-                           ORDER BY timestamp DESC
-                           LIMIT ?
-                       )""",
-                    (keep_count,),
-                )
-                self._conn.commit()
-                logger.info("Audit log rotated: deleted %d old entries", count - keep_count)
+            with self._write_lock:
+                count = self._conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+                if count > AUDIT_MAX_ENTRIES:
+                    # Keep only the most recent 80% of entries
+                    keep_count = int(AUDIT_MAX_ENTRIES * 0.8)
+                    self._conn.execute(
+                        """DELETE FROM audit_log
+                           WHERE id NOT IN (
+                               SELECT id FROM audit_log
+                               ORDER BY timestamp DESC
+                               LIMIT ?
+                           )""",
+                        (keep_count,),
+                    )
+                    self._conn.commit()
+                    logger.info("Audit log rotated: deleted %d old entries", count - keep_count)
         except sqlite3.Error as exc:
             logger.exception("Audit log rotation failed: %s", exc)
 
@@ -183,8 +187,9 @@ class AuditLog:
         sql = " ".join(query_parts)
 
         try:
-            cursor = self._conn.execute(sql, params)
-            rows = cursor.fetchall()
+            with self._write_lock:
+                cursor = self._conn.execute(sql, params)
+                rows = cursor.fetchall()
             return [
                 {
                     "id": row["id"],
@@ -205,27 +210,28 @@ class AuditLog:
     def stats(self) -> Dict[str, Any]:
         """Get audit log statistics."""
         try:
-            total = self._conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+            with self._write_lock:
+                total = self._conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
 
-            # Count by action type
-            action_counts = {}
-            cursor = self._conn.execute(
-                "SELECT action, COUNT(*) as count FROM audit_log GROUP BY action ORDER BY count DESC LIMIT 10"
-            )
-            for row in cursor.fetchall():
-                action_counts[row["action"]] = row["count"]
+                # Count by action type
+                action_counts = {}
+                cursor = self._conn.execute(
+                    "SELECT action, COUNT(*) as count FROM audit_log GROUP BY action ORDER BY count DESC LIMIT 10"
+                )
+                for row in cursor.fetchall():
+                    action_counts[row["action"]] = row["count"]
 
-            # Count by status
-            status_counts = {}
-            cursor = self._conn.execute(
-                "SELECT status, COUNT(*) as count FROM audit_log GROUP BY status"
-            )
-            for row in cursor.fetchall():
-                status_counts[row["status"]] = row["count"]
+                # Count by status
+                status_counts = {}
+                cursor = self._conn.execute(
+                    "SELECT status, COUNT(*) as count FROM audit_log GROUP BY status"
+                )
+                for row in cursor.fetchall():
+                    status_counts[row["status"]] = row["count"]
 
-            # Oldest and newest entry
-            oldest = self._conn.execute("SELECT MIN(timestamp) FROM audit_log").fetchone()[0]
-            newest = self._conn.execute("SELECT MAX(timestamp) FROM audit_log").fetchone()[0]
+                # Oldest and newest entry
+                oldest = self._conn.execute("SELECT MIN(timestamp) FROM audit_log").fetchone()[0]
+                newest = self._conn.execute("SELECT MAX(timestamp) FROM audit_log").fetchone()[0]
 
             return {
                 "total_entries": total,

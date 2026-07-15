@@ -168,7 +168,7 @@ class MCPServer:
         self._running = True
         logger.info("MCP server: listening on stdio")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         while self._running:
             try:

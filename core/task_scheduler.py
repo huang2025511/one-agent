@@ -148,42 +148,50 @@ class TaskStore:
             self._conn.commit()
 
     def get(self, task_id: str) -> Optional[Task]:
-        cur = self._conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-        row = cur.fetchone()
+        # 修复：共享 sqlite3.Connection 的读操作也需持锁
+        with self._write_lock:
+            cur = self._conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            row = cur.fetchone()
         if row:
             return self._row_to_task(row)
         return None
 
     def get_pending(self, limit: int = 100) -> List[Task]:
         now = time.time()
-        cur = self._conn.execute("""
-            SELECT * FROM tasks
-            WHERE status IN ('pending', 'failed')
-            AND (run_at = 0 OR run_at <= ?)
-            ORDER BY priority DESC, created_at ASC
-            LIMIT ?
-        """, (now, limit))
-        return [self._row_to_task(r) for r in cur.fetchall()]
+        with self._write_lock:
+            cur = self._conn.execute("""
+                SELECT * FROM tasks
+                WHERE status IN ('pending', 'failed')
+                AND (run_at = 0 OR run_at <= ?)
+                ORDER BY priority DESC, created_at ASC
+                LIMIT ?
+            """, (now, limit))
+            rows = cur.fetchall()
+        return [self._row_to_task(r) for r in rows]
 
     def get_running(self) -> List[Task]:
-        cur = self._conn.execute(
-            "SELECT * FROM tasks WHERE status = ? ORDER BY started_at DESC",
-            (TaskStatus.RUNNING.value,),
-        )
-        return [self._row_to_task(r) for r in cur.fetchall()]
+        with self._write_lock:
+            cur = self._conn.execute(
+                "SELECT * FROM tasks WHERE status = ? ORDER BY started_at DESC",
+                (TaskStatus.RUNNING.value,),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_task(r) for r in rows]
 
     def list_tasks(self, status: Optional[str] = None, limit: int = 50) -> List[Task]:
-        if status:
-            cur = self._conn.execute(
-                "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                (status, limit),
-            )
-        else:
-            cur = self._conn.execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            )
-        return [self._row_to_task(r) for r in cur.fetchall()]
+        with self._write_lock:
+            if status:
+                cur = self._conn.execute(
+                    "SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                )
+            else:
+                cur = self._conn.execute(
+                    "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                )
+            rows = cur.fetchall()
+        return [self._row_to_task(r) for r in rows]
 
     def delete(self, task_id: str) -> bool:
         with self._write_lock:

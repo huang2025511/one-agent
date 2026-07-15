@@ -1093,8 +1093,9 @@ class RESTAPIGateway(Plugin):
                                     progress_queue.put_nowait((msg, phase))
                                 except _asyncio.QueueFull:
                                     pass
-                            except Exception:
-                                pass
+                            except Exception as _e:
+                                # 进度事件处理失败不应中断主流程，但记录便于排查
+                                logger.debug("progress event handling failed: %s", _e, exc_info=True)
 
                         _app_instance.bus.subscribe("turn_progress", _on_progress)
 
@@ -1107,7 +1108,7 @@ class RESTAPIGateway(Plugin):
 
                         result: Dict[str, Any] = {}
                         _streamed_content = False  # 跟踪是否已通过 streaming phase 推送了最终答案
-                        _last_heartbeat = _asyncio.get_event_loop().time()
+                        _last_heartbeat = _asyncio.get_running_loop().time()
                         try:
                             while not chat_task.done():
                                 # 修复：检查客户端是否断连（避免 LLM token 浪费）
@@ -1120,7 +1121,7 @@ class RESTAPIGateway(Plugin):
                                     msg, phase = await _asyncio.wait_for(
                                         progress_queue.get(), timeout=0.5
                                     )
-                                    _last_heartbeat = _asyncio.get_event_loop().time()
+                                    _last_heartbeat = _asyncio.get_running_loop().time()
                                     if phase == "streaming":
                                         # streaming phase 是最终答案的实时增量，作为 content 推送
                                         _streamed_content = True
@@ -1129,7 +1130,7 @@ class RESTAPIGateway(Plugin):
                                         yield SSEFormatter.format_data({'status': 'thinking', 'content': msg, 'phase': phase, 'session_id': session_id})
                                 except _asyncio.TimeoutError:
                                     # 心跳保活：长时间无进度事件时发送 heartbeat，防止客户端超时断连
-                                    now = _asyncio.get_event_loop().time()
+                                    now = _asyncio.get_running_loop().time()
                                     if now - _last_heartbeat >= 10:
                                         _last_heartbeat = now
                                         yield SSEFormatter.format_data({'status': 'heartbeat', 'session_id': session_id})
@@ -1151,7 +1152,12 @@ class RESTAPIGateway(Plugin):
                             if not chat_task.done():
                                 chat_task.cancel()
                             try:
-                                result = await chat_task
+                                # 超时保护：取消后任务应快速抛出 CancelledError，
+                                # 但若底层协程吞掉取消或卡在阻塞调用，await 会无限挂起，
+                                # 导致 SSE 流永不关闭、客户端超时。限时 5s 等待结果。
+                                result = await _asyncio.wait_for(chat_task, timeout=5.0)
+                            except _asyncio.TimeoutError:
+                                logger.warning("chat_task did not finish within 5s after cancel; abandoning")
                             except _asyncio.CancelledError:
                                 pass
                             except Exception as exc:

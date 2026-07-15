@@ -3365,9 +3365,18 @@ class Coordinator(Plugin):
                     logger.debug("replan triggered after failures: %s", this_round_names)
 
             # Check if all skills failed
+            # 兼容两种 tool_call 格式：
+            #   1. 直接 name 字段（部分 provider）
+            #   2. OpenAI 流式格式 function.name
+            # 之前只取 tc.get("name", "")，对格式 2 永远得到 ""，
+            # 导致 all() 返回 False（"" not in _failed_skills），
+            # "所有工具失败"保护逻辑永远不触发。
             if i >= 1 and all(
                 name in _failed_skills and _failed_skills[name] >= MAX_SKILL_FAILURES
-                for name in [tc.get("name", "") for tc in tool_calls]
+                for name in [
+                    tc.get("name") or tc.get("function", {}).get("name", "")
+                    for tc in tool_calls
+                ]
             ):
                 messages.append({
                     "role": "user",

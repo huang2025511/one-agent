@@ -22,7 +22,8 @@ router:
     simple: 0.5
     complex: 0.8
     expert: 1.0
-  self_evolution: false
+  self_evolution:
+    enabled: false
 
 # 修复：之前用 `monitor:` 但代码读 `monitoring:`（FullConfig.monitoring），
 # 导致监控配置被 Pydantic 静默忽略。
@@ -31,6 +32,5 @@ monitoring:
   tracing_enabled: true
   health_check_interval: 60
 
-features:
-  self_evolution: false
-  experimental: false
+# 注：FullConfig 无 features 字段，原 `features:` 块被 Pydantic 静默忽略（死配置）。
+# 自进化开关已在上方 router.self_evolution.enabled: false 中设置。

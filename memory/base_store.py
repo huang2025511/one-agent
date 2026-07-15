@@ -129,10 +129,8 @@ class BaseSQLiteStore:
                     continue
                 # Non-lock error or final attempt
                 raise
-
-        # All retries exhausted
-        if last_error:
-            raise last_error
+        # 不可达：循环内 locked 错误会 continue/raise，非 locked 错误直接 raise，
+        # 成功则 return。永远不会正常结束循环到达这里。
 
     def close(self) -> None:
         """Close the database connection."""
