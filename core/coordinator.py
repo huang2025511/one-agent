@@ -1030,6 +1030,24 @@ class Coordinator(Plugin):
         if turn is None or turn.result is not None or turn.error is not None:
             return
 
+        # Spawn the actual processing as a background task so the event bus
+        # loop is not blocked. This is critical for real-time streaming:
+        # _run_turn calls the LLM and emits turn_progress events during
+        # execution. If we await _run_turn inline, the bus serializes
+        # dispatch and all turn_progress events pile up until the turn
+        # completes, making the client see "thinking..." with no incremental
+        # updates. (Same non-blocking pattern as _on_external.)
+        task = asyncio.create_task(self._process_routed_turn(turn))
+        self._pending_turn_tasks.add(task)
+        task.add_done_callback(self._pending_turn_tasks.discard)
+
+    async def _process_routed_turn(self, turn: TurnContext) -> None:
+        """Execute a routed turn in the background.
+
+        Runs outside the event bus dispatch loop so turn_progress events
+        emitted during LLM streaming can be delivered to subscribers
+        (API streaming endpoint, gateways) in real time.
+        """
         try:
             self.publish("turn_start", turn=turn, session_id=turn.session_id)
         except Exception:
@@ -1084,20 +1102,26 @@ class Coordinator(Plugin):
             return
 
         # Auto-detect language from user input
-        if turn.input_text:
-            from i18n import detect_language, get_language, set_language
-            detected_lang = detect_language(turn.input_text)
-            current_lang = get_language()
-            if detected_lang != current_lang:
-                set_language(detected_lang)
-                logger.info("Auto-detected language: %s from user input", detected_lang)
-                # Persist language preference to config (offload disk I/O)
-                await asyncio.to_thread(self._persist_language, detected_lang)
+        try:
+            if turn.input_text:
+                from i18n import detect_language, get_language, set_language
+                detected_lang = detect_language(turn.input_text)
+                current_lang = get_language()
+                if detected_lang != current_lang:
+                    set_language(detected_lang)
+                    logger.info("Auto-detected language: %s from user input", detected_lang)
+                    # Persist language preference to config (offload disk I/O)
+                    await asyncio.to_thread(self._persist_language, detected_lang)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("language auto-detect failed (non-fatal): %s", exc)
 
         # Increment turn counters for self-evolution statistics
-        if self.ctx and hasattr(self.ctx, 'counters'):
-            self.ctx.counters['turns_processed'] = self.ctx.counters.get('turns_processed', 0) + 1
-            self.ctx.counters['tokens_used'] = self.ctx.counters.get('tokens_used', 0) + (turn.tokens_used or 0)
+        try:
+            if self.ctx and hasattr(self.ctx, 'counters'):
+                self.ctx.counters['turns_processed'] = self.ctx.counters.get('turns_processed', 0) + 1
+                self.ctx.counters['tokens_used'] = self.ctx.counters.get('tokens_used', 0) + (turn.tokens_used or 0)
+        except Exception:
+            pass
 
         # avoid double-processing — if something already published a reply,
         # skip this turn entirely
