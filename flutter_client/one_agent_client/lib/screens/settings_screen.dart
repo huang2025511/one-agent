@@ -1337,6 +1337,7 @@ class _ConnectionInfoSection extends ConsumerWidget {
             initial: s.baseUrl,
             onSubmit: (v) async {
               await ref.read(settingsProvider.notifier).setBaseUrl(v);
+              return true;
             },
           ),
         ),
@@ -1351,6 +1352,7 @@ class _ConnectionInfoSection extends ConsumerWidget {
             obscure: true,
             onSubmit: (v) async {
               await ref.read(settingsProvider.notifier).setApiKey(v);
+              return true;
             },
           ),
         ),
@@ -1420,7 +1422,7 @@ class _AboutSection extends ConsumerWidget {
               ? Text(updateState.error!,
                   style: const TextStyle(fontSize: 12, color: Colors.red))
               : updateState.latestRelease != null
-                  ? Text('新版本可用: v${updateState.latestRelease!.version}',
+                  ? Text('新版本可用: ${updateState.latestRelease!.tagName}',
                       style: const TextStyle(fontSize: 12, color: Colors.orange))
                   : null,
           onTap: updateState.isChecking || updateState.isDownloading

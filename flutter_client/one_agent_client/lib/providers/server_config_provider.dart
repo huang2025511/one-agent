@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/system_api.dart';
+import '../models/system_stats.dart';
 
 /// 服务端配置状态
 class ServerConfigState {
