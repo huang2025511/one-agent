@@ -98,6 +98,15 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
+
+    // 问题4 修复：跳过 release lint 检查，避免下载 test/lint 依赖。
+    // GitHub Actions 构建时 Gradle 会尝试下载 androidx.test 等 test 依赖
+    // 用于 lint 检查，但这些依赖在 release 构建中并非必需，且经常因网络
+    // 问题下载失败导致整个构建失败。跳过 lint 检查可显著提高构建可靠性。
+    lintOptions {
+        checkReleaseBuilds false
+        abortOnError false
+    }
 }
 
 flutter {
