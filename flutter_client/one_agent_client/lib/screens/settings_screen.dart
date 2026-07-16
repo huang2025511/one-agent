@@ -853,6 +853,9 @@ class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
   /// 提取当前已配置的服务商列表
   /// 问题2a 修复：优先使用 config.llm.api_keys 中已配置 key 的服务商，
   /// 确保切换主服务商后新增服务商不会消失。
+  /// 问题1 再次修复：增加 ProviderModelCache 作为第4重来源，
+  /// 即使 config 因任何边缘情况丢失了自定义服务商，只要模型缓存
+  /// 里有该服务商的模型，胶囊也会显示。
   List<String> _extractConfiguredProviders() {
     final providers = <String>{};
     // 1. 从已配置 API Key 的服务商中提取（最可靠的来源）
@@ -867,6 +870,13 @@ class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
         final p = m['provider'] as String?;
         if (p != null && p.isNotEmpty) providers.add(p);
       }
+    }
+    // 4. 从 ProviderModelCache 补充（防御性：即使 config 丢失了自定义服务商，
+    //    只要之前测试过该服务商并缓存了模型，胶囊也会显示）
+    final cachedModels = ProviderModelCache.allCachedModels();
+    for (final m in cachedModels) {
+      final p = m['provider'] as String?;
+      if (p != null && p.isNotEmpty) providers.add(p);
     }
     return providers.toList()..sort();
   }
@@ -2950,6 +2960,12 @@ Set<String> _collectConfiguredProviders(ServerConfigNotifier notifier) {
       final p = m['provider'] as String?;
       if (p != null && p.isNotEmpty) providers.add(p);
     }
+  }
+  // 问题1 修复：也从 ProviderModelCache 补充（防御性）
+  final cachedModels = ProviderModelCache.allCachedModels();
+  for (final m in cachedModels) {
+    final p = m['provider'] as String?;
+    if (p != null && p.isNotEmpty) providers.add(p);
   }
   return providers;
 }

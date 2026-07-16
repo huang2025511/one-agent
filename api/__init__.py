@@ -1114,9 +1114,17 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             from models.resolver import KNOWN_PROVIDERS
             # 获取已配置的 api_keys
+            # 优先从 _llm._api_keys 读取（运行时缓存），回退到 _ctx.config
             configured_keys = {}
             if _llm:
-                configured_keys = getattr(_llm, "_api_keys", {})
+                configured_keys = getattr(_llm, "_api_keys", {}) or {}
+            # 问题1 修复：_llm 可能为 None 或 _api_keys 未及时更新，
+            # 从 _ctx.config 读取作为补充来源
+            cfg_api_keys = (_ctx.config.get("llm", {}) or {}).get("api_keys", {}) or {}
+            for k, v in cfg_api_keys.items():
+                if k not in configured_keys or not configured_keys.get(k):
+                    if v:  # 只在有值时补充
+                        configured_keys[k] = v
 
             # 获取 base_urls 映射（含自定义服务商的 base_url）
             base_urls = {}
