@@ -10,12 +10,15 @@ class SettingsState {
   final String apiKey;
   final bool isConnected;
   final bool isLoading;
+  /// 文字缩放系数（1.0 为默认）。问题10：客户端文字设置功能。
+  final double fontScale;
 
   const SettingsState({
     this.baseUrl = ApiConstants.defaultBaseUrl,
     this.apiKey = '',
     this.isConnected = false,
     this.isLoading = false,
+    this.fontScale = 1.0,
   });
 
   SettingsState copyWith({
@@ -23,11 +26,13 @@ class SettingsState {
     String? apiKey,
     bool? isConnected,
     bool? isLoading,
+    double? fontScale,
   }) => SettingsState(
     baseUrl: baseUrl ?? this.baseUrl,
     apiKey: apiKey ?? this.apiKey,
     isConnected: isConnected ?? this.isConnected,
     isLoading: isLoading ?? this.isLoading,
+    fontScale: fontScale ?? this.fontScale,
   );
 }
 
@@ -41,9 +46,18 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
     final prefs = await SharedPreferences.getInstance();
     final url = prefs.getString(PrefKeys.baseUrl) ?? ApiConstants.defaultBaseUrl;
     final key = prefs.getString(PrefKeys.apiKey) ?? '';
-    state = state.copyWith(baseUrl: url, apiKey: key);
+    final scale = prefs.getDouble(PrefKeys.fontScale) ?? 1.0;
+    state = state.copyWith(baseUrl: url, apiKey: key, fontScale: scale);
     ApiClient.configure(baseUrl: url, apiKey: key);
     await checkConnection();
+  }
+
+  /// 问题10：设置文字缩放系数，持久化到本地
+  Future<void> setFontScale(double scale) async {
+    final clamped = scale.clamp(0.8, 1.6);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(PrefKeys.fontScale, clamped);
+    state = state.copyWith(fontScale: clamped);
   }
 
   Future<void> setBaseUrl(String url) async {

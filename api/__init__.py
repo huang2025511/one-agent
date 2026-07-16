@@ -569,11 +569,15 @@ class RESTAPIGateway(Plugin):
                 # 但 LLMProvider 的 _api_keys/_primary_provider/_default_model/
                 # _provider_base_urls 仍是启动时缓存的值，导致客户端改了配置
                 # 也不生效（必须重启服务）。现在重新 setup 让配置即时生效。
-                if _llm is not None:
+                # 问题11 修复：_register_dashboard_config_routes 没有 _llm 参数，
+                # 必须从 _ctx.get_plugin("llm") 获取，否则 NameError 导致
+                # /api/config/reload 请求 500 失败。
+                _llm_inst = _ctx.get_plugin("llm") if _ctx else None
+                if _llm_inst is not None:
                     try:
                         import asyncio
                         async def _resync_llm():
-                            await _llm.setup(_ctx)
+                            await _llm_inst.setup(_ctx)
                         try:
                             loop = asyncio.get_running_loop()
                             loop.create_task(_resync_llm())
@@ -690,11 +694,15 @@ class RESTAPIGateway(Plugin):
                 # _default_model/_provider_base_urls 仍是启动时缓存的值，
                 # 导致客户端改了 base_urls/primary_model/primary_provider 也不
                 # 生效（必须重启服务）。现在重新 setup 让配置即时生效。
-                if _llm is not None:
+                # 问题11 修复：_register_dashboard_config_routes 没有 _llm 参数，
+                # 必须从 _ctx.get_plugin("llm") 获取，否则 NameError 导致
+                # 所有 PUT /api/config 请求 500 失败（"保存失败"根因之一）。
+                _llm_inst = _ctx.get_plugin("llm") if _ctx else None
+                if _llm_inst is not None:
                     try:
                         import asyncio
                         async def _resync_llm():
-                            await _llm.setup(_ctx)
+                            await _llm_inst.setup(_ctx)
                         try:
                             loop = asyncio.get_running_loop()
                             loop.create_task(_resync_llm())
@@ -925,7 +933,10 @@ class RESTAPIGateway(Plugin):
                     cat = _llm.get_catalog()
                     if cat:
                         await asyncio.wait_for(cat.refresh(), timeout=10.0)
-                        for m in cat.all_models():
+                        # 问题11 修复：ModelCatalog 的方法是 all()，不是 all_models()。
+                        # 之前调用 cat.all_models() 会抛 AttributeError，被外层
+                        # except 吞掉，导致 /api/models 永远返回空的 available_models。
+                        for m in cat.all():
                             md = m.to_dict()
                             md["supports_tools"] = _llm.model_supports_tools(m.id)
                             available_models.append(md)
@@ -1092,7 +1103,24 @@ class RESTAPIGateway(Plugin):
             body: dict,
             x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
         ):
-            """测试服务商连通性并拉取模型列表。body: {"provider": "openai", "api_key": "...", "base_url": "..."}"""
+            """测试服务商连通性并拉取模型列表（含分类与元数据）。
+
+            返回结构::
+                {
+                  "ok": True,
+                  "provider": "openai",
+                  "base_url": "...",
+                  "models_count": 50,
+                  "models": ["gpt-4o", ...],            # 向后兼容：纯 id 列表
+                  "free_models": [ {ModelInfo.to_dict()}, ... ],
+                  "paid_models": [ {ModelInfo.to_dict()}, ... ],
+                }
+
+            分类逻辑：使用 ``ModelCatalog._normalize`` + ``auto_classify_tier``
+            对每个模型做元数据补全（is_free / pricing / description / tier /
+            capabilities），按 is_free 拆分为 free / paid 两组，方便客户端
+            分开展示。原始 ``models`` 字段保留为纯 id 列表以向后兼容。
+            """
             auth(x_api_key)
             provider = (body.get("provider") or "").strip()
             api_key = body.get("api_key", "")
@@ -1120,24 +1148,45 @@ class RESTAPIGateway(Plugin):
             if not base_url:
                 raise HTTPException(400, f"unknown provider: {provider}, please provide base_url")
             try:
-                import httpx
-                headers = {}
-                if api_key:
-                    headers["Authorization"] = f"Bearer {api_key}"
-                async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
-                    if resp.status_code >= 400:
-                        return {"ok": False, "provider": provider, "error": f"HTTP {resp.status_code}"}
-                    data = resp.json()
-                    models_list = data.get("data") or data.get("models") or []
-                    return {
-                        "ok": True,
-                        "provider": provider,
-                        "base_url": base_url,
-                        "models_count": len(models_list),
-                        "models": [m.get("id", "") for m in models_list if isinstance(m, dict)][:50],
-                    }
+                # 使用 ModelCatalog 拉取并分类模型（含 is_free / pricing /
+                # description / tier / capabilities 等元数据），让客户端可以
+                # 分免费/付费两组展示，并显示模型介绍。
+                from models.catalog import ModelCatalog, auto_classify_tier
+                from models.capabilities import detect_capabilities
+                cat = ModelCatalog(base_url=base_url, api_key=api_key, provider=provider, ttl=0)
+                try:
+                    await cat.refresh(force=True)
+                finally:
+                    await cat.aclose()
+
+                free_models = []
+                paid_models = []
+                plain_ids = []
+                for m in cat.all():
+                    # 补全能力信息（text/vision/tools/reasoning 等）
+                    try:
+                        m.capabilities = detect_capabilities(m)
+                    except Exception:
+                        pass
+                    md = m.to_dict()
+                    md["supports_tools"] = bool(_llm and _llm.model_supports_tools(m.id)) if _llm else False
+                    plain_ids.append(m.id)
+                    if m.is_free:
+                        free_models.append(md)
+                    else:
+                        paid_models.append(md)
+
+                return {
+                    "ok": True,
+                    "provider": provider,
+                    "base_url": base_url,
+                    "models_count": len(plain_ids),
+                    "models": plain_ids[:50],  # 向后兼容
+                    "free_models": free_models,
+                    "paid_models": paid_models,
+                }
             except Exception as exc:
+                logger.warning("test_provider(%s) failed: %s", provider, exc)
                 return {"ok": False, "provider": provider, "error": str(exc)[:200]}
 
         @app.get("/api/marketplace/browse")
@@ -2123,7 +2172,12 @@ class RESTAPIGateway(Plugin):
 
         @app.post("/api/settings")
         async def settings_set(body: dict, x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-            """修改配置项。body: {"key": "模型", "value": "gpt-4o"}"""
+            """修改配置项。body: {"key": "模型", "value": "gpt-4o"}
+
+            问题11 修复：与 /api/config 保持一致 — 修改 LLM 相关配置后
+            热重载 LLMProvider，让 base_urls / primary_model / api_keys
+            等改动即时生效，无需重启服务。
+            """
             auth(x_api_key)
             from skills import (
                 _SENSITIVE_KEYS,
@@ -2151,6 +2205,24 @@ class RESTAPIGateway(Plugin):
                         backup_mgr.create_backup(reason="pre-change")
                         _set_nested(_ctx.config, path, parsed)
                         _save_config(_ctx.config)
+                        # 问题11：LLM 相关配置改动后热重载 LLMProvider，
+                        # 与 /api/config 行为保持一致。注意 _register_settings_routes
+                        # 没有 _llm 参数，必须从 _ctx.get_plugin("llm") 获取。
+                        if path.startswith("llm."):
+                            _llm_inst = _ctx.get_plugin("llm")
+                            if _llm_inst is not None:
+                                try:
+                                    import asyncio
+                                    async def _resync_llm():
+                                        await _llm_inst.setup(_ctx)
+                                    try:
+                                        loop = asyncio.get_running_loop()
+                                        loop.create_task(_resync_llm())
+                                    except RuntimeError:
+                                        asyncio.run(_resync_llm())
+                                    logger.info("LLM provider re-synced after /api/settings update (%s)", path)
+                                except Exception as exc:
+                                    logger.warning("LLM re-sync failed after /api/settings update: %s", exc)
                     return {"alias": alias, "path": path, "value": parsed, "saved": True}
             raise HTTPException(404, _("unknown_key", key=key))
 

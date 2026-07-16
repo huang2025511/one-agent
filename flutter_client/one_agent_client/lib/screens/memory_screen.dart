@@ -267,28 +267,44 @@ class _RoleTab extends ConsumerStatefulWidget {
 }
 
 class _RoleTabState extends ConsumerState<_RoleTab> {
+  bool _wasConnected = false;
+
   @override
   void initState() {
     super.initState();
     // 延迟加载，避免在 build 中直接触发
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(roleProvider.notifier).load();
+      _maybeLoad();
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    // 问题9 修复：监听连接状态变化，连接成功后自动刷新角色列表
+    // 之前只在 initState 加载一次，断开后重连不会刷新，导致角色列表过期
+    final isConnected = ref.watch(settingsProvider.select((s) => s.isConnected));
+    if (isConnected && !_wasConnected) {
+      _wasConnected = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(roleProvider.notifier).load();
+      });
+    } else if (!isConnected) {
+      _wasConnected = false;
+    }
+
     final state = ref.watch(roleProvider);
     return Stack(
       children: [
-        _buildBody(context, state),
+        _buildBody(context, state, isConnected),
         Positioned(
           right: 16,
           bottom: 16,
           child: FloatingActionButton(
             heroTag: 'role_add',
             tooltip: '添加角色',
-            onPressed: () => _showEditDialog(context, ref, null),
+            onPressed: isConnected
+                ? () => _showEditDialog(context, ref, null)
+                : null,
             child: const Icon(Icons.add),
           ),
         ),
@@ -296,7 +312,38 @@ class _RoleTabState extends ConsumerState<_RoleTab> {
     );
   }
 
-  Widget _buildBody(BuildContext context, RoleState state) {
+  void _maybeLoad() {
+    final isConnected = ref.read(settingsProvider).isConnected;
+    if (isConnected) {
+      _wasConnected = true;
+      ref.read(roleProvider.notifier).load();
+    }
+  }
+
+  Widget _buildBody(BuildContext context, RoleState state, bool isConnected) {
+    // 问题9 修复：未连接时显示提示，而不是显示过期/空的角色列表
+    if (!isConnected) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off, size: 56,
+                 color: Theme.of(context).colorScheme.outlineVariant),
+            const SizedBox(height: 16),
+            Text('未连接服务器',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  color: Theme.of(context).colorScheme.outline,
+                )),
+            const SizedBox(height: 8),
+            Text('角色数据由服务端统一管理，请先连接 One-Agent 服务器',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.outline,
+                )),
+          ],
+        ),
+      );
+    }
     if (state.isLoading && state.roles.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -346,30 +393,35 @@ class _RoleTabState extends ConsumerState<_RoleTab> {
     final builtinRoles = state.roles.where((r) => r.isBuiltin).toList();
     final customRoles = state.roles.where((r) => !r.isBuiltin).toList();
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(8, 8, 8, 80),
-      children: [
-        // 顶部说明文字
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Text(
-            '选择一个角色激活，或创建自定义角色',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+    // 问题9 修复：添加下拉刷新，用户可手动同步服务端最新角色
+    return RefreshIndicator(
+      onRefresh: () => ref.read(roleProvider.notifier).load(),
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(8, 8, 8, 80),
+        children: [
+          // 顶部说明文字
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              '选择一个角色激活，或创建自定义角色\n（下拉刷新同步服务端最新角色）',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
           ),
-        ),
-        if (builtinRoles.isNotEmpty) ...[
-          _buildSectionHeader(context, '内置角色'),
-          ...builtinRoles.map((r) => _RoleListTile(role: r)),
+          if (builtinRoles.isNotEmpty) ...[
+            _buildSectionHeader(context, '内置角色'),
+            ...builtinRoles.map((r) => _RoleListTile(role: r)),
+          ],
+          if (builtinRoles.isNotEmpty && customRoles.isNotEmpty)
+            const Divider(height: 32),
+          if (customRoles.isNotEmpty) ...[
+            _buildSectionHeader(context, '自定义角色'),
+            ...customRoles.map((r) => _RoleListTile(role: r)),
+          ],
         ],
-        if (builtinRoles.isNotEmpty && customRoles.isNotEmpty)
-          const Divider(height: 32),
-        if (customRoles.isNotEmpty) ...[
-          _buildSectionHeader(context, '自定义角色'),
-          ...customRoles.map((r) => _RoleListTile(role: r)),
-        ],
-      ],
+      ),
     );
   }
 

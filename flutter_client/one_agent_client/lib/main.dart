@@ -37,6 +37,8 @@ class OneAgentApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // 监听连接状态以触发设置 Provider 初始化（加载已保存的服务器地址/API Key）
     ref.watch(settingsProvider.select((s) => s.isConnected));
+    // 问题10：监听字体缩放系数，实时重建 MaterialApp 应用新字号
+    final fontScale = ref.watch(settingsProvider.select((s) => s.fontScale));
 
     return MaterialApp(
       title: 'One-Agent',
@@ -48,6 +50,19 @@ class OneAgentApp extends ConsumerWidget {
         GlobalCupertinoLocalizations.delegate,
       ],
       supportedLocales: AppLocalizations.supportedLocales,
+      builder: (context, child) {
+        // 问题10：通过 MediaQuery.textScaleOf 全局应用字体缩放
+        return MediaQuery.withClampedTextScaling(
+          minScaleFactor: 0.8,
+          maxScaleFactor: 1.6,
+          child: MediaQuery(
+            data: MediaQuery.of(context).copyWith(
+              textScaler: TextScaler.linear(fontScale),
+            ),
+            child: child!,
+          ),
+        );
+      },
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(

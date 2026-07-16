@@ -14,6 +14,10 @@ class UpdateState {
   final String? currentVersionName;
   final double downloadProgress; // 0.0 - 1.0
   final String? error;
+  /// 问题7 修复：记录上次成功检查的时间戳。
+  /// 之前检查成功但无新版本时，UI 没有任何反馈，用户以为"检查更新"按钮无效。
+  /// 现在用此字段标记"已完成检查"，UI 据此显示"已是最新版本"。
+  final DateTime? lastCheckedAt;
 
   const UpdateState({
     this.isChecking = false,
@@ -24,6 +28,7 @@ class UpdateState {
     this.currentVersionName,
     this.downloadProgress = 0,
     this.error,
+    this.lastCheckedAt,
   });
 
   /// 是否有新版本可用
@@ -39,6 +44,7 @@ class UpdateState {
     double? downloadProgress,
     bool clearError = false,
     String? error,
+    DateTime? lastCheckedAt,
   }) => UpdateState(
     isChecking: isChecking ?? this.isChecking,
     isDownloading: isDownloading ?? this.isDownloading,
@@ -49,6 +55,7 @@ class UpdateState {
     downloadProgress: downloadProgress ?? this.downloadProgress,
     // clearError=true 显式清空；未传 error 时保留旧值；传了 error 则覆盖
     error: clearError ? null : (error ?? this.error),
+    lastCheckedAt: lastCheckedAt ?? this.lastCheckedAt,
   );
 }
 
@@ -75,12 +82,17 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
         currentVersion: buildNumber,
       );
 
+      // 问题7 修复：记录检查完成时间，无论是否有新版本，
+      // UI 都能给出"已是最新版本"的反馈。
       state = UpdateState(
         isChecking: false,
         currentVersion: buildNumber,
         currentVersionName: versionName,
         latestRelease: release,
+        lastCheckedAt: DateTime.now(),
       );
+
+      // 检查成功后立即给出 SnackBar 反馈（在 UI 层由调用方处理）
     } catch (e) {
       state = UpdateState(
         isChecking: false,

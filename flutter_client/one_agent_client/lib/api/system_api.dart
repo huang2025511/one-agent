@@ -67,12 +67,27 @@ class SystemApi {
   }
 
   /// 更新配置
+  /// 修复：之前 catch(_) 吞掉所有异常返回 null，导致客户端只能显示通用"保存失败"，
+  /// 无法看到服务端的真实错误（如 Pydantic 校验失败的 detail）。
+  /// 现在捕获 DioException，提取服务端错误信息，以 {'error': msg} 形式返回。
   static Future<Map<String, dynamic>?> updateConfig(Map<String, dynamic> config) async {
     try {
       final resp = await ApiClient.dio.put('/api/config', data: {'config': config});
       return resp.data as Map<String, dynamic>?;
-    } catch (_) {
-      return null;
+    } on dynamic catch (e) {
+      // 提取服务端返回的错误详情
+      String msg = '保存失败';
+      try {
+        final respData = (e as dynamic).response?.data;
+        if (respData is Map) {
+          msg = respData['detail']?.toString() ??
+              respData['message']?.toString() ??
+              msg;
+        } else if (respData is String && respData.isNotEmpty) {
+          msg = respData;
+        }
+      } catch (_) {}
+      return {'status': 'error', 'message': msg};
     }
   }
 

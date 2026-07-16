@@ -262,6 +262,23 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
         .toList()
       ..sort();
   }
+
+  /// 服务商 base_url 映射（来自 config.llm.base_urls）
+  /// 键为服务商名，值为自定义 API 地址
+  Map<String, String> get providerBaseUrls {
+    final urls = _get(['llm', 'base_urls']) as Map<String, dynamic>?;
+    if (urls == null) return {};
+    return urls.map((k, v) => MapEntry(k, v?.toString() ?? ''));
+  }
+
+  /// 指定服务商的已添加模型列表（来自 available_models，按 provider 过滤）
+  List<Map<String, dynamic>> modelsForProvider(String provider) {
+    final models = availableModels ?? [];
+    return models
+        .whereType<Map<String, dynamic>>()
+        .where((m) => (m['provider'] as String?) == provider)
+        .toList();
+  }
 }
 
 final serverConfigProvider =

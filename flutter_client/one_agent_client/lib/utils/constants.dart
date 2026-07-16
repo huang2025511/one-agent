@@ -65,6 +65,7 @@ class PrefKeys {
   static const String themeMode = 'theme_mode';
   static const String language = 'language';
   static const String lastSessionId = 'last_session_id';
+  static const String fontScale = 'font_scale';
 }
 
 /// 主题模式

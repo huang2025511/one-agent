@@ -186,6 +186,17 @@ class _SkillListTileState extends ConsumerState<_SkillListTile> {
     return null;
   }
 
+  /// 问题8 修复：判断该技能是否可卸载
+  /// 内置技能（directory 为 null 或包含 'builtin'）不可卸载，
+  /// 之前对所有技能无条件显示卸载入口，导致点击后服务端返回 404，
+  /// 用户感觉"卸载无效"。现在对内置技能隐藏卸载入口。
+  bool get _canUninstall {
+    final dir = widget.skill.directory;
+    if (dir == null || dir.isEmpty) return false;
+    if (dir.contains('builtin')) return false;
+    return true;
+  }
+
   Color? _sourceColor(String label, ThemeData theme) {
     switch (label) {
       case '内置':
@@ -315,29 +326,36 @@ class _SkillListTileState extends ConsumerState<_SkillListTile> {
           ),
         ],
       ),
-      trailing: PopupMenuButton<String>(
-        icon: const Icon(Icons.more_vert),
-        tooltip: '操作',
-        onSelected: (action) async {
-          switch (action) {
-            case 'uninstall':
-              await _handleUninstall();
-              break;
-          }
-        },
-        itemBuilder: (context) => const [
-          PopupMenuItem(
-            value: 'uninstall',
-            child: Row(
-              children: [
-                Icon(Icons.delete_outline, size: 20),
-                SizedBox(width: 8),
-                Text('卸载'),
+      trailing: _canUninstall
+          ? PopupMenuButton<String>(
+              icon: const Icon(Icons.more_vert),
+              tooltip: '操作',
+              onSelected: (action) async {
+                switch (action) {
+                  case 'uninstall':
+                    await _handleUninstall();
+                    break;
+                }
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem(
+                  value: 'uninstall',
+                  child: Row(
+                    children: [
+                      Icon(Icons.delete_outline, size: 20),
+                      SizedBox(width: 8),
+                      Text('卸载'),
+                    ],
+                  ),
+                ),
               ],
+            )
+          // 问题8 修复：内置技能不可卸载，显示锁图标提示
+          : Tooltip(
+              message: '内置技能，不可卸载',
+              child: Icon(Icons.lock_outline,
+                  size: 18, color: Theme.of(context).colorScheme.outline),
             ),
-          ),
-        ],
-      ),
       isThreeLine: true,
     );
   }

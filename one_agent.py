@@ -78,6 +78,10 @@ class LLMConfig(BaseModel):
 
 
 class RouterConfig(BaseModel):
+    # 修复：允许 extra 字段，与 LLMConfig 保持一致。
+    # 之前缺少 extra="allow"，导致客户端 PUT router.tier_models 等扩展字段时
+    # Pydantic 校验失败返回 400，所有设置保存都显示"保存失败"。
+    model_config = {"extra": "allow"}
     enabled: bool = True
     task_complexity_thresholds: Dict[str, float] = Field(
         default_factory=lambda: {"trivial": 0.2, "simple": 0.5, "complex": 0.8, "expert": 1.0}

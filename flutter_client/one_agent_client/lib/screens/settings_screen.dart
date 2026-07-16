@@ -265,6 +265,8 @@ class _UnifiedSettingsViewState extends ConsumerState<_UnifiedSettingsView> {
               const SizedBox(height: 16),
               _ConnectionInfoSection(ref: ref),
               const SizedBox(height: 16),
+              const _AppearanceSection(),
+              const SizedBox(height: 16),
               const _AboutSection(),
             ],
           ),
@@ -483,6 +485,8 @@ class _ModelRoutingSection extends StatelessWidget {
         const Divider(height: 1, indent: 20, endIndent: 20),
 
         // ── 默认模型 Hero ───────────────────────────
+        // 问题2 修复：点击默认模型名称弹出所有模型列表供选择
+        // 之前只显示模型名称，无法切换
         Container(
           margin: const EdgeInsets.all(16),
           padding: const EdgeInsets.all(20),
@@ -522,14 +526,49 @@ class _ModelRoutingSection extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 12),
-              Text(
-                defaultModel.isEmpty ? '未设置' : defaultModel,
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontFamily: 'monospace',
-                  fontWeight: FontWeight.bold,
-                  color: defaultModel.isEmpty
-                      ? theme.colorScheme.onSurfaceVariant
-                      : null,
+              // 问题2：点击模型名称 → 弹出所有模型列表供选择
+              InkWell(
+                onTap: () => _showModelSelectionDialog(
+                  context,
+                  title: '默认模型',
+                  current: defaultModel,
+                  notifier: notifier,
+                  onSubmit: (v) {
+                    // 解析 provider 前缀，同时更新 primary_model 和 primary_provider
+                    final parts = v.split('/');
+                    final provider = parts.length > 1 ? parts.first : '';
+                    final updates = <String, dynamic>{
+                      'llm': {'primary_model': v}
+                    };
+                    if (provider.isNotEmpty) {
+                      (updates['llm'] as Map<String, dynamic>)['primary_provider'] = provider;
+                    }
+                    return notifier.updateConfig(updates);
+                  },
+                ),
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          defaultModel.isEmpty ? '点击选择模型' : defaultModel,
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.bold,
+                            color: defaultModel.isEmpty
+                                ? theme.colorScheme.onSurfaceVariant
+                                : null,
+                          ),
+                        ),
+                      ),
+                      Icon(Icons.unfold_more,
+                          size: 18,
+                          color: theme.colorScheme.primary.withOpacity(0.7)),
+                    ],
+                  ),
                 ),
               ),
               if (provider.isNotEmpty) ...[
@@ -672,7 +711,12 @@ class _ModelRoutingSection extends StatelessWidget {
           const SizedBox(height: 8),
         ],
 
-        // ── 模型选择区（带清晰边界 Card + 边框） ───────
+        // ── 轻量模型选择区 ──────────────────────────
+        // 问题5 修复：
+        // - 移除多余默认模型栏（Hero 区已有，避免重复）
+        // - 修复 Column(crossAxisAlignment: start) 导致的竖列显示问题
+        // - 轻量模型用 _showModelSelectionDialog 弹窗选择（与默认模型一致），
+        //   而不是让用户手动修改模型名称
         Container(
           margin: const EdgeInsets.fromLTRB(16, 4, 16, 16),
           decoration: BoxDecoration(
@@ -683,7 +727,7 @@ class _ModelRoutingSection extends StatelessWidget {
             color: theme.colorScheme.surfaceContainerHighest.withOpacity(0.25),
           ),
           child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 2),
@@ -693,7 +737,7 @@ class _ModelRoutingSection extends StatelessWidget {
                         color: theme.colorScheme.onSurfaceVariant),
                     const SizedBox(width: 6),
                     Text(
-                      '模型选择',
+                      '轻量模型（LLM 意图分类用）',
                       style: theme.textTheme.labelSmall?.copyWith(
                         color: theme.colorScheme.onSurfaceVariant,
                         letterSpacing: 0.5,
@@ -703,31 +747,6 @@ class _ModelRoutingSection extends StatelessWidget {
                   ],
                 ),
               ),
-              _NavTile(
-                title: '默认模型',
-                subtitle: '从可用模型列表中选择',
-                value: defaultModel,
-                leading: Icons.star_outline,
-                onTap: () => _showModelSelectionDialog(
-                  context,
-                  title: '默认模型',
-                  current: defaultModel,
-                  notifier: notifier,
-                  onSubmit: (v) {
-                    // 解析 provider 前缀，同时更新 primary_model 和 primary_provider
-                    final parts = v.split('/');
-                    final provider = parts.length > 1 ? parts.first : '';
-                    final updates = <String, dynamic>{
-                      'llm': {'primary_model': v}
-                    };
-                    if (provider.isNotEmpty) {
-                      (updates['llm'] as Map<String, dynamic>)['primary_provider'] = provider;
-                    }
-                    return notifier.updateConfig(updates);
-                  },
-                ),
-              ),
-              const Divider(height: 1, indent: 20, endIndent: 20),
               _NavTile(
                 title: '轻量模型',
                 subtitle: '路由摘要、意图分类用',
@@ -794,6 +813,10 @@ class _ModelRoutingSection extends StatelessWidget {
 }
 
 /// 服务商管理区域 — 显示已配置服务商 + 添加入口
+///
+/// 问题1 修复：
+/// - 长按服务商胶囊 → 设为主服务商（更新 llm.primary_provider）
+/// - 点击服务商 → 显示详情对话框（key 星号、API 地址、已添加模型、测试按钮）
 class _ProviderManagementArea extends StatelessWidget {
   final ServerConfigNotifier notifier;
 
@@ -804,6 +827,8 @@ class _ProviderManagementArea extends StatelessWidget {
     final theme = Theme.of(context);
     final providers = _extractConfiguredProviders();
     final primary = notifier.catalogPrimaryProvider;
+    // 已配置 key 的服务商集合（用于显示 key 状态）
+    final configuredKeyProviders = notifier.configuredProviders.toSet();
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 14, 12, 12),
@@ -842,6 +867,13 @@ class _ProviderManagementArea extends StatelessWidget {
                   ),
                 ),
               ],
+              const SizedBox(width: 6),
+              if (providers.isNotEmpty)
+                Tooltip(
+                  message: '长按设为主服务商 · 点击查看详情',
+                  child: Icon(Icons.info_outline,
+                      size: 12, color: theme.colorScheme.outline),
+                ),
               const Spacer(),
               TextButton.icon(
                 icon: const Icon(Icons.add, size: 16),
@@ -875,13 +907,30 @@ class _ProviderManagementArea extends StatelessWidget {
                   .map((p) => _ProviderPill(
                         name: p,
                         isPrimary: p == primary,
-                        onTap: () => _showProviderConfigDialog(
+                        hasKey: configuredKeyProviders.contains(p),
+                        onTap: () => _showProviderDetailSheet(
                           context: context,
                           name: p,
-                          baseUrl: '',
-                          hasKey: false,
                           notifier: notifier,
                         ),
+                        onLongPress: p == primary
+                            ? null
+                            : () async {
+                                final ok = await notifier.updateConfig({
+                                  'llm': {'primary_provider': p}
+                                });
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(ok
+                                          ? '已设 $p 为主服务商'
+                                          : notifier.state.error ?? '设置失败'),
+                                      behavior: SnackBarBehavior.floating,
+                                    ),
+                                  );
+                                }
+                                if (ok) await notifier.loadModels();
+                              },
                       ))
                   .toList(),
             ),
@@ -911,16 +960,20 @@ class _ProviderManagementArea extends StatelessWidget {
   }
 }
 
-/// 服务商胶囊（小标签，点击可重新配置）
+/// 服务商胶囊（小标签，点击查看详情，长按设为主服务商）
 class _ProviderPill extends StatelessWidget {
   final String name;
   final bool isPrimary;
+  final bool hasKey;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
 
   const _ProviderPill({
     required this.name,
     this.isPrimary = false,
+    this.hasKey = false,
     this.onTap,
+    this.onLongPress,
   });
 
   @override
@@ -931,6 +984,7 @@ class _ProviderPill extends StatelessWidget {
         : theme.colorScheme.onSurfaceVariant;
     return InkWell(
       onTap: onTap,
+      onLongPress: onLongPress,
       borderRadius: BorderRadius.circular(8),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -952,6 +1006,16 @@ class _ProviderPill extends StatelessWidget {
                 color: color,
                 fontWeight: FontWeight.w500,
                 fontFamily: 'monospace',
+              ),
+            ),
+            // key 状态点
+            const SizedBox(width: 4),
+            Container(
+              width: 5,
+              height: 5,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: hasKey ? Colors.green : theme.colorScheme.outline,
               ),
             ),
             if (isPrimary) ...[
@@ -1891,6 +1955,91 @@ class _ConnectionInfoSection extends ConsumerWidget {
 }
 
 // ════════════════════════════════════════════════════════════════
+//  外观分区（问题10：客户端文字设置功能）
+// ════════════════════════════════════════════════════════════════
+class _AppearanceSection extends ConsumerWidget {
+  const _AppearanceSection();
+
+  static const _presets = <double>[0.85, 1.0, 1.15, 1.3, 1.5];
+  static const _presetLabels = <String>['小', '标准', '中', '大', '特大'];
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final s = ref.watch(settingsProvider);
+    final scale = s.fontScale;
+    final idx = _presets.indexWhere((p) => (p - scale).abs() < 0.02);
+    final label = idx >= 0 ? _presetLabels[idx] : '${(scale * 100).round()}%';
+
+    return _SettingsSection(
+      icon: Icons.text_fields,
+      title: '外观',
+      children: [
+        ListTile(
+          leading: const Icon(Icons.format_size, size: 20),
+          title: const Text('字体大小'),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('当前: $label', style: const TextStyle(fontSize: 12)),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Text('A', style: TextStyle(fontSize: 12)),
+                    Expanded(
+                      child: Slider(
+                        value: scale,
+                        min: 0.8,
+                        max: 1.6,
+                        divisions: 16,
+                        label: '${(scale * 100).round()}%',
+                        onChanged: (v) {
+                          ref.read(settingsProvider.notifier).setFontScale(v);
+                        },
+                      ),
+                    ),
+                    const Text('A', style: TextStyle(fontSize: 22)),
+                  ],
+                ),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    for (var i = 0; i < _presets.length; i++)
+                      ChoiceChip(
+                        label: Text(_presetLabels[i]),
+                        selected: idx == i,
+                        onSelected: (_) {
+                          ref
+                              .read(settingsProvider.notifier)
+                              .setFontScale(_presets[i]);
+                        },
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+        ),
+        ListTile(
+          leading: const Icon(Icons.preview, size: 20),
+          title: const Text('预览'),
+          subtitle: Text(
+            '这是一段预览文字，用于查看字体大小效果。The quick brown fox.',
+            style: TextStyle(
+              fontSize: 14 * scale,
+              height: 1.4,
+            ),
+          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+        ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
 //  关于分区
 // ════════════════════════════════════════════════════════════════
 class _AboutSection extends ConsumerWidget {
@@ -1899,6 +2048,20 @@ class _AboutSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final updateState = ref.watch(updateProvider);
+
+    // 问题7 修复：检查成功但无新版本时，给出"已是最新版本"反馈
+    // 之前这种情况 subtitle 为 null，用户以为按钮无效
+    String? subtitle;
+    if (updateState.error != null) {
+      subtitle = updateState.error;
+    } else if (updateState.latestRelease != null) {
+      subtitle = '新版本可用: ${updateState.latestRelease!.tagName}';
+    } else if (updateState.lastCheckedAt != null) {
+      final t = updateState.lastCheckedAt!;
+      final timeStr =
+          '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+      subtitle = '已是最新版本（$timeStr 检查）';
+    }
 
     return _SettingsSection(
       icon: Icons.info,
@@ -1929,16 +2092,36 @@ class _AboutSection extends ConsumerWidget {
                   ),
                 )
               : const Icon(Icons.chevron_right, size: 20),
-          subtitle: updateState.error != null
-              ? Text(updateState.error!,
-                  style: const TextStyle(fontSize: 12, color: Colors.red))
-              : updateState.latestRelease != null
-                  ? Text('新版本可用: ${updateState.latestRelease!.tagName}',
-                      style: const TextStyle(fontSize: 12, color: Colors.orange))
-                  : null,
+          subtitle: subtitle != null
+              ? Text(subtitle,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: updateState.error != null
+                        ? Colors.red
+                        : updateState.latestRelease != null
+                            ? Colors.orange
+                            : Colors.green,
+                  ))
+              : null,
           onTap: updateState.isChecking || updateState.isDownloading
               ? null
-              : () => ref.read(updateProvider.notifier).checkForUpdate(),
+              : () async {
+                  await ref.read(updateProvider.notifier).checkForUpdate();
+                  // 检查完成后给出 SnackBar 反馈
+                  if (!context.mounted) return;
+                  final s = ref.read(updateProvider);
+                  final msg = s.error != null
+                      ? s.error!
+                      : s.latestRelease != null
+                          ? '发现新版本: ${s.latestRelease!.tagName}'
+                          : '已是最新版本';
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(msg),
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
+                },
           contentPadding: const EdgeInsets.symmetric(horizontal: 20),
         ),
       ],
@@ -2455,6 +2638,766 @@ Future<void> _showProviderConfigDialog({
       notifier: notifier,
     ),
   );
+}
+
+/// 服务商详情面板（问题1 实现）
+///
+/// 显示：
+/// - API Key（星号代替）+ API 地址
+/// - 该服务商已添加的模型列表
+/// - 测试按钮 → 拉取最新模型（免费/付费分类展示，带介绍）
+/// - 可直接在分类模型列表点击「加入 tier」按钮
+Future<void> _showProviderDetailSheet({
+  required BuildContext context,
+  required String name,
+  required ServerConfigNotifier notifier,
+}) async {
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+    ),
+    builder: (ctx) => _ProviderDetailSheet(
+      providerName: name,
+      notifier: notifier,
+    ),
+  );
+}
+
+/// 服务商详情面板（StatefulWidget）
+class _ProviderDetailSheet extends StatefulWidget {
+  final String providerName;
+  final ServerConfigNotifier notifier;
+
+  const _ProviderDetailSheet({
+    required this.providerName,
+    required this.notifier,
+  });
+
+  @override
+  State<_ProviderDetailSheet> createState() => _ProviderDetailSheetState();
+}
+
+class _ProviderDetailSheetState extends State<_ProviderDetailSheet> {
+  bool _testing = false;
+  String? _error;
+  // 测试后拉取到的分类模型列表
+  List<Map<String, dynamic>> _freeModels = [];
+  List<Map<String, dynamic>> _paidModels = [];
+  String _query = '';
+  // 用户选中的模型 id（含 provider 前缀）
+  final Set<String> _selectedToAdd = {};
+
+  bool get _hasKey =>
+      widget.notifier.configuredProviders.contains(widget.providerName);
+  String get _baseUrl =>
+      widget.notifier.providerBaseUrls[widget.providerName] ?? '';
+  bool get _isPrimary =>
+      widget.notifier.catalogPrimaryProvider == widget.providerName;
+
+  Future<void> _testAndFetch() async {
+    setState(() {
+      _testing = true;
+      _error = null;
+      _freeModels = [];
+      _paidModels = [];
+    });
+    try {
+      final result = await SystemApi.testProvider(
+        provider: widget.providerName,
+        // 留空 → 服务端使用已存储的 key 测试
+        apiKey: '',
+        baseUrl: _baseUrl,
+      );
+      if (!mounted) return;
+      final ok = result?['ok'] == true;
+      if (ok) {
+        setState(() {
+          _testing = false;
+          _freeModels = ((result?['free_models'] as List?) ?? [])
+              .whereType<Map<String, dynamic>>()
+              .toList();
+          _paidModels = ((result?['paid_models'] as List?) ?? [])
+              .whereType<Map<String, dynamic>>()
+              .toList();
+        });
+      } else {
+        setState(() {
+          _testing = false;
+          _error = result?['error']?.toString() ?? '连接失败';
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _testing = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  /// 把选中的模型加入指定 tier 层
+  Future<void> _addSelectedToTier(String tierName) async {
+    if (_selectedToAdd.isEmpty) return;
+    // 读取当前 tier 的模型列表
+    final tiers = widget.notifier.tierData ?? {};
+    final tierInfo = tiers[tierName] as Map<String, dynamic>?;
+    final current = (tierInfo?['models'] as List? ?? [])
+        .whereType<String>()
+        .toList();
+    // 合并去重，保留顺序（新增的追加到末尾）
+    final merged = <String>[...current];
+    for (final m in _selectedToAdd) {
+      if (!merged.contains(m)) merged.add(m);
+    }
+    final ok = await widget.notifier.updateConfig({
+      'llm': {
+        'model_tiers': {tierName: merged}
+      }
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(ok
+            ? '已将 ${_selectedToAdd.length} 个模型加入 $tierName 层'
+            : widget.notifier.state.error ?? '保存失败'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    if (ok) {
+      setState(() {
+        // 清空选中并刷新
+        _selectedToAdd.clear();
+      });
+      await widget.notifier.loadModels();
+    }
+  }
+
+  String _fullModelId(String raw) {
+    return raw.contains('/') ? raw : '${widget.providerName}/$raw';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final configuredModels = widget.notifier.modelsForProvider(widget.providerName);
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.85,
+      minChildSize: 0.5,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (ctx, scrollController) => Padding(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(ctx).viewInsets.bottom,
+        ),
+        child: Column(
+          children: [
+            // 拖动指示器
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: theme.colorScheme.outline.withOpacity(0.4),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // 标题栏
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 12, 8),
+              child: Row(
+                children: [
+                  Icon(Icons.cloud, color: theme.colorScheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      widget.providerName,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontFamily: 'monospace',
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  if (_isPrimary)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        '主服务商',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: theme.colorScheme.onPrimary,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    )
+                  else
+                    TextButton.icon(
+                      icon: const Icon(Icons.star_outline, size: 16),
+                      label: const Text('设为主', style: TextStyle(fontSize: 12)),
+                      onPressed: () async {
+                        final ok = await widget.notifier.updateConfig({
+                          'llm': {'primary_provider': widget.providerName}
+                        });
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(ok
+                                ? '已设 ${widget.providerName} 为主服务商'
+                                : widget.notifier.state.error ?? '设置失败'),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                        if (ok) await widget.notifier.loadModels();
+                      },
+                    ),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            // 内容区
+            Expanded(
+              child: ListView(
+                controller: scrollController,
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+                children: [
+                  // ── API Key & 地址 ──────────────────────
+                  _DetailRow(
+                    label: 'API Key',
+                    value: _hasKey ? '••••••••（已配置，留空保持不变）' : '未配置',
+                    icon: Icons.key,
+                    valueColor: _hasKey ? Colors.green : theme.colorScheme.error,
+                  ),
+                  const SizedBox(height: 8),
+                  _DetailRow(
+                    label: 'API 地址',
+                    value: _baseUrl.isEmpty ? '使用服务商默认地址' : _baseUrl,
+                    icon: Icons.link,
+                  ),
+                  const SizedBox(height: 8),
+                  _DetailRow(
+                    label: '已添加模型',
+                    value: '${configuredModels.length} 个',
+                    icon: Icons.model_training,
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── 编辑按钮 ──────────────────────────
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.edit, size: 16),
+                          label: const Text('编辑 Key / 地址'),
+                          onPressed: () {
+                            Navigator.of(ctx).pop();
+                            _showProviderConfigDialog(
+                              context: context,
+                              name: widget.providerName,
+                              baseUrl: _baseUrl,
+                              hasKey: _hasKey,
+                              notifier: widget.notifier,
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+
+                  // ── 已添加模型列表 ──────────────────────
+                  if (configuredModels.isNotEmpty) ...[
+                    _SectionLabel(
+                      icon: Icons.checklist,
+                      text: '已添加模型（${configuredModels.length}）',
+                    ),
+                    const SizedBox(height: 8),
+                    ...configuredModels.map((m) => _ProviderModelRow(
+                          info: m,
+                          showAddToTier: false,
+                        )),
+                    const SizedBox(height: 16),
+                  ],
+
+                  // ── 测试按钮 ──────────────────────────
+                  FilledButton.icon(
+                    onPressed: _testing ? null : _testAndFetch,
+                    icon: _testing
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.wifi_find, size: 18),
+                    label: Text(_testing ? '测试中...' : '测试连接并拉取最新模型'),
+                  ),
+
+                  // ── 错误提示 ──────────────────────────
+                  if (_error != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.errorContainer.withOpacity(0.3),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        _error!,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: theme.colorScheme.onErrorContainer,
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  // ── 拉取到的模型（分类展示） ────────────
+                  if (_freeModels.isNotEmpty || _paidModels.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    // 搜索框
+                    TextField(
+                      decoration: InputDecoration(
+                        hintText: '搜索模型...',
+                        prefixIcon: const Icon(Icons.search, size: 18),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 10),
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(8)),
+                      ),
+                      onChanged: (v) => setState(() => _query = v),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // 选中模型操作栏
+                    if (_selectedToAdd.isNotEmpty) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
+                        margin: const EdgeInsets.only(bottom: 12),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.primaryContainer
+                              .withOpacity(0.4),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            Text(
+                              '已选 ${_selectedToAdd.length} 个模型，加入：',
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                color: theme.colorScheme.primary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            const Spacer(),
+                            _TierAddButton(
+                              tier: 'trivial',
+                              onPressed: () => _addSelectedToTier('trivial'),
+                            ),
+                            const SizedBox(width: 4),
+                            _TierAddButton(
+                              tier: 'simple',
+                              onPressed: () => _addSelectedToTier('simple'),
+                            ),
+                            const SizedBox(width: 4),
+                            _TierAddButton(
+                              tier: 'complex',
+                              onPressed: () => _addSelectedToTier('complex'),
+                            ),
+                            const SizedBox(width: 4),
+                            _TierAddButton(
+                              tier: 'expert',
+                              onPressed: () => _addSelectedToTier('expert'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+
+                    // 免费模型分类
+                    if (_freeModels.isNotEmpty) ...[
+                      _SectionLabel(
+                        icon: Icons.bolt,
+                        text: '免费模型（${_freeModels.length}）',
+                        color: Colors.teal,
+                      ),
+                      const SizedBox(height: 8),
+                      ..._filteredModels(_freeModels).map((m) =>
+                          _ProviderModelRow(
+                            info: m,
+                            isSelected: _selectedToAdd.contains(_fullModelId(
+                                (m['id'] as String?) ?? '')),
+                            showAddToTier: true,
+                            onToggle: () {
+                              final id = _fullModelId(
+                                  (m['id'] as String?) ?? '');
+                              setState(() {
+                                if (_selectedToAdd.contains(id)) {
+                                  _selectedToAdd.remove(id);
+                                } else {
+                                  _selectedToAdd.add(id);
+                                }
+                              });
+                            },
+                          )),
+                      const SizedBox(height: 16),
+                    ],
+
+                    // 付费模型分类
+                    if (_paidModels.isNotEmpty) ...[
+                      _SectionLabel(
+                        icon: Icons.paid,
+                        text: '付费模型（${_paidModels.length}）',
+                        color: Colors.orange,
+                      ),
+                      const SizedBox(height: 8),
+                      ..._filteredModels(_paidModels).map((m) =>
+                          _ProviderModelRow(
+                            info: m,
+                            isSelected: _selectedToAdd.contains(_fullModelId(
+                                (m['id'] as String?) ?? '')),
+                            showAddToTier: true,
+                            onToggle: () {
+                              final id = _fullModelId(
+                                  (m['id'] as String?) ?? '');
+                              setState(() {
+                                if (_selectedToAdd.contains(id)) {
+                                  _selectedToAdd.remove(id);
+                                } else {
+                                  _selectedToAdd.add(id);
+                                }
+                              });
+                            },
+                          )),
+                    ],
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Map<String, dynamic>> _filteredModels(List<Map<String, dynamic>> src) {
+    if (_query.isEmpty) return src;
+    final q = _query.toLowerCase();
+    return src.where((m) {
+      final id = (m['id'] as String?) ?? '';
+      final name = (m['name'] as String?) ?? '';
+      final desc = (m['description'] as String?) ?? '';
+      return id.toLowerCase().contains(q) ||
+          name.toLowerCase().contains(q) ||
+          desc.toLowerCase().contains(q);
+    }).toList();
+  }
+}
+
+/// 详情行（标签 + 值）
+class _DetailRow extends StatelessWidget {
+  final String label;
+  final String value;
+  final IconData icon;
+  final Color? valueColor;
+
+  const _DetailRow({
+    required this.label,
+    required this.value,
+    required this.icon,
+    this.valueColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 14, color: theme.colorScheme.onSurfaceVariant),
+        const SizedBox(width: 8),
+        Text(
+          '$label: ',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: theme.textTheme.bodySmall?.copyWith(
+              fontFamily: 'monospace',
+              color: valueColor,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// 区块标签
+class _SectionLabel extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final Color? color;
+
+  const _SectionLabel({
+    required this.icon,
+    required this.text,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final c = color ?? theme.colorScheme.primary;
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: c),
+        const SizedBox(width: 6),
+        Text(
+          text,
+          style: theme.textTheme.labelMedium?.copyWith(
+            color: c,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Tier 加入按钮
+class _TierAddButton extends StatelessWidget {
+  final String tier;
+  final VoidCallback onPressed;
+
+  const _TierAddButton({required this.tier, required this.onPressed});
+
+  static const _labels = {
+    'trivial': '极简',
+    'simple': '简单',
+    'complex': '复杂',
+    'expert': '专家',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 28,
+      child: FilledButton.tonal(
+        onPressed: onPressed,
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          minimumSize: const Size(0, 28),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        child: Text(
+          _labels[tier] ?? tier,
+          style: const TextStyle(fontSize: 11),
+        ),
+      ),
+    );
+  }
+}
+
+/// 服务商模型行 — 显示模型 id + 详情 + 选择/加入 tier 按钮
+class _ProviderModelRow extends StatelessWidget {
+  final Map<String, dynamic> info;
+  final bool isSelected;
+  final bool showAddToTier;
+  final VoidCallback? onToggle;
+
+  const _ProviderModelRow({
+    required this.info,
+    this.isSelected = false,
+    this.showAddToTier = false,
+    this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final id = (info['id'] as String?) ?? '';
+    final name = (info['name'] as String?) ?? '';
+    final desc = (info['description'] as String?) ?? '';
+    final isFree = info['is_free'] == true;
+    final pricing = (info['pricing'] as Map?)?.cast<String, dynamic>();
+    final caps = ((info['capabilities'] as List?) ?? [])
+        .whereType<String>()
+        .toList();
+    final ctxLen = (info['context_length'] as num?)?.toInt() ?? 0;
+    final supportsTools = info['supports_tools'] == true;
+
+    // 价格描述
+    String priceText = '';
+    if (isFree) {
+      priceText = '免费';
+    } else if (pricing != null && pricing.isNotEmpty) {
+      final parts = <String>[];
+      pricing.forEach((k, v) {
+        final numV = (v is num) ? v : num.tryParse(v.toString());
+        if (numV != null && numV > 0) {
+          parts.add('\$${(numV * 1000).toStringAsFixed(4)}/1K $k');
+        }
+      });
+      if (parts.isNotEmpty) priceText = parts.join(' · ');
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 6),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: BorderSide(
+          color: isSelected
+              ? theme.colorScheme.primary.withOpacity(0.5)
+              : theme.colorScheme.outlineVariant.withOpacity(0.3),
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (showAddToTier)
+              Padding(
+                padding: const EdgeInsets.only(top: 2, right: 8),
+                child: InkWell(
+                  onTap: onToggle,
+                  child: Icon(
+                    isSelected
+                        ? Icons.check_circle
+                        : Icons.add_circle_outline,
+                    size: 20,
+                    color: isSelected
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              )
+            else
+              Padding(
+                padding: const EdgeInsets.only(top: 2, right: 8),
+                child: Icon(
+                  isFree ? Icons.bolt : Icons.paid,
+                  size: 16,
+                  color: isFree ? Colors.teal : Colors.orange,
+                ),
+              ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 第一行：模型 ID + 免费/付费标签
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          id,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: (isFree ? Colors.teal : Colors.orange)
+                              .withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(3),
+                        ),
+                        child: Text(
+                          isFree ? '免费' : '付费',
+                          style: TextStyle(
+                            fontSize: 9,
+                            color: isFree ? Colors.teal : Colors.orange,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  // 第二行：name（如果有）
+                  if (name.isNotEmpty && name != id) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      name,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                  // 第三行：详情
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      if (priceText.isNotEmpty)
+                        Text(
+                          priceText,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: isFree
+                                ? Colors.teal
+                                : Colors.orange.shade700,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      if (ctxLen > 0)
+                        _MiniInfo('ctx ${_fmtCtx(ctxLen)}'),
+                      if (supportsTools)
+                        const _MiniInfo('工具', highlight: true),
+                      ...caps.take(4).map((c) => _CapabilityChip(cap: c)),
+                    ],
+                  ),
+                  // 第四行：描述
+                  if (desc.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      desc,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: theme.colorScheme.onSurfaceVariant,
+                        fontStyle: FontStyle.italic,
+                      ),
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _fmtCtx(int n) {
+    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(0)}K';
+    return n.toString();
+  }
 }
 
 /// 服务商配置对话框（StatefulWidget）
@@ -3009,126 +3952,167 @@ Future<void> _showModelSelectionDialog(
   }
 }
 
-/// Tier 层模型选择对话框 — 勾选/取消该层的模型
+/// Tier 层模型选择对话框 — 勾选/取消该层的模型，并支持拖拽排序
+///
+/// 问题4 修复：
+/// - 字段路径从 router.tier_models 改为 llm.model_tiers（与服务端对齐）
+/// - 使用 List 保留用户设置的调用顺序，路由时按此顺序回退
+/// - 添加 ReorderableListView 支持长按拖动调整顺序
+/// - 显示模型详情（免费/付费、价格、能力、上下文长度）
 Future<void> _showTierModelsDialog(
   BuildContext context, {
   required String tierName,
   required List<String> currentModels,
   required ServerConfigNotifier notifier,
 }) async {
-  // 候选模型 = 当前 tier 已有模型 + 所有 available_models（去重）
+  // 候选模型 = 当前 tier 已有模型 + 所有 available_models（去重，保留顺序）
   final availableModels = (notifier.availableModels ?? [])
       .whereType<Map<String, dynamic>>()
       .toList();
 
-  final candidateIds = <String>{...currentModels};
+  // 已选模型用 List 保留顺序（路由调用顺序）
+  // 初始顺序：先按 currentModels 原始顺序，再补充其他已选的
+  final orderedSelected = <String>[];
+  for (final m in currentModels) {
+    if (!orderedSelected.contains(m)) orderedSelected.add(m);
+  }
+  // 候选集（含未选）
+  final candidateIds = <String>[...orderedSelected];
   for (final m in availableModels) {
     final id = (m['id'] as String?) ?? '';
-    if (id.isNotEmpty) candidateIds.add(id);
+    if (id.isNotEmpty && !candidateIds.contains(id)) candidateIds.add(id);
   }
 
-  // 排序：当前 tier 中已存在的模型在前，再按 ID 字母序
-  final sortedIds = candidateIds.toList()
-    ..sort((a, b) {
-      final aInCurrent = currentModels.contains(a);
-      final bInCurrent = currentModels.contains(b);
-      if (aInCurrent != bInCurrent) {
-        return aInCurrent ? -1 : 1;
-      }
-      return a.compareTo(b);
-    });
+  // 构建 id -> info 映射
+  final modelInfoMap = <String, Map<String, dynamic>>{};
+  for (final m in availableModels) {
+    final id = (m['id'] as String?) ?? '';
+    if (id.isNotEmpty) modelInfoMap[id] = m;
+  }
 
-  // 初始勾选状态 = 当前 tier 模型
-  final selected = <String>{...currentModels};
+  // 待选（未勾选）模型列表
+  var unselected = candidateIds.where((id) => !orderedSelected.contains(id)).toList()
+    ..sort();
 
   final result = await showDialog<bool>(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setState) {
-        // 构建 id -> info 映射
-        final modelInfoMap = <String, Map<String, dynamic>>{};
-        for (final m in availableModels) {
-          final id = (m['id'] as String?) ?? '';
-          if (id.isNotEmpty) modelInfoMap[id] = m;
-        }
-
+        final theme = Theme.of(ctx);
         return AlertDialog(
           title: Row(
             children: [
               Icon(Icons.layers,
-                  size: 20, color: Theme.of(ctx).colorScheme.primary),
+                  size: 20, color: theme.colorScheme.primary),
               const SizedBox(width: 8),
               Expanded(
-                child: Text('$tierName 层模型（已选 ${selected.length}）'),
+                child: Text('$tierName 层模型（已选 ${orderedSelected.length}）'),
               ),
             ],
           ),
           content: SizedBox(
             width: double.maxFinite,
-            child: sortedIds.isEmpty
+            child: candidateIds.isEmpty
                 ? const Text('暂无可用模型')
                 : ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 440),
-                    child: ListView.builder(
+                    constraints: const BoxConstraints(maxHeight: 520),
+                    child: ListView(
                       shrinkWrap: true,
-                      itemCount: sortedIds.length,
-                      itemBuilder: (ctx, i) {
-                        final id = sortedIds[i];
-                        final info = modelInfoMap[id];
-                        final tier = (info?['tier'] as String?) ?? '';
-                        final caps = ((info?['capabilities'] as List?) ?? [])
-                            .whereType<String>()
-                            .toList();
-                        final isChecked = selected.contains(id);
-                        final wasInCurrent = currentModels.contains(id);
-
-                        return CheckboxListTile(
-                          value: isChecked,
-                          onChanged: (v) {
-                            setState(() {
-                              if (v == true) {
-                                selected.add(id);
-                              } else {
-                                selected.remove(id);
-                              }
-                            });
-                          },
-                          dense: true,
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 0),
-                          title: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  id,
-                                  style: const TextStyle(
-                                    fontFamily: 'monospace',
-                                    fontSize: 13,
+                      children: [
+                        // ── 已选模型（可拖拽排序） ──────────────
+                        if (orderedSelected.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: Row(
+                              children: [
+                                Icon(Icons.drag_indicator,
+                                    size: 14, color: theme.colorScheme.primary),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '已选（长按拖动调整调用顺序）',
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.primary,
+                                    fontWeight: FontWeight.w600,
                                   ),
-                                  overflow: TextOverflow.ellipsis,
                                 ),
-                              ),
-                              if (wasInCurrent && !isChecked)
-                                const _InfoChip('移除', color: Colors.orange),
-                            ],
+                              ],
+                            ),
                           ),
-                          subtitle: tier.isNotEmpty || caps.isNotEmpty
-                              ? Padding(
-                                  padding: const EdgeInsets.only(top: 4),
-                                  child: Wrap(
-                                    spacing: 4,
-                                    runSpacing: 4,
-                                    children: [
-                                      if (tier.isNotEmpty)
-                                        _TierBadge(tier: tier),
-                                      ...caps.take(3)
-                                          .map((c) => _CapabilityChip(cap: c)),
-                                    ],
-                                  ),
-                                )
-                              : null,
-                        );
-                      },
+                          // ReorderableListView 需要明确高度，外包 Container
+                          Container(
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                color: theme.colorScheme.primary.withOpacity(0.3),
+                              ),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: ReorderableListView(
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              buildDefaultDragHandles: false,
+                              onReorder: (oldIdx, newIdx) {
+                                setState(() {
+                                  if (newIdx > oldIdx) newIdx -= 1;
+                                  final item = orderedSelected.removeAt(oldIdx);
+                                  orderedSelected.insert(newIdx, item);
+                                });
+                              },
+                              children: List.generate(orderedSelected.length, (i) {
+                                final id = orderedSelected[i];
+                                return _TierModelTile(
+                                  key: ValueKey('sel_$id'),
+                                  id: id,
+                                  info: modelInfoMap[id],
+                                  index: i,
+                                  isSelected: true,
+                                  onToggle: () => setState(() {
+                                    orderedSelected.remove(id);
+                                    unselected.add(id);
+                                    unselected.sort();
+                                  }),
+                                );
+                              }),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+                        // ── 未选模型 ──────────────────────────
+                        if (unselected.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: Text(
+                              '可选模型（${unselected.length}）',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                color: theme.colorScheme.outlineVariant
+                                    .withOpacity(0.5),
+                              ),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Column(
+                              children: unselected.map((id) {
+                                return _TierModelTile(
+                                  key: ValueKey('unsel_$id'),
+                                  id: id,
+                                  info: modelInfoMap[id],
+                                  isSelected: false,
+                                  onToggle: () => setState(() {
+                                    unselected.remove(id);
+                                    orderedSelected.add(id);
+                                  }),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
           ),
@@ -3138,7 +4122,7 @@ Future<void> _showTierModelsDialog(
               child: const Text('取消'),
             ),
             FilledButton(
-              onPressed: selected.isEmpty
+              onPressed: orderedSelected.isEmpty
                   ? null
                   : () => Navigator.of(ctx).pop(true),
               child: const Text('保存'),
@@ -3150,10 +4134,14 @@ Future<void> _showTierModelsDialog(
   );
 
   if (result == true && context.mounted) {
+    // 修复：字段路径从 router.tier_models 改为 llm.model_tiers，
+    // 与服务端 models/__init__.py:238 的 llm_cfg.get("model_tiers") 对齐。
+    // 之前写 router.tier_models 服务端根本不读，导致勾选/移除无效。
+    // 保留 List 顺序（不 sort），让路由按用户设置的顺序调用模型。
     final ok = await notifier.updateConfig({
-      'router': {
-        'tier_models': {
-          tierName: selected.toList()..sort(),
+      'llm': {
+        'model_tiers': {
+          tierName: orderedSelected.toList(),
         }
       }
     });
@@ -3161,13 +4149,198 @@ Future<void> _showTierModelsDialog(
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(ok
-              ? '$tierName 层模型已更新（${selected.length} 个）'
+              ? '$tierName 层模型已更新（${orderedSelected.length} 个，按顺序调用）'
               : notifier.state.error ?? '保存失败'),
           behavior: SnackBarBehavior.floating,
         ),
       );
     }
     if (ok) await notifier.loadModels();
+  }
+}
+
+/// Tier 模型条目 — 显示模型 ID + 详情（免费/付费、价格、能力）+ 勾选/移除按钮
+class _TierModelTile extends StatelessWidget {
+  final String id;
+  final Map<String, dynamic>? info;
+  final int? index;
+  final bool isSelected;
+  final VoidCallback onToggle;
+
+  const _TierModelTile({
+    super.key,
+    required this.id,
+    this.info,
+    this.index,
+    required this.isSelected,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isFree = info?['is_free'] == true;
+    final pricing = (info?['pricing'] as Map?)?.cast<String, dynamic>();
+    final desc = (info?['description'] as String?) ?? '';
+    final caps = ((info?['capabilities'] as List?) ?? [])
+        .whereType<String>()
+        .toList();
+    final ctxLen = (info?['context_length'] as num?)?.toInt() ?? 0;
+    final supportsTools = info?['supports_tools'] == true;
+
+    // 价格描述
+    String priceText = '';
+    if (isFree) {
+      priceText = '免费';
+    } else if (pricing != null && pricing.isNotEmpty) {
+      final parts = <String>[];
+      pricing.forEach((k, v) {
+        final numV = (v is num) ? v : num.tryParse(v.toString());
+        if (numV != null && numV > 0) {
+          // 价格通常以 per-token USD 表示，转成 per-1K-tokens 更可读
+          parts.add('$k: \$${(numV * 1000).toStringAsFixed(4)}/1K');
+        }
+      });
+      if (parts.isNotEmpty) priceText = parts.join(' · ');
+    }
+
+    return ListTile(
+      key: key,
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+      leading: isSelected && index != null
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ReorderableDragStartListener(
+                  index: index!,
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4),
+                    child: Icon(Icons.drag_handle, size: 18),
+                  ),
+                ),
+                Text('#${index! + 1}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.primary,
+                    )),
+              ],
+            )
+          : Icon(
+              isFree ? Icons.bolt : Icons.paid,
+              size: 16,
+              color: isFree ? Colors.teal : Colors.orange,
+            ),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              id,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 13,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          // 免费/付费标签
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            decoration: BoxDecoration(
+              color: (isFree ? Colors.teal : Colors.orange).withOpacity(0.15),
+              borderRadius: BorderRadius.circular(3),
+              border: Border.all(
+                color: (isFree ? Colors.teal : Colors.orange).withOpacity(0.4),
+                width: 0.5,
+              ),
+            ),
+            child: Text(
+              isFree ? '免费' : '付费',
+              style: TextStyle(
+                fontSize: 9,
+                color: isFree ? Colors.teal : Colors.orange,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+      subtitle: Padding(
+        padding: const EdgeInsets.only(top: 4),
+        child: Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            if (priceText.isNotEmpty)
+              Text(
+                priceText,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: isFree ? Colors.teal : Colors.orange.shade700,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            if (ctxLen > 0)
+              _MiniInfo('ctx ${_fmtCtx(ctxLen)}'),
+            if (supportsTools) const _MiniInfo('工具', highlight: true),
+            ...caps.take(3).map((c) => _CapabilityChip(cap: c)),
+            if (desc.isNotEmpty)
+              Text(
+                desc,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 10,
+                  color: theme.colorScheme.onSurfaceVariant,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+          ],
+        ),
+      ),
+      trailing: IconButton(
+        icon: Icon(
+          isSelected ? Icons.remove_circle_outline : Icons.add_circle_outline,
+          size: 20,
+          color: isSelected ? Colors.red : theme.colorScheme.primary,
+        ),
+        onPressed: onToggle,
+        tooltip: isSelected ? '从该层移除' : '加入该层',
+      ),
+    );
+  }
+
+  static String _fmtCtx(int n) {
+    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
+    if (n >= 1000) return '${(n / 1000).toStringAsFixed(0)}K';
+    return n.toString();
+  }
+}
+
+/// 小型信息标签（用于 tier 模型详情）
+class _MiniInfo extends StatelessWidget {
+  final String text;
+  final bool highlight;
+  const _MiniInfo(this.text, {this.highlight = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = highlight
+        ? Theme.of(context).colorScheme.primary
+        : Theme.of(context).colorScheme.onSurfaceVariant;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 9, color: color, fontWeight: FontWeight.w500),
+      ),
+    );
   }
 }
 
