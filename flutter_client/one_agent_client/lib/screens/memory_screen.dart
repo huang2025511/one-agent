@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/memory_provider.dart';
 import '../providers/role_provider.dart';
+import '../providers/settings_provider.dart';
 import '../models/memory.dart';
 import '../models/role.dart';
 
