@@ -223,12 +223,26 @@ class ChatNotifier extends StateNotifier<ChatState> {
           final content = event.content ?? '';
           final phase = event.phase ?? 'thinking';
           if (event.phase == 'plan') {
-            // phase=plan 是最终完整思考计划，覆盖之前截断的进度版
-            // 追加换行符确保下一段 phase 标题能正确分行
-            thinkingBuffer = content.isEmpty ? null : content + '\n\n';
-            if (!_phaseOrder.contains('plan')) _phaseOrder.add('plan');
-            // 同步更新 _last_phase，plan 之后回到新 phase 时能正确生成标题
-            _lastPhase = 'plan';
+            // 问题3 修复：phase=plan 是服务端在 chat_task 完成后推送的
+            // 最终思考计划（turn.meta["thinking"]），只包含 think 阶段的
+            // 计划文本。之前直接用它覆盖 thinkingBuffer，导致流式过程中
+            // 累积的 planning/reasoning/tool_loop/reflection/verification
+            // 等所有 phase 的思考内容全部丢失。
+            // 现在：如果 thinkingBuffer 已有内容，将 plan 作为独立 section
+            // 追加（不覆盖）；如果为空，则用 plan 作为初始内容。
+            if (content.isEmpty) {
+              // plan 内容为空，忽略
+            } else if (thinkingBuffer != null && thinkingBuffer!.isNotEmpty) {
+              // 已有其他 phase 的思考，将 plan 追加为独立 section
+              if (!_phaseOrder.contains('plan')) _phaseOrder.add('plan');
+              _lastPhase = 'plan';
+              thinkingBuffer = thinkingBuffer! + '### 📋 执行计划\n$content\n\n';
+            } else {
+              // thinkingBuffer 为空，用 plan 作为初始内容
+              if (!_phaseOrder.contains('plan')) _phaseOrder.add('plan');
+              _lastPhase = 'plan';
+              thinkingBuffer = '### 📋 执行计划\n$content\n\n';
+            }
           } else if (content.isEmpty) {
             // 初始 thinking 占位事件，无 content，忽略
           } else {

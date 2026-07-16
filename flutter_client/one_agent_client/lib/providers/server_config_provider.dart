@@ -258,8 +258,18 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
       state.models?['available_models'] as List<dynamic>?;
 
   /// 已配置 API Key 的服务商列表（来自 config.llm.api_keys，值为 "***" 表示已配置）
+  ///
+  /// 问题1 修复：增强 Map 类型健壮性。dio 反序列化的嵌套 Map 可能是
+  /// Map<String, dynamic> 或 Map<dynamic, dynamic>，直接 `as Map<String, dynamic>?`
+  /// 在某些边缘情况下会返回 null（类型不匹配），导致 configuredProviders
+  /// 返回空列表，自定义服务商从 UI 消失。现在先用 `as Map?` 再取值。
   List<String> get configuredProviders {
-    final keys = _get(['llm', 'api_keys']) as Map<String, dynamic>?;
+    final raw = _get(['llm', 'api_keys']);
+    if (raw == null) return [];
+    // 兼容 Map<String, dynamic> 和 Map<dynamic, dynamic>
+    final keys = raw is Map<String, dynamic>
+        ? raw
+        : (raw is Map ? Map<String, dynamic>.from(raw) : null);
     if (keys == null) return [];
     return keys.entries
         .where((e) {
@@ -275,7 +285,11 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
   /// 服务商 base_url 映射（来自 config.llm.base_urls）
   /// 键为服务商名，值为自定义 API 地址
   Map<String, String> get providerBaseUrls {
-    final urls = _get(['llm', 'base_urls']) as Map<String, dynamic>?;
+    final raw = _get(['llm', 'base_urls']);
+    if (raw == null) return {};
+    final urls = raw is Map<String, dynamic>
+        ? raw
+        : (raw is Map ? Map<String, dynamic>.from(raw) : null);
     if (urls == null) return {};
     return urls.map((k, v) => MapEntry(k, v?.toString() ?? ''));
   }

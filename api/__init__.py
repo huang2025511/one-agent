@@ -1102,18 +1102,62 @@ class RESTAPIGateway(Plugin):
         async def list_providers(
             x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
         ):
-            """列出所有已知服务商及其 base_url。"""
+            """列出所有已知服务商及其 base_url。
+
+            问题1 修复：除了 KNOWN_PROVIDERS 硬编码列表外，还扫描
+            _llm._api_keys 和 config.llm.base_urls 中所有已配置的服务商
+            （包括用户自定义添加的服务商），确保它们也出现在列表中。
+            之前只返回 KNOWN_PROVIDERS，自定义服务商永远不在列表里，
+            导致切换主服务商后客户端 configuredProviders 如果有任何
+            边缘情况丢失，自定义服务商就从 UI 消失。
+            """
             auth(x_api_key)
             from models.resolver import KNOWN_PROVIDERS
             # 获取已配置的 api_keys
             configured_keys = {}
             if _llm:
                 configured_keys = getattr(_llm, "_api_keys", {})
+
+            # 获取 base_urls 映射（含自定义服务商的 base_url）
+            base_urls = {}
+            if _llm:
+                base_urls.update(getattr(_llm, "_provider_base_urls", {}) or {})
+            # 合并 config.llm.base_urls（自定义服务商的 base_url）
+            cfg_base_urls = (_ctx.config.get("llm", {}) or {}).get("base_urls", {}) or {}
+            base_urls.update(cfg_base_urls)
+
             providers = []
+            seen_names = set()
+            # 1. 先加入 KNOWN_PROVIDERS
             for name, base_url in KNOWN_PROVIDERS.items():
+                seen_names.add(name)
                 providers.append({
                     "name": name,
                     "base_url": base_url,
+                    "has_key": bool(configured_keys.get(name)),
+                })
+            # 2. 再加入 _api_keys 中有 key 但不在 KNOWN_PROVIDERS 的自定义服务商
+            for name, key_val in configured_keys.items():
+                if name in seen_names:
+                    continue
+                if not key_val:
+                    continue
+                seen_names.add(name)
+                providers.append({
+                    "name": name,
+                    "base_url": base_urls.get(name, ""),
+                    "has_key": True,
+                })
+            # 3. 最后加入 base_urls 中有 URL 但不在以上列表的服务商
+            for name, url in base_urls.items():
+                if name in seen_names:
+                    continue
+                if not url:
+                    continue
+                seen_names.add(name)
+                providers.append({
+                    "name": name,
+                    "base_url": url,
                     "has_key": bool(configured_keys.get(name)),
                 })
             return {"providers": providers}

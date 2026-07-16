@@ -480,8 +480,17 @@ class OneAgentApp:
             # （router 的 _history_tail 按 user→assistant 顺序配对，
             #  缺失的 assistant 会让下一轮的 reply 错配到本轮的 input）
             if turn.result:
+                # 问题3 修复：持久化时保存 thinking（思考过程），否则
+                # 切换会话/重开 App 后历史消息的思考过程全部丢失。
+                # turn.meta["thinking"] 由 coordinator 在 think 阶段设置。
+                _thinking = ""
+                try:
+                    _thinking = (turn.meta.get("thinking") or "") if turn.meta else ""
+                except Exception:
+                    pass
                 _store.add_message(sid, "assistant", turn.result,
-                                   meta={"model": turn.model or "", "turn_id": turn.turn_id},
+                                   meta={"model": turn.model or "", "turn_id": turn.turn_id,
+                                         "thinking": _thinking},
                                    tokens=turn.tokens_used)
             elif turn.error:
                 _reply = f"[处理失败] {turn.error}" if turn.error else "[处理失败]"

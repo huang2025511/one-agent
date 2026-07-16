@@ -623,33 +623,41 @@ class _ModelRoutingSection extends StatelessWidget {
           },
         ),
 
-        // 路由子选项（仅路由开启时显示）
-        if (routingOn) ...[
-          _SwitchTile(
-            title: '自我进化',
-            subtitle: '根据历史成功率自动调整 tier 阈值',
-            value: notifier.selfEvolutionEnabled,
-            onChanged: (v) => notifier.updateConfig({
-              'router': {'self_evolution': {'enabled': v}}
-            }).then((ok) => _showResult(context, ok, notifier, '自我进化')),
-          ),
-          _SwitchTile(
-            title: '上下文压缩',
-            subtitle: '超长对话自动压缩历史上下文',
-            value: notifier.contextCompressionEnabled,
-            onChanged: (v) => notifier.updateConfig({
-              'router': {'context_compression': {'enabled': v}}
-            }).then((ok) => _showResult(context, ok, notifier, '上下文压缩')),
-          ),
-          _SwitchTile(
-            title: '技能懒加载',
-            subtitle: '按需加载技能，降低 token 消耗',
-            value: notifier.skillLazyLoadingEnabled,
-            onChanged: (v) => notifier.updateConfig({
-              'router': {'skill_lazy_loading': {'enabled': v}}
-            }).then((ok) => _showResult(context, ok, notifier, '技能懒加载')),
-          ),
-        ],
+        // 路由子选项
+        // 问题2 修复：这三个开关（自我进化/上下文压缩/技能懒加载）在配置层
+        // 面是独立于 router.enabled 的，后端也独立读取各自的 enabled 字段。
+        // 之前用 if (routingOn) 包裹导致路由关闭后这三个开关从 UI 消失，
+        // 用户无法查看和操作它们。现在始终显示，路由关闭时加提示。
+        _SwitchTile(
+          title: '自我进化',
+          subtitle: routingOn
+              ? '根据历史成功率自动调整 tier 阈值'
+              : '根据历史成功率自动调整 tier 阈值（需开启 4 层路由生效）',
+          value: notifier.selfEvolutionEnabled,
+          onChanged: (v) => notifier.updateConfig({
+            'router': {'self_evolution': {'enabled': v}}
+          }).then((ok) => _showResult(context, ok, notifier, '自我进化')),
+        ),
+        _SwitchTile(
+          title: '上下文压缩',
+          subtitle: routingOn
+              ? '超长对话自动压缩历史上下文'
+              : '超长对话自动压缩历史上下文（需开启 4 层路由生效）',
+          value: notifier.contextCompressionEnabled,
+          onChanged: (v) => notifier.updateConfig({
+            'router': {'context_compression': {'enabled': v}}
+          }).then((ok) => _showResult(context, ok, notifier, '上下文压缩')),
+        ),
+        _SwitchTile(
+          title: '技能懒加载',
+          subtitle: routingOn
+              ? '按需加载技能，降低 token 消耗'
+              : '按需加载技能，降低 token 消耗（需开启 4 层路由生效）',
+          value: notifier.skillLazyLoadingEnabled,
+          onChanged: (v) => notifier.updateConfig({
+            'router': {'skill_lazy_loading': {'enabled': v}}
+          }).then((ok) => _showResult(context, ok, notifier, '技能懒加载')),
+        ),
 
         // 4 层路由分布
         if (routingOn && tiers != null) ...[
