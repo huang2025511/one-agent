@@ -9,6 +9,10 @@ class UpdateState {
   final bool isChecking;
   final bool isDownloading;
   final bool isResumed; // 当前下载是否为断点续传
+  /// 问题4 修复：始终存储服务端最新 Release 信息（不做版本过滤）。
+  /// 之前 getLatestRelease 在 currentVersion >= versionNumber 时返回 null，
+  /// 导致 UI 无法显示"服务端最新版本是什么"。现在始终存储，由 hasUpdate
+  /// 计算属性根据版本号比较决定是否提示更新。
   final ReleaseInfo? latestRelease;
   final int? currentVersion;
   final String? currentVersionName;
@@ -31,14 +35,25 @@ class UpdateState {
     this.lastCheckedAt,
   });
 
-  /// 是否有新版本可用
-  bool get hasUpdate => latestRelease != null;
+  /// 是否有新版本可用（问题4 修复：基于版本号比较，而非 latestRelease 是否为 null）
+  bool get hasUpdate {
+    final release = latestRelease;
+    if (release == null || currentVersion == null) return false;
+    return currentVersion! < release.versionNumber;
+  }
+
+  /// 服务端最新版本号（用于 UI 展示）
+  int? get latestVersion => latestRelease?.versionNumber;
+
+  /// 服务端最新版本标签（如 "app-v2074"）
+  String? get latestTagName => latestRelease?.tagName;
 
   UpdateState copyWith({
     bool? isChecking,
     bool? isDownloading,
     bool? isResumed,
     ReleaseInfo? latestRelease,
+    bool clearLatestRelease = false,
     int? currentVersion,
     String? currentVersionName,
     double? downloadProgress,
@@ -49,7 +64,7 @@ class UpdateState {
     isChecking: isChecking ?? this.isChecking,
     isDownloading: isDownloading ?? this.isDownloading,
     isResumed: isResumed ?? this.isResumed,
-    latestRelease: latestRelease ?? this.latestRelease,
+    latestRelease: clearLatestRelease ? null : (latestRelease ?? this.latestRelease),
     currentVersion: currentVersion ?? this.currentVersion,
     currentVersionName: currentVersionName ?? this.currentVersionName,
     downloadProgress: downloadProgress ?? this.downloadProgress,
@@ -78,12 +93,26 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
       final buildNumber = int.tryParse(packageInfo.buildNumber) ?? 0;
       final versionName = packageInfo.version;
 
-      final release = await UpdateApi.getLatestRelease(
-        currentVersion: buildNumber,
-      );
+      // 问题4 修复：使用 fetchLatestRelease 始终获取最新 Release 信息，
+      // 不做版本号过滤。这样 UI 可以同时显示当前版本和服务端最新版本，
+      // 用户也能在版本比较失误时手动强制下载。
+      final release = await UpdateApi.fetchLatestRelease();
+
+      if (release == null) {
+        // 两个源都不可用 — 抛异常让 UI 显示"检测失败"
+        state = UpdateState(
+          isChecking: false,
+          currentVersion: buildNumber,
+          currentVersionName: versionName,
+          error: '无法连接更新服务器（Gitee 和 GitHub 均不可达），请检查网络后重试',
+          lastCheckedAt: DateTime.now(),
+        );
+        return;
+      }
 
       // 问题7 修复：记录检查完成时间，无论是否有新版本，
       // UI 都能给出"已是最新版本"的反馈。
+      // 问题4 修复：始终存储 latestRelease，由 hasUpdate 决定是否提示更新。
       state = UpdateState(
         isChecking: false,
         currentVersion: buildNumber,
@@ -99,6 +128,7 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
         currentVersion: state.currentVersion,
         currentVersionName: state.currentVersionName,
         error: '检查更新失败: $e',
+        lastCheckedAt: DateTime.now(),
       );
     }
   }

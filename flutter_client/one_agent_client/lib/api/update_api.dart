@@ -39,18 +39,32 @@ class UpdateApi {
   /// [currentVersion] 当前应用版本号（用于无新版本时返回 null）
   /// 两个源都不可用时抛异常（而非返回 null），让 UI 显示"检测失败"而非"最新版本"
   static Future<ReleaseInfo?> getLatestRelease({int? currentVersion}) async {
-    // 国内用户优先 Gitee（1-2秒即可响应），失败回退 GitHub
-    ReleaseInfo? release = await _fetchFromGitee();
-    release ??= await _fetchFromGitHub();
-
+    final release = await fetchLatestRelease();
     if (release == null) {
       throw Exception('无法连接更新服务器（Gitee 和 GitHub 均不可达），请检查网络后重试');
     }
-
     // 比较版本号：若当前版本 >= 最新版本，则无需更新
     if (currentVersion != null && currentVersion >= release.versionNumber) {
       return null;
     }
+    return release;
+  }
+
+  /// 问题4 修复：始终获取最新 Release 信息（不做版本号过滤）。
+  ///
+  /// 之前 getLatestRelease 在 currentVersion >= release.versionNumber 时
+  /// 返回 null，导致 UI 无法显示"最新版本是什么"。如果用户的 buildNumber
+  /// 因构建配置问题意外大于服务端 tag（例如 debug 构建用了错误的
+  /// build-number），就永远看不到更新提示。
+  ///
+  /// 现在 fetchLatestRelease 始终返回 release（只要网络可达且有 APK 资源），
+  /// 由 UpdateState.hasUpdate 根据 versionNumber 比较决定是否提示更新。
+  /// 这样 UI 可以同时显示"当前版本"和"服务端最新版本"，用户也能手动
+  /// 强制下载（即使版本号比较认为"无需更新"）。
+  static Future<ReleaseInfo?> fetchLatestRelease() async {
+    // 国内用户优先 Gitee（1-2秒即可响应），失败回退 GitHub
+    ReleaseInfo? release = await _fetchFromGitee();
+    release ??= await _fetchFromGitHub();
     return release;
   }
 

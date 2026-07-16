@@ -579,8 +579,9 @@ class RESTAPIGateway(Plugin):
                         async def _resync_llm():
                             await _llm_inst.setup(_ctx)
                         try:
-                            loop = asyncio.get_running_loop()
-                            loop.create_task(_resync_llm())
+                            # 问题1 修复：同步等待 setup 完成，不能用 create_task
+                            # fire-and-forget（否则返回后 _api_keys 未更新）
+                            await _resync_llm()
                         except RuntimeError:
                             asyncio.run(_resync_llm())
                         logger.info("LLM provider re-synced after config reload")
@@ -697,6 +698,11 @@ class RESTAPIGateway(Plugin):
                 # 问题11 修复：_register_dashboard_config_routes 没有 _llm 参数，
                 # 必须从 _ctx.get_plugin("llm") 获取，否则 NameError 导致
                 # 所有 PUT /api/config 请求 500 失败（"保存失败"根因之一）。
+                # 问题1 修复：LLM 热重载必须同步等待完成，不能用 create_task
+                # fire-and-forget。之前用 loop.create_task() 不 await，导致
+                # update_config 返回后 _llm._api_keys 仍未更新，客户端紧接着
+                # 调用 list_providers 时 has_key 返回 False（即使 key 已保存
+                # 到文件），新增服务商在"添加服务商"对话框中显示为"未配置"。
                 _llm_inst = _ctx.get_plugin("llm") if _ctx else None
                 if _llm_inst is not None:
                     try:
@@ -705,7 +711,8 @@ class RESTAPIGateway(Plugin):
                             await _llm_inst.setup(_ctx)
                         try:
                             loop = asyncio.get_running_loop()
-                            loop.create_task(_resync_llm())
+                            # 同步等待 setup 完成，确保 _api_keys 立即更新
+                            await _resync_llm()
                         except RuntimeError:
                             asyncio.run(_resync_llm())
                         logger.info("LLM provider re-synced after config update")
@@ -2229,8 +2236,8 @@ class RESTAPIGateway(Plugin):
                                     async def _resync_llm():
                                         await _llm_inst.setup(_ctx)
                                     try:
-                                        loop = asyncio.get_running_loop()
-                                        loop.create_task(_resync_llm())
+                                        # 问题1 修复：同步等待 setup 完成
+                                        await _resync_llm()
                                     except RuntimeError:
                                         asyncio.run(_resync_llm())
                                     logger.info("LLM provider re-synced after /api/settings update (%s)", path)

@@ -1035,7 +1035,10 @@ class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
                                     ),
                                   );
                                 }
-                                if (ok) await notifier.loadModels();
+                                // 问题1 修复：切换主服务商后用 loadConfig()
+                                // 而非 loadModels()，确保 state.config 保留
+                                // 所有 api_keys（包括新增服务商），避免消失。
+                                if (ok) await notifier.loadConfig();
                               },
                       ))
                   .toList(),
@@ -2235,13 +2238,22 @@ class _AboutSection extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final updateState = ref.watch(updateProvider);
 
-    // 问题7 修复：检查成功但无新版本时，给出"已是最新版本"反馈
-    // 之前这种情况 subtitle 为 null，用户以为按钮无效
+    // 问题4 修复：使用 hasUpdate（基于版本号比较）而非 latestRelease != null。
+    // 之前 latestRelease 在"当前版本 >= 服务端版本"时为 null，导致 UI 无法
+    // 显示服务端最新版本信息。现在始终存储 latestRelease，subtitle 可以同时
+    // 展示当前版本和服务端最新版本，让用户清楚知道是否有更新。
     String? subtitle;
     if (updateState.error != null) {
       subtitle = updateState.error;
     } else if (updateState.latestRelease != null) {
-      subtitle = '新版本可用: ${updateState.latestRelease!.tagName}';
+      final latest = updateState.latestRelease!;
+      if (updateState.hasUpdate) {
+        subtitle = '新版本可用: ${latest.tagName} (v${latest.versionNumber})';
+      } else {
+        // 问题4：当前版本 >= 服务端版本时，仍展示服务端最新版本信息，
+        // 让用户知道服务端有什么版本，可手动强制下载。
+        subtitle = '服务端最新: ${latest.tagName}（当前已是最新或更新）';
+      }
     } else if (updateState.lastCheckedAt != null) {
       final t = updateState.lastCheckedAt!;
       final timeStr =
@@ -2284,7 +2296,7 @@ class _AboutSection extends ConsumerWidget {
                     fontSize: 12,
                     color: updateState.error != null
                         ? Colors.red
-                        : updateState.latestRelease != null
+                        : updateState.hasUpdate
                             ? Colors.orange
                             : Colors.green,
                   ))
@@ -2298,7 +2310,7 @@ class _AboutSection extends ConsumerWidget {
                   final s = ref.read(updateProvider);
                   final msg = s.error != null
                       ? s.error!
-                      : s.latestRelease != null
+                      : s.hasUpdate
                           ? '发现新版本: ${s.latestRelease!.tagName}'
                           : '已是最新版本';
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -2310,6 +2322,59 @@ class _AboutSection extends ConsumerWidget {
                 },
           contentPadding: const EdgeInsets.symmetric(horizontal: 20),
         ),
+        // 问题4：发现新版本时显示下载按钮（直接下载，无需进入二级页面）
+        if (updateState.hasUpdate && !updateState.isDownloading) ...[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: FilledButton.icon(
+              onPressed: updateState.isChecking
+                  ? null
+                  : () => ref.read(updateProvider.notifier).downloadAndInstall(),
+              icon: const Icon(Icons.download, size: 18),
+              label: Text(updateState.latestRelease != null
+                  ? '下载 ${updateState.latestRelease!.tagName}'
+                  : '下载更新'),
+            ),
+          ),
+          const SizedBox(height: 4),
+        ],
+        // 问题4：下载中显示进度
+        if (updateState.isDownloading) ...[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              children: [
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: updateState.downloadProgress,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${(updateState.downloadProgress * 100).toInt()}%',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 4),
+        ],
+        // 问题4：即使版本号比较认为"无需更新"，也允许用户强制下载服务端最新版
+        // （用于调试或绕过版本比较失误）
+        if (updateState.latestRelease != null &&
+            !updateState.hasUpdate &&
+            !updateState.isDownloading &&
+            !updateState.isChecking) ...[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: OutlinedButton.icon(
+              onPressed: () => ref.read(updateProvider.notifier).downloadAndInstall(),
+              icon: const Icon(Icons.download_for_offline, size: 18),
+              label: const Text('强制下载服务端最新版'),
+            ),
+          ),
+          const SizedBox(height: 4),
+        ],
       ],
     );
   }
@@ -2725,6 +2790,32 @@ Future<void> _showProviderManagementDialog(
       .toList();
   final configured = _collectConfiguredProviders(notifier);
 
+  // 问题1 修复：将客户端已配置但不在服务端 KNOWN_PROVIDERS 列表中的
+  // 服务商也加入列表，确保所有有 key 的服务商都能显示（包括自定义服务商）。
+  final knownNames = providers
+      .map((p) => p['name'] as String? ?? '')
+      .where((n) => n.isNotEmpty)
+      .toSet();
+  final baseUrls = notifier.providerBaseUrls;
+  for (final name in configured) {
+    if (!knownNames.contains(name)) {
+      providers.add({
+        'name': name,
+        'base_url': baseUrls[name] ?? '',
+        'has_key': true,
+      });
+    }
+  }
+  // 已配置的排在前面
+  providers.sort((a, b) {
+    final aName = a['name'] as String? ?? '';
+    final bName = b['name'] as String? ?? '';
+    final aConfigured = configured.contains(aName) ? 0 : 1;
+    final bConfigured = configured.contains(bName) ? 0 : 1;
+    if (aConfigured != bConfigured) return aConfigured - bConfigured;
+    return aName.compareTo(bName);
+  });
+
   await showDialog(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -2740,7 +2831,12 @@ Future<void> _showProviderManagementDialog(
                   final p = providers[i];
                   final name = p['name'] as String? ?? '';
                   final baseUrl = p['base_url'] as String? ?? '';
-                  final hasKey = p['has_key'] == true;
+                  // 问题1 修复：hasKey 优先从客户端 state.config 判断
+                  // （configuredProviders），而非 list_providers 的 has_key。
+                  // 因为 LLM 热重载可能尚未完成，list_providers 返回的
+                  // has_key 可能是过期值（False），导致已保存 key 的服务商
+                  // 在对话框中显示为"未配置"。
+                  final hasKey = configured.contains(name) || p['has_key'] == true;
                   final isConfigured = configured.contains(name);
 
                   return ListTile(
@@ -2808,6 +2904,17 @@ class ProviderModelCache {
   static void clear(String provider) => _cache.remove(provider);
 
   static void clearAll() => _cache.clear();
+
+  /// 问题2 修复：获取所有缓存的模型（free + paid），合并为一个列表。
+  /// 用于模型选择对话框，让新测试的服务商模型也能在选择器中出现。
+  static List<Map<String, dynamic>> allCachedModels() {
+    final all = <Map<String, dynamic>>[];
+    for (final entry in _cache.values) {
+      all.addAll(entry.free);
+      all.addAll(entry.paid);
+    }
+    return all;
+  }
 }
 
 class _CachedModels {
@@ -3089,7 +3196,10 @@ class _ProviderDetailSheetState extends State<_ProviderDetailSheet> {
                             behavior: SnackBarBehavior.floating,
                           ),
                         );
-                        if (ok) await widget.notifier.loadModels();
+                        // 问题1 修复：切换主服务商后用 loadConfig()
+                        // 而非 loadModels()，确保 state.config 保留
+                        // 所有 api_keys（包括新增服务商），避免消失。
+                        if (ok) await widget.notifier.loadConfig();
                       },
                     ),
                   IconButton(
@@ -3462,6 +3572,20 @@ class _ProviderModelRow extends StatelessWidget {
     this.onToggle,
   });
 
+  /// 问题3：tier → (中文名, 推荐使用场景, 颜色)
+  static const _tierMeta = {
+    'trivial': ('极简', '简单问答/单轮对话', Colors.grey),
+    'simple': ('简单', '日常任务/轻量生成', Colors.blue),
+    'complex': ('复杂', '多步骤任务/工具调用', Colors.purple),
+    'expert': ('专家', '深度推理/长文分析', Colors.deepOrange),
+  };
+
+  /// 问题3：免费模型速率限制（与服务端 _RATE_BUDGETS 对齐）
+  static const _freeRateLimits = {
+    'free': ('~20 req/min', '~200K tok/min'),
+    'trial': ('~60 req/min', '~1M tok/min'),
+  };
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -3474,9 +3598,24 @@ class _ProviderModelRow extends StatelessWidget {
         .whereType<String>()
         .toList();
     final ctxLen = (info['context_length'] as num?)?.toInt() ?? 0;
+    final maxOut = (info['max_output_length'] as num?)?.toInt() ?? 0;
     final supportsTools = info['supports_tools'] == true;
+    final tier = (info['tier'] as String?) ?? '';
+    final inMods = ((info['input_modalities'] as List?) ?? [])
+        .whereType<String>()
+        .toList();
+    final outMods = ((info['output_modalities'] as List?) ?? [])
+        .whereType<String>()
+        .toList();
+    final features = ((info['features'] as List?) ?? [])
+        .whereType<String>()
+        .toList();
+    final quantization = (info['quantization'] as String?) ?? '';
+    final tags = ((info['tags'] as List?) ?? [])
+        .whereType<String>()
+        .toList();
 
-    // 价格描述
+    // 问题3：价格详情 — 付费模型按字段展示（input/output/completion 分别显示）
     String priceText = '';
     if (isFree) {
       priceText = '免费';
@@ -3485,11 +3624,54 @@ class _ProviderModelRow extends StatelessWidget {
       pricing.forEach((k, v) {
         final numV = (v is num) ? v : num.tryParse(v.toString());
         if (numV != null && numV > 0) {
-          parts.add('\$${(numV * 1000).toStringAsFixed(4)}/1K $k');
+          // 显示 $X / 1M tokens（行业惯例）
+          final perM = numV * 1000000;
+          final formatted = perM >= 1
+              ? perM.toStringAsFixed(perM >= 100 ? 0 : 2)
+              : perM.toStringAsFixed(4);
+          parts.add('\$$formatted/$k');
         }
       });
       if (parts.isNotEmpty) priceText = parts.join(' · ');
     }
+
+    // 问题3：免费模型限制参数
+    String? freeLimit;
+    if (isFree) {
+      final hasTrialTag = tags.contains('trial');
+      final limits = hasTrialTag ? _freeRateLimits['trial'] : _freeRateLimits['free'];
+      if (limits != null) {
+        freeLimit = '${limits.$1} / ${limits.$2}';
+      }
+    }
+
+    // 问题3：上下文分类标签
+    String? ctxTag;
+    for (final t in tags) {
+      if (t.endsWith('-context')) {
+        ctxTag = t.replaceAll('-context', '');
+        break;
+      }
+    }
+
+    // 问题3：模态信息
+    final modalityParts = <String>[];
+    if (inMods.isNotEmpty) {
+      modalityParts.add('输入:${inMods.join(",")}');
+    }
+    if (outMods.isNotEmpty && outMods != inMods) {
+      modalityParts.add('输出:${outMods.join(",")}');
+    }
+
+    // 问题3：功能特性（合并 features + caps，去重）
+    final allFeatures = <String>{...features, ...caps};
+    final featureList = allFeatures
+        .where((f) => !f.isEmpty)
+        .take(6)
+        .toList();
+
+    // 问题3：tier 推荐信息
+    final tierInfo = tier.isNotEmpty ? _tierMeta[tier] : null;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 6),
@@ -3536,7 +3718,7 @@ class _ProviderModelRow extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 第一行：模型 ID + 免费/付费标签
+                  // 第一行：模型 ID + 免费/付费标签 + 推荐路由层标签
                   Row(
                     children: [
                       Expanded(
@@ -3550,6 +3732,30 @@ class _ProviderModelRow extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      // 问题3：推荐路由层标签
+                      if (tierInfo != null) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: tierInfo.$3.withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(3),
+                            border: Border.all(
+                              color: tierInfo.$3.withOpacity(0.4),
+                              width: 0.5,
+                            ),
+                          ),
+                          child: Text(
+                            '推荐:${tierInfo.$1}',
+                            style: TextStyle(
+                              fontSize: 9,
+                              color: tierInfo.$3,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                      ],
                       Container(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 5, vertical: 1),
@@ -3580,32 +3786,57 @@ class _ProviderModelRow extends StatelessWidget {
                       ),
                     ),
                   ],
-                  // 第三行：详情
+                  // 第三行：价格 + 免费限制
+                  if (priceText.isNotEmpty || freeLimit != null) ...[
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 3,
+                      children: [
+                        if (priceText.isNotEmpty)
+                          Text(
+                            priceText,
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: isFree
+                                  ? Colors.teal
+                                  : Colors.orange.shade700,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        if (freeLimit != null)
+                          Text(
+                            '限速: $freeLimit',
+                            style: TextStyle(
+                              fontSize: 9,
+                              color: theme.colorScheme.onSurfaceVariant,
+                              fontStyle: FontStyle.italic,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                  // 第四行：详情标签 — 上下文/输出/模态/功能/量化
                   const SizedBox(height: 4),
                   Wrap(
                     spacing: 6,
                     runSpacing: 4,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      if (priceText.isNotEmpty)
-                        Text(
-                          priceText,
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: isFree
-                                ? Colors.teal
-                                : Colors.orange.shade700,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
                       if (ctxLen > 0)
-                        _MiniInfo('ctx ${_fmtCtx(ctxLen)}'),
+                        _MiniInfo(
+                            '上下文 ${_fmtCtx(ctxLen)}${ctxTag != null ? " ($ctxTag)" : ""}'),
+                      if (maxOut > 0)
+                        _MiniInfo('输出 ${_fmtCtx(maxOut)}'),
                       if (supportsTools)
-                        const _MiniInfo('工具', highlight: true),
-                      ...caps.take(4).map((c) => _CapabilityChip(cap: c)),
+                        const _MiniInfo('工具调用', highlight: true),
+                      ...modalityParts.map((m) => _MiniInfo(m)),
+                      ...featureList.map((f) => _CapabilityChip(cap: f)),
+                      if (quantization.isNotEmpty)
+                        _MiniInfo('量化:$quantization'),
                     ],
                   ),
-                  // 第四行：描述
+                  // 第五行：描述
                   if (desc.isNotEmpty) ...[
                     const SizedBox(height: 4),
                     Text(
@@ -3617,6 +3848,27 @@ class _ProviderModelRow extends StatelessWidget {
                       ),
                       maxLines: 3,
                       overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                  // 第六行：推荐使用场景（问题3）
+                  if (tierInfo != null) ...[
+                    const SizedBox(height: 4),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: tierInfo.$3.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        '适合: ${tierInfo.$2}',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: tierInfo.$3,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
                     ),
                   ],
                 ],
@@ -3777,7 +4029,11 @@ class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
     if (!mounted) return;
     setState(() => _saving = false);
     if (ok) {
-      await widget.notifier.loadModels();
+      // 问题1 修复：保存后调用 loadConfig()（同时刷新 config + models），
+      // 而非仅 loadModels()。确保 state.config 立即包含新增服务商的
+      // api_keys（"***"），使 configuredProviders 正确返回新服务商，
+      // 避免切换主服务商后新增服务商从列表中消失。
+      await widget.notifier.loadConfig();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -4032,9 +4288,23 @@ Future<void> _showModelSelectionDialog(
   required ServerConfigNotifier notifier,
   required Future<bool> Function(String) onSubmit,
 }) async {
-  final models = (notifier.availableModels ?? [])
+  // 问题2 修复：合并 available_models（来自服务端 /api/models）和
+  // ProviderModelCache 中缓存的服务商测试模型，确保新测试的服务商
+  // 模型也能在选择器中出现，无需等待服务端 catalog 刷新。
+  final serverModels = (notifier.availableModels ?? [])
       .whereType<Map<String, dynamic>>()
       .toList();
+  final cachedModels = ProviderModelCache.allCachedModels();
+  // 合并去重（按 model id）
+  final seenIds = <String>{};
+  final models = <Map<String, dynamic>>[];
+  for (final m in [...serverModels, ...cachedModels]) {
+    final id = (m['id'] as String?) ?? '';
+    if (id.isNotEmpty && !seenIds.contains(id)) {
+      seenIds.add(id);
+      models.add(m);
+    }
+  }
 
   // 问题6 修复：无可用模型时不回退到文本编辑（用户不应手动修改模型名称），
   // 而是提示用户先测试服务商拉取模型列表。
@@ -4121,6 +4391,11 @@ Future<void> _showModelSelectionDialog(
                       final caps = ((m['capabilities'] as List?) ?? [])
                           .whereType<String>()
                           .toList();
+                      final isFree = m['is_free'] == true;
+                      final ctxLen =
+                          (m['context_length'] as num?)?.toInt() ?? 0;
+                      final provider =
+                          (m['provider'] as String?) ?? '';
                       final isCurrent = id == current;
 
                       return RadioListTile<String>(
@@ -4142,11 +4417,36 @@ Future<void> _showModelSelectionDialog(
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            if (isCurrent)
+                            // 问题3：免费/付费标签
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 4, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: (isFree ? Colors.teal : Colors.orange)
+                                    .withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(3),
+                              ),
+                              child: Text(
+                                isFree ? '免费' : '付费',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  color: isFree
+                                      ? Colors.teal
+                                      : Colors.orange,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            if (isCurrent) ...[
+                              const SizedBox(width: 4),
                               const _InfoChip('当前', color: Colors.green),
+                            ],
                           ],
                         ),
-                        subtitle: tier.isNotEmpty || caps.isNotEmpty
+                        subtitle: tier.isNotEmpty ||
+                                caps.isNotEmpty ||
+                                ctxLen > 0 ||
+                                provider.isNotEmpty
                             ? Padding(
                                 padding: const EdgeInsets.only(top: 4),
                                 child: Wrap(
@@ -4155,8 +4455,13 @@ Future<void> _showModelSelectionDialog(
                                   crossAxisAlignment:
                                       WrapCrossAlignment.center,
                                   children: [
+                                    if (provider.isNotEmpty)
+                                      _MiniInfo(provider),
                                     if (tier.isNotEmpty)
                                       _TierBadge(tier: tier),
+                                    if (ctxLen > 0)
+                                      _MiniInfo(
+                                          'ctx ${_ProviderModelRow._fmtCtx(ctxLen)}'),
                                     ...caps.take(4)
                                         .map((c) => _CapabilityChip(cap: c)),
                                   ],
@@ -4214,10 +4519,22 @@ Future<void> _showTierModelsDialog(
   required List<String> currentModels,
   required ServerConfigNotifier notifier,
 }) async {
-  // 候选模型 = 当前 tier 已有模型 + 所有 available_models（去重，保留顺序）
-  final availableModels = (notifier.availableModels ?? [])
+  // 候选模型 = 当前 tier 已有模型 + 所有 available_models + 缓存模型（去重，保留顺序）
+  // 问题2 修复：合并 ProviderModelCache 中的缓存模型，让新测试的服务商
+  // 模型也能在 4 层路由模型选择中出现。
+  final serverModels = (notifier.availableModels ?? [])
       .whereType<Map<String, dynamic>>()
       .toList();
+  final cachedModels = ProviderModelCache.allCachedModels();
+  final availableModels = <Map<String, dynamic>>[];
+  final _seenTierIds = <String>{};
+  for (final m in [...serverModels, ...cachedModels]) {
+    final id = (m['id'] as String?) ?? '';
+    if (id.isNotEmpty && !_seenTierIds.contains(id)) {
+      _seenTierIds.add(id);
+      availableModels.add(m);
+    }
+  }
 
   // 已选模型用 List 保留顺序（路由调用顺序）
   // 初始顺序：先按 currentModels 原始顺序，再补充其他已选的
