@@ -84,6 +84,7 @@ class Skill:
         directory: Optional[str] = None,
         version: str = "1.0.0",
         changelog: Optional[List[str]] = None,
+        hidden: bool = False,
     ) -> None:
         self.id = id
         self.title = title
@@ -93,6 +94,9 @@ class Skill:
         self.directory = directory
         self.version = version  # Semantic version (e.g., "1.2.3")
         self.changelog = changelog or []  # List of version notes
+        # hidden=True 的技能不会出现在 /api/skills 列表和 LLM 工具清单中，
+        # 但仍可通过 /skill <id> 直接调用（向后兼容）。用于隐藏已弃用/内部技能。
+        self.hidden = hidden
         self.uses = 0
         self.last_used: Optional[float] = None
         # 性能优化：预计算 title+description 的小写形式, pick_relevant 每轮调用多次
@@ -214,6 +218,10 @@ class SkillManager(Plugin):
     def all_skill_ids(self) -> List[str]:
         return list(self._skills.keys())
 
+    def visible_skill_ids(self) -> List[str]:
+        """返回非隐藏技能的 ID 列表（用于 /api/skills 和 LLM 工具清单）。"""
+        return [sid for sid, sk in self._skills.items() if not sk.hidden]
+
     def get(self, id: str) -> Optional[Skill]:
         return self._skills.get(id)
 
@@ -237,6 +245,9 @@ class SkillManager(Plugin):
             query_words.add(w.lower())
         scored: List[tuple] = []
         for skill in self._skills.values():
+            # 跳过隐藏技能：已弃用/内部技能不应暴露给 LLM
+            if skill.hidden:
+                continue
             # 性能优化：直接读预计算的 _hay_lower, 避免每轮重新拼接+lower
             hay = skill._hay_lower
             hits = sum(1 for w in query_words if w in hay)
@@ -913,6 +924,7 @@ class SkillManager(Plugin):
                 },
             },
             handler=system_unlock_handler,
+            hidden=True,
         ))
 
         # ---------- 锁定会话技能（已弃用） ----------
@@ -935,6 +947,7 @@ class SkillManager(Plugin):
                 },
             },
             handler=system_lock_handler,
+            hidden=True,
         ))
 
         # ---------- 主动消息推送技能 ----------

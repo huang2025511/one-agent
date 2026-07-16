@@ -32,8 +32,9 @@ class SubAgent:
         try:
             # 只挑与子任务相关的少量 skill，避免工具表过大
             # 这里简单取全部（子任务通常用 web_search/calc/system_run 等）
+            # 使用 visible_skill_ids() 过滤掉 hidden 的已弃用技能
             tool_list = []
-            for sid in self._skills.all_skill_ids():
+            for sid in self._skills.visible_skill_ids():
                 skill = self._skills.get(sid)
                 if skill is None:
                     continue

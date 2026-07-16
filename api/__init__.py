@@ -62,6 +62,27 @@ MAX_CHAT_BODY_SIZE = 64 * 1024  # 64 KB
 MAX_CHAT_TEXT_LENGTH = 10000
 
 
+def _resolve_config_path() -> str:
+    """解析当前生效的配置文件路径。
+
+    与 one_agent.py 的 _get_config_path() 保持一致，避免"读 dev、写 default"
+    的路径错位 bug。优先级：
+      1. ONE_AGENT_CONFIG 环境变量（显式指定，最高优先级）
+      2. ONE_AGENT_ENV 环境变量 → config/{env}_config.yaml
+      3. config/default_config.yaml（兜底默认）
+    """
+    import os
+    explicit = os.environ.get("ONE_AGENT_CONFIG")
+    if explicit:
+        return explicit
+    env_name = os.environ.get("ONE_AGENT_ENV", "").strip().lower()
+    if env_name:
+        env_path = Path(__file__).resolve().parent.parent / "config" / f"{env_name}_config.yaml"
+        if env_path.exists():
+            return str(env_path)
+    return str(Path(__file__).resolve().parent.parent / "config" / "default_config.yaml")
+
+
 def _validate_chat_text(text: str) -> str:
     """Validate chat text input: max 10000 chars, cannot be empty/whitespace."""
     if not isinstance(text, str):
@@ -529,14 +550,9 @@ class RESTAPIGateway(Plugin):
 
             try:
                 # Reload configuration from file
-                import os
-
                 from one_agent import load_config
 
-                config_path = os.environ.get(
-                    "ONE_AGENT_CONFIG",
-                    str(Path(__file__).resolve().parent.parent / "config" / "default_config.yaml"),
-                )
+                config_path = _resolve_config_path()
                 new_config = load_config(config_path)
 
                 # Update context config — must be a dict to match startup type
@@ -548,6 +564,24 @@ class RESTAPIGateway(Plugin):
                 # Update API-specific settings
                 if hasattr(self, '_setup_from_config'):
                     self._setup_from_config(new_config)
+
+                # 热重载 LLM Provider：之前只更新了 _ctx.config 和 REST 设置，
+                # 但 LLMProvider 的 _api_keys/_primary_provider/_default_model/
+                # _provider_base_urls 仍是启动时缓存的值，导致客户端改了配置
+                # 也不生效（必须重启服务）。现在重新 setup 让配置即时生效。
+                if _llm is not None:
+                    try:
+                        import asyncio
+                        async def _resync_llm():
+                            await _llm.setup(_ctx)
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(_resync_llm())
+                        except RuntimeError:
+                            asyncio.run(_resync_llm())
+                        logger.info("LLM provider re-synced after config reload")
+                    except Exception as exc:
+                        logger.warning("LLM re-sync failed after reload: %s", exc)
 
                 logger.info("Configuration reloaded successfully")
 
@@ -581,14 +615,13 @@ class RESTAPIGateway(Plugin):
 
             try:
                 import copy
-                import os
 
                 from one_agent import load_config
 
-                config_path = os.environ.get(
-                    "ONE_AGENT_CONFIG",
-                    str(Path(__file__).resolve().parent.parent / "config" / "default_config.yaml"),
-                )
+                # 修复：使用 _resolve_config_path() 而非只读 ONE_AGENT_CONFIG，
+                # 与启动时的 _get_config_path() 保持一致，避免"读 dev、写 default"
+                # 的路径错位 bug。
+                config_path = _resolve_config_path()
 
                 # Load raw config from file (not runtime config, which may
                 # have masked API keys) so we can safely merge and save.
@@ -599,9 +632,15 @@ class RESTAPIGateway(Plugin):
                     else copy.deepcopy(raw_config)
                 )
 
-                # Deep merge the incoming updates
+                # Deep merge the incoming updates.
+                # 修复：处理 "***" 哨兵值 — GET /api/config 会把 api_keys 脱敏成
+                # "***"，如果客户端原样回传，_deep_merge 会用字面量 "***" 覆盖
+                # 真实密钥。现在遇到 "***" 时跳过，保留文件中的原值。
                 def _deep_merge(target: dict, source: dict) -> dict:
                     for key, value in source.items():
+                        # 跳过 "***" 哨兵（GET 脱敏值，客户端未修改该字段）
+                        if value == "***":
+                            continue
                         if (
                             key in target
                             and isinstance(target[key], dict)
@@ -645,6 +684,25 @@ class RESTAPIGateway(Plugin):
                 # Update API-specific settings
                 if hasattr(self, "_setup_from_config"):
                     self._setup_from_config(new_config)
+
+                # 修复：热重载 LLM Provider。之前 PUT 后只更新了 _ctx.config
+                # 和 REST 设置，但 LLMProvider 的 _api_keys/_primary_provider/
+                # _default_model/_provider_base_urls 仍是启动时缓存的值，
+                # 导致客户端改了 base_urls/primary_model/primary_provider 也不
+                # 生效（必须重启服务）。现在重新 setup 让配置即时生效。
+                if _llm is not None:
+                    try:
+                        import asyncio
+                        async def _resync_llm():
+                            await _llm.setup(_ctx)
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(_resync_llm())
+                        except RuntimeError:
+                            asyncio.run(_resync_llm())
+                        logger.info("LLM provider re-synced after config update")
+                    except Exception as exc:
+                        logger.warning("LLM re-sync failed after config update: %s", exc)
 
                 logger.info("Configuration updated and saved to %s", config_path)
 
@@ -1041,9 +1099,24 @@ class RESTAPIGateway(Plugin):
             base_url = (body.get("base_url") or "").strip()
             if not provider:
                 raise HTTPException(400, "provider is required")
+            # 修复：客户端编辑已配置服务商时 key 字段可能留空（表示不修改），
+            # 此时使用服务端已存储的 key 进行测试，而非发送无 auth 的请求。
+            if not api_key and _llm is not None:
+                try:
+                    stored = getattr(_llm, "_api_keys", {}).get(provider, "")
+                    if stored and stored != "***":
+                        api_key = stored
+                except Exception:
+                    pass
             if not base_url:
                 from models.resolver import KNOWN_PROVIDERS
                 base_url = KNOWN_PROVIDERS.get(provider, "")
+                # 也尝试从 LLMProvider 的自定义 base_urls 读取
+                if not base_url and _llm is not None:
+                    try:
+                        base_url = getattr(_llm, "_provider_base_urls", {}).get(provider, "")
+                    except Exception:
+                        pass
             if not base_url:
                 raise HTTPException(400, f"unknown provider: {provider}, please provide base_url")
             try:
@@ -1563,9 +1636,11 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             if _skills is None:
                 raise HTTPException(503, _("skills_not_available"))
-            # 返回完整技能信息（含描述、版本、使用次数）而非仅 ID 列表
+            # 返回完整技能信息（含描述、版本、使用次数）而非仅 ID 列表。
+            # 使用 visible_skill_ids() 过滤掉 hidden=True 的已弃用/内部技能，
+            # 避免"os 密码"等无用技能出现在客户端列表中。
             skills_info = []
-            for sid in _skills.all_skill_ids():
+            for sid in _skills.visible_skill_ids():
                 skill = _skills.get(sid)
                 if skill is None:
                     continue
@@ -2693,7 +2768,7 @@ class RESTAPIGateway(Plugin):
         def _get_backup_mgr():
             """Shared ConfigBackupManager factory for the config-backup endpoints."""
             from config_backup import ConfigBackupManager
-            cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
+            cfg_path = _resolve_config_path()
             return ConfigBackupManager(cfg_path)
 
         # ---------------------------------------------------------------- Health & Readiness

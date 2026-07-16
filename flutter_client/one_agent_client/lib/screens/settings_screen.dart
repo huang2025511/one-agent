@@ -2505,7 +2505,8 @@ class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
   Future<void> _testConnection() async {
     final key = _keyController.text.trim();
     final url = _urlController.text.trim();
-    if (key.isEmpty) {
+    // 已配置 Key 时允许留空（服务端会使用已存储的 Key 测试）
+    if (key.isEmpty && !widget.hasKey) {
       setState(() => _error = '请输入 API Key');
       return;
     }
@@ -2549,7 +2550,8 @@ class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
 
   Future<void> _saveAndExit() async {
     final key = _keyController.text.trim();
-    if (key.isEmpty) {
+    // 已配置 Key 时允许留空（不修改原 Key）；新配置时必须输入
+    if (key.isEmpty && !widget.hasKey) {
       setState(() => _error = '请输入 API Key');
       return;
     }
@@ -2558,10 +2560,14 @@ class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
       _error = null;
     });
 
-    // 1. 保存 API Key
-    final updates = <String, dynamic>{
-      'llm': {'api_keys': {widget.providerName: key}}
-    };
+    // 构建更新体 — 只包含实际要修改的字段
+    final llmUpdates = <String, dynamic>{};
+
+    // 1. 保存 API Key（仅当用户输入了新 Key 时才发送；
+    //    留空时跳过，服务端保留原 Key）
+    if (key.isNotEmpty) {
+      llmUpdates['api_keys'] = {widget.providerName: key};
+    }
     // 2. 如果用户选了模型，将第一个设为默认模型（provider/model 格式）
     if (_selectedModels.isNotEmpty) {
       final firstModel = _selectedModels.first;
@@ -2569,17 +2575,22 @@ class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
       final fullId = firstModel.contains('/')
           ? firstModel
           : '${widget.providerName}/$firstModel';
-      (updates['llm'] as Map<String, dynamic>)['primary_model'] = fullId;
-      (updates['llm'] as Map<String, dynamic>)['primary_provider'] =
-          widget.providerName;
+      llmUpdates['primary_model'] = fullId;
+      llmUpdates['primary_provider'] = widget.providerName;
     }
     // 3. 可选 base_url 覆盖
     final url = _urlController.text.trim();
     if (url.isNotEmpty && url != widget.defaultBaseUrl) {
-      (updates['llm'] as Map<String, dynamic>)['base_urls'] = {
-        widget.providerName: url
-      };
+      llmUpdates['base_urls'] = {widget.providerName: url};
     }
+
+    if (llmUpdates.isEmpty) {
+      // 没有任何修改
+      Navigator.of(context).pop();
+      return;
+    }
+
+    final updates = <String, dynamic>{'llm': llmUpdates};
 
     final ok = await widget.notifier.updateConfig(updates);
     if (!mounted) return;
@@ -2590,7 +2601,7 @@ class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(_selectedModels.isEmpty
-              ? '${widget.providerName} API Key 已保存'
+              ? '${widget.providerName} 配置已保存'
               : '${widget.providerName} 已配置，默认模型已更新'),
           behavior: SnackBarBehavior.floating,
         ),
@@ -2637,16 +2648,17 @@ class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
               if (widget.hasKey)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
-                  child: _InfoChip('已配置 Key',
+                  child: _InfoChip('已配置 Key（留空保持不变）',
                       icon: Icons.check, color: Colors.green),
                 ),
               // API Key 输入
+              // 当服务商已配置 Key 时，留空表示不修改原 Key（服务端会跳过 "***" 哨兵）
               TextField(
                 controller: _keyController,
                 obscureText: _obscure,
                 decoration: InputDecoration(
                   labelText: 'API Key',
-                  hintText: '输入 API Key',
+                  hintText: widget.hasKey ? '留空保持不变' : '输入 API Key',
                   prefixIcon: const Icon(Icons.key, size: 18),
                   suffixIcon: IconButton(
                     icon: Icon(
