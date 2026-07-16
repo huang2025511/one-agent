@@ -211,6 +211,15 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
   int get commandTimeoutSeconds => _getInt(['security', 'command_timeout_seconds'], 30);
   int get maxPasswordAttempts => _getInt(['security', 'max_password_attempts'], 3);
 
+  /// 问题5 修复：检查系统执行器密码是否已配置。
+  /// system_executor_password 为空字符串时，PasswordManager.is_configured()
+  /// 返回 False，此时所有命令无密码执行，system_executor_enabled 和
+  /// require_password_for_dangerous 开关无意义，应在 UI 中隐藏。
+  bool get isPasswordConfigured {
+    final pwd = _get(['security', 'system_executor_password'], '');
+    return pwd is String && pwd.isNotEmpty;
+  }
+
   // ════════════════════════════════════════════════════════════
   //  REST API 配置
   // ════════════════════════════════════════════════════════════

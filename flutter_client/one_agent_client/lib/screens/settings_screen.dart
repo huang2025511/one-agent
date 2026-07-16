@@ -466,7 +466,11 @@ class _ModelRoutingSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final routingOn = notifier.catalogRoutingEnabled;
+    // 问题1+3 修复：使用 routingEnabled（从 state.config 读取）而非
+    // catalogRoutingEnabled（从 state.models 读取）。updateConfig 后
+    // state.config 立即更新，但 state.models 需要等 loadModels() 完成
+    // 才刷新，导致开关状态不同步（按钮一直显示开启）。
+    final routingOn = notifier.routingEnabled;
     final defaultModel = notifier.catalogDefaultModel;
     final provider = notifier.catalogPrimaryProvider;
     final tiers = notifier.tierData;
@@ -702,8 +706,14 @@ class _ModelRoutingSection extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: modelsByCategory.entries.map((e) {
-                final count = (e.value as List).length;
-                return _CategoryChip(category: e.key, count: count);
+                final modelIds = (e.value as List)
+                    .whereType<String>()
+                    .toList();
+                return _CategoryChip(
+                  category: e.key,
+                  count: modelIds.length,
+                  modelIds: modelIds,
+                );
               }).toList(),
             ),
           ),
@@ -812,22 +822,96 @@ class _ModelRoutingSection extends StatelessWidget {
   }
 }
 
-/// 服务商管理区域 — 显示已配置服务商 + 添加入口
+/// 服务商管理区域 — 显示已配置服务商 + 添加入口 + 一键测试
 ///
-/// 问题1 修复：
-/// - 长按服务商胶囊 → 设为主服务商（更新 llm.primary_provider）
-/// - 点击服务商 → 显示详情对话框（key 星号、API 地址、已添加模型、测试按钮）
-class _ProviderManagementArea extends StatelessWidget {
+/// 问题2a/2b/2c 修复：
+/// - 2a: 所有有 key 的服务商都保留显示（从 config.llm.api_keys 读取）
+/// - 2b: 添加"测试全部"按钮，绿色=可用，灰色=不可用
+/// - 2c: 拉取到的模型数据缓存在 ProviderModelCache 中，详情页可复用
+class _ProviderManagementArea extends StatefulWidget {
   final ServerConfigNotifier notifier;
 
   const _ProviderManagementArea({required this.notifier});
 
   @override
+  State<_ProviderManagementArea> createState() => _ProviderManagementAreaState();
+}
+
+class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
+  /// 服务商测试状态：null=未测试, true=可用, false=不可用
+  final Map<String, bool> _testStatus = {};
+  bool _testingAll = false;
+
+  /// 提取当前已配置的服务商列表
+  /// 问题2a 修复：优先使用 config.llm.api_keys 中已配置 key 的服务商，
+  /// 确保切换主服务商后新增服务商不会消失。
+  List<String> _extractConfiguredProviders() {
+    final providers = <String>{};
+    // 1. 从已配置 API Key 的服务商中提取（最可靠的来源）
+    providers.addAll(widget.notifier.configuredProviders);
+    // 2. 从 primary_provider 补充
+    final primary = widget.notifier.catalogPrimaryProvider;
+    if (primary.isNotEmpty) providers.add(primary);
+    // 3. 从 available_models 补充（可能有未在 api_keys 中的服务商）
+    final models = widget.notifier.availableModels ?? [];
+    for (final m in models) {
+      if (m is Map<String, dynamic>) {
+        final p = m['provider'] as String?;
+        if (p != null && p.isNotEmpty) providers.add(p);
+      }
+    }
+    return providers.toList()..sort();
+  }
+
+  /// 问题2b：一键测试所有已配置 key 的服务商
+  Future<void> _testAllProviders() async {
+    final providersToTest = widget.notifier.configuredProviders;
+    if (providersToTest.isEmpty) return;
+    setState(() {
+      _testingAll = true;
+      _testStatus.clear();
+    });
+    for (final p in providersToTest) {
+      final result = await SystemApi.testProvider(provider: p);
+      if (!mounted) return;
+      final ok = result?['ok'] == true;
+      setState(() {
+        _testStatus[p] = ok;
+      });
+      // 问题2c：缓存拉取到的模型数据
+      if (ok) {
+        final freeModels = (result?['free_models'] as List?)
+                ?.whereType<Map<String, dynamic>>()
+                .toList() ??
+            [];
+        final paidModels = (result?['paid_models'] as List?)
+                ?.whereType<Map<String, dynamic>>()
+                .toList() ??
+            [];
+        ProviderModelCache.set(p, free: freeModels, paid: paidModels);
+      }
+    }
+    if (!mounted) return;
+    setState(() => _testingAll = false);
+    final okCount = _testStatus.values.where((v) => v).length;
+    final failCount = _testStatus.length - okCount;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('测试完成：$okCount 个可用'
+              '${failCount > 0 ? '，$failCount 个不可用' : ''}'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final notifier = widget.notifier;
     final providers = _extractConfiguredProviders();
     final primary = notifier.catalogPrimaryProvider;
-    // 已配置 key 的服务商集合（用于显示 key 状态）
     final configuredKeyProviders = notifier.configuredProviders.toSet();
 
     return Padding(
@@ -875,6 +959,26 @@ class _ProviderManagementArea extends StatelessWidget {
                       size: 12, color: theme.colorScheme.outline),
                 ),
               const Spacer(),
+              // 问题2b：一键测试所有服务商状态
+              if (configuredKeyProviders.isNotEmpty)
+                TextButton.icon(
+                  icon: _testingAll
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.network_check, size: 16),
+                  label: Text(
+                      _testingAll ? '测试中...' : '测试全部',
+                      style: const TextStyle(fontSize: 12)),
+                  onPressed: _testingAll ? null : _testAllProviders,
+                  style: TextButton.styleFrom(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                    minimumSize: const Size(0, 30),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
               TextButton.icon(
                 icon: const Icon(Icons.add, size: 16),
                 label: const Text('添加服务商',
@@ -908,6 +1012,8 @@ class _ProviderManagementArea extends StatelessWidget {
                         name: p,
                         isPrimary: p == primary,
                         hasKey: configuredKeyProviders.contains(p),
+                        // 问题2b：显示测试状态（绿色=可用，灰色=不可用）
+                        isAvailable: _testStatus[p],
                         onTap: () => _showProviderDetailSheet(
                           context: context,
                           name: p,
@@ -938,26 +1044,6 @@ class _ProviderManagementArea extends StatelessWidget {
       ),
     );
   }
-
-  /// 提取当前已配置的服务商列表
-  /// 优先使用 config.llm.api_keys 中已配置 key 的服务商，
-  /// 再补充 available_models 中出现的 provider
-  List<String> _extractConfiguredProviders() {
-    final providers = <String>{};
-    // 1. 从已配置 API Key 的服务商中提取
-    providers.addAll(notifier.configuredProviders);
-    // 2. 从 primary_provider 和 available_models 补充
-    final primary = notifier.catalogPrimaryProvider;
-    if (primary.isNotEmpty) providers.add(primary);
-    final models = notifier.availableModels ?? [];
-    for (final m in models) {
-      if (m is Map<String, dynamic>) {
-        final p = m['provider'] as String?;
-        if (p != null && p.isNotEmpty) providers.add(p);
-      }
-    }
-    return providers.toList()..sort();
-  }
 }
 
 /// 服务商胶囊（小标签，点击查看详情，长按设为主服务商）
@@ -965,6 +1051,8 @@ class _ProviderPill extends StatelessWidget {
   final String name;
   final bool isPrimary;
   final bool hasKey;
+  /// 问题2b：测试状态。null=未测试, true=可用(绿), false=不可用(灰)
+  final bool? isAvailable;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
 
@@ -972,6 +1060,7 @@ class _ProviderPill extends StatelessWidget {
     required this.name,
     this.isPrimary = false,
     this.hasKey = false,
+    this.isAvailable,
     this.onTap,
     this.onLongPress,
   });
@@ -1008,16 +1097,32 @@ class _ProviderPill extends StatelessWidget {
                 fontFamily: 'monospace',
               ),
             ),
-            // key 状态点
-            const SizedBox(width: 4),
-            Container(
-              width: 5,
-              height: 5,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: hasKey ? Colors.green : theme.colorScheme.outline,
+            // 问题2b：测试状态指示灯（绿色=可用，灰色=不可用，无色=未测试）
+            if (isAvailable != null) ...[
+              const SizedBox(width: 4),
+              Tooltip(
+                message: isAvailable! ? '可用' : '不可用',
+                child: Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isAvailable! ? Colors.green : Colors.grey,
+                  ),
+                ),
               ),
-            ),
+            ] else ...[
+              // key 状态点（未测试时显示 key 配置状态）
+              const SizedBox(width: 4),
+              Container(
+                width: 5,
+                height: 5,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: hasKey ? Colors.green : theme.colorScheme.outline,
+                ),
+              ),
+            ],
             if (isPrimary) ...[
               const SizedBox(width: 4),
               Container(
@@ -1371,8 +1476,14 @@ class _CapabilityChip extends StatelessWidget {
 class _CategoryChip extends StatelessWidget {
   final String category;
   final int count;
+  /// 问题4 修复：传入该分类下的模型 id 列表，点击标签时展示
+  final List<String> modelIds;
 
-  const _CategoryChip({required this.category, required this.count});
+  const _CategoryChip({
+    required this.category,
+    required this.count,
+    required this.modelIds,
+  });
 
   static const _icons = {
     'text': Icons.text_snippet,
@@ -1400,33 +1511,83 @@ class _CategoryChip extends StatelessWidget {
     'reasoning': '推理',
   };
 
+  void _showModels(BuildContext context) {
+    final theme = Theme.of(context);
+    final label = _labels[category] ?? category;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(_icons[category] ?? Icons.category,
+                size: 20, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Text('$label ($count)'),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: modelIds.isEmpty
+              ? const Text('暂无模型')
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: modelIds.length,
+                  itemBuilder: (ctx, i) => ListTile(
+                    dense: true,
+                    leading: Icon(Icons.memory,
+                        size: 16, color: theme.colorScheme.outline),
+                    title: Text(
+                      modelIds[i],
+                      style: const TextStyle(
+                          fontFamily: 'monospace', fontSize: 13),
+                    ),
+                  ),
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final icon = _icons[category] ?? Icons.category;
     final label = _labels[category] ?? category;
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: theme.colorScheme.primary),
-          const SizedBox(width: 6),
-          Text(label, style: theme.textTheme.labelMedium),
-          const SizedBox(width: 4),
-          Text(
-            '$count',
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.bold,
-            ),
+    return InkWell(
+      onTap: () => _showModels(context),
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: theme.colorScheme.primary.withOpacity(0.2),
           ),
-        ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: theme.colorScheme.primary),
+            const SizedBox(width: 6),
+            Text(label, style: theme.textTheme.labelMedium),
+            const SizedBox(width: 4),
+            Text(
+              '$count',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1747,26 +1908,51 @@ class _SecuritySection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 问题5 修复：密码未配置时（system_executor_password 为空），
+    // 隐藏"系统执行器"和"危险命令需密码"开关 — 因为没有密码，
+    // 所有命令都无密码执行，这两个开关无意义。
+    final pwdConfigured = notifier.isPasswordConfigured;
     return _SettingsSection(
       icon: Icons.shield,
       title: '安全',
       children: [
-        _SwitchTile(
-          title: '系统执行器',
-          subtitle: '允许通过密码执行系统级命令',
-          value: notifier.systemExecutorEnabled,
-          onChanged: (v) => notifier.updateConfig({
-            'security': {'system_executor_enabled': v}
-          }).then((ok) => _showResult(context, ok, notifier, '系统执行器')),
-        ),
-        _SwitchTile(
-          title: '危险命令需密码',
-          subtitle: '执行高危命令前要求密码验证',
-          value: notifier.requirePasswordForDangerous,
-          onChanged: (v) => notifier.updateConfig({
-            'security': {'require_password_for_dangerous': v}
-          }).then((ok) => _showResult(context, ok, notifier, '危险命令保护')),
-        ),
+        if (!pwdConfigured)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Row(
+              children: [
+                Icon(Icons.info_outline,
+                    size: 14, color: Theme.of(context).colorScheme.outline),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '系统执行器密码未配置，所有命令直接执行（无需密码）',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        if (pwdConfigured) ...[
+          _SwitchTile(
+            title: '系统执行器',
+            subtitle: '允许通过密码执行系统级命令',
+            value: notifier.systemExecutorEnabled,
+            onChanged: (v) => notifier.updateConfig({
+              'security': {'system_executor_enabled': v}
+            }).then((ok) => _showResult(context, ok, notifier, '系统执行器')),
+          ),
+          _SwitchTile(
+            title: '危险命令需密码',
+            subtitle: '执行高危命令前要求密码验证',
+            value: notifier.requirePasswordForDangerous,
+            onChanged: (v) => notifier.updateConfig({
+              'security': {'require_password_for_dangerous': v}
+            }).then((ok) => _showResult(context, ok, notifier, '危险命令保护')),
+          ),
+        ],
         _NavTile(
           title: '命令超时',
           value: '${notifier.commandTimeoutSeconds}s',
@@ -2601,6 +2787,40 @@ Future<void> _showProviderManagementDialog(
   );
 }
 
+/// 问题2c：服务商模型缓存（内存级，app 运行期间持久）
+/// 存储"测试全部"或详情页测试时拉取到的模型列表，避免重复请求。
+/// 当用户重新打开服务商详情页时可直接展示缓存数据。
+class ProviderModelCache {
+  static final Map<String, _CachedModels> _cache = {};
+
+  static void set(String provider,
+      {required List<Map<String, dynamic>> free,
+      required List<Map<String, dynamic>> paid}) {
+    _cache[provider] = _CachedModels(
+      free: free,
+      paid: paid,
+      fetchedAt: DateTime.now(),
+    );
+  }
+
+  static _CachedModels? get(String provider) => _cache[provider];
+
+  static void clear(String provider) => _cache.remove(provider);
+
+  static void clearAll() => _cache.clear();
+}
+
+class _CachedModels {
+  final List<Map<String, dynamic>> free;
+  final List<Map<String, dynamic>> paid;
+  final DateTime fetchedAt;
+  _CachedModels({
+    required this.free,
+    required this.paid,
+    required this.fetchedAt,
+  });
+}
+
 /// 提取当前已配置的服务商列表
 /// 优先使用 config.llm.api_keys 中已配置 key 的服务商，
 /// 再补充 available_models 中出现的 provider
@@ -2689,6 +2909,17 @@ class _ProviderDetailSheetState extends State<_ProviderDetailSheet> {
   // 用户选中的模型 id（含 provider 前缀）
   final Set<String> _selectedToAdd = {};
 
+  @override
+  void initState() {
+    super.initState();
+    // 问题2c：打开详情页时，先从缓存加载之前拉取到的模型数据
+    final cached = ProviderModelCache.get(widget.providerName);
+    if (cached != null) {
+      _freeModels = cached.free;
+      _paidModels = cached.paid;
+    }
+  }
+
   bool get _hasKey =>
       widget.notifier.configuredProviders.contains(widget.providerName);
   String get _baseUrl =>
@@ -2713,14 +2944,18 @@ class _ProviderDetailSheetState extends State<_ProviderDetailSheet> {
       if (!mounted) return;
       final ok = result?['ok'] == true;
       if (ok) {
+        final free = ((result?['free_models'] as List?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .toList();
+        final paid = ((result?['paid_models'] as List?) ?? [])
+            .whereType<Map<String, dynamic>>()
+            .toList();
+        // 问题2c：缓存拉取到的模型数据，下次打开详情页时可直接展示
+        ProviderModelCache.set(widget.providerName, free: free, paid: paid);
         setState(() {
           _testing = false;
-          _freeModels = ((result?['free_models'] as List?) ?? [])
-              .whereType<Map<String, dynamic>>()
-              .toList();
-          _paidModels = ((result?['paid_models'] as List?) ?? [])
-              .whereType<Map<String, dynamic>>()
-              .toList();
+          _freeModels = free;
+          _paidModels = paid;
         });
       } else {
         setState(() {
@@ -3521,9 +3756,12 @@ class _ProviderConfigDialogState extends State<_ProviderConfigDialog> {
       llmUpdates['primary_model'] = fullId;
       llmUpdates['primary_provider'] = widget.providerName;
     }
-    // 3. 可选 base_url 覆盖
+    // 3. base_url 保存
+    // 问题2c 修复：新添加的服务商如果没有已保存的 base_url，即使 URL
+    // 等于默认值也要保存，这样详情页能正确显示 API 地址。
     final url = _urlController.text.trim();
-    if (url.isNotEmpty && url != widget.defaultBaseUrl) {
+    final existingUrl = widget.notifier.providerBaseUrls[widget.providerName] ?? '';
+    if (url.isNotEmpty && (url != existingUrl || existingUrl.isEmpty)) {
       llmUpdates['base_urls'] = {widget.providerName: url};
     }
 
@@ -3798,14 +4036,25 @@ Future<void> _showModelSelectionDialog(
       .whereType<Map<String, dynamic>>()
       .toList();
 
-  // 无可用模型时回退到文本输入
+  // 问题6 修复：无可用模型时不回退到文本编辑（用户不应手动修改模型名称），
+  // 而是提示用户先测试服务商拉取模型列表。
   if (models.isEmpty) {
-    await _showTextEditDialog(
-      context,
-      title: title,
-      label: 'provider/model',
-      initial: current,
-      onSubmit: onSubmit,
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: const Text(
+          '暂无可用模型列表。\n\n请先在「服务商」区域点击服务商名称，'
+          '在详情页中点击「测试」按钮拉取最新模型列表，'
+          '之后再回来选择模型。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
     );
     return;
   }

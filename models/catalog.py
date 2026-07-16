@@ -87,9 +87,15 @@ _RATE_BUDGETS = {
 
 
 def _classify_free(pricing: Dict[str, float]) -> bool:
-    """Return True when every pricing field is 0 / empty / unparseable."""
+    """Return True when every pricing field is 0 / empty / unparseable.
+
+    问题2d 修复：之前没有 pricing 信息时返回 False（误判为付费），
+    导致许多 provider（如 SenseNova）的免费模型被标为收费。
+    现在无 pricing 信息时默认返回 True（假设免费），因为大多数
+    provider 的 /v1/models 接口不返回 pricing 元数据，但不代表收费。
+    """
     if not pricing:
-        return False
+        return True  # 无 pricing 信息，默认假设免费
     for v in pricing.values():
         try:
             if float(v) > 0:
@@ -455,19 +461,24 @@ _TRIVIAL_HINTS = re.compile(
 def auto_classify_tier(model: ModelInfo) -> str:
     """Smartly assign a model to one of: trivial / simple / complex / expert.
 
+    问题2e 修复：之前 expert/complex 分支强依赖 ``is_free is False``，
+    导致免费的大模型（即使 ctx=200K、有 vision/tools）既进不了 expert
+    也进不了 complex，只能落到 simple。现在改为按模型能力（context_length、
+    vision/tools/reasoning 特性、名称关键词）分类，不再把 is_free 作为
+    能力门槛。
+
     Decision tree (in order — first match wins):
 
       1. **Expert signals** — has "reasoning" / "thinking" feature,
-         OR huge context (> 200K) + paid, OR name contains opus/o1/o3/...
+         OR huge context (> 200K), OR name contains opus/o1/o3/...
          → ``expert``
-      2. **Trivial signals** — free AND tiny context (< 8K) AND no
+      2. **Trivial signals** — tiny context (< 8K) AND no
          vision/tools/reasoning, OR name is "nano" / "tiny" / "0.5b"...
          → ``trivial``
-      3. **Complex signals** — paid AND context >= 32K, OR paid AND
-         has vision/tools, OR name is sonnet/gpt-4/opus-3/...
+      3. **Complex signals** — context >= 32K, OR has vision/tools,
+         OR name is sonnet/gpt-4/opus-3/...
          → ``complex``
-      4. **Simple** — everything else (free models with reasonable
-         context, paid models with small context, haiku/flash/mini/...)
+      4. **Simple** — everything else (haiku/flash/mini/...)
          → ``simple``
     """
     name = (model.id or "") + " " + (model.name or "")
@@ -479,33 +490,31 @@ def auto_classify_tier(model: ModelInfo) -> str:
     ctx = int(model.context_length or 0)
 
     # ---- 1. expert ----
-    if has_reasoning and model.is_free is False:
+    # 推理模型或超大上下文模型 → expert（不再要求 is_free is False）
+    if has_reasoning:
         return "expert"
     if _EXPERT_HINTS.search(name):
         return "expert"
-    if model.is_free is False and ctx >= 500_000:
+    if ctx >= 200_000:
         return "expert"
 
     # ---- 2. trivial ----
-    # 只把"免费"小模型归入 trivial；付费 mini/nano（如 gpt-4o-mini）
-    # 能力并不弱，应进 simple。原代码第三条规则不带 is_free 检查，
-    # 会把付费 mini 误判为 trivial。
-    if model.is_free and ctx and ctx < 8_000 and not has_vision and not has_tools and not has_reasoning:
+    # 极小上下文 + 无高级能力 → trivial（不再要求 is_free）
+    if ctx and ctx < 8_000 and not has_vision and not has_tools and not has_reasoning:
         return "trivial"
-    if _TRIVIAL_HINTS.search(name) and model.is_free:
+    if _TRIVIAL_HINTS.search(name):
         return "trivial"
 
     # ---- 3. complex ----
-    if model.is_free is False and ctx >= 32_000:
+    # 大上下文或有 vision/tools 能力 → complex（不再要求 is_free is False）
+    if ctx >= 32_000:
         return "complex"
-    if model.is_free is False and (has_vision or has_tools):
+    if has_vision or has_tools:
         return "complex"
     if _COMPLEX_HINTS.search(name):
         return "complex"
 
     # ---- 4. simple (default) ----
-    if _SIMPLE_HINTS.search(name):
-        return "simple"
     return "simple"
 
 

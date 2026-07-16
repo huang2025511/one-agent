@@ -712,6 +712,18 @@ class RESTAPIGateway(Plugin):
                     except Exception as exc:
                         logger.warning("LLM re-sync failed after config update: %s", exc)
 
+                # 问题1+3 修复：热重载 SmartRouter，让 router.enabled / self_evolution /
+                # context_compression 等配置即时生效。之前只热重载 LLM，router._cfg
+                # 仍是启动时的缓存值，导致 /api/models 返回的 routing_enabled 过期，
+                # 客户端开关状态不同步。
+                _router_inst = _ctx.get_plugin("router") if _ctx else None
+                if _router_inst is not None:
+                    try:
+                        _router_inst._cfg = (_ctx.config.get("router") or {})
+                        logger.info("Router config re-synced after config update")
+                    except Exception as exc:
+                        logger.warning("Router re-sync failed after config update: %s", exc)
+
                 logger.info("Configuration updated and saved to %s", config_path)
 
                 # Return sanitized config
@@ -904,13 +916,14 @@ class RESTAPIGateway(Plugin):
             default_model = getattr(_llm, "_default_model", "") if _llm else ""
             primary_provider = getattr(_llm, "_primary_provider", "") if _llm else ""
 
-            # Routing status from SmartRouter
+            # Routing status — 从 _ctx.config 读取（配置更新的真实源头），
+            # 而非 _router._cfg（运行时缓存，PUT 后未热重载 router 时会过期）。
+            # 问题1+3 根因：之前从 _router._cfg 读，导致客户端关闭路由后
+            # /api/models 仍返回 routing_enabled=true，开关状态不同步。
             _router = _ctx.get_plugin("router") if _ctx else None
-            routing_enabled = True
-            tier_stats = {}
-            if _router:
-                routing_enabled = getattr(_router, "_cfg", {}).get("enabled", True)
-                tier_stats = getattr(_router, "_tier_stats", {})
+            router_cfg = (_ctx.config.get("router") or {}) if _ctx else {}
+            routing_enabled = router_cfg.get("enabled", True)
+            tier_stats = getattr(_router, "_tier_stats", {}) if _router else {}
 
             # 4-tier model mapping with thresholds from config
             router_cfg = (_ctx.config.get("router") or {}) if _ctx else {}

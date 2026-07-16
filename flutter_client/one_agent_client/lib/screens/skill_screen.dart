@@ -186,15 +186,21 @@ class _SkillListTileState extends ConsumerState<_SkillListTile> {
     return null;
   }
 
-  /// 问题8 修复：判断该技能是否可卸载
-  /// 内置技能（directory 为 null 或包含 'builtin'）不可卸载，
-  /// 之前对所有技能无条件显示卸载入口，导致点击后服务端返回 404，
-  /// 用户感觉"卸载无效"。现在对内置技能隐藏卸载入口。
+  /// 问题7 修复：判断该技能是否可卸载
+  /// 只要 directory 非空（文件型技能），就可以卸载。
+  /// 之前对 directory 包含 'builtin' 的技能也禁止卸载，
+  /// 导致所有从 builtin 目录加载的文件型技能都无法卸载。
+  /// 代码型技能（directory 为 null/空，由 _seed_builtins 注册）不可卸载。
   bool get _canUninstall {
     final dir = widget.skill.directory;
     if (dir == null || dir.isEmpty) return false;
-    if (dir.contains('builtin')) return false;
     return true;
+  }
+
+  /// 问题7：是否为 builtin 目录下的技能（卸载时额外警告）
+  bool get _isBuiltin {
+    final dir = widget.skill.directory;
+    return dir != null && dir.contains('builtin');
   }
 
   Color? _sourceColor(String label, ThemeData theme) {
@@ -223,7 +229,31 @@ class _SkillListTileState extends ConsumerState<_SkillListTile> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('卸载技能'),
-        content: Text('确定要卸载技能「${skill.title}」吗？此操作不可撤销。'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('确定要卸载技能「${skill.title}」吗？此操作不可撤销。'),
+            if (_isBuiltin) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(Icons.warning_amber,
+                      size: 16, color: Theme.of(ctx).colorScheme.error),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      '这是内置目录下的技能，卸载后可能影响系统功能',
+                      style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                            color: Theme.of(ctx).colorScheme.error,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
