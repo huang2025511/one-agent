@@ -21,7 +21,11 @@ import yaml
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-NVIDIA_KEY = "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"
+# 修复 #1（安全）：移除硬编码真实 API Key。
+# 该 key 已进入 git 历史，必须立即吊销并轮换。
+# 现在从环境变量读取，CI 已用 --ignore=tests/test_e2e_real.py 排除此文件。
+# 本地运行需：export NVIDIA_API_KEY=nvapi-xxxx
+NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "nvapi-FAKE-KEY-FOR-TESTING-ONLY")
 
 
 @pytest.fixture

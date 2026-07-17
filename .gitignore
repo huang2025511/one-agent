@@ -57,3 +57,11 @@ coverage.xml
 node_modules/
 test-report.log
 data/
+
+# 修复 #1（安全）：签名密钥不应提交到仓库。
+# 注意：one-agent-release.keystore 已在历史中，需通过轮换密钥彻底解决。
+# 此 .gitignore 规则防止未来新增的 keystore 文件被误提交。
+*.keystore
+*.jks
+keystore.properties
+key.properties

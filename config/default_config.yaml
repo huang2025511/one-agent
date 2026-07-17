@@ -5,7 +5,7 @@ agent:
   data_dir: ./data
   log_level: DEBUG
   timezone: Asia/Shanghai
-  language: zh-CN
+  language: zh  # 修复 #6：统一为 zh（与 i18n 内部码、dev/staging/prod_config.yaml 一致；原 zh-CN 会被 i18n 找不到而回退）
 llm:
   primary_provider: sensenova
   primary_model: sensenova/deepseek-v4-flash
@@ -80,8 +80,12 @@ gateways:
     secret: ''
   dingtalk:
     enabled: false
-    app_key: ''
-    app_secret: ''
+    # 修复 #1：键名改为 client_id/client_secret，与 gateways/messaging.py 读取
+    # （cfg.get("client_id") / cfg.get("client_secret")）及 .env.example
+    # （DINGTALK_CLIENT_ID/DINGTALK_CLIENT_SECRET）对齐；原 app_key/app_secret
+    # 从不被读取，stream 模式会因 client_id/secret 为空而 fail-closed。
+    client_id: ''
+    client_secret: ''
   feishu:
     enabled: false
     app_id: ''

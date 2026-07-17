@@ -2005,9 +2005,12 @@ class _SecuritySection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 问题5 修复：密码未配置时（system_executor_password 为空），
-    // 隐藏"系统执行器"和"危险命令需密码"开关 — 因为没有密码，
-    // 所有命令都无密码执行，这两个开关无意义。
+    // 修复 #2（安全）：密码保护已恢复分级判断。
+    // 未配置密码时：
+    //   - require_password_for_dangerous=true → 危险命令被拒绝
+    //   - require_password_for_dangerous=false → 危险命令放行
+    // 因此即使未配置密码，也需显示"危险命令需密码"开关让用户选择策略。
+    // 仅"系统执行器"开关在未配置密码时隐藏（无密码时该开关无实际效果）。
     final pwdConfigured = notifier.isPasswordConfigured;
     return _SettingsSection(
       icon: Icons.shield,
@@ -2018,14 +2021,18 @@ class _SecuritySection extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
             child: Row(
               children: [
-                Icon(Icons.info_outline,
-                    size: 14, color: Theme.of(context).colorScheme.outline),
+                Icon(Icons.warning_amber_rounded,
+                    size: 14, color: Theme.of(context).colorScheme.error),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    '系统执行器密码未配置，所有命令直接执行（无需密码）',
+                    notifier.requirePasswordForDangerous
+                        ? '系统执行器密码未配置。危险命令将被拒绝，请在服务端配置 system_executor_password'
+                        : '系统执行器密码未配置。危险命令将直接执行（无需密码）',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.outline,
+                          color: notifier.requirePasswordForDangerous
+                              ? Theme.of(context).colorScheme.error
+                              : Theme.of(context).colorScheme.outline,
                         ),
                   ),
                 ),
@@ -2041,15 +2048,20 @@ class _SecuritySection extends StatelessWidget {
               'security': {'system_executor_enabled': v}
             }).then((ok) => _showResult(context, ok, notifier, '系统执行器')),
           ),
-          _SwitchTile(
-            title: '危险命令需密码',
-            subtitle: '执行高危命令前要求密码验证',
-            value: notifier.requirePasswordForDangerous,
-            onChanged: (v) => notifier.updateConfig({
-              'security': {'require_password_for_dangerous': v}
-            }).then((ok) => _showResult(context, ok, notifier, '危险命令保护')),
-          ),
         ],
+        // 修复 #2：无论是否配置密码都显示此开关。
+        // 开启时：未配置密码→拒绝危险命令；已配置密码→需密码验证。
+        // 关闭时：所有危险命令直接执行。
+        _SwitchTile(
+          title: '危险命令需密码',
+          subtitle: pwdConfigured
+              ? '执行高危命令前要求密码验证'
+              : '开启后危险命令将被拒绝（未配置密码）。配置密码后可密码验证执行',
+          value: notifier.requirePasswordForDangerous,
+          onChanged: (v) => notifier.updateConfig({
+            'security': {'require_password_for_dangerous': v}
+          }).then((ok) => _showResult(context, ok, notifier, '危险命令保护')),
+        ),
         _NavTile(
           title: '命令超时',
           value: '${notifier.commandTimeoutSeconds}s',

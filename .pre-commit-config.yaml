@@ -16,3 +16,11 @@ repos:
         args: [--maxkb=500]
       - id: check-merge-conflict
       - id: debug-statements
+
+  # 修复 #1（安全）：添加 gitleaks 密钥扫描钩子。
+  # 之前因无密钥检测，导致 NVIDIA API Key 和 agnes-ai API Key 被提交到仓库。
+  # gitleaks 会扫描所有暂存文件中的 API key/token/密码模式，防止未来泄露。
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

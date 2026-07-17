@@ -237,6 +237,11 @@ class SystemExecutor(BaseExecutor):
         max_attempts = int(sec_cfg.get("max_password_attempts", 3))
         lockout_min = int(sec_cfg.get("lockout_minutes", 5))
         self._pwd_manager = PasswordManager(stored_hash, cache_min, max_attempts, lockout_min)
+        # 修复 #2（安全）：读取 require_password_for_dangerous 配置。
+        # 之前 _check_permission 无条件放行所有命令（含 DANGEROUS），
+        # 导致 PasswordManager 整套 PBKDF2+lockout 机制成为死代码，
+        # 配置和 UI 的开关成为"安全剧场"。现在恢复分级判断。
+        self._require_password = bool(sec_cfg.get("require_password_for_dangerous", True))
         self._max_output_bytes = int(sec_cfg.get("max_output_bytes", 100_000))
         self._timeout_seconds = int(sec_cfg.get("command_timeout_seconds", 30))
         self._workdir = str(sec_cfg.get("command_workdir", "."))
@@ -244,8 +249,10 @@ class SystemExecutor(BaseExecutor):
         if not self._pwd_manager.is_configured():
             logger.info(
                 "system_executor: no password configured. "
-                "All commands (including DANGEROUS) will execute without password. "
-                "如需启用密码保护，请在 config 中设置 security.system_executor_password"
+                "DANGEROUS commands will be %s. "
+                "如需启用密码保护，请在 config 中设置 security.system_executor_password",
+                "BLOCKED (require_password_for_dangerous=true)" if self._require_password
+                else "ALLOWED (require_password_for_dangerous=false)",
             )
 
         # Register skill
@@ -315,10 +322,63 @@ class SystemExecutor(BaseExecutor):
     ) -> Tuple[bool, bool]:
         """Return (allowed, needs_password).
 
-        密码锁已移除：所有命令（含 DANGEROUS）均直接允许执行，无需密码。
-        风险级别仅用于日志记录和结果展示，不再阻塞执行。
+        修复 #2（安全）：恢复分级密码保护逻辑。
+
+        分级策略：
+        - risk_level 0-1 (SAFE/LOW)：直接放行，无需密码
+        - risk_level 2-3 (MEDIUM/DANGEROUS)：
+          - 若 require_password_for_dangerous=false：放行（用户明确关闭保护）
+          - 若 require_password_for_dangerous=true：
+            - 未配置密码：拒绝，提示用户配置密码
+            - 已配置密码：检查缓存 → 验证密码 → 锁定机制
         """
-        return (True, False)
+        # 低风险命令直接放行
+        if risk_level < 2:
+            return (True, False)
+
+        # 高风险命令，但用户明确关闭了密码保护
+        if not self._require_password:
+            return (True, False)
+
+        # 高风险命令，需要密码保护
+        pwd_mgr = self._pwd_manager
+        if pwd_mgr is None:
+            # PasswordManager 未初始化（setup 未跑或 executor disabled）
+            return (False, True)
+
+        # 未配置密码 → 拒绝（而非放行，避免安全剧场）
+        if not pwd_mgr.is_configured():
+            logger.warning(
+                "system_executor: DANGEROUS command blocked — "
+                "require_password_for_dangerous=true but no password configured. "
+                "请在 config 中设置 security.system_executor_password"
+            )
+            return (False, True)
+
+        # 检查密码缓存（避免短时间内反复要求输入密码）
+        if pwd_mgr.is_cached(risk_level):
+            return (True, False)
+
+        # 检查锁定状态
+        if not pwd_mgr.can_attempt():
+            return (False, True)
+
+        # 验证提供的密码
+        if not provided_password:
+            # 未提供密码，需要用户输入
+            return (False, True)
+
+        if pwd_mgr.verify(provided_password):
+            pwd_mgr.record_success(risk_level)
+            return (True, False)
+
+        # 密码错误
+        pwd_mgr.record_failure()
+        logger.warning(
+            "system_executor: password verification failed (attempt %d/%d)",
+            pwd_mgr._failed_count, pwd_mgr._max_attempts,
+        )
+        return (False, True)
 
     # ------------------------------------------------------------ execution
     async def _execute(

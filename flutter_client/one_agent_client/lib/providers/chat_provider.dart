@@ -202,19 +202,23 @@ class ChatNotifier extends StateNotifier<ChatState> {
         // 错误事件：保留已流式生成的部分内容，追加错误提示
         // 之前用错误消息整体覆盖 content，用户已看到的部分回复会消失
         if (event.type == 'error') {
-          final updatedMsgs = [...state.messages];
-          final lastIdx = updatedMsgs.length - 1;
-          if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
-            final existing = updatedMsgs[lastIdx].content;
+          final messages = state.messages;
+          final lastIdx = messages.length - 1;
+          if (lastIdx >= 0 && messages[lastIdx].role == MessageRole.assistant) {
+            final existing = messages[lastIdx].content;
             final errContent = event.content ?? '发生未知错误';
             // 若已有内容，追加错误提示而非替换；错误信息存入 errorMessage
-            updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
+            // 性能优化：用 sublist 替换最后一条，避免 [...state.messages] 整表 O(n) 复制
+            final updatedMsg = messages[lastIdx].copyWith(
               content: existing.isNotEmpty ? '$existing\n\n⚠️ $errContent' : errContent,
               isError: true,
               errorMessage: event.content,
               isStreaming: false,
             );
-            state = state.copyWith(messages: updatedMsgs, isLoading: false);
+            state = state.copyWith(
+              messages: [...messages.sublist(0, lastIdx), updatedMsg],
+              isLoading: false,
+            );
           }
           return;
         }
@@ -260,36 +264,38 @@ class ChatNotifier extends StateNotifier<ChatState> {
           buffer.write(event.content);
         }
 
-        // 更新最后一条消息
-        final updatedMsgs = [...state.messages];
-        final lastIdx = updatedMsgs.length - 1;
-        if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
-          updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
+        // 更新最后一条消息（性能优化：用 sublist 替换最后一条，避免 [...state.messages] 整表 O(n) 复制）
+        final messages = state.messages;
+        final lastIdx = messages.length - 1;
+        // 合并 done 分支：done 时同时设 isStreaming:false/isLoading:false/currentSessionId，
+        // 只 state= 一次，避免原来先更新内容再设 isStreaming 的二次 state 写入
+        if (lastIdx >= 0 && messages[lastIdx].role == MessageRole.assistant) {
+          final oldMsg = messages[lastIdx];
+          final updatedMsg = oldMsg.copyWith(
             content: buffer.toString(),
             thinking: thinkingBuffer,
             metadata: {
-              if (updatedMsgs[lastIdx].metadata != null)
-                ...updatedMsgs[lastIdx].metadata!,
+              if (oldMsg.metadata != null) ...oldMsg.metadata!,
               'thinkingSummary': _phaseOrder
                   .map((p) => '${_phaseIcon(p)} ${_phaseLabel(p)}')
                   .join(' → '),
             },
+            // done 事件同时重置 isStreaming，否则流式指示器卡住
+            isStreaming: event.done == true ? false : oldMsg.isStreaming,
           );
-          state = state.copyWith(messages: updatedMsgs);
-        }
-
-        // 完成
-        if (event.done == true) {
-          // 修复：done 事件必须同时重置 isStreaming，否则流式指示器卡住
-          final doneMsgs = [...state.messages];
-          final doneIdx = doneMsgs.length - 1;
-          if (doneIdx >= 0 && doneMsgs[doneIdx].role == MessageRole.assistant) {
-            doneMsgs[doneIdx] = doneMsgs[doneIdx].copyWith(isStreaming: false);
-          }
           state = state.copyWith(
-            messages: doneMsgs,
-            currentSessionId: event.sessionId ?? state.currentSessionId,
+            messages: [...messages.sublist(0, lastIdx), updatedMsg],
+            // done 时同步重置 isLoading 并更新 currentSessionId（合并到同一次 state 写入）
+            isLoading: event.done == true ? false : null,
+            currentSessionId: event.done == true
+                ? (event.sessionId ?? state.currentSessionId)
+                : null,
+          );
+        } else if (event.done == true) {
+          // 无助手消息可更新，但 done 仍需重置 isLoading/currentSessionId
+          state = state.copyWith(
             isLoading: false,
+            currentSessionId: event.sessionId ?? state.currentSessionId,
           );
         }
       },
@@ -297,20 +303,23 @@ class ChatNotifier extends StateNotifier<ChatState> {
         debugPrint('❌ SSE stream onError: $err');
         if (_streamSub == null) return; // dispose 后回调可能仍在飞
         // 标记占位助手消息结束流式并显示错误，保留已收到的部分内容
-        final updatedMsgs = [...state.messages];
-        final lastIdx = updatedMsgs.length - 1;
-        if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
-          final existing = updatedMsgs[lastIdx].content;
+        // 性能优化：用 sublist 替换最后一条，避免 [...state.messages] 整表 O(n) 复制
+        final messages = state.messages;
+        final lastIdx = messages.length - 1;
+        List<ChatMessage> newMessages = messages;
+        if (lastIdx >= 0 && messages[lastIdx].role == MessageRole.assistant) {
+          final existing = messages[lastIdx].content;
           final errContent = '发送失败: $err';
-          updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(
+          final updatedMsg = messages[lastIdx].copyWith(
             content: existing.isNotEmpty ? '$existing\n\n⚠️ $errContent' : errContent,
             isStreaming: false,
             isError: true,
             errorMessage: err.toString(),
           );
+          newMessages = [...messages.sublist(0, lastIdx), updatedMsg];
         }
         state = state.copyWith(
-          messages: updatedMsgs,
+          messages: newMessages,
           isLoading: false,
           error: '发送失败: $err',
         );
@@ -318,12 +327,18 @@ class ChatNotifier extends StateNotifier<ChatState> {
       onDone: () {
         if (_streamSub == null) return; // dispose 后回调可能仍在飞
         // 标记流结束
-        final updatedMsgs = [...state.messages];
-        final lastIdx = updatedMsgs.length - 1;
-        if (lastIdx >= 0 && updatedMsgs[lastIdx].role == MessageRole.assistant) {
-          updatedMsgs[lastIdx] = updatedMsgs[lastIdx].copyWith(isStreaming: false);
+        // 性能优化：用 sublist 替换最后一条，避免整表复制
+        final messages = state.messages;
+        final lastIdx = messages.length - 1;
+        if (lastIdx >= 0 && messages[lastIdx].role == MessageRole.assistant) {
+          final updatedMsg = messages[lastIdx].copyWith(isStreaming: false);
+          state = state.copyWith(
+            messages: [...messages.sublist(0, lastIdx), updatedMsg],
+            isLoading: false,
+          );
+        } else {
+          state = state.copyWith(isLoading: false);
         }
-        state = state.copyWith(messages: updatedMsgs, isLoading: false);
         // 清理引用：订阅已自动取消，但 _streamSub 仍持有已取消对象，
         // 置空让后续判断（_streamSub == null 守卫）能正确识别流已结束
         _streamSub = null;

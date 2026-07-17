@@ -31,9 +31,16 @@ jobs:
           pip install pytest pytest-asyncio pytest-cov pytest-timeout
 
       - name: Run unit tests with coverage
+        # 修复 #3：之前只跑 unit_tests.py + test_new_features.py 两个文件，
+        # tests/ 下 34 个测试文件大多未执行。现在跑全部测试，但排除：
+        # - test_e2e_real.py：含硬编码真实 API key，会单独处理（避免泄漏/计费）
+        # - integration_test.py：依赖外部环境，CI 中易抖动
+        # - benchmark_test.py：性能基准测试，非功能正确性校验
         run: |
-          python -m pytest tests/unit_tests.py tests/test_new_features.py \
-            -v --timeout=120 \
+          python -m pytest tests/ -x --timeout=120 \
+            --ignore=tests/test_e2e_real.py \
+            --ignore=tests/integration_test.py \
+            --ignore=tests/benchmark_test.py \
             --cov=. --cov-report=term-missing --cov-report=xml \
             --cov-config=.coveragerc
 

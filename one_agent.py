@@ -194,14 +194,59 @@ def _expand_env(obj):
 # Config loading with validation
 # ============================================================
 
+def _deep_merge_dict(base: dict, override: dict) -> dict:
+    """递归深度合并两个配置字典：dict 类型键递归合并，其他类型直接覆盖。
+
+    用于 ONE_AGENT_ENV 触发时把 default_config.yaml 作为基础、再用 env 配置
+    （dev/staging/prod）覆盖：env 只声明需要差异化的段，其余从 default 继承。
+    """
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge_dict(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
 def load_config(path: str) -> FullConfig:
     """Load and validate config from YAML, expanding env vars and decrypting secrets.
 
     Returns a FullConfig Pydantic object (validated).  Call .model_dump() to get a
     plain dict for contexts that don't need Pydantic validation.
+
+    修复 #2：ONE_AGENT_ENV 触发的 env 配置（dev/staging/prod）只覆盖部分段，
+    之前不与 default_config.yaml 合并，导致 rest/memory/skills 等段缺失，
+    回退到 Pydantic 默认值（如 rest.rate_limit_per_minute 从 10000 降到 60、
+    memory.long_term.storage 丢失等）。现在先加载 default 作为基础，再用 env
+    配置深度覆盖。注意：ONE_AGENT_CONFIG 显式指定的路径不合并（用户明确要完全
+    用那个文件）；只有 ONE_AGENT_ENV 触发、且 path 正是 env 解析出的配置时才合并。
     """
-    with open(path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    default_path = str(ROOT / "config" / "default_config.yaml")
+    explicit = os.environ.get("ONE_AGENT_CONFIG")
+    env_name = os.environ.get("ONE_AGENT_ENV", "").strip().lower()
+
+    # 仅当 ONE_AGENT_ENV 触发、ONE_AGENT_CONFIG 未显式指定、且 path 正是
+    # config/{env}_config.yaml（非 default 本身）时，才与 default 深度合并。
+    should_merge = False
+    if env_name and not explicit:
+        env_path = str(ROOT / "config" / f"{env_name}_config.yaml")
+        try:
+            same_path = Path(path).resolve() == Path(env_path).resolve()
+        except Exception:
+            same_path = path == env_path
+        if same_path and env_path != default_path:
+            should_merge = True
+
+    if should_merge and Path(default_path).exists():
+        with open(default_path, encoding="utf-8") as f:
+            base = yaml.safe_load(f) or {}
+        with open(path, encoding="utf-8") as f:
+            override = yaml.safe_load(f) or {}
+        raw = _deep_merge_dict(base, override)
+    else:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
 
     expanded = _expand_env(raw)
 

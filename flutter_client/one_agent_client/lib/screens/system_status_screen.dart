@@ -26,8 +26,10 @@ class _SystemStatusScreenState extends ConsumerState<SystemStatusScreen> {
   @override
   void initState() {
     super.initState();
-    // 每 10 秒自动刷新系统状态，保证会话数/消息数实时
-    _timer = Timer.periodic(const Duration(seconds: 10), (_) {
+    // 修复：轮询间隔从 10 秒延长到 30 秒。
+    // IndexedStack 会导致非活跃 tab 的 mounted 仍为 true，Timer 不会因切 tab 而取消，
+    // 30 秒既能保持状态相对实时，又显著减少后台 tab 的无谓刷新开销
+    _timer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) ref.read(systemProvider.notifier).loadAll();
     });
   }

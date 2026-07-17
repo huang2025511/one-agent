@@ -7,6 +7,9 @@ class TypewriterText extends StatefulWidget {
   final TextStyle? style;
   final TextAlign? textAlign;
   final Duration speed;
+  // 修复：流式状态标志。流结束（isStreaming==false）时立即跳到完整文本，
+  // 避免长回复追赶延迟。默认 true 保持向后兼容。
+  final bool isStreaming;
 
   const TypewriterText(
     this.text, {
@@ -14,6 +17,7 @@ class TypewriterText extends StatefulWidget {
     this.style,
     this.textAlign,
     this.speed = const Duration(milliseconds: 20),
+    this.isStreaming = true,
   });
 
   @override
@@ -29,19 +33,30 @@ class _TypewriterTextState extends State<TypewriterText> {
   void initState() {
     super.initState();
     _targetText = widget.text;
-    _startTimer();
+    // 修复：流结束（isStreaming==false）时直接显示完整文本，不启动 timer
+    if (!widget.isStreaming) {
+      _displayText = _targetText;
+    } else {
+      _startTimer();
+    }
   }
 
   @override
   void didUpdateWidget(TypewriterText oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.text != oldWidget.text) {
-      _targetText = widget.text;
-      // 不取消 timer，让现有 timer 继续追赶新目标
-      // 如果已经追上了，重新启动 timer
-      if (_timer == null || !_timer!.isActive) {
-        _startTimer();
-      }
+    _targetText = widget.text;
+    // 修复：流结束（isStreaming==false）时立即跳到完整文本，取消追赶 timer
+    if (!widget.isStreaming && _displayText.length < _targetText.length) {
+      _displayText = _targetText;
+      _timer?.cancel();
+      _timer = null;
+      return;
+    }
+    // 不取消 timer，让现有 timer 继续追赶新目标
+    // 如果已经追上了，重新启动 timer
+    if (widget.text != oldWidget.text &&
+        (_timer == null || !_timer!.isActive)) {
+      _startTimer();
     }
   }
 
@@ -62,8 +77,11 @@ class _TypewriterTextState extends State<TypewriterText> {
         timer.cancel();
         return;
       }
-      // 每次显示2个字符，快速追赶目标文本
-      final nextEnd = (current + 2).clamp(0, _targetText.length);
+      // 修复：自适应速度——落后过多时按 diff/10 推进（至少 5 字符），快速追赶；
+      // 之前固定每次 2 字符（100 字/秒），长回复需百秒才能追上
+      final diff = _targetText.length - current;
+      final advance = diff > 50 ? (diff / 10).ceil().clamp(5, diff) : 2;
+      final nextEnd = (current + advance).clamp(0, _targetText.length);
       setState(() {
         _displayText = _targetText.substring(0, nextEnd);
       });

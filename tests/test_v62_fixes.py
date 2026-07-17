@@ -182,7 +182,7 @@ web_search("agnes ai openai compatible api")
 def test_user_case_system_run():
     """测试用户案例中的 system_run curl 调用"""
     text = '''```bash
-system_run("curl -s https://apihub.agnes-ai.com/v1/models -H \\"Authorization: Bearer sk-mDvN2X2mg2IYS7lmCQgVup9sckqriDnlNqD3jyozKYZ1zNP1\\"")
+system_run("curl -s https://apihub.agnes-ai.com/v1/models -H \\"Authorization: Bearer sk-FAKE-KEY-FOR-TESTING-ONLY\\"")
 ```
 '''
     calls = parse_markdown_tool_calls(text)

@@ -75,10 +75,22 @@ class MemoryNotifier extends StateNotifier<MemoryState> {
     try {
       final ok = await MemoryApi.add(text: text, tags: tags);
       if (ok) {
-        await loadPage();
-        // 修复：loadPage 可能因竞态提前 return 不设 isLoading，
-        // 此处必须显式重置 isLoading: false
-        state = state.copyWith(clearError: true, isLoading: false);
+        // 修复：用乐观更新——直接把新记忆插入列表头部，而非依赖 loadPage。
+        // loadPage 可能被 _loadSeq 竞态丢弃（用户在 add 后立即触发新的 loadPage/search），
+        // 导致刚添加的记忆不显示。乐观更新确保用户立即看到结果。
+        final newMemory = Memory(
+          // 临时 id，下次 loadPage/search 会用服务端真实数据替换
+          id: DateTime.now().microsecondsSinceEpoch,
+          text: text,
+          source: 'mobile',
+          tags: tags,
+          createdAt: DateTime.now(),
+        );
+        state = state.copyWith(
+          memories: [newMemory, ...state.memories],
+          clearError: true,
+          isLoading: false,
+        );
       } else {
         state = state.copyWith(error: '添加失败', isLoading: false);
       }

@@ -26,13 +26,9 @@ router:
     complex: 0.6
     expert: 0.9
 
-# 开发环境监控
-# 修复：之前用 `monitor:` 但代码读 `monitoring:`（FullConfig.monitoring），
-# 导致监控配置被 Pydantic 静默忽略。
-monitoring:
-  metrics_enabled: true
-  tracing_enabled: true
-  health_check_interval: 30  # 更频繁的健康检查
+# 修复 #7：移除 monitoring 段——metrics_enabled/tracing_enabled/health_check_interval
+# 三个键 FullConfig.monitoring 从不读取（死配置）。env 配置合并 default_config.yaml
+# 后，monitoring 继承 default 的 enabled/port 即可，无需在 env 中重复声明。
 
 # 注：FullConfig 无 features 字段，原 `features:` 块被 Pydantic 静默忽略（死配置）。
 # 自进化/实验功能的真实开关在 router.self_evolution.enabled 与各模块配置中。

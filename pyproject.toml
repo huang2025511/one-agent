@@ -31,6 +31,8 @@ test = [
     "pytest>=8.0,<9.0",
     "pytest-asyncio>=0.23.0,<1.0",
     "pytest-cov>=4.0,<7.0",
+    # 修复 #5：CI 用 --timeout 控制单测耗时，需声明为依赖（与 requirements.txt 一致）
+    "pytest-timeout>=0.13.0",
 ]
 full = [
     # full 现在等价于核心依赖 + wechat + test

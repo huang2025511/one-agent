@@ -132,7 +132,21 @@ class SseClient {
       }
 
       if (response.statusCode != 200) {
-        final responseBody = await response.transform(utf8.decoder).join();
+        // 修复 #3（bug）：错误响应体 join() 无大小限制，OOM 风险。
+        // 限制最多读取 64KB，超限截断。仅用于 debug 日志和错误提示。
+        final sb = StringBuffer();
+        int readBytes = 0;
+        const maxErrorBytes = 64 * 1024;
+        await for (final chunk in response.transform(utf8.decoder)) {
+          readBytes += chunk.length;
+          if (readBytes > maxErrorBytes) {
+            sb.write(chunk.substring(0, maxErrorBytes - sb.length));
+            sb.write('...[truncated]');
+            break;
+          }
+          sb.write(chunk);
+        }
+        final responseBody = sb.toString();
         if (kDebugMode) {
           debugPrint('❌ SSE: 错误响应体 - $responseBody');
         }
@@ -151,6 +165,14 @@ class SseClient {
       try {
         await for (final chunk in response.transform(utf8.decoder).timeout(_streamIdleTimeout)) {
           buffer += chunk;
+
+          // 修复 #3（bug）：SSE 规范允许行结束符为 \r\n、\r 或 \n。
+          // 之前只识别 \n\n 作为事件块分隔符，若服务端或中间代理（nginx/CDN）
+          // 使用 \r\n 换行，所有事件会被拼在一块无法解析。
+          // 标准化换行后再用 \n\n 切分。
+          if (buffer.contains('\r')) {
+            buffer = buffer.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+          }
 
           while (buffer.contains('\n\n')) {
             final idx = buffer.indexOf('\n\n');
@@ -182,6 +204,16 @@ class SseClient {
         if (kDebugMode) {
           debugPrint('⏰ SSE: 流超时（${_streamIdleTimeout.inSeconds}秒无数据）');
         }
+        // 修复 #3（bug）：流读取阶段 TimeoutException 走兜底 return，
+        // 重试机制完全失效。移动网络切换/WiFi 断开时 120 秒无数据很常见。
+        // 修复：若未收到任何内容且还有重试次数，则继续重试而非 return。
+        if (!hasReceivedContent && attempt < _maxRetries) {
+          if (kDebugMode) {
+            debugPrint('🔄 SSE: 流超时且未收到内容，尝试重连...');
+          }
+          continue; // 回到 for 循环顶部，触发重连
+        }
+        // 已收到内容或重试次数用尽，走下面的兜底逻辑
       } catch (e) {
         if (kDebugMode) {
           debugPrint('❌ SSE: 流读取中断 - $e');
@@ -223,18 +255,34 @@ class SseClient {
   /// 解析 SSE 数据块
   StreamEvent? _parseSseBlock(String block) {
     final lines = block.split('\n');
-    String? dataLine;
+    // 修复 #3（bug）：SSE 规范规定同一事件内多个 data: 行应按换行符拼接。
+    // 之前后一行覆盖前一行，导致跨多行的 JSON（格式化 thinking、含换行代码块）
+    // 只保留最后一行，JSON 解析失败或内容丢失。
+    final StringBuffer dataBuffer = StringBuffer();
+    bool hasData = false;
     String? eventType;
 
     for (final line in lines) {
       if (line.startsWith('data: ')) {
-        dataLine = line.substring(6);
+        if (hasData) {
+          dataBuffer.write('\n'); // 多行 data 按 \n 拼接
+        }
+        dataBuffer.write(line.substring(6));
+        hasData = true;
+      } else if (line.startsWith('data:')) {
+        // 兼容 "data:" 无空格前缀
+        if (hasData) {
+          dataBuffer.write('\n');
+        }
+        dataBuffer.write(line.substring(5));
+        hasData = true;
       } else if (line.startsWith('event: ')) {
         eventType = line.substring(7);
       }
     }
 
-    if (dataLine == null) return null;
+    if (!hasData) return null;
+    final dataLine = dataBuffer.toString();
 
     try {
       final json = jsonDecode(dataLine) as Map<String, dynamic>;

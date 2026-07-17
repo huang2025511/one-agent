@@ -17,7 +17,10 @@ class MainScreen extends ConsumerStatefulWidget {
   ConsumerState<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends ConsumerState<MainScreen> {
+// 修复：混入 WidgetsBindingObserver 监听 app 生命周期，
+// 在 app 进入后台时暂停审批轮询，回到前台时恢复，避免后台无谓网络请求
+class _MainScreenState extends ConsumerState<MainScreen>
+    with WidgetsBindingObserver {
   int _currentIndex = 0;
   bool _updateCheckDone = false;
 
@@ -48,11 +51,24 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   @override
   void initState() {
     super.initState();
+    // 修复：注册生命周期监听，便于在 app 前后台切换时暂停/恢复审批轮询
+    WidgetsBinding.instance.addObserver(this);
     // 延迟启动审批轮询和更新检查，等设置加载完成
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(approvalProvider.notifier).startPolling();
       _checkUpdateOnStartup();
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
+    // 修复：app 进入后台（paused）时暂停审批轮询，回到前台（resumed）时恢复，
+    // 避免后台持续轮询浪费电量和网络资源
+    if (lifecycleState == AppLifecycleState.paused) {
+      ref.read(approvalProvider.notifier).stopPolling();
+    } else if (lifecycleState == AppLifecycleState.resumed) {
+      ref.read(approvalProvider.notifier).startPolling();
+    }
   }
 
   /// 启动时自动检查更新（延迟 3 秒，等网络连接建立）
@@ -105,6 +121,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
 
   @override
   void dispose() {
+    // 修复：移除生命周期监听，避免 widget dispose 后仍收到生命周期回调
+    WidgetsBinding.instance.removeObserver(this);
     // 在 super.dispose() 之前停止轮询，ref 仍有效
     ref.read(approvalProvider.notifier).stopPolling();
     super.dispose();

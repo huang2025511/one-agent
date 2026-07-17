@@ -25,7 +25,8 @@ class ChatScreen extends ConsumerStatefulWidget {
 class _ChatScreenState extends ConsumerState<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
   bool _isNearBottom = true;
-  String? _lastSessionId;
+  // 修复：保留 _forceScrollToBottom 标记，但现在在 ref.listen 回调中设置和消费，
+  // 而非在 build 主体中（移除了 _lastSessionId，改由 ref.listen 检测会话切换）
   bool _forceScrollToBottom = false;
 
   @override
@@ -41,7 +42,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
     // 预加载会话列表，供 Drawer 侧边栏使用
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) ref.read(sessionListProvider.notifier).load();
+      if (!mounted) return;
+      ref.read(sessionListProvider.notifier).load();
+      // 修复：ref.listen 只在状态变化时触发，首次构建不会触发。
+      // 若初始已有会话消息，需在此补一次初始滚动到底部。
+      final chatState = ref.read(chatProvider);
+      if (chatState.currentSessionId != null &&
+          chatState.messages.isNotEmpty) {
+        _scrollToBottom(instant: true);
+      }
     });
   }
 
@@ -74,20 +83,31 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final isConnected = settingsState.isConnected;
     final l10n = AppLocalizations.of(context)!;
 
-    // 检测会话切换：当 currentSessionId 变化时，强制滚动到底部显示最新内容
-    if (chatState.currentSessionId != _lastSessionId) {
-      _lastSessionId = chatState.currentSessionId;
-      _forceScrollToBottom = true;
-    }
+    // 修复：用 ref.listen 监听 currentSessionId 变化，在回调中做副作用，移出 build。
+    // 之前在 build 中直接比较 _lastSessionId 并修改 _forceScrollToBottom，属于 build 副作用，
+    // 每次 rebuild（如输入框输入）都会重复执行。
+    ref.listen<String?>(chatProvider.select((s) => s.currentSessionId),
+        (prev, next) {
+      if (prev != next) {
+        // 会话切换：标记需要强制滚动到底部（等消息加载后在 messages 监听中消费）
+        _forceScrollToBottom = true;
+      }
+    });
 
-    // 会话切换后立即滚动到底部（instant），新消息流式追加时平滑滚动
-    if (_forceScrollToBottom && chatState.messages.isNotEmpty) {
-      _forceScrollToBottom = false;
-      _scrollToBottom(instant: true);
-    } else if (chatState.messages.isNotEmpty && _isNearBottom) {
-      // 仅在接近底部时自动滚动，避免打断用户上滑阅读历史
-      _scrollToBottom();
-    }
+    // 修复：消息列表变化时滚动——会话切换后立即滚动，流式追加时平滑滚动。
+    // 之前这些副作用都在 build 中执行，每次 rebuild 都会重复调度滚动。
+    ref.listen<List<ChatMessage>>(chatProvider.select((s) => s.messages),
+        (prev, next) {
+      if (next.isEmpty) return;
+      if (_forceScrollToBottom) {
+        // 会话切换后立即滚动到底部显示最新内容
+        _forceScrollToBottom = false;
+        _scrollToBottom(instant: true);
+      } else if (_isNearBottom) {
+        // 仅在接近底部时自动滚动，避免打断用户上滑阅读历史
+        _scrollToBottom();
+      }
+    });
 
     return Scaffold(
       drawer: const _SessionDrawer(),
