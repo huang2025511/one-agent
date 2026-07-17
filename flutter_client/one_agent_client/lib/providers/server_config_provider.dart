@@ -52,8 +52,16 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
       final configResult = results[0] as AppConfig?;
       final modelsResult = results[1] as Map<String, dynamic>?;
       if (configResult != null && configResult.config != null) {
+        // 问题1 根本修复：用深合并而非直接替换。
+        // 保留当前 state.config 中服务端返回 config 没有的字段
+        // （特别是自定义服务商的 api_keys 和 base_urls），
+        // 防止切换主服务商后自定义服务商从 UI 消失。
+        final mergedConfig = _deepMergeConfig(
+          state.config,
+          configResult.config!,
+        );
         state = state.copyWith(
-          config: configResult.config,
+          config: mergedConfig,
           models: modelsResult,
           isLoading: false,
           clearError: true,
@@ -88,8 +96,24 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
     try {
       final result = await SystemApi.updateConfig(updates);
       if (result != null && result['status'] == 'ok') {
+        final newConfig = result['config'];
+        // 问题1 根本修复：用深合并而非直接替换。
+        // 服务端返回的 config 可能丢失自定义服务商的 api_keys，
+        // 深合并保留当前 state 中服务端没有的字段。
+        Map<String, dynamic> mergedConfig;
+        if (newConfig is Map<String, dynamic>) {
+          mergedConfig = _deepMergeConfig(state.config, newConfig);
+        } else if (newConfig is Map) {
+          mergedConfig = _deepMergeConfig(
+            state.config,
+            Map<String, dynamic>.from(newConfig),
+          );
+        } else {
+          // 服务端返回的 config 字段异常，保留当前 state
+          mergedConfig = state.config ?? <String, dynamic>{};
+        }
         state = state.copyWith(
-          config: result['config'] as Map<String, dynamic>,
+          config: mergedConfig,
           isSaving: false,
           clearError: true,
         );
@@ -112,6 +136,46 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
   // ════════════════════════════════════════════════════════════
   //  通用嵌套 Map 取值辅助
   // ════════════════════════════════════════════════════════════
+
+  /// 深度合并两个 config Map。
+  ///
+  /// 问题1 根本修复：服务端返回的 config 可能因各种原因（旧版本、
+  /// _deep_merge 行为差异、配置文件路径不同等）丢失自定义服务商的
+  /// api_keys 条目。此方法将服务端返回的 config 与当前 state.config
+  /// 深度合并：服务端返回的字段优先，但保留当前 state 中服务端没有
+  /// 的字段（特别是自定义服务商的 api_keys 和 base_urls）。
+  ///
+  /// 注意：null 值不会覆盖已有值（避免服务端返回 null 清除已配置的 key）。
+  Map<String, dynamic> _deepMergeConfig(
+    Map<String, dynamic>? current,
+    Map<String, dynamic> incoming,
+  ) {
+    if (current == null || current.isEmpty) {
+      return Map<String, dynamic>.from(incoming);
+    }
+    final result = Map<String, dynamic>.from(current);
+    for (final entry in incoming.entries) {
+      final key = entry.key;
+      final value = entry.value;
+      if (value is Map<String, dynamic> && result[key] is Map<String, dynamic>) {
+        result[key] = _deepMergeConfig(
+          result[key] as Map<String, dynamic>?,
+          value,
+        );
+      } else if (value is Map && result[key] is Map) {
+        // 兼容 Map<dynamic, dynamic>
+        final curMap = Map<String, dynamic>.from(result[key] as Map);
+        final incMap = Map<String, dynamic>.from(value as Map);
+        result[key] = _deepMergeConfig(curMap, incMap);
+      } else if (value != null) {
+        result[key] = value;
+      }
+      // value == null 时不覆盖，保留当前值
+    }
+    return result;
+  }
+
+
   dynamic _get(List<String> path, [dynamic fallback]) {
     dynamic cur = state.config;
     for (final key in path) {
