@@ -850,12 +850,67 @@ class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
   final Map<String, bool> _testStatus = {};
   bool _testingAll = false;
 
+  /// 问题1 根本修复（v2079）：缓存 list_providers API 返回的所有
+  /// has_key=true 的服务商。这是最权威的来源——直接从服务端读取
+  /// "哪些服务商已配置 key"，不依赖客户端 state.config 是否完整。
+  /// 即使 state.config 因任何原因（深合并边缘情况、服务端返回差异、
+  /// 热重载时序等）丢失了某个自定义服务商，只要服务端确认该服务商
+  /// 有 key，胶囊栏就会显示。
+  Set<String> _serverKeyedProviders = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    // 启动时立即拉取一次服务端 has_key=true 的服务商列表
+    _refreshServerKeyedProviders();
+  }
+
+  /// 调用 list_providers API，把 has_key=true 的服务商缓存到
+  /// _serverKeyedProviders，然后 setState 触发 UI 刷新。
+  Future<void> _refreshServerKeyedProviders() async {
+    try {
+      final result = await SystemApi.listProviders();
+      if (result == null) return;
+      final providers = result['providers'] as List? ?? [];
+      final keyed = <String>{};
+      for (final p in providers) {
+        if (p is Map<String, dynamic>) {
+          final name = p['name'] as String? ?? '';
+          final hasKey = p['has_key'] == true;
+          if (name.isNotEmpty && hasKey) {
+            keyed.add(name);
+          }
+        }
+      }
+      if (!mounted) return;
+      // 只有当集合变化时才 setState，避免无谓重建
+      if (!_setEquals(keyed, _serverKeyedProviders)) {
+        setState(() {
+          _serverKeyedProviders = keyed;
+        });
+      }
+    } catch (_) {
+      // 静默失败，胶囊栏仍可用其他来源
+    }
+  }
+
+  bool _setEquals(Set<String> a, Set<String> b) {
+    if (a.length != b.length) return false;
+    for (final v in a) {
+      if (!b.contains(v)) return false;
+    }
+    return true;
+  }
+
   /// 提取当前已配置的服务商列表
   /// 问题2a 修复：优先使用 config.llm.api_keys 中已配置 key 的服务商，
   /// 确保切换主服务商后新增服务商不会消失。
   /// 问题1 再次修复：增加 ProviderModelCache 作为第4重来源，
   /// 即使 config 因任何边缘情况丢失了自定义服务商，只要模型缓存
   /// 里有该服务商的模型，胶囊也会显示。
+  /// 问题1 v2079 根本修复：增加第5重来源——直接调用 list_providers
+  /// API 获取服务端所有 has_key=true 的服务商。这是用户期望的
+  /// "客户端把服务端所有带 key 的服务商都识别出来显示"。
   List<String> _extractConfiguredProviders() {
     final providers = <String>{};
     // 1. 从已配置 API Key 的服务商中提取（最可靠的来源）
@@ -878,6 +933,10 @@ class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
       final p = m['provider'] as String?;
       if (p != null && p.isNotEmpty) providers.add(p);
     }
+    // 5. 问题1 v2079 根本修复：从 list_providers API 缓存的服务端
+    //    has_key=true 服务商列表补充。这是最权威的来源——直接来自
+    //    服务端，不受客户端 state.config 任何边缘情况影响。
+    providers.addAll(_serverKeyedProviders);
     return providers.toList()..sort();
   }
 
@@ -1001,8 +1060,13 @@ class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
                 icon: const Icon(Icons.add, size: 16),
                 label: const Text('添加服务商',
                     style: TextStyle(fontSize: 12)),
-                onPressed: () =>
-                    _showProviderManagementDialog(context, notifier),
+                onPressed: () async {
+                  await _showProviderManagementDialog(context, notifier);
+                  if (!mounted) return;
+                  // 问题1 v2079 修复：添加服务商对话框关闭后刷新
+                  // list_providers 缓存，确保新添加的服务商立即出现在胶囊栏。
+                  await _refreshServerKeyedProviders();
+                },
                 style: TextButton.styleFrom(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
@@ -1032,11 +1096,17 @@ class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
                         hasKey: configuredKeyProviders.contains(p),
                         // 问题2b：显示测试状态（绿色=可用，灰色=不可用）
                         isAvailable: _testStatus[p],
-                        onTap: () => _showProviderDetailSheet(
-                          context: context,
-                          name: p,
-                          notifier: notifier,
-                        ),
+                        onTap: () async {
+                          await _showProviderDetailSheet(
+                            context: context,
+                            name: p,
+                            notifier: notifier,
+                          );
+                          if (!mounted) return;
+                          // 问题1 v2079 修复：详情面板关闭后刷新
+                          // list_providers 缓存，确保 key 变更立即反映。
+                          await _refreshServerKeyedProviders();
+                        },
                         onLongPress: p == primary
                             ? null
                             : () async {
@@ -1056,7 +1126,13 @@ class _ProviderManagementAreaState extends State<_ProviderManagementArea> {
                                 // 问题1 修复：切换主服务商后用 loadConfig()
                                 // 而非 loadModels()，确保 state.config 保留
                                 // 所有 api_keys（包括新增服务商），避免消失。
-                                if (ok) await notifier.loadConfig();
+                                if (ok) {
+                                  await notifier.loadConfig();
+                                  // 问题1 v2079 根本修复：同时刷新
+                                  // list_providers 缓存，确保胶囊栏立即
+                                  // 反映服务端最新的 has_key 状态。
+                                  await _refreshServerKeyedProviders();
+                                }
                               },
                       ))
                   .toList(),
