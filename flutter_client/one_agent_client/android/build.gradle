@@ -3,6 +3,9 @@ allprojects {
         maven { url 'https://maven.aliyun.com/repository/google' }
         maven { url 'https://maven.aliyun.com/repository/central' }
         maven { url 'https://maven.aliyun.com/repository/public' }
+        // v2079 修复：aliyun 镜像偶发 502 故障时自动 fallback 到腾讯云镜像，
+        // 避免 org.ow2.asm:asm-tree 等依赖下载失败导致整个构建失败。
+        maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
         google()
         mavenCentral()
     }
@@ -14,6 +17,24 @@ subprojects {
 }
 subprojects {
     project.evaluationDependsOn(':app')
+    // v2079 修复：对所有子项目（如 :open_filex）也禁用 release lint 检查和
+    // extractReleaseAnnotations task。这些 task 需要下载 lint 依赖（如
+    // org.ow2.asm:asm-tree），而镜像偶发 502 故障会导致下载失败，
+    // 进而整个 APK 构建失败。release 构建并不需要这些 lint 产物。
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android {
+                lintOptions {
+                    checkReleaseBuilds false
+                    abortOnError false
+                }
+            }
+        }
+        // 禁用 extractReleaseAnnotations task（需要 lint 依赖）
+        project.tasks.matching { it.name == 'extractReleaseAnnotations' }.all {
+            it.enabled = false
+        }
+    }
 }
 
 tasks.register("clean", Delete) {
