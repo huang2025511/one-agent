@@ -19,10 +19,12 @@ subprojects {
     project.evaluationDependsOn(':app')
 }
 
-// v2079 修复：对所有子项目（如 :open_filex）禁用 release lint 检查和
-// extractReleaseAnnotations task。这些 task 需要下载 lint 依赖（如
-// org.ow2.asm:asm-tree），而镜像偶发 502 故障会导致下载失败，
-// 进而整个 APK 构建失败。release 构建并不需要这些 lint 产物。
+// v2079 修复：对所有子项目（如 :open_filex）禁用 release lint 检查。
+// lint task 需要下载 lint 依赖（如 org.ow2.asm:asm-tree），而镜像偶发
+// 502 故障会导致下载失败，进而整个 APK 构建失败。release 构建不需要 lint。
+//
+// 注意：不能禁用 extractReleaseAnnotations task，因为下游 syncReleaseLibJars
+// 依赖它生成的 typedefs.txt。只能通过添加镜像 fallback 让依赖下载成功。
 //
 // 用 gradle.afterProject 而非 afterEvaluate，因为 evaluationDependsOn
 // 已经评估了子项目，afterEvaluate 会抛 "Cannot run afterEvaluate when
@@ -39,10 +41,6 @@ gradle.afterProject { project ->
         }
     } catch (Exception e) {
         // 某些项目可能没有 lintOptions，忽略
-    }
-    // 禁用 extractReleaseAnnotations task（需要 lint 依赖）
-    project.tasks.matching { it.name == 'extractReleaseAnnotations' }.configureEach {
-        enabled = false
     }
 }
 
