@@ -328,16 +328,30 @@ def test_system_executor_safe_command_allowed():
 
 
 def test_system_executor_dangerous_allowed_without_password():
-    """密码锁已移除：DANGEROUS 命令也直接允许执行，无需密码。"""
+    """密码保护恢复：DANGEROUS 命令默认需密码，未配置密码时拒绝。
+
+    修复 #2（安全）：之前 _check_permission 无条件放行所有命令（含 DANGEROUS），
+    使 PasswordManager 成为死代码。现在恢复分级判断——risk>=2 且 require_password=True
+    时，未配置密码则拒绝（fail-secure），需要密码输入。
+    """
     from executors.system import SystemExecutor
     exe = SystemExecutor()
     exe._enabled = True
-    # 密码锁已移除，所有命令（含 DANGEROUS）均直接允许
+    # 默认 require_password=True，且 _pwd_manager=None（未 setup）
+    # → 高危命令应被拒绝并要求密码
     allowed, needs_pwd = asyncio.run(
         exe._check_permission("rm -rf /tmp/test", 3, "dangerous", "")
     )
-    assert allowed is True
-    assert needs_pwd is False
+    assert allowed is False, "DANGEROUS 命令在未配置密码时应被拒绝（fail-secure）"
+    assert needs_pwd is True, "应提示需要密码输入"
+
+    # 关闭密码保护开关后，DANGEROUS 命令直接放行
+    exe._require_password = False
+    allowed2, needs_pwd2 = asyncio.run(
+        exe._check_permission("rm -rf /tmp/test", 3, "dangerous", "")
+    )
+    assert allowed2 is True
+    assert needs_pwd2 is False
 
 
 def test_system_executor_static_hash():

@@ -8,6 +8,14 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+# 修复：强制设置 ONE_AGENT_CONFIG 指向 test_config.yaml。
+# 之前 conftest 用 test_config.yaml 加载配置，但 _save_config（skills/__init__.py）
+# 读取 os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")——
+# 若 env 未设置，_save_config 会把内存中的 test 配置写回 default_config.yaml，
+# 污染生产配置（name 变 One-Agent-Test、retries 变 1、language 变 en 等）。
+# 设置 env 后，load 和 save 都走 test_config.yaml，default_config.yaml 不受影响。
+os.environ.setdefault("ONE_AGENT_CONFIG", "config/test_config.yaml")
+
 from one_agent import OneAgentApp
 
 
@@ -49,7 +57,9 @@ def _run_app_in_thread(app_instance, ready_event):
 def app():
     """Start OneAgentApp in a dedicated thread for the entire test session."""
     # Use test-specific config with higher rate limits
-    cfg_path = os.environ.get("ONE_AGENT_CONFIG", "config/test_config.yaml")
+    # （ONE_AGENT_CONFIG 已在模块顶部 setdefault，_save_config 也会写到这里，
+    #  不会污染 config/default_config.yaml）
+    cfg_path = os.environ["ONE_AGENT_CONFIG"]
     application = OneAgentApp(cfg_path)
     # Remove CLI gateway to avoid input() blocking
     application._pm._plugins = [p for p in application._pm._plugins if p.name != "gateway_cli"]

@@ -453,7 +453,7 @@ _SIMPLE_HINTS = re.compile(
     re.IGNORECASE,
 )
 _TRIVIAL_HINTS = re.compile(
-    r"(nano|tiny|mini|0\.5b|1b|1\.5b|2b|3b)",
+    r"(nano|tiny|0\.5b|1b|1\.5b|2b|3b)",
     re.IGNORECASE,
 )
 

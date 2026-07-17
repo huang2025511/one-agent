@@ -223,6 +223,9 @@ class SystemExecutor(BaseExecutor):
         self._timeout_seconds: int = 30
         self._workdir: str = "."
         self._enabled: bool = False
+        # 安全默认：setup() 未调用时也按"需要密码"处理（fail-secure），
+        # 避免 SystemExecutor() 直接构造后 _check_permission 因缺少属性而崩溃。
+        self._require_password: bool = True
 
     async def setup(self, ctx) -> None:
         await super().setup(ctx)
