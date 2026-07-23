@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -221,7 +222,13 @@ class Summary:
 
 
 class MetricsRegistry:
-    """Central metrics registry with Prometheus format export."""
+    """Central metrics registry with Prometheus format export.
+
+    线程安全：所有指标注册/读取操作通过 ``_lock`` 保护，防止多线程
+    （如 FastAPI 同步路由线程池与事件循环线程并发）下出现：
+    1. check-then-act 竞态（两个线程同时创建同名指标，后者覆盖前者）
+    2. collect_all() 迭代 dict 时被其它线程修改导致 RuntimeError
+    """
 
     def __init__(self) -> None:
         self._counters: Dict[str, Counter] = {}
@@ -229,65 +236,77 @@ class MetricsRegistry:
         self._histograms: Dict[str, Histogram] = {}
         self._summaries: Dict[str, Summary] = {}
         self._custom_metrics: Dict[str, Callable] = {}
+        self._lock = threading.Lock()
 
     def counter(
         self, name: str, description: str = "", labels: List[str] = None
     ) -> Counter:
         """Get or create a counter."""
-        if name not in self._counters:
-            self._counters[name] = Counter(name, description, labels)
-        return self._counters[name]
+        with self._lock:
+            if name not in self._counters:
+                self._counters[name] = Counter(name, description, labels)
+            return self._counters[name]
 
     def gauge(
         self, name: str, description: str = "", labels: List[str] = None
     ) -> Gauge:
         """Get or create a gauge."""
-        if name not in self._gauges:
-            self._gauges[name] = Gauge(name, description, labels)
-        return self._gauges[name]
+        with self._lock:
+            if name not in self._gauges:
+                self._gauges[name] = Gauge(name, description, labels)
+            return self._gauges[name]
 
     def histogram(
         self, name: str, description: str = "", labels: List[str] = None,
         buckets: tuple = None,
     ) -> Histogram:
         """Get or create a histogram."""
-        if name not in self._histograms:
-            self._histograms[name] = Histogram(name, description, labels, buckets)
-        return self._histograms[name]
+        with self._lock:
+            if name not in self._histograms:
+                self._histograms[name] = Histogram(name, description, labels, buckets)
+            return self._histograms[name]
 
     def summary(
         self, name: str, description: str = "", labels: List[str] = None,
         quantiles: tuple = None,
     ) -> Summary:
         """Get or create a summary."""
-        if name not in self._summaries:
-            self._summaries[name] = Summary(name, description, labels, quantiles)
-        return self._summaries[name]
+        with self._lock:
+            if name not in self._summaries:
+                self._summaries[name] = Summary(name, description, labels, quantiles)
+            return self._summaries[name]
 
     def register_custom(self, name: str, collector: Callable) -> None:
         """Register a custom metric collector function.
 
         The collector should return a list of MetricValue objects.
         """
-        self._custom_metrics[name] = collector
+        with self._lock:
+            self._custom_metrics[name] = collector
 
     def collect_all(self) -> List[tuple]:
         """Collect all metrics as (metric_type, name, description, values)."""
+        # 在锁内复制引用列表，避免迭代时其它线程修改 dict 导致
+        # "dictionary changed size during iteration" RuntimeError。
+        # 各 metric.collect() 在锁外执行（它们读自己的 _values，
+        # defaultdict 等在 CPython GIL 下单次操作是原子的）。
+        with self._lock:
+            counters = list(self._counters.values())
+            gauges = list(self._gauges.values())
+            histograms = list(self._histograms.values())
+            summaries = list(self._summaries.values())
+            custom = list(self._custom_metrics.items())
+
         result = []
-
-        for name, metric in self._counters.items():
+        for metric in counters:
             result.append(("counter", metric.name, metric.description, metric.collect()))
-
-        for name, metric in self._gauges.items():
+        for metric in gauges:
             result.append(("gauge", metric.name, metric.description, metric.collect()))
-
-        for name, metric in self._histograms.items():
+        for metric in histograms:
             result.append(("histogram", metric.name, metric.description, metric.collect()))
-
-        for name, metric in self._summaries.items():
+        for metric in summaries:
             result.append(("summary", metric.name, metric.description, metric.collect()))
-
-        for name, collector in self._custom_metrics.items():
+        for name, collector in custom:
             try:
                 values = collector()
                 result.append(("gauge", name, "", values))
@@ -330,22 +349,33 @@ class MetricsRegistry:
 
     def clear(self) -> None:
         """Clear all metrics (for testing)."""
-        self._counters.clear()
-        self._gauges.clear()
-        self._histograms.clear()
-        self._summaries.clear()
+        with self._lock:
+            self._counters.clear()
+            self._gauges.clear()
+            self._histograms.clear()
+            self._summaries.clear()
+            self._custom_metrics.clear()
 
 
 # Singleton
 _registry: Optional[MetricsRegistry] = None
+_registry_lock = threading.Lock()
 
 
 def get_metrics_registry() -> MetricsRegistry:
-    """Get the shared metrics registry."""
+    """Get the shared metrics registry (thread-safe singleton).
+
+    修复：之前 ``global _registry`` 无锁保护，并发首次调用时两个线程
+    可能同时判断 ``_registry is None`` 为 True，各自创建实例并调用
+    _setup_default_metrics()，后者覆盖前者，导致前者上累积的指标数据
+    丢失。现在用 _registry_lock 保护 double-checked locking。
+    """
     global _registry
     if _registry is None:
-        _registry = MetricsRegistry()
-        _setup_default_metrics()
+        with _registry_lock:
+            if _registry is None:
+                _registry = MetricsRegistry()
+                _setup_default_metrics()
     return _registry
 
 

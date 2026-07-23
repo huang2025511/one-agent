@@ -14,6 +14,22 @@ from .context import TurnContext
 
 logger = logging.getLogger(__name__)
 
+# 保存 fire-and-forget 任务的强引用，防止被 GC 中途回收
+# （CPython 文档：Task 若无强引用可能被垃圾回收器中途回收，导致
+# "Task was destroyed but it is pending!" 警告且异常静默丢失）。
+# 任务完成后通过 done_callback 自动从集合移除。
+_background_tasks: set = set()
+
+
+def _on_task_done(task: "asyncio.Task") -> None:
+    """任务完成回调：从 _background_tasks 移除并记录未捕获异常。"""
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug("record_self_improvement_async 后台任务失败: %s", exc)
+
 
 async def record_self_improvement_async(coord, turn) -> None:
     """Record failure + 用 LLM 提炼改进 + 持久化应用（真正闭环）。
@@ -67,7 +83,9 @@ def record_self_improvement(coord, turn) -> None:
     if not (coord.ctx and hasattr(coord.ctx, 'self_improver') and coord.ctx.self_improver):
         return
     try:
-        asyncio.create_task(record_self_improvement_async(coord, turn))
+        task = asyncio.create_task(record_self_improvement_async(coord, turn))
+        _background_tasks.add(task)
+        task.add_done_callback(_on_task_done)
     except RuntimeError:
         # 没有运行中的事件循环时，退化到同步 record_failure
         error_type, error_detail = coord._parse_error(turn.error)
