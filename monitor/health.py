@@ -60,8 +60,12 @@ class HealthChecker:
 
         The function should return a ComponentCheck.
         """
+        is_new = name not in self._checks
         self._checks[name] = check_fn
-        logger.debug("Registered health check: %s", name)
+        # 只在首次注册时记日志；同名覆盖（如 api/__init__.py 用带 ctx
+        # 的版本替换默认无 ctx 版本）不重复输出，避免启动日志噪音。
+        if is_new:
+            logger.debug("Registered health check: %s", name)
 
     def check_all(self) -> Dict[str, Any]:
         """Run all health checks and return results."""
