@@ -59,6 +59,10 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
-    # Live2D 模型目录（用户下载模型后放入 assets/models/<model_name>/）
-    # 目录需包含 .model3.json + .moc3 + textures + motions + expressions
+    # 内置免费 Live2D 模型 - mao 猫（8个表情 + 7个动作）
+    - assets/models/mao/
+    - assets/models/mao/expressions/
+    - assets/models/mao/motions/
+    - assets/models/mao/mao_pro.4096/
+    # 用户后续导入的模型目录
     - assets/models/
