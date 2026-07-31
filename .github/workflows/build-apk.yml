@@ -60,7 +60,7 @@ jobs:
       - name: Patch flutter_live2d CMake version (3.10.2 → 3.22.1)
         run: |
           # flutter_live2d 要求 cmake 3.10.2，但 AGP 8.x 与之不兼容
-          # 我们修改插件的 build.gradle 来使用已安装的 cmake 3.22.1
+          # 我们修改插件的 build.gradle.kts 来使用已安装的 cmake 3.22.1
           LIVE2D_DIR=$(find $PUB_CACHE -type d -name "flutter_live2d-*" 2>/dev/null | head -1)
           if [ -z "$LIVE2D_DIR" ]; then
             LIVE2D_DIR=$(find $HOME/.pub-cache -type d -name "flutter_live2d-*" 2>/dev/null | head -1)
@@ -68,17 +68,29 @@ jobs:
           
           if [ -n "$LIVE2D_DIR" ]; then
             echo "Found flutter_live2d at: $LIVE2D_DIR"
-            GRADLE_FILE="$LIVE2D_DIR/android/build.gradle"
+            # flutter_live2d 使用 build.gradle.kts (Kotlin DSL)
+            GRADLE_FILE="$LIVE2D_DIR/android/build.gradle.kts"
+            if [ ! -f "$GRADLE_FILE" ]; then
+              GRADLE_FILE="$LIVE2D_DIR/android/build.gradle"
+            fi
+            
             if [ -f "$GRADLE_FILE" ]; then
               echo "Patching $GRADLE_FILE"
-              # 将 cmake 版本从 3.10.2 替换为 3.22.1
-              sed -i 's/version.*"3.10.2"/version "3.22.1"/g' "$GRADLE_FILE"
-              # 也替换可能的单引号
-              sed -i "s/version.*'3.10.2'/version '3.22.1'/g" "$GRADLE_FILE"
-              echo "Patched! Contents of externalNativeBuild block:"
-              grep -A 5 "externalNativeBuild" "$GRADLE_FILE" || echo "No externalNativeBuild block found"
+              echo "=== Before patch ==="
+              cat "$GRADLE_FILE"
+              
+              # Kotlin DSL: version = "3.10.2" -> version = "3.22.1"
+              # Groovy DSL: version "3.10.2" -> version "3.22.1"
+              sed -i 's/version[[:space:]]*=[[:space:]]*"3.10.2"/version = "3.22.1"/g' "$GRADLE_FILE"
+              sed -i 's/version[[:space:]]*"3.10.2"/version "3.22.1"/g' "$GRADLE_FILE"
+              # 也处理可能的单引号
+              sed -i "s/version[[:space:]]*=[[:space:]]*'3.10.2'/version = '3.22.1'/g" "$GRADLE_FILE"
+              sed -i "s/version[[:space:]]*'3.10.2'/version '3.22.1'/g" "$GRADLE_FILE"
+              
+              echo "=== After patch ==="
+              cat "$GRADLE_FILE"
             else
-              echo "Warning: build.gradle not found at $GRADLE_FILE"
+              echo "Warning: build.gradle(.kts) not found at $LIVE2D_DIR/android/"
               ls -la "$LIVE2D_DIR/android/" 2>/dev/null || echo "No android directory"
             fi
           else
