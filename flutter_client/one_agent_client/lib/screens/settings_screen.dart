@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/system_api.dart';
+import '../providers/live2d_model_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/server_config_provider.dart';
 import '../providers/system_provider.dart';
 import '../providers/update_provider.dart';
+import 'model_manager_screen.dart';
 
 /// 设置页面 — 统一管理所有 One-Agent 设置
 ///
@@ -264,6 +266,8 @@ class _UnifiedSettingsViewState extends ConsumerState<_UnifiedSettingsView> {
               _AdvancedSection(notifier: notifier),
               const SizedBox(height: 16),
               _ConnectionInfoSection(ref: ref),
+              const SizedBox(height: 16),
+              const _PetModelSection(),
               const SizedBox(height: 16),
               const _AppearanceSection(),
               const SizedBox(height: 16),
@@ -5036,4 +5040,45 @@ void _showResult(
       behavior: SnackBarBehavior.floating,
     ),
   );
+}
+
+// ════════════════════════════════════════════════════════════════
+//  桌宠模型管理分区
+// ════════════════════════════════════════════════════════════════
+
+class _PetModelSection extends ConsumerWidget {
+  const _PetModelSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final modelState = ref.watch(live2dModelProvider);
+    final currentName = modelState.currentModel?.name ?? '内置 / Canvas';
+
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+            color: theme.colorScheme.outlineVariant.withOpacity(0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            leading: Icon(Icons.pets, color: theme.colorScheme.primary),
+            title: const Text('桌宠 Live2D 模型'),
+            subtitle: Text('当前: $currentName',
+                style: const TextStyle(fontSize: 12)),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => const ModelManagerScreen(),
+              ));
+            },
+          ),
+        ],
+      ),
+    );
+  }
 }

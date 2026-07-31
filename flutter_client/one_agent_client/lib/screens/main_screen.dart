@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/approval_provider.dart';
+import '../providers/pet_provider.dart';
 import '../providers/update_provider.dart';
 import 'chat_screen.dart';
 import 'memory_screen.dart';
@@ -132,11 +133,40 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Widget build(BuildContext context) {
     final approvalState = ref.watch(approvalProvider);
     final pendingCount = approvalState.pending.where((a) => a.isPending).length;
+    final petState = ref.watch(petProvider);
 
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
         children: _pages,
+      ),
+      // 桌宠悬浮窗开关
+      floatingActionButton: FloatingActionButton.small(
+        onPressed: petState.isLoading
+            ? null
+            : () async {
+                await ref.read(petProvider.notifier).toggle();
+                if (petState.error != null && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(petState.error!)),
+                  );
+                }
+              },
+        tooltip: petState.isOverlayActive ? '关闭桌宠' : '开启桌宠',
+        child: petState.isLoading
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Icon(
+                petState.isOverlayActive
+                    ? Icons.pets
+                    : Icons.pets_outlined,
+                color: petState.isOverlayActive
+                    ? const Color(0xFF6366F1)
+                    : null,
+              ),
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
