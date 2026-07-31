@@ -1,13 +1,13 @@
 allprojects {
     repositories {
+        // 官方源优先（GitHub Actions 海外 runner 稳定）
+        google()
+        mavenCentral()
+        // 国内镜像作为 fallback（本地构建时速度快）
         maven { url 'https://maven.aliyun.com/repository/google' }
         maven { url 'https://maven.aliyun.com/repository/central' }
         maven { url 'https://maven.aliyun.com/repository/public' }
-        // v2079 修复：aliyun 镜像偶发 502 故障时自动 fallback 到腾讯云镜像，
-        // 避免 org.ow2.asm:asm-tree 等依赖下载失败导致整个构建失败。
         maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
-        google()
-        mavenCentral()
     }
 }
 
