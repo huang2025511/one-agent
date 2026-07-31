@@ -27,6 +27,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Setup Android SDK (CMake + NDK for flutter_live2d native build)
+        run: |
+          # flutter_live2d 要求 cmake;3.10.2，项目用 ndk 25.1.8937393
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "cmake;3.10.2" \
+            "ndk;25.1.8937393" > /dev/null 2>&1 || true
+          echo "已安装的 cmake 版本:"
+          ls $ANDROID_HOME/cmake/ 2>/dev/null || echo "无"
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
