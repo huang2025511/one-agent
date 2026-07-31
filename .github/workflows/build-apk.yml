@@ -138,6 +138,6 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE
           git remote add gitee "https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/huang20260511/one-agent.git" 2>/dev/null || true
-          git push gitee HEAD:main --force-with-lease 2>&1 | sed "s/oauth2:[^@]*@/oauth2:***@/g"
+          git push gitee HEAD:main --force 2>&1 | sed "s/oauth2:[^@]*@/oauth2:***@/g"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
