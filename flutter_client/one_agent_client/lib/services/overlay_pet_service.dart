@@ -49,13 +49,13 @@ class OverlayPetService {
 
   /// 检查悬浮窗权限
   Future<bool> checkPermission() async {
-    return await FlutterOverlayWindow.isPermissionGranted();
+    return await FlutterOverlayWindow.isPermissionGranted() ?? false;
   }
 
   /// 请求悬浮窗权限
   Future<bool> requestPermission() async {
     final granted = await FlutterOverlayWindow.requestPermission();
-    return granted;
+    return granted ?? false;
   }
 
   /// 启动桌宠悬浮窗
@@ -109,7 +109,7 @@ class OverlayPetService {
       data: config,
     ));
 
-    return result;
+    return result ?? false;
   }
 
   /// 关闭悬浮窗
@@ -120,7 +120,7 @@ class OverlayPetService {
     _listenerSub = null;
     final result = await FlutterOverlayWindow.closeOverlay();
     debugPrint('✅ 悬浮窗关闭结果: $result');
-    return result;
+    return result ?? false;
   }
 
   /// 向悬浮窗发送消息

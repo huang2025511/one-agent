@@ -46,7 +46,7 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
   String _baseUrl = 'http://127.0.0.1:18792';
   String _apiKey = '';
   String? _sessionId;
-  String? _modelPath; // 文件系统模型目录
+  String? _modelDir; // 模型目录（assets 或文件系统路径）
   String? _modelFileName; // 模型文件名
 
   // 宠物状态
@@ -99,7 +99,7 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
             _baseUrl = data['baseUrl'] as String? ?? _baseUrl;
             _apiKey = data['apiKey'] as String? ?? _apiKey;
             _sessionId = data['sessionId'] as String?;
-            _modelPath = data['modelPath'] as String?;
+            _modelDir = data['modelPath'] as String?;
             _modelFileName = data['modelFileName'] as String?;
             // 配置 ApiClient（悬浮窗内独立配置）
             ApiClient.configure(baseUrl: _baseUrl, apiKey: _apiKey);
@@ -284,14 +284,14 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
                 ),
               // 宠物（模型路径变化时通过 key 重建以重新加载）
               PetRenderer(
-                key: ValueKey('${_modelPath ?? ''}/${_modelFileName ?? ''}'),
+                key: ValueKey('${_modelDir ?? ''}/${_modelFileName ?? ''}'),
                 state: PetRenderState(
                   mood: _mood,
                   mouthOpen: _mouthOpen,
                 ),
                 size: 160,
-                filePath: _modelPath,
-                fileModelName: _modelFileName,
+                modelDir: _modelDir,
+                modelFileName: _modelFileName,
                 onTap: _onPetTap,
               ),
               // 输入框

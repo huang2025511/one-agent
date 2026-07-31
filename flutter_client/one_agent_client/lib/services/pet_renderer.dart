@@ -53,20 +53,13 @@ class PetRenderer extends StatefulWidget {
   final double size;
   final VoidCallback? onTap;
 
-  /// Live2D 模型目录（相对 assets）。如 'assets/models/haru/'。
+  /// Live2D 模型目录。支持 assets 路径（'assets/models/haru/'）
+  /// 或文件系统绝对路径（'/data/.../live2d_models/haru/'）。
   /// 留空则自动检测 assets/models/ 下第一个 .model3.json。
   final String? modelDir;
 
   /// Live2D 模型文件名（如 'haru.model3.json'）。留空则自动检测。
   final String? modelFileName;
-
-  /// 文件系统绝对路径（如 '/data/.../live2d_models/haru/'）。
-  /// 优先级：filePath > modelDir(assets) > Canvas fallback
-  final String? filePath;
-
-  /// 文件系统路径对应的模型文件名（如 'haru.model3.json'）。
-  /// 需与 filePath 一起提供。
-  final String? fileModelName;
 
   const PetRenderer({
     super.key,
@@ -75,8 +68,6 @@ class PetRenderer extends StatefulWidget {
     this.onTap,
     this.modelDir,
     this.modelFileName,
-    this.filePath,
-    this.fileModelName,
   });
 
   @override
@@ -184,17 +175,13 @@ class _PetRendererState extends State<PetRenderer>
   }
 
   /// 解析模型路径
-  /// 优先级：filePath（文件系统）> modelDir（assets）> 自动扫描 assets
+  /// 优先级：modelDir（调用方指定，支持 assets 和文件系统）> 自动扫描 assets
   Future<(String?, String?)> _resolveModelPath() async {
-    // 1. 文件系统路径（导入的模型）优先
-    if (widget.filePath != null && widget.fileModelName != null) {
-      return (widget.filePath, widget.fileModelName);
-    }
-    // 2. 调用方显式指定的 assets 路径
+    // 1. 调用方显式指定的路径（支持 assets 和文件系统绝对路径）
     if (widget.modelDir != null && widget.modelFileName != null) {
       return (widget.modelDir, widget.modelFileName);
     }
-    // 3. 扫描 assets/models/ 下子目录（通过 AssetManifest.json）
+    // 2. 扫描 assets/models/ 下子目录（通过 AssetManifest.json）
     try {
       final manifestJson = await rootBundle.loadString('AssetManifest.json');
       final regex = RegExp(r'"([^"]+\.model3\.json)"');
@@ -213,15 +200,17 @@ class _PetRendererState extends State<PetRenderer>
     return (null, null);
   }
 
-  void _startIdleMotion() {
+  Future<void> _startIdleMotion() async {
     if (!_live2dAvailable) return;
-    // Idle 动作通常 group='Idle' 或 'idle'
-    _live2dController.startMotion(group: 'Idle', priority: 1).catchError((_) {
-      // 失败则尝试 index 0
-      return _live2dController.startMotion(index: 0, priority: 1);
-    }).catchError((e) {
-      if (kDebugMode) debugPrint('idle motion 启动失败: $e');
-    });
+    try {
+      await _live2dController.startMotion(group: 'Idle', priority: 1);
+    } catch (_) {
+      try {
+        await _live2dController.startMotion(index: 0, priority: 1);
+      } catch (e) {
+        if (kDebugMode) debugPrint('idle motion 启动失败: $e');
+      }
+    }
   }
 
   void _updateTalkAnimation() {
@@ -260,27 +249,25 @@ class _PetRendererState extends State<PetRenderer>
   void _applyStateToLive2D(PetRenderState oldState) {
     if (!_live2dAvailable) return;
 
-    // 1. 嘴型同步（说话时）
-    if (widget.state.mood == PetMood.talking) {
-      _live2dController
-          .setParameter('ParamMouthOpenY', widget.state.mouthOpen)
-          .catchError((_) {});
-      _live2dController
-          .setParameter('ParamMouthForm', widget.state.mouthOpen * 0.8 - 0.4)
-          .catchError((_) {});
-    }
+    try {
+      // 1. 嘴型同步（说话时）
+      if (widget.state.mood == PetMood.talking) {
+        _live2dController.setParameter(
+            'ParamMouthOpenY', widget.state.mouthOpen);
+        _live2dController.setParameter(
+            'ParamMouthForm', widget.state.mouthOpen * 0.8 - 0.4);
+      }
 
-    // 2. 眼睛睁开
-    if (widget.state.mood == PetMood.sleeping) {
-      _live2dController.setParameter('ParamEyeLOpen', 0.0).catchError((_) {});
-      _live2dController.setParameter('ParamEyeROpen', 0.0).catchError((_) {});
-    } else {
-      _live2dController
-          .setParameter('ParamEyeLOpen', widget.state.eyeOpen)
-          .catchError((_) {});
-      _live2dController
-          .setParameter('ParamEyeROpen', widget.state.eyeOpen)
-          .catchError((_) {});
+      // 2. 眼睛睁开
+      if (widget.state.mood == PetMood.sleeping) {
+        _live2dController.setParameter('ParamEyeLOpen', 0.0);
+        _live2dController.setParameter('ParamEyeROpen', 0.0);
+      } else {
+        _live2dController.setParameter('ParamEyeLOpen', widget.state.eyeOpen);
+        _live2dController.setParameter('ParamEyeROpen', widget.state.eyeOpen);
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('Live2D 参数设置失败: $e');
     }
 
     // 3. mood 变化时切换表情和动作
@@ -290,24 +277,21 @@ class _PetRendererState extends State<PetRenderer>
   }
 
   void _applyMoodChange(PetMood mood) {
-    // 表情索引映射（不同模型差异大，容错处理）
-    // 尝试常见表情名 → index 映射。失败则忽略。
-    final exprIndex = _moodToExpressionIndex(mood);
-    if (exprIndex >= 0 && exprIndex != _lastExpressionIndex) {
-      _live2dController.setExpression(exprIndex).catchError((e) {
-        if (kDebugMode) debugPrint('表情切换失败 index=$exprIndex: $e');
-      });
-      _lastExpressionIndex = exprIndex;
-    }
+    try {
+      // 表情索引映射（不同模型差异大，容错处理）
+      final exprIndex = _moodToExpressionIndex(mood);
+      if (exprIndex >= 0 && exprIndex != _lastExpressionIndex) {
+        _live2dController.setExpression(exprIndex);
+        _lastExpressionIndex = exprIndex;
+      }
 
-    // 触发对应动作
-    final motionGroup = _moodToMotionGroup(mood);
-    if (motionGroup != null) {
-      _live2dController
-          .startMotion(group: motionGroup, priority: 2)
-          .catchError((e) {
-        if (kDebugMode) debugPrint('动作切换失败 group=$motionGroup: $e');
-      });
+      // 触发对应动作
+      final motionGroup = _moodToMotionGroup(mood);
+      if (motionGroup != null) {
+        _live2dController.startMotion(group: motionGroup, priority: 2);
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('Live2D 表情/动作切换失败: $e');
     }
   }
 
