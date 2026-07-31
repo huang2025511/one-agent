@@ -70,7 +70,7 @@ android {
 
     defaultConfig {
         applicationId "com.oneagent"
-        minSdk flutter.minSdkVersion
+        minSdk 24
         targetSdk flutter.targetSdkVersion
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
