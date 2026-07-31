@@ -135,49 +135,66 @@ jobs:
       # ── 上传 APK 到 Gitee Release（保持 Gitee 也有构建产物）──
       - name: Upload APK to Gitee Release
         if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           TAG_NAME="${GITHUB_REF#refs/tags/}"
           APK_FILE=$(ls one-agent-pet-*.apk | head -1)
-          echo "Tag: $TAG_NAME | APK: $APK_FILE"
+          APK_SIZE=$(du -h "$APK_FILE" | awk '{print $1}')
+          echo "Tag: $TAG_NAME | APK: $APK_FILE | Size: $APK_SIZE"
 
-          # 1. 在 Gitee 创建 Release（如果已存在则获取已有 release）
-          RESPONSE=$(curl -s -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases" \
+          # 1. 在 Gitee 创建 Release（带超时和重试）
+          echo ">>> 创建 Gitee Release..."
+          RESPONSE=$(curl --connect-timeout 30 --max-time 60 -s -w "\n%{http_code}" -X POST \
+            "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases" \
             -H "Content-Type: application/json;charset=UTF-8" \
             -d "{
-              \"access_token\": \"${{ secrets.GITEE_TOKEN }}\",
+              \"access_token\": \"${GITEE_TOKEN}\",
               \"tag_name\": \"${TAG_NAME}\",
               \"name\": \"${TAG_NAME}\",
               \"body\": \"APK 构建产物（自动同步自 GitHub Actions）\",
               \"target_commitish\": \"main\"
             }")
 
-          RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          RELEASE_ID=$(echo "$BODY" | jq -r '.id // empty')
 
           if [ -z "$RELEASE_ID" ]; then
-            echo "创建 Gitee Release 失败，尝试获取已有的 Release:"
-            RESPONSE=$(curl -s "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/tags/${TAG_NAME}?access_token=${{ secrets.GITEE_TOKEN }}")
+            echo ">>> 创建失败，尝试获取已有的 Release..."
+            RESPONSE=$(curl --connect-timeout 30 --max-time 60 -s \
+              "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/tags/${TAG_NAME}?access_token=${GITEE_TOKEN}")
             RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
             if [ -z "$RELEASE_ID" ]; then
-              echo "无法获取 Gitee Release: $RESPONSE"
+              echo "ERROR: 无法获取 Gitee Release: $RESPONSE"
               exit 1
             fi
           fi
 
-          echo "Gitee Release ID: $RELEASE_ID"
+          echo ">>> Gitee Release ID: $RELEASE_ID"
 
-          # 2. 上传 APK 附件到 Gitee Release
-          UPLOAD_RESP=$(curl -s -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/${RELEASE_ID}/attach_files" \
-            -F "access_token=${{ secrets.GITEE_TOKEN }}" \
+          # 2. 上传 APK 附件到 Gitee Release（带超时和进度）
+          echo ">>> 开始上传 APK (${APK_SIZE})..."
+          UPLOAD_RESP=$(curl --connect-timeout 30 --max-time 300 -s -w "\n%{http_code}" \
+            -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/${RELEASE_ID}/attach_files" \
+            -F "access_token=${GITEE_TOKEN}" \
             -F "file=@${APK_FILE}")
 
-          echo "上传结果: $UPLOAD_RESP"
+          UPLOAD_HTTP_CODE=$(echo "$UPLOAD_RESP" | tail -1)
+          UPLOAD_BODY=$(echo "$UPLOAD_RESP" | sed '$d')
+          echo "Upload HTTP Status: $UPLOAD_HTTP_CODE"
+          echo "Upload Response: $UPLOAD_BODY"
 
           # 3. 输出下载链接
-          ASSET_URL=$(echo "$UPLOAD_RESP" | jq -r '.browser_download_url // empty')
+          ASSET_URL=$(echo "$UPLOAD_BODY" | jq -r '.browser_download_url // empty' 2>/dev/null)
           if [ -n "$ASSET_URL" ]; then
             echo "✅ APK 已上传到 Gitee: $ASSET_URL"
           else
-            echo "⚠️ APK 上传可能失败，请检查 Gitee Release 页面"
+            echo "⚠️ APK 上传可能失败 (HTTP $UPLOAD_HTTP_CODE)，请检查 Gitee Release 页面"
+            echo "https://gitee.com/huang20260511/one-agent/releases/${TAG_NAME}"
           fi
 
       # ── 构建完成后自动同步代码到 Gitee（保持 Gitee 为最新主仓库）──
