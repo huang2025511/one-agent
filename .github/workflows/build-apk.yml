@@ -179,9 +179,9 @@ jobs:
           echo ">>> Gitee Release ID: $RELEASE_ID"
           echo "release_id=${RELEASE_ID}" >> $GITHUB_OUTPUT
 
-          # 2. 上传 APK 附件到 Gitee Release（跨境上传可能慢，超时 600s）
-          echo ">>> 开始上传 APK (${APK_SIZE})，最长等待 10 分钟..."
-          UPLOAD_RESP=$(curl --connect-timeout 30 --max-time 600 --retry 2 --retry-delay 10 -s -w "\n%{http_code}" \
+          # 2. 上传 APK 附件到 Gitee Release（跨境上传可能慢，超时 120s）
+          echo ">>> 开始上传 APK (${APK_SIZE})，最长等待 2 分钟..."
+          UPLOAD_RESP=$(curl --connect-timeout 30 --max-time 120 -s -w "\n%{http_code}" \
             -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/${RELEASE_ID}/attach_files" \
             -F "access_token=${GITEE_TOKEN}" \
             -F "file=@${APK_FILE}")
