@@ -29,40 +29,20 @@ jobs:
 
       - name: Setup Android SDK (CMake + NDK for flutter_live2d native build)
         run: |
-          # flutter_live2d 要求 cmake;3.10.2，我们先尝试安装
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
-            "cmake;3.10.2" > /dev/null 2>&1 || true
+          # flutter_live2d 原本要求 cmake;3.10.2，但 AGP 8.x 与旧版 CMake Server 握手失败。
+          # 解决方案：安装 cmake;3.22.1（稳定版，兼容 AGP 8.x），
+          # 然后修改 flutter_live2d 插件的 build.gradle 使其使用此版本。
           
-          # 如果安装失败（cmake 不存在），从其他版本完整复制
-          if [ ! -f "$ANDROID_HOME/cmake/3.10.2/bin/cmake" ] || [ ! -d "$ANDROID_HOME/cmake/3.10.2/share" ]; then
-            echo "cmake;3.10.2 未安装或不完整，从其他版本完整复制..."
-            # 查找可用的 cmake 版本（排除 3.10.2 自身）
-            SRC_DIR=""
-            for dir in $ANDROID_HOME/cmake/*; do
-              if [ -f "$dir/bin/cmake" ] && [[ ! "$dir" == *"3.10.2"* ]]; then
-                SRC_DIR="$dir"
-                break
-              fi
-            done
+          # 安装所需 CMake 版本
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "cmake;3.22.1" > /dev/null 2>&1 || true
             
-            if [ -n "$SRC_DIR" ]; then
-              echo "从 $SRC_DIR 完整复制到 cmake/3.10.2/"
-              rm -rf $ANDROID_HOME/cmake/3.10.2
-              # 完整复制所有文件（bin, share, doc 等）
-              cp -r "$SRC_DIR" $ANDROID_HOME/cmake/3.10.2
-            else
-              echo "错误: 找不到任何已安装的 cmake 版本"
-              exit 1
-            fi
-          fi
-
           # 安装项目需要的 NDK (27.2.12479018 是 flutter_live2d 需要的版本)
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
             "ndk;27.2.12479018" > /dev/null 2>&1 || true
 
-          echo "=== 验证 CMake 3.10.2 ==="
-          ls -la $ANDROID_HOME/cmake/3.10.2/bin/
-          $ANDROID_HOME/cmake/3.10.2/bin/cmake --version
+          echo "=== 验证 CMake 3.22.1 ==="
+          $ANDROID_HOME/cmake/3.22.1/bin/cmake --version
           echo "=== 已安装的 cmake 版本 ==="
           ls $ANDROID_HOME/cmake/
           echo "=== 已安装的 NDK 版本 ==="
@@ -76,6 +56,34 @@ jobs:
 
       - name: Get dependencies
         run: flutter pub get
+
+      - name: Patch flutter_live2d CMake version (3.10.2 → 3.22.1)
+        run: |
+          # flutter_live2d 要求 cmake 3.10.2，但 AGP 8.x 与之不兼容
+          # 我们修改插件的 build.gradle 来使用已安装的 cmake 3.22.1
+          LIVE2D_DIR=$(find $PUB_CACHE -type d -name "flutter_live2d-*" 2>/dev/null | head -1)
+          if [ -z "$LIVE2D_DIR" ]; then
+            LIVE2D_DIR=$(find $HOME/.pub-cache -type d -name "flutter_live2d-*" 2>/dev/null | head -1)
+          fi
+          
+          if [ -n "$LIVE2D_DIR" ]; then
+            echo "Found flutter_live2d at: $LIVE2D_DIR"
+            GRADLE_FILE="$LIVE2D_DIR/android/build.gradle"
+            if [ -f "$GRADLE_FILE" ]; then
+              echo "Patching $GRADLE_FILE"
+              # 将 cmake 版本从 3.10.2 替换为 3.22.1
+              sed -i 's/version.*"3.10.2"/version "3.22.1"/g' "$GRADLE_FILE"
+              # 也替换可能的单引号
+              sed -i "s/version.*'3.10.2'/version '3.22.1'/g" "$GRADLE_FILE"
+              echo "Patched! Contents of externalNativeBuild block:"
+              grep -A 5 "externalNativeBuild" "$GRADLE_FILE" || echo "No externalNativeBuild block found"
+            else
+              echo "Warning: build.gradle not found at $GRADLE_FILE"
+              ls -la "$LIVE2D_DIR/android/" 2>/dev/null || echo "No android directory"
+            fi
+          else
+            echo "Warning: flutter_live2d not found in pub cache"
+          fi
 
       - name: Generate freezed/json code
         run: dart run build_runner build --delete-conflicting-outputs
