@@ -33,22 +33,23 @@ jobs:
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
             "cmake;3.10.2" > /dev/null 2>&1 || true
           
-          # 如果安装失败（cmake 不存在），从其他版本复制
-          if [ ! -f "$ANDROID_HOME/cmake/3.10.2/bin/cmake" ]; then
-            echo "cmake;3.10.2 未安装，从其他版本复制..."
+          # 如果安装失败（cmake 不存在），从其他版本完整复制
+          if [ ! -f "$ANDROID_HOME/cmake/3.10.2/bin/cmake" ] || [ ! -d "$ANDROID_HOME/cmake/3.10.2/share" ]; then
+            echo "cmake;3.10.2 未安装或不完整，从其他版本完整复制..."
             # 查找可用的 cmake 版本（排除 3.10.2 自身）
             SRC_DIR=""
-            for dir in $ANDROID_HOME/cmake/*/bin; do
-              if [ -f "$dir/cmake" ] && [[ ! "$dir" == *"3.10.2"* ]]; then
+            for dir in $ANDROID_HOME/cmake/*; do
+              if [ -f "$dir/bin/cmake" ] && [[ ! "$dir" == *"3.10.2"* ]]; then
                 SRC_DIR="$dir"
                 break
               fi
             done
             
             if [ -n "$SRC_DIR" ]; then
-              echo "从 $SRC_DIR 复制文件到 cmake/3.10.2/bin/"
-              mkdir -p $ANDROID_HOME/cmake/3.10.2/bin
-              cp -r "$SRC_DIR"/* $ANDROID_HOME/cmake/3.10.2/bin/
+              echo "从 $SRC_DIR 完整复制到 cmake/3.10.2/"
+              rm -rf $ANDROID_HOME/cmake/3.10.2
+              # 完整复制所有文件（bin, share, doc 等）
+              cp -r "$SRC_DIR" $ANDROID_HOME/cmake/3.10.2
             else
               echo "错误: 找不到任何已安装的 cmake 版本"
               exit 1
