@@ -87,8 +87,8 @@ class OverlayPetService {
       }
     });
 
-    // 3. 显示悬浮窗
-    final result = await FlutterOverlayWindow.showOverlay(
+    // 3. 显示悬浮窗（showOverlay 返回 void，无法判断成功与否）
+    await FlutterOverlayWindow.showOverlay(
       enableDrag: true,
       overlayTitle: 'One-Agent 桌宠',
       overlayContent: '桌宠运行中',
@@ -100,7 +100,7 @@ class OverlayPetService {
       startPosition: const OverlayPosition(0, 0),
     );
 
-    debugPrint('✅ 悬浮窗启动结果: $result');
+    debugPrint('✅ 悬浮窗已请求显示');
 
     // 4. 等悬浮窗渲染后发送配置
     await Future.delayed(const Duration(milliseconds: 500));
@@ -109,7 +109,7 @@ class OverlayPetService {
       data: config,
     ));
 
-    return result ?? false;
+    return true;
   }
 
   /// 关闭悬浮窗
@@ -118,9 +118,9 @@ class OverlayPetService {
     await Future.delayed(const Duration(milliseconds: 100));
     _listenerSub?.cancel();
     _listenerSub = null;
-    final result = await FlutterOverlayWindow.closeOverlay();
-    debugPrint('✅ 悬浮窗关闭结果: $result');
-    return result ?? false;
+    await FlutterOverlayWindow.closeOverlay();
+    debugPrint('✅ 悬浮窗已关闭');
+    return true;
   }
 
   /// 向悬浮窗发送消息
