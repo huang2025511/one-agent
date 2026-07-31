@@ -1,0 +1,139 @@
+# Gitee Go Pipeline: 同步 GitHub Release APK 到 Gitee Release
+# 解决 GitHub Actions runner 在海外、跨境上传 Gitee 慢的问题
+# 此 Pipeline 在 Gitee 国内 runner 上执行，国内网络下载 GitHub Release + 上传 Gitee Release 都很流畅
+name: sync-apk
+
+# 触发条件：GitHub 同步代码到 Gitee 后，通过 webhook 触发
+# 也可以手动触发
+trigger:
+  push:
+    branches:
+      - main
+    paths:
+      - "flutter_client/one_agent_client/build/app/outputs/flutter-apk/app-release.apk"
+
+# 也支持手动触发
+manual:
+  description: "手动同步 GitHub Release APK 到 Gitee Release"
+
+# Gitee Go 变量：GITEE_TOKEN 需在 Gitee 仓库设置中配置
+env:
+  GH_REPO: huang2025511/one-agent
+  GITEE_REPO: huang20260511/one-agent
+
+stages:
+  - name: sync_apk
+    displayName: "同步 APK 到 Gitee Release"
+    steps:
+      - name: print_env
+        displayName: "打印环境信息"
+        run: |
+          echo "GITEE_BUILD_REF: $GITEE_BUILD_REF"
+          echo "GITEE_BUILD_COMMIT: $GITEE_BUILD_COMMIT"
+
+      - name: detect_version
+        displayName: "检测 pubspec.yaml 版本"
+        run: |
+          VERSION=$(grep '^version:' flutter_client/one_agent_client/pubspec.yaml | head -1 | awk '{print $2}')
+          echo "Pubspec version: $VERSION"
+          echo "VERSION=$VERSION" > .env_version
+
+      - name: download_from_github
+        displayName: "从 GitHub Release 下载 APK"
+        run: |
+          set -e
+          source .env_version
+          # 从 Gitee secrets 读取 GitHub token（需在 Gitee 仓库设置中配置）
+          # 配置路径: 仓库 -> 设置 -> Secrets -> 名称: GH_TOKEN
+          if [ -z "$GH_TOKEN" ]; then
+            echo "ERROR: GH_TOKEN 未配置，请在 Gitee 仓库设置中配置"
+            exit 1
+          fi
+
+          cd flutter_client/one_agent_client
+          # 查找最新的 GitHub Release tag
+          TAG=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${GH_REPO}/releases?per_page=5" | \
+            jq -r '.[] | select(.tag_name | contains("pet")) | .tag_name' | head -1)
+
+          if [ -z "$TAG" ]; then
+            echo "ERROR: 未找到 GitHub Release"
+            exit 1
+          fi
+          echo "GitHub Release Tag: $TAG"
+
+          # 获取 APK 文件名
+          APK_NAME=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${GH_REPO}/releases/tags/${TAG}" | \
+            jq -r '.assets[] | select(.name | endswith(".apk")) | .name' | head -1)
+
+          if [ -z "$APK_NAME" ]; then
+            echo "ERROR: Release 中未找到 APK 资产"
+            exit 1
+          fi
+          echo "APK 文件名: $APK_NAME"
+
+          # 下载 APK
+          echo "正在下载 $APK_NAME ..."
+          curl -L -H "Authorization: token $GH_TOKEN" \
+            "https://github.com/${GH_REPO}/releases/download/${TAG}/${APK_NAME}" \
+            -o "${APK_NAME}"
+
+          ls -lh "${APK_NAME}"
+          echo "TAG=$TAG" >> ../.env_version
+          echo "APK_NAME=$APK_NAME" >> ../.env_version
+
+      - name: upload_to_gitee
+        displayName: "上传 APK 到 Gitee Release"
+        run: |
+          set -e
+          source .env_version
+          cd flutter_client/one_agent_client
+
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "ERROR: GITEE_TOKEN 未配置"
+            exit 1
+          fi
+
+          # 1. 检查/创建 Gitee Release
+          echo ">>> 检查 Gitee Release ${TAG}..."
+          RELEASE_ID=$(curl -s \
+            "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/tags/${TAG}?access_token=${GITEE_TOKEN}" | \
+            jq -r '.id // empty')
+
+          if [ -z "$RELEASE_ID" ]; then
+            echo ">>> 创建 Gitee Release..."
+            RESPONSE=$(curl -s -X POST \
+              "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases" \
+              -H "Content-Type: application/json;charset=UTF-8" \
+              -d "{
+                \"access_token\": \"${GITEE_TOKEN}\",
+                \"tag_name\": \"${TAG}\",
+                \"name\": \"${TAG}\",
+                \"body\": \"APK 构建产物（自动同步自 GitHub Release）\",
+                \"target_commitish\": \"main\"
+              }")
+            RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+            if [ -z "$RELEASE_ID" ]; then
+              echo "ERROR: 创建 Release 失败: $RESPONSE"
+              exit 1
+            fi
+          fi
+          echo ">>> Gitee Release ID: $RELEASE_ID"
+
+          # 2. 上传 APK 附件
+          echo ">>> 上传 ${APK_NAME} ..."
+          UPLOAD_RESP=$(curl -s -X POST \
+            "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/${RELEASE_ID}/attach_files" \
+            -F "access_token=${GITEE_TOKEN}" \
+            -F "file=@${APK_NAME}")
+
+          echo "上传结果: $UPLOAD_RESP"
+
+          ASSET_URL=$(echo "$UPLOAD_RESP" | jq -r '.browser_download_url // empty')
+          if [ -n "$ASSET_URL" ]; then
+            echo "✅ APK 已上传到 Gitee: $ASSET_URL"
+          else
+            echo "❌ APK 上传失败"
+            exit 1
+          fi

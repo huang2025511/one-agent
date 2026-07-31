@@ -132,85 +132,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 上传 APK 到 Gitee Release（保持 Gitee 也有构建产物）──
-      - name: Upload APK to Gitee Release
-        id: gitee_release
+      # ── 触发 Gitee Go Pipeline 同步 APK（国内网络，避免跨境慢）──
+      - name: Trigger Gitee Go Pipeline
         if: startsWith(github.ref, 'refs/tags/')
         continue-on-error: true
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           TAG_NAME="${GITHUB_REF#refs/tags/}"
-          APK_FILE=$(ls one-agent-pet-*.apk | head -1)
-          APK_SIZE=$(du -h "$APK_FILE" | awk '{print $1}')
-          GH_DOWNLOAD="https://github.com/huang2025511/one-agent/releases/download/${TAG_NAME}/${APK_FILE}"
-          echo "Tag: $TAG_NAME | APK: $APK_FILE | Size: $APK_SIZE"
-
-          # 1. 在 Gitee 创建 Release（body 包含 GitHub 下载链接作为备选）
-          echo ">>> 创建 Gitee Release..."
-          RESPONSE=$(curl --connect-timeout 30 --max-time 60 -s -w "\n%{http_code}" -X POST \
-            "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases" \
-            -H "Content-Type: application/json;charset=UTF-8" \
-            -d "{
-              \"access_token\": \"${GITEE_TOKEN}\",
-              \"tag_name\": \"${TAG_NAME}\",
-              \"name\": \"${TAG_NAME}\",
-              \"body\": \"APK 构建产物（自动同步自 GitHub Actions）\\n\\n**GitHub 下载链接:** ${GH_DOWNLOAD}\",
-              \"target_commitish\": \"main\"
-            }")
-
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | sed '$d')
-          echo "HTTP Status: $HTTP_CODE"
-
-          RELEASE_ID=$(echo "$BODY" | jq -r '.id // empty')
-
-          if [ -z "$RELEASE_ID" ]; then
-            echo ">>> 创建失败，尝试获取已有的 Release..."
-            RESPONSE=$(curl --connect-timeout 30 --max-time 60 -s \
-              "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/tags/${TAG_NAME}?access_token=${GITEE_TOKEN}")
-            RELEASE_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
-            if [ -z "$RELEASE_ID" ]; then
-              echo "ERROR: 无法获取 Gitee Release: $RESPONSE"
-              exit 1
-            fi
-          fi
-
-          echo ">>> Gitee Release ID: $RELEASE_ID"
-          echo "release_id=${RELEASE_ID}" >> $GITHUB_OUTPUT
-
-          # 2. 上传 APK 附件到 Gitee Release（跨境上传可能慢，超时 120s）
-          echo ">>> 开始上传 APK (${APK_SIZE})，最长等待 2 分钟..."
-          UPLOAD_RESP=$(curl --connect-timeout 30 --max-time 120 -s -w "\n%{http_code}" \
-            -X POST "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/${RELEASE_ID}/attach_files" \
-            -F "access_token=${GITEE_TOKEN}" \
-            -F "file=@${APK_FILE}")
-
-          UPLOAD_HTTP_CODE=$(echo "$UPLOAD_RESP" | tail -1)
-          UPLOAD_BODY=$(echo "$UPLOAD_RESP" | sed '$d')
-          echo "Upload HTTP Status: $UPLOAD_HTTP_CODE"
-
-          ASSET_URL=$(echo "$UPLOAD_BODY" | jq -r '.browser_download_url // empty' 2>/dev/null)
-          if [ -n "$ASSET_URL" ]; then
-            echo "✅ APK 已上传到 Gitee: $ASSET_URL"
-            echo "asset_url=${ASSET_URL}" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ APK 上传到 Gitee 失败 (HTTP $UPLOAD_HTTP_CODE)"
-            echo "⚠️ 请通过 GitHub 下载: ${GH_DOWNLOAD}"
-            # 不 exit 1，因为 continue-on-error 会处理
-            exit 1
-          fi
-
-      - name: Gitee Release Result
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          if [ "${{ steps.gitee_release.outcome }}" = "success" ]; then
-            echo "✅ Gitee Release 创建 + APK 上传成功"
-          else
-            echo "⚠️ Gitee APK 上传失败（跨境网络超时），但 Gitee Release 已创建"
-            echo "⚠️ Gitee Release 描述中已包含 GitHub 下载链接"
-            echo "⚠️ GitHub Release: https://github.com/huang2025511/one-agent/releases/tag/${GITHUB_REF#refs/tags/}"
-          fi
+          echo "触发 Gitee Go Pipeline 同步 APK 到 Gitee Release"
+          echo "Tag: $TAG_NAME"
+          echo "Gitee Pipeline 配置文件: .gitee/pipeline/sync-apk.yml"
+          # 实际上 Gitee Go 在每次 push 到 Gitee main 时会自动触发
+          # 这里只需要确保代码同步成功即可
 
       # ── 构建完成后自动同步代码到 Gitee（保持 Gitee 为最新主仓库）──
       - name: Sync to Gitee
