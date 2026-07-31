@@ -140,7 +140,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
         index: _currentIndex,
         children: _pages,
       ),
-      // 桌宠悬浮窗开关
+      // 桌宠悬浮窗开关 — 放在左上角，避免与聊天页右下角的向下箭头/发送按钮重叠
       floatingActionButton: FloatingActionButton.small(
         onPressed: petState.isLoading
             ? null
@@ -153,6 +153,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                 }
               },
         tooltip: petState.isOverlayActive ? '关闭桌宠' : '开启桌宠',
+        heroTag: 'pet_fab',
         child: petState.isLoading
             ? const SizedBox(
                 width: 20,
@@ -168,6 +169,7 @@ class _MainScreenState extends ConsumerState<MainScreen>
                     : null,
               ),
       ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.startTop,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (index) => setState(() => _currentIndex = index),

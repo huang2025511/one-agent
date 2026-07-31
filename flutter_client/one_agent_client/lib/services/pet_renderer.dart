@@ -338,58 +338,77 @@ class _PetRendererState extends State<PetRenderer>
 
   @override
   Widget build(BuildContext context) {
-    // Live2D 加载中
-    if (_live2dLoading) {
-      return SizedBox(
-        width: widget.size,
-        height: widget.size,
-        child: const Center(
-          child: SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(strokeWidth: 2),
+    // ⚠️ 重要：Live2DView 必须始终被构建，否则 native view 无法 attached，
+    // _live2dController.whenAttached 会永远卡住（死锁），导致一直转圈圈。
+    // 因此采用 Stack 结构：底层始终放 Live2DView（不可见但已挂载），
+    // Canvas fallback 在 Live2D 不可见时显示，上层叠加 loading。
+
+    final child = SizedBox(
+      width: widget.size,
+      height: widget.size,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // 底层：Live2DView（始终构建，确保 native view attached；
+          // 加载中或失败时通过 Opacity 隐藏，不影响上层显示）
+          Opacity(
+            opacity: _live2dAvailable && !_live2dLoading ? 1.0 : 0.0,
+            child: Live2DView(controller: _live2dController),
           ),
-        ),
-      );
-    }
-
-    // Live2D 可用
-    if (_live2dAvailable) {
-      return GestureDetector(
-        onTap: widget.onTap,
-        child: SizedBox(
-          width: widget.size,
-          height: widget.size,
-          child: Live2DView(controller: _live2dController),
-        ),
-      );
-    }
-
-    // Canvas fallback
-    return GestureDetector(
-      onTap: widget.onTap,
-      child: SizedBox(
-        width: widget.size,
-        height: widget.size,
-        child: AnimatedBuilder(
-          animation: Listenable.merge([
-            _breathController,
-            _blinkController,
-            _talkController,
-          ]),
-          builder: (context, _) {
-            return CustomPaint(
-              painter: _PetPainter(
-                state: widget.state,
-                breath: _breathController.value,
-                blink: _blinkController.value,
-                talk: _talkController.value,
+          // 中间层：Canvas fallback（Live2D 不可用或加载失败时显示）
+          if (!_live2dAvailable)
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: Listenable.merge([
+                  _breathController,
+                  _blinkController,
+                  _talkController,
+                ]),
+                builder: (context, _) {
+                  return CustomPaint(
+                    painter: _PetPainter(
+                      state: widget.state,
+                      breath: _breathController.value,
+                      blink: _blinkController.value,
+                      talk: _talkController.value,
+                    ),
+                  );
+                },
               ),
-            );
-          },
-        ),
+            ),
+          // 上层：加载中指示器
+          if (_live2dLoading)
+            Positioned.fill(
+              child: Container(
+                color: Colors.white.withOpacity(0.5),
+                alignment: Alignment.center,
+                child: const SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            ),
+          // 上层：错误提示（加载失败时）
+          if (!_live2dLoading && !_live2dAvailable && _live2dError != null)
+            Positioned(
+              left: 4,
+              right: 4,
+              bottom: 4,
+              child: Text(
+                _live2dError!,
+                style: const TextStyle(fontSize: 9, color: Colors.redAccent),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+        ],
       ),
     );
+
+    if (widget.onTap == null) return child;
+    return GestureDetector(onTap: widget.onTap, child: child);
   }
 }
 
