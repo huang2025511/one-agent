@@ -134,7 +134,7 @@ jobs:
 
       # ── 构建完成后自动同步代码到 Gitee（保持 Gitee 为最新主仓库）──
       - name: Sync to Gitee
-        if: success()
+        if: always()
         run: |
           cd $GITHUB_WORKSPACE
           git remote add gitee "https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/huang20260511/one-agent.git" 2>/dev/null || true
