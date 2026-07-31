@@ -133,43 +133,14 @@ class _MainScreenState extends ConsumerState<MainScreen>
   Widget build(BuildContext context) {
     final approvalState = ref.watch(approvalProvider);
     final pendingCount = approvalState.pending.where((a) => a.isPending).length;
-    final petState = ref.watch(petProvider);
 
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
         children: _pages,
       ),
-      // 桌宠悬浮窗开关 — 放在左上角，避免与聊天页右下角的向下箭头/发送按钮重叠
-      floatingActionButton: FloatingActionButton.small(
-        onPressed: petState.isLoading
-            ? null
-            : () async {
-                await ref.read(petProvider.notifier).toggle();
-                if (petState.error != null && context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(petState.error!)),
-                  );
-                }
-              },
-        tooltip: petState.isOverlayActive ? '关闭桌宠' : '开启桌宠',
-        heroTag: 'pet_fab',
-        child: petState.isLoading
-            ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : Icon(
-                petState.isOverlayActive
-                    ? Icons.pets
-                    : Icons.pets_outlined,
-                color: petState.isOverlayActive
-                    ? const Color(0xFF6366F1)
-                    : null,
-              ),
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.startTop,
+      // 注意：桌宠开关按钮已移至 ChatScreen AppBar 的 actions 右上角，
+      // 不再使用左上角 FAB，避免覆盖 Drawer 汉堡按钮（会话列表入口）。
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (index) => setState(() => _currentIndex = index),

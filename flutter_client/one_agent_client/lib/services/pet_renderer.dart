@@ -338,10 +338,14 @@ class _PetRendererState extends State<PetRenderer>
 
   @override
   Widget build(BuildContext context) {
-    // ⚠️ 重要：Live2DView 必须始终被构建，否则 native view 无法 attached，
-    // _live2dController.whenAttached 会永远卡住（死锁），导致一直转圈圈。
-    // 因此采用 Stack 结构：底层始终放 Live2DView（不可见但已挂载），
-    // Canvas fallback 在 Live2D 不可见时显示，上层叠加 loading。
+    // ⚠️ 重要：Live2DView 必须始终被构建，且不能用 Opacity(0) 包裹，
+    // 因为 Flutter PlatformView 在 opacity=0 时不会真正创建 native view，
+    // 导致 _live2dController.whenAttached 永远卡住（死锁），一直转圈圈。
+    //
+    // 正确做法：底层始终放 Live2DView（完全不包裹 Opacity/Offstage），
+    // 当 Live2D 不可用/加载中时，上层的 Canvas fallback 或 loading 容器
+    // 会完全覆盖在 Live2DView 上面，达到"隐藏"效果，
+    // 同时 native view 能正常 attached，whenAttached 能正常返回。
 
     final child = SizedBox(
       width: widget.size,
@@ -349,14 +353,10 @@ class _PetRendererState extends State<PetRenderer>
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 底层：Live2DView（始终构建，确保 native view attached；
-          // 加载中或失败时通过 Opacity 隐藏，不影响上层显示）
-          Opacity(
-            opacity: _live2dAvailable && !_live2dLoading ? 1.0 : 0.0,
-            child: Live2DView(controller: _live2dController),
-          ),
-          // 中间层：Canvas fallback（Live2D 不可用或加载失败时显示）
-          if (!_live2dAvailable)
+          // 底层：Live2DView（始终直接构建，确保 native view attached）
+          Live2DView(controller: _live2dController),
+          // 中间层：Canvas fallback 覆盖层（Live2D 不可用或加载中时完全盖住底层）
+          if (!_live2dAvailable || _live2dLoading)
             Positioned.fill(
               child: AnimatedBuilder(
                 animation: Listenable.merge([
@@ -376,7 +376,7 @@ class _PetRendererState extends State<PetRenderer>
                 },
               ),
             ),
-          // 上层：加载中指示器
+          // 上层：加载中指示器（盖住 fallback 画的宠物）
           if (_live2dLoading)
             Positioned.fill(
               child: Container(

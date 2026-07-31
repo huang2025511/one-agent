@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 
 import '../l10n/app_localizations.dart';
 import '../providers/chat_provider.dart';
+import '../providers/pet_provider.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/typewriter_text.dart';
 import '../providers/session_provider.dart';
@@ -127,6 +128,32 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ],
         ),
         actions: [
+          // 桌宠开关按钮（右上角，不覆盖左侧 Drawer 汉堡按钮）
+          Consumer(
+            builder: (context, ref, _) {
+              final petState = ref.watch(petProvider);
+              return IconButton(
+                icon: Icon(
+                  petState.isOverlayActive ? Icons.pets : Icons.pets_outlined,
+                  color: petState.isOverlayActive
+                      ? const Color(0xFF6366F1)
+                      : null,
+                ),
+                onPressed: petState.isLoading
+                    ? null
+                    : () async {
+                        await ref.read(petProvider.notifier).toggle();
+                        final err = ref.read(petProvider).error;
+                        if (err != null && context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text(err)),
+                          );
+                        }
+                      },
+                tooltip: petState.isOverlayActive ? '关闭桌宠' : '开启桌宠',
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.delete_outline),
             tooltip: l10n.clearChat,
