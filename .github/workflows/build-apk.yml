@@ -29,21 +29,29 @@ jobs:
 
       - name: Setup Android SDK (CMake + NDK for flutter_live2d native build)
         run: |
-          # flutter_live2d 要求 cmake;3.10.2，我们先尝试安装，若失败则用软链接
+          # flutter_live2d 要求 cmake;3.10.2，我们先尝试安装
           yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
             "cmake;3.10.2" > /dev/null 2>&1 || true
+          
+          # 如果安装失败（cmake 不存在），从其他版本复制
+          if [ ! -f "$ANDROID_HOME/cmake/3.10.2/bin/cmake" ]; then
+            echo "cmake;3.10.2 未安装，从其他版本复制..."
+            # 查找可用的 cmake 版本（排除 3.10.2 自身）
+            SRC_DIR=""
+            for dir in $ANDROID_HOME/cmake/*/bin; do
+              if [ -f "$dir/cmake" ] && [[ ! "$dir" == *"3.10.2"* ]]; then
+                SRC_DIR="$dir"
+                break
+              fi
+            done
             
-          # 如果安装失败，创建软链接（确保 bin 目录下有 cmake 和 ninja）
-          if [ ! -d "$ANDROID_HOME/cmake/3.10.2/bin" ] || [ ! -f "$ANDROID_HOME/cmake/3.10.2/bin/cmake" ]; then
-            mkdir -p $ANDROID_HOME/cmake/3.10.2/bin
-            # 查找已安装的 cmake 版本（通常是 3.31.5）
-            SOURCE_DIR=$(ls -d $ANDROID_HOME/cmake/*/bin 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
-            if [ -n "$SOURCE_DIR" ]; then
-              cp -r "$SOURCE_DIR/bin/"* $ANDROID_HOME/cmake/3.10.2/bin/ 2>/dev/null || true
-              # 或者创建软链接
-              SRC_BIN="$SOURCE_DIR/bin"
-              ln -sf $SRC_BIN/cmake $ANDROID_HOME/cmake/3.10.2/bin/cmake 2>/dev/null || true
-              ln -sf $SRC_BIN/ninja $ANDROID_HOME/cmake/3.10.2/bin/ninja 2>/dev/null || true
+            if [ -n "$SRC_DIR" ]; then
+              echo "从 $SRC_DIR 复制文件到 cmake/3.10.2/bin/"
+              mkdir -p $ANDROID_HOME/cmake/3.10.2/bin
+              cp -r "$SRC_DIR"/* $ANDROID_HOME/cmake/3.10.2/bin/
+            else
+              echo "错误: 找不到任何已安装的 cmake 版本"
+              exit 1
             fi
           fi
 
