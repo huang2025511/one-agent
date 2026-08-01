@@ -208,8 +208,8 @@ jobs:
               fi
             fi
 
-            # 422 通常表示 tag 已存在，尝试获取已存在的 release
-            if [ "$HTTP_CODE" = "422" ]; then
+            # 400/422 通常表示 tag 已存在，尝试获取已存在的 release
+            if [ "$HTTP_CODE" = "422" ] || [ "$HTTP_CODE" = "400" ]; then
               echo "Tag 已存在，尝试获取已有 Release..."
               GET_RESP=$(curl -s "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/tags/${TAG}?access_token=${GITEE_TOKEN}")
               REL_ID=$(echo "$GET_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
