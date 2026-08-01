@@ -31,6 +31,19 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Setup Android SDK (CMake + NDK for flutter_live2d native build)
+        run: |
+          # flutter_live2d 原本要求 cmake;3.10.2，但 AGP 8.x 与旧版 CMake Server 握手失败。
+          # 安装 cmake;3.22.1（稳定版，兼容 AGP 8.x），然后 patch 插件使用此版本。
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "cmake;3.22.1" > /dev/null 2>&1 || true
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;27.2.12479018" > /dev/null 2>&1 || true
+          echo "=== CMake versions ==="
+          ls $ANDROID_HOME/cmake/ 2>/dev/null || echo "无"
+          echo "=== NDK versions ==="
+          ls $ANDROID_HOME/ndk/ 2>/dev/null || echo "无"
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -51,6 +64,31 @@ jobs:
       - name: Get dependencies
         working-directory: flutter_client/one_agent_client
         run: flutter pub get
+
+      - name: Patch flutter_live2d CMake version (3.10.2 → 3.22.1)
+        working-directory: flutter_client/one_agent_client
+        run: |
+          LIVE2D_DIR=$(find $HOME/.pub-cache -type d -name "flutter_live2d-*" 2>/dev/null | head -1)
+          if [ -n "$LIVE2D_DIR" ]; then
+            echo "Found flutter_live2d at: $LIVE2D_DIR"
+            GRADLE_FILE="$LIVE2D_DIR/android/build.gradle.kts"
+            if [ ! -f "$GRADLE_FILE" ]; then
+              GRADLE_FILE="$LIVE2D_DIR/android/build.gradle"
+            fi
+            if [ -f "$GRADLE_FILE" ]; then
+              echo "Patching $GRADLE_FILE"
+              sed -i 's/version[[:space:]]*=[[:space:]]*"3.10.2"/version = "3.22.1"/g' "$GRADLE_FILE"
+              sed -i 's/version[[:space:]]*"3.10.2"/version "3.22.1"/g' "$GRADLE_FILE"
+              sed -i "s/version[[:space:]]*=[[:space:]]*'3.10.2'/version = '3.22.1'/g" "$GRADLE_FILE"
+              sed -i "s/version[[:space:]]*'3.10.2'/version '3.22.1'/g" "$GRADLE_FILE"
+              echo "=== After patch ==="
+              cat "$GRADLE_FILE"
+            else
+              echo "Warning: build.gradle(.kts) not found"
+            fi
+          else
+            echo "Warning: flutter_live2d not found in pub cache"
+          fi
 
       - name: Generate freezed/json_serializable code
         working-directory: flutter_client/one_agent_client
