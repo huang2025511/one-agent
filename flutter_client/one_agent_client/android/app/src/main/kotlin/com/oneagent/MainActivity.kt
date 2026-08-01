@@ -11,26 +11,28 @@ import io.flutter.plugins.GeneratedPluginRegistrant
 class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
+        // ⚠️ 必须在 super.configureFlutterEngine() 之前预创建 overlay 引擎！
+        //
+        // 原因：super.configureFlutterEngine() 会触发主引擎插件注册，
+        // 其中 FlutterOverlayWindowPlugin.onAttachedToActivity() 会检查
+        // FlutterEngineCache 中是否已有 "myCachedEngine"：
+        //   - 若有：跳过创建，直接用缓存的引擎（✅ 我们想要的行为）
+        //   - 若无：自己创建一个引擎放入缓存，但不注册插件（❌ 导致
+        //     FlutterLive2dPlugin 未注册，Live2DView 无法创建 native view）
+        //
+        // 所以必须在 super 之前就把注册了插件的 overlay 引擎放入缓存，
+        // 这样 FlutterOverlayWindowPlugin 检测到缓存已有引擎就会跳过创建。
         ensureOverlayEngineRegistered()
+        super.configureFlutterEngine(flutterEngine)
     }
 
     /**
      * 预创建悬浮窗 FlutterEngine 并注册所有插件。
      *
-     * 问题：flutter_overlay_window 0.4.5 使用
-     * FlutterEngineGroup.createAndRunEngine() 创建 overlay 引擎，
-     * 但该引擎不会自动注册插件（GeneratedPluginRegistrant）。
-     * 导致悬浮窗引擎里没有 FlutterLive2dPlugin，Live2DView 的
-     * PlatformView 无法创建，whenAttached 永远不返回，
-     * 最终显示 Canvas fallback 圆形 + 错误提示。
-     *
-     * 修复：在 MainActivity 启动时预创建 overlay 引擎，手动注册所有
-     * 插件（包括 flutter_live2d），放入 FlutterEngineCache。
-     * flutter_overlay_window 的 FlutterOverlayWindowPlugin 会检测到
-     * 缓存已有引擎，直接使用它（跳过自己创建）。
-     *
-     * 缓存 key "myCachedEngine" 对应 OverlayConstants.CACHED_TAG。
+     * flutter_overlay_window 的 OverlayService 从 FlutterEngineCache
+     * 获取 "myCachedEngine" 引擎来渲染悬浮窗 UI。如果该引擎没有注册
+     * FlutterLive2dPlugin，Live2DView 的 PlatformView factory 未注册，
+     * native view 无法创建，whenAttached 超时，最终显示 Canvas fallback。
      */
     private fun ensureOverlayEngineRegistered() {
         val cachedTag = "myCachedEngine"
