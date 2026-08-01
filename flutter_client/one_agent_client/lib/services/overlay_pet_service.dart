@@ -37,12 +37,28 @@ class OverlayPetService {
   static final OverlayPetService instance = OverlayPetService._();
 
   StreamSubscription? _listenerSub;
-  final _messageFromOverlayController =
+
+  /// 不要在 dispose 关闭 broadcast controller，
+  /// 因为 PetNotifier 会被重建，但 OverlayPetService 是单例，
+  /// 关闭后重建的 PetNotifier 监听时会 "stream has already been listened to" / "Bad state: Stream has already been listened to"。
+  /// 如果 controller 被关闭（isClosed），用 _reinitStreamController() 重新创建。
+  StreamController<OverlayMessage> _messageFromOverlayController =
       StreamController<OverlayMessage>.broadcast();
 
+  /// 幂等：确保 stream controller 可订阅
+  void _reinitStreamControllerIfClosed() {
+    if (_messageFromOverlayController.isClosed) {
+      debugPrint('🔄 _messageFromOverlayController 已关闭，重新创建');
+      _messageFromOverlayController =
+          StreamController<OverlayMessage>.broadcast();
+    }
+  }
+
   /// 来自悬浮窗的消息流（主 APP 监听）
-  Stream<OverlayMessage> get messagesFromOverlay =>
-      _messageFromOverlayController.stream;
+  Stream<OverlayMessage> get messagesFromOverlay {
+    _reinitStreamControllerIfClosed();
+    return _messageFromOverlayController.stream;
+  }
 
   /// 悬浮窗是否正在运行
   bool get isActive => _listenerSub != null;
@@ -52,10 +68,23 @@ class OverlayPetService {
     return await FlutterOverlayWindow.isPermissionGranted() ?? false;
   }
 
-  /// 请求悬浮窗权限
-  Future<bool> requestPermission() async {
-    final granted = await FlutterOverlayWindow.requestPermission();
-    return granted ?? false;
+  /// 请求悬浮窗权限（授权弹窗返回后二次校验，修复部分机型 requestPermission 返回假 false）
+  Future<bool> requestPermissionWithRetry() async {
+    final rawGranted = await FlutterOverlayWindow.requestPermission();
+    if (rawGranted == true) return true;
+
+    // 部分 Android 机型：用户刚在设置页面授权，requestPermission 仍然返回 false，
+    // 等 300ms 再查一次 isPermissionGranted
+    await Future.delayed(const Duration(milliseconds: 300));
+    final recheck = await FlutterOverlayWindow.isPermissionGranted();
+    if (recheck == true) {
+      debugPrint('✅ 权限二次校验通过（首次返回 false 但实际已授权）');
+      return true;
+    }
+
+    // 再等 800ms 做最后一次检查（覆盖系统设置跳转返回慢的机型）
+    await Future.delayed(const Duration(milliseconds: 800));
+    return await FlutterOverlayWindow.isPermissionGranted() ?? false;
   }
 
   /// 启动桌宠悬浮窗
@@ -67,25 +96,46 @@ class OverlayPetService {
     int height = 200,
     Map<String, dynamic> config = const {},
   }) async {
-    // 1. 确保有权限
+    _reinitStreamControllerIfClosed();
+
+    // 1. 确保有权限（请求授权后二次检查）
     final hasPermission = await checkPermission();
     if (!hasPermission) {
-      final granted = await requestPermission();
+      final granted = await requestPermissionWithRetry();
       if (!granted) {
         debugPrint('❌ 悬浮窗权限被拒绝');
+        return false;
+      }
+      // 授权成功后再查一次，保证权限一定到位
+      final finalCheck = await checkPermission();
+      if (!finalCheck) {
+        debugPrint('❌ 最终权限校验失败，请检查系统设置');
         return false;
       }
     }
 
     // 2. 监听来自悬浮窗的消息
-    _listenerSub?.cancel();
-    _listenerSub = FlutterOverlayWindow.overlayListener.listen((event) {
-      debugPrint('📩 主APP收到悬浮窗消息: $event');
-      final msg = OverlayMessage.fromJson(event.toString());
-      if (msg != null) {
-        _messageFromOverlayController.add(msg);
-      }
-    });
+    //    FlutterOverlayWindow.overlayListener 是单次订阅流（非 broadcast），
+    //    必须确保上一次完全 cancel 完成后（等 Future）才能重新 listen，
+    //    否则抛 "Bad state: Stream has already been listened to"。
+    await _listenerSub?.cancel();
+    _listenerSub = null;
+    try {
+      _listenerSub = FlutterOverlayWindow.overlayListener.listen((event) {
+        debugPrint('📩 主APP收到悬浮窗消息: $event');
+        final msg = OverlayMessage.fromJson(event.toString());
+        if (msg != null) {
+          _reinitStreamControllerIfClosed();
+          _messageFromOverlayController.add(msg);
+        }
+      }, onError: (e) {
+        debugPrint('⚠️  overlayListener 流错误: $e');
+      });
+    } catch (e) {
+      // 兜底：如果 overlayListener 仍报重复监听，跳过监听（不影响启动，只是收不到消息）
+      debugPrint('⚠️  跳过 overlayListener 监听（已订阅）: $e');
+      _listenerSub = null;
+    }
 
     // 3. 显示悬浮窗（加 10 秒超时，防止 showOverlay 挂起导致按钮永远灰色）
     try {
@@ -121,11 +171,16 @@ class OverlayPetService {
 
   /// 关闭悬浮窗
   Future<bool> hide() async {
-    await sendToOverlay(const OverlayMessage(type: 'close'));
+    try {
+      await sendToOverlay(const OverlayMessage(type: 'close'));
+    } catch (_) {}
     await Future.delayed(const Duration(milliseconds: 100));
-    _listenerSub?.cancel();
+    // cancel 必须 await 完成后才能把 _listenerSub 置 null
+    await _listenerSub?.cancel();
     _listenerSub = null;
-    await FlutterOverlayWindow.closeOverlay();
+    try {
+      await FlutterOverlayWindow.closeOverlay();
+    } catch (_) {}
     debugPrint('✅ 悬浮窗已关闭');
     return true;
   }
@@ -135,9 +190,13 @@ class OverlayPetService {
     await FlutterOverlayWindow.shareData(msg.toJson());
   }
 
+  /// ⚠️  不再关闭 broadcast controller，
+  /// 因为 PetNotifier 会被 Riverpod 重创建，再次订阅会失败。
+  /// 单例 OverlayPetService 生命周期与 App 进程绑定即可。
   void dispose() {
     _listenerSub?.cancel();
     _listenerSub = null;
-    _messageFromOverlayController.close();
+    // 注释掉以下行以避免 "stream has already been listened to":
+    // _messageFromOverlayController.close();
   }
 }
