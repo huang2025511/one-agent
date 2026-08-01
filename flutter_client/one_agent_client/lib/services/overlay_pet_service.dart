@@ -98,20 +98,18 @@ class OverlayPetService {
   }) async {
     _reinitStreamControllerIfClosed();
 
-    // 1. 确保有权限（请求授权后二次检查）
+    // 1. 权限处理：isPermissionGranted() 在很多机型上不可靠（返回 false 即使已授权），
+    //    所以不再用它做门控判断。如果权限没开，尝试请求一次给用户授权机会；
+    //    不管结果如何，都继续执行 showOverlay（系统会自行处理无权限的情况）。
     final hasPermission = await checkPermission();
     if (!hasPermission) {
-      final granted = await requestPermissionWithRetry();
-      if (!granted) {
-        debugPrint('❌ 悬浮窗权限被拒绝');
-        return false;
+      // 尝试请求权限（会跳转到系统设置页让用户授权）
+      try {
+        await FlutterOverlayWindow.requestPermission();
+      } catch (e) {
+        debugPrint('⚠️  requestPermission 异常（忽略，继续尝试 showOverlay）: $e');
       }
-      // 授权成功后再查一次，保证权限一定到位
-      final finalCheck = await checkPermission();
-      if (!finalCheck) {
-        debugPrint('❌ 最终权限校验失败，请检查系统设置');
-        return false;
-      }
+      // 不再 return false！直接继续执行 showOverlay
     }
 
     // 2. 监听来自悬浮窗的消息
@@ -138,6 +136,7 @@ class OverlayPetService {
     }
 
     // 3. 显示悬浮窗（加 10 秒超时，防止 showOverlay 挂起导致按钮永远灰色）
+    bool overlayShown = false;
     try {
       await FlutterOverlayWindow.showOverlay(
         enableDrag: true,
@@ -152,12 +151,14 @@ class OverlayPetService {
       ).timeout(const Duration(seconds: 10), onTimeout: () {
         debugPrint('⏰ showOverlay 超时（10s），继续执行');
       });
+      overlayShown = true;
     } catch (e) {
       debugPrint('❌ showOverlay 异常: $e');
-      // 不直接 return false，因为某些设备上 showOverlay 即使成功也可能抛异常
+      // 某些设备上 showOverlay 即使成功也可能抛异常，不直接判失败
+      overlayShown = true;
     }
 
-    debugPrint('✅ 悬浮窗已请求显示');
+    debugPrint('✅ 悬浮窗已请求显示 (overlayShown=$overlayShown)');
 
     // 4. 等悬浮窗渲染后发送配置
     await Future.delayed(const Duration(milliseconds: 500));
