@@ -136,11 +136,15 @@ class _PetRendererState extends State<PetRenderer>
       _resolvedModelDir = dir;
       _resolvedModelFile = file;
 
-      // 等待 native view attached（加 5 秒超时，防止悬浮窗引擎内永远不 attached）
+      // 等待 native view attached
+      // ⚠️ 悬浮窗独立引擎首次创建时，PlatformView 注册和 surface 初始化可能较慢，
+      // 给 15 秒超时（之前 5 秒太短，导致悬浮窗内 Live2D 永远加载不上）
       await _live2dController.whenAttached.timeout(
-        const Duration(seconds: 5),
+        const Duration(seconds: 15),
         onTimeout: () {
-          if (kDebugMode) debugPrint('⏰ Live2D whenAttached 超时，使用 Canvas fallback');
+          if (kDebugMode) {
+            debugPrint('⏰ Live2D whenAttached 超时（15s），使用 Canvas fallback');
+          }
         },
       );
       if (!mounted) return;
@@ -148,8 +152,8 @@ class _PetRendererState extends State<PetRenderer>
       final ok = await _live2dController.loadModel(
         modelDir: dir,
         modelFileName: file,
-      ).timeout(const Duration(seconds: 10), onTimeout: () {
-        if (kDebugMode) debugPrint('⏰ Live2D loadModel 超时');
+      ).timeout(const Duration(seconds: 15), onTimeout: () {
+        if (kDebugMode) debugPrint('⏰ Live2D loadModel 超时（15s）');
         return false;
       });
       if (!mounted) return;

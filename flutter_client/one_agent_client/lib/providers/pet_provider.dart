@@ -6,6 +6,11 @@ import '../services/overlay_pet_service.dart';
 import 'live2d_model_provider.dart';
 import 'settings_provider.dart';
 
+/// 内置免费 Live2D 模型（mao 猫）的 assets 路径
+/// 当用户未导入自定义模型时，悬浮窗使用此内置模型
+const _kBuiltinModelDir = 'assets/models/mao/';
+const _kBuiltinModelFile = 'mao_pro.model3.json';
+
 /// 桌宠状态
 class PetState {
   final bool isOverlayActive; // 悬浮窗是否激活
@@ -71,6 +76,12 @@ class PetNotifier extends StateNotifier<PetState> {
       final modelState = _ref.read(live2dModelProvider);
       final currentModel = modelState.currentModel;
 
+      // 模型路径：优先用户导入的模型，否则用内置 mao 猫模型（assets 路径）
+      // ⚠️ 必须显式传入，否则悬浮窗独立引擎的 rootBundle 可能无法
+      // 正确扫描 AssetManifest，导致 PetRenderer 找不到模型而显示 Canvas fallback
+      final modelPath = currentModel?.dirPath ?? _kBuiltinModelDir;
+      final modelFileName = currentModel?.modelFileName ?? _kBuiltinModelFile;
+
       // 整体加 15 秒超时保护，防止任何环节卡死导致按钮永远灰色
       final success = await OverlayPetService.instance.show(
         width: 280,
@@ -78,10 +89,8 @@ class PetNotifier extends StateNotifier<PetState> {
         config: {
           'baseUrl': baseUrl,
           'apiKey': apiKey,
-          if (currentModel != null) ...{
-            'modelPath': currentModel.dirPath,
-            'modelFileName': currentModel.modelFileName,
-          },
+          'modelPath': modelPath,
+          'modelFileName': modelFileName,
         },
       ).timeout(const Duration(seconds: 15), onTimeout: () {
         debugPrint('⏰ startPet show() 整体超时（15s）');
@@ -132,15 +141,15 @@ class PetNotifier extends StateNotifier<PetState> {
     final settings = _ref.read(settingsProvider);
     final modelState = _ref.read(live2dModelProvider);
     final currentModel = modelState.currentModel;
+    final modelPath = currentModel?.dirPath ?? _kBuiltinModelDir;
+    final modelFileName = currentModel?.modelFileName ?? _kBuiltinModelFile;
     await OverlayPetService.instance.sendToOverlay(OverlayMessage(
       type: 'config',
       data: {
         'baseUrl': settings.baseUrl,
         'apiKey': settings.apiKey,
-        if (currentModel != null) ...{
-          'modelPath': currentModel.dirPath,
-          'modelFileName': currentModel.modelFileName,
-        },
+        'modelPath': modelPath,
+        'modelFileName': modelFileName,
       },
     ));
   }

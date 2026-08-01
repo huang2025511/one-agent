@@ -144,7 +144,9 @@ class OverlayPetService {
         overlayContent: '桌宠运行中',
         flag: OverlayFlag.defaultFlag,
         visibility: NotificationVisibility.visibilityPublic,
-        positionGravity: PositionGravity.auto,
+        // positionGravity 设为 none：拖动后保持在用户放置的位置，
+        // 不会自动滑回屏幕边缘/中央
+        positionGravity: PositionGravity.none,
         height: height,
         width: width,
         startPosition: const OverlayPosition(0, 0),
