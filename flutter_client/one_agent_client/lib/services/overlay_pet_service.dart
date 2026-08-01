@@ -87,18 +87,25 @@ class OverlayPetService {
       }
     });
 
-    // 3. 显示悬浮窗（showOverlay 返回 void，无法判断成功与否）
-    await FlutterOverlayWindow.showOverlay(
-      enableDrag: true,
-      overlayTitle: 'One-Agent 桌宠',
-      overlayContent: '桌宠运行中',
-      flag: OverlayFlag.defaultFlag,
-      visibility: NotificationVisibility.visibilityPublic,
-      positionGravity: PositionGravity.auto,
-      height: height,
-      width: width,
-      startPosition: const OverlayPosition(0, 0),
-    );
+    // 3. 显示悬浮窗（加 10 秒超时，防止 showOverlay 挂起导致按钮永远灰色）
+    try {
+      await FlutterOverlayWindow.showOverlay(
+        enableDrag: true,
+        overlayTitle: 'One-Agent 桌宠',
+        overlayContent: '桌宠运行中',
+        flag: OverlayFlag.defaultFlag,
+        visibility: NotificationVisibility.visibilityPublic,
+        positionGravity: PositionGravity.auto,
+        height: height,
+        width: width,
+        startPosition: const OverlayPosition(0, 0),
+      ).timeout(const Duration(seconds: 10), onTimeout: () {
+        debugPrint('⏰ showOverlay 超时（10s），继续执行');
+      });
+    } catch (e) {
+      debugPrint('❌ showOverlay 异常: $e');
+      // 不直接 return false，因为某些设备上 showOverlay 即使成功也可能抛异常
+    }
 
     debugPrint('✅ 悬浮窗已请求显示');
 

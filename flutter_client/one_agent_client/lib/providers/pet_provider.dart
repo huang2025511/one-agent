@@ -71,6 +71,7 @@ class PetNotifier extends StateNotifier<PetState> {
       final modelState = _ref.read(live2dModelProvider);
       final currentModel = modelState.currentModel;
 
+      // 整体加 15 秒超时保护，防止任何环节卡死导致按钮永远灰色
       final success = await OverlayPetService.instance.show(
         width: 280,
         height: 360,
@@ -82,7 +83,10 @@ class PetNotifier extends StateNotifier<PetState> {
             'modelFileName': currentModel.modelFileName,
           },
         },
-      );
+      ).timeout(const Duration(seconds: 15), onTimeout: () {
+        debugPrint('⏰ startPet show() 整体超时（15s）');
+        return false;
+      });
 
       state = state.copyWith(
         isOverlayActive: success,
