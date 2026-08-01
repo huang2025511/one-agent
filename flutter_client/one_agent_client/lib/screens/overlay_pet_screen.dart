@@ -9,30 +9,13 @@ import '../api/sse_client.dart';
 import '../models/chat_message.dart';
 import '../services/pet_renderer.dart';
 
-/// 悬浮窗入口 — 必须是顶层函数 + @pragma('vm:entry-point')
-@pragma('vm:entry-point')
-void overlayMain() {
-  runApp(const _OverlayPetApp());
-}
-
-class _OverlayPetApp extends StatelessWidget {
-  const _OverlayPetApp();
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF6366F1),
-          brightness: Brightness.light,
-        ),
-      ),
-      home: const OverlayPetScreen(),
-    );
-  }
-}
+/// ⚠️ 悬浮窗入口 overlayMain() 已在 main.dart 中统一定义（避免重复符号冲突）
+/// main.dart 通过 `import 'screens/overlay_pet_screen.dart'` 引用本文件，
+/// 因此本文件中的 OverlayPetScreen 类不会被 tree-shaking 移除。
+///
+/// 历史教训：曾经在 main.dart 和本文件各定义一个 overlayMain()，
+/// 导致 Dart 顶层函数同名冲突，Flutter 引擎无法定位悬浮窗入口点，
+/// 悬浮窗完全无法启动（权限已开也无效）。
 
 /// 悬浮窗内的桌宠页面
 class OverlayPetScreen extends StatefulWidget {
