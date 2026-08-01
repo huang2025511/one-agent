@@ -9,6 +9,35 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'l10n/app_localizations.dart';
 import 'providers/settings_provider.dart';
 import 'screens/main_screen.dart';
+import 'screens/overlay_pet_screen.dart';
+
+/// 悬浮窗 entry point — flutter_overlay_window 通过此入口启动桌宠悬浮窗
+/// ⚠️ 必须在 main.dart 中定义，且必须被 import，否则 release 构建时
+/// tree-shaking 会移除此函数，导致悬浮窗启动时找不到 entry point！
+@pragma('vm:entry-point')
+void overlayMain() {
+  runApp(const _OverlayApp());
+}
+
+/// 悬浮窗 MaterialApp（独立于主 App，不需要 ProviderScope）
+class _OverlayApp extends StatelessWidget {
+  const _OverlayApp();
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF6366F1),
+          brightness: Brightness.light,
+        ),
+      ),
+      home: const OverlayPetScreen(),
+    );
+  }
+}
 
 void main() {
   runZonedGuarded(() {
