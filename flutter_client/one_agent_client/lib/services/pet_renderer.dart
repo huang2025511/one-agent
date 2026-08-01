@@ -214,7 +214,7 @@ class _PetRendererState extends State<PetRenderer>
       await _live2dController.startMotion(group: 'Idle', priority: 1);
     } catch (_) {
       try {
-        await _live2dController.startMotion(index: 0, priority: 1);
+        await _live2dController.startMotion(group: 'Idle', index: 0, priority: 1);
       } catch (e) {
         if (kDebugMode) debugPrint('idle motion 启动失败: $e');
       }
@@ -657,7 +657,7 @@ class _PetPainter extends CustomPainter {
           bubblePaint,
         );
         final textPainter = TextPainter(
-          text: const TextSpan(
+          text: TextSpan(
             text: '?',
             style: TextStyle(
               color: Colors.black54,
