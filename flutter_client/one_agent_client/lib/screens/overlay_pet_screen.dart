@@ -280,7 +280,7 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
                 ),
               // 宠物（模型路径变化时通过 key 重建以重新加载）
               PetRenderer(
-                key: ValueKey('${_modelDir ?? ''}/${_modelFileName ?? ''}'),
+                key: ValueKey('overlay-${_modelDir ?? ''}/${_modelFileName ?? ''}'),
                 state: PetRenderState(
                   mood: _mood,
                   mouthOpen: _mouthOpen,
@@ -288,6 +288,7 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
                 size: 160,
                 modelDir: _modelDir,
                 modelFileName: _modelFileName,
+                isOverlay: true,
                 onTap: _onPetTap,
               ),
               // 输入框

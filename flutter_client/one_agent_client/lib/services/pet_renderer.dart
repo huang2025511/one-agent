@@ -61,6 +61,10 @@ class PetRenderer extends StatefulWidget {
   /// Live2D 模型文件名（如 'haru.model3.json'）。留空则自动检测。
   final String? modelFileName;
 
+  /// 是否在悬浮窗中渲染。悬浮窗中 Live2D 可能不兼容，
+  /// 会使用更长的超时时间，失败则 fallback 到 Canvas。
+  final bool isOverlay;
+
   const PetRenderer({
     super.key,
     this.state = const PetRenderState(),
@@ -68,6 +72,7 @@ class PetRenderer extends StatefulWidget {
     this.onTap,
     this.modelDir,
     this.modelFileName,
+    this.isOverlay = false,
   });
 
   @override
@@ -120,13 +125,18 @@ class _PetRendererState extends State<PetRenderer>
   }
 
   Future<void> _initLive2D() async {
+    final overlay = widget.isOverlay;
+    final tag = overlay ? '🔴[overlay]' : '🟢[main]';
+    final attachTimeout = overlay ? const Duration(seconds: 15) : const Duration(seconds: 5);
+    final loadTimeout = overlay ? const Duration(seconds: 15) : const Duration(seconds: 10);
+
+    debugPrint('$tag 开始初始化 Live2D，isOverlay=$overlay');
+
     try {
       // 解析模型路径
       final (dir, file) = await _resolveModelPath();
       if (dir == null || file == null) {
-        if (kDebugMode) {
-          debugPrint('🐾 未找到 Live2D 模型，使用 Canvas fallback');
-        }
+        debugPrint('$tag ❌ 未找到 Live2D 模型: dir=$dir file=$file');
         setState(() {
           _live2dAvailable = false;
           _live2dLoading = false;
@@ -136,48 +146,58 @@ class _PetRendererState extends State<PetRenderer>
       }
       _resolvedModelDir = dir;
       _resolvedModelFile = file;
+      debugPrint('$tag 📁 模型路径: $dir$file');
 
       // 等待 native view attached
-      // ⚠️ 悬浮窗独立引擎首次创建时，PlatformView 注册和 surface 初始化可能较慢，
-      // 给 15 秒超时（之前 5 秒太短，导致悬浮窗内 Live2D 永远加载不上）
+      debugPrint('$tag ⏳ 等待 PlatformView attached (timeout: ${attachTimeout.inSeconds}s)...');
       await _live2dController.whenAttached.timeout(
-        const Duration(seconds: 15),
+        attachTimeout,
         onTimeout: () {
-          if (kDebugMode) {
-            debugPrint('⏰ Live2D whenAttached 超时（15s），使用 Canvas fallback');
-          }
+          debugPrint('$tag ⏰ whenAttached 超时，PlatformView 可能未注册');
         },
       );
       if (!mounted) return;
 
+      final attached = _live2dController.value.isAttached;
+      debugPrint('$tag ${attached ? '✅ PlatformView 已 attached' : '❌ PlatformView 未 attached'}');
+
+      if (!attached) {
+        setState(() {
+          _live2dAvailable = false;
+          _live2dLoading = false;
+          _live2dError = 'PlatformView 未创建（插件可能未注册）';
+        });
+        return;
+      }
+
+      debugPrint('$tag ⏳ 加载模型...');
       final ok = await _live2dController.loadModel(
         modelDir: dir,
         modelFileName: file,
-      ).timeout(const Duration(seconds: 15), onTimeout: () {
-        if (kDebugMode) debugPrint('⏰ Live2D loadModel 超时（15s）');
+      ).timeout(loadTimeout, onTimeout: () {
+        debugPrint('$tag ⏰ loadModel 超时（${loadTimeout.inSeconds}s）');
         return false;
       });
       if (!mounted) return;
 
       if (ok) {
-        if (kDebugMode) debugPrint('✅ Live2D 模型加载成功: $dir/$file');
+        debugPrint('$tag ✅ Live2D 模型加载成功: $dir$file');
         setState(() {
           _live2dAvailable = true;
           _live2dLoading = false;
         });
-        // 启动 idle 动作
         _startIdleMotion();
       } else {
         final err = _live2dController.value.lastError;
-        if (kDebugMode) debugPrint('❌ Live2D 加载失败: ${err?.code} ${err?.message}');
+        debugPrint('$tag ❌ Live2D 加载失败: ${err?.code} ${err?.message}');
         setState(() {
           _live2dAvailable = false;
           _live2dLoading = false;
           _live2dError = err?.message ?? 'Live2D 加载失败';
         });
       }
-    } catch (e) {
-      if (kDebugMode) debugPrint('❌ Live2D 初始化异常: $e');
+    } catch (e, stackTrace) {
+      debugPrint('$tag ❌ Live2D 初始化异常: $e\n$stackTrace');
       if (!mounted) return;
       setState(() {
         _live2dAvailable = false;

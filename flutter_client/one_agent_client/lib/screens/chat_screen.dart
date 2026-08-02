@@ -14,6 +14,7 @@ import '../providers/session_provider.dart';
 import '../api/session_api.dart';
 import '../models/chat_message.dart';
 import '../models/session.dart';
+import '../services/pet_renderer.dart';
 
 /// 聊天主页面
 class ChatScreen extends ConsumerStatefulWidget {
@@ -154,6 +155,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               );
             },
           ),
+          // Live2D 宠物预览（主 APP 内显示，确保 Live2D 能正常工作）
+          IconButton(
+            icon: const Icon(Icons.preview),
+            tooltip: '预览宠物',
+            onPressed: () => _showPetPreview(context),
+          ),
           IconButton(
             icon: const Icon(Icons.delete_outline),
             tooltip: l10n.clearChat,
@@ -240,6 +247,70 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ),
           const _InputBar(),
         ],
+      ),
+    );
+  }
+
+  /// 显示 Live2D 宠物预览（在主 APP 引擎中渲染，确保 Live2D 正常工作）
+  void _showPetPreview(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => Container(
+        height: MediaQuery.of(context).size.height * 0.6,
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            Container(
+              margin: const EdgeInsets.only(top: 8),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  const Text(
+                    'Live2D 宠物预览',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Center(
+                child: PetRenderer(
+                  state: const PetRenderState(mood: PetMood.idle),
+                  size: 250,
+                  modelDir: 'assets/models/mao/',
+                  modelFileName: 'mao_pro.model3.json',
+                  isOverlay: false,
+                ),
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text(
+                '如果圆形宠物显示，说明 Live2D 插件未加载成功\n请检查网络或重新启动应用',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
