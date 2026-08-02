@@ -25,13 +25,21 @@ class OverlayPetScreen extends StatefulWidget {
   State<OverlayPetScreen> createState() => _OverlayPetScreenState();
 }
 
+/// 内置免费 Live2D 模型（mao 猫）默认路径
+/// 悬浮窗启动时立即使用此路径加载模型，不依赖主 APP 的 config 消息
+/// （主 APP 发 config 消息时悬浮窗的 overlayListener 可能还没注册，
+///  导致消息丢失，模型路径为 null，最终显示 Canvas fallback 圆形）
+const _kDefaultModelDir = 'assets/models/mao/';
+const _kDefaultModelFile = 'mao_pro.model3.json';
+
 class _OverlayPetScreenState extends State<OverlayPetScreen> {
   // 配置（由主 APP 通过 flutter_overlay_window 传入）
   String _baseUrl = 'http://127.0.0.1:18792';
   String _apiKey = '';
   String? _sessionId;
-  String? _modelDir; // 模型目录（assets 或文件系统路径）
-  String? _modelFileName; // 模型文件名
+  // 默认使用内置 mao 模型，config 消息可覆盖为用户导入的模型
+  String _modelDir = _kDefaultModelDir;
+  String _modelFileName = _kDefaultModelFile;
 
   // 宠物状态
   PetMood _mood = PetMood.idle;
@@ -83,8 +91,12 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
             _baseUrl = data['baseUrl'] as String? ?? _baseUrl;
             _apiKey = data['apiKey'] as String? ?? _apiKey;
             _sessionId = data['sessionId'] as String?;
-            _modelDir = data['modelPath'] as String?;
-            _modelFileName = data['modelFileName'] as String?;
+            // 模型路径：仅在主 APP 显式传入时覆盖默认内置模型
+            // （主 APP 传 null 会丢失默认值，所以用 != null 判断）
+            final path = data['modelPath'] as String?;
+            final file = data['modelFileName'] as String?;
+            if (path != null && path.isNotEmpty) _modelDir = path;
+            if (file != null && file.isNotEmpty) _modelFileName = file;
             // 配置 ApiClient（悬浮窗内独立配置）
             ApiClient.configure(baseUrl: _baseUrl, apiKey: _apiKey);
           });

@@ -162,7 +162,16 @@ class OverlayPetService {
 
     debugPrint('✅ 悬浮窗已请求显示 (overlayShown=$overlayShown)');
 
-    // 4. 等悬浮窗渲染后发送配置
+    // 4. 等悬浮窗 Dart 引擎启动 + overlayListener 注册后发送配置
+    //    悬浮窗是独立 Flutter 引擎，需要时间初始化 Dart 代码和注册 listener。
+    //    如果发太早，overlayListener 还没注册，config 消息会丢失，
+    //    导致悬浮窗收不到模型路径，显示 Canvas fallback 圆形。
+    await Future.delayed(const Duration(seconds: 1));
+    await sendToOverlay(OverlayMessage(
+      type: 'config',
+      data: config,
+    ));
+    // 重发一次 config，防止首次消息丢失（竞态保护）
     await Future.delayed(const Duration(milliseconds: 500));
     await sendToOverlay(OverlayMessage(
       type: 'config',

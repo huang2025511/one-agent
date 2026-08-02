@@ -130,6 +130,7 @@ class _PetRendererState extends State<PetRenderer>
         setState(() {
           _live2dAvailable = false;
           _live2dLoading = false;
+          _live2dError = '未找到模型: $dir/$file';
         });
         return;
       }
