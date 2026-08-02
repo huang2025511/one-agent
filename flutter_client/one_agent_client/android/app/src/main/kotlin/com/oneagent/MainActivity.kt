@@ -1,5 +1,7 @@
 package com.oneagent
 
+import android.util.Log
+import com.linh18nd.flutter_live2d.FlutterLive2dPlugin
 import io.flutter.FlutterInjector
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -9,6 +11,10 @@ import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugins.GeneratedPluginRegistrant
 
 class MainActivity : FlutterActivity() {
+
+    companion object {
+        private const val TAG = "MainActivity"
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         // ⚠️ 必须在 super.configureFlutterEngine() 之前预创建 overlay 引擎！
@@ -30,13 +36,25 @@ class MainActivity : FlutterActivity() {
      * 预创建悬浮窗 FlutterEngine 并注册所有插件。
      *
      * flutter_overlay_window 的 OverlayService 从 FlutterEngineCache
-     * 获取 "myCachedEngine" 引擎来渲染悬浮窗 UI。如果该引擎没有注册
-     * FlutterLive2dPlugin，Live2DView 的 PlatformView factory 未注册，
-     * native view 无法创建，whenAttached 超时，最终显示 Canvas fallback。
+     * 获取 "myCachedEngine" 引擎来渲染悬浮窗 UI。
+     *
+     * ⚠️ 关键：GeneratedPluginRegistrant.registerWith() 只注册了 6 个插件
+     * （dynamic_color, flutter_secure_storage, fluttertoast, jni, jni_flutter,
+     *   shared_preferences），不包含 flutter_live2d！
+     *
+     * FlutterLive2dPlugin 负责在 onAttachedToEngine 中注册
+     * PlatformView factory "live2d_view"，没有这个 factory，
+     * Live2DView 的 native view 无法创建，whenAttached 超时，
+     * 最终只能显示 Canvas fallback 圆形宠物。
+     *
+     * 因此必须手动实例化并注册 FlutterLive2dPlugin。
      */
     private fun ensureOverlayEngineRegistered() {
         val cachedTag = "myCachedEngine"
-        if (FlutterEngineCache.getInstance().get(cachedTag) != null) return
+        if (FlutterEngineCache.getInstance().get(cachedTag) != null) {
+            Log.d(TAG, "overlay engine already cached, skipping")
+            return
+        }
 
         val engineGroup = FlutterEngineGroup(this)
         val entrypoint = DartExecutor.DartEntrypoint(
@@ -44,8 +62,22 @@ class MainActivity : FlutterActivity() {
             "overlayMain"
         )
         val overlayEngine = engineGroup.createAndRunEngine(this, entrypoint)
-        // 手动注册所有插件（包括 flutter_live2d）
+
+        // 1. 注册 GeneratedPluginRegistrant 中的基础插件
         GeneratedPluginRegistrant.registerWith(overlayEngine)
+
+        // 2. ⚠️ 手动注册 FlutterLive2dPlugin（不在 GeneratedPluginRegistrant 中）
+        //    必须在 put 到 cache 之前注册，否则 FlutterOverlayWindowPlugin
+        //    检测到缓存引擎后会跳过创建，但引擎缺少 live2d_view factory
+        try {
+            val live2dPlugin = FlutterLive2dPlugin()
+            overlayEngine.plugins.add(live2dPlugin)
+            Log.d(TAG, "✅ FlutterLive2dPlugin registered on overlay engine")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to register FlutterLive2dPlugin", e)
+        }
+
         FlutterEngineCache.getInstance().put(cachedTag, overlayEngine)
+        Log.d(TAG, "✅ overlay engine cached as '$cachedTag'")
     }
 }
