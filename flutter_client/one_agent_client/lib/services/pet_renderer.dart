@@ -389,19 +389,8 @@ class _PetRendererState extends State<PetRenderer>
                 },
               ),
             ),
-          // 上层：加载中指示器（盖住 fallback 画的宠物）
-          if (_live2dLoading)
-            Positioned.fill(
-              child: Container(
-                color: Colors.white.withOpacity(0.5),
-                alignment: Alignment.center,
-                child: const SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-            ),
+          // 不显示加载指示器：加载中时 Canvas fallback 已经可见，
+          // 用户能看到宠物而不是转圈。Live2D 加载成功后自动替换 Canvas。
           // 上层：错误提示（加载失败时）
           if (!_live2dLoading && !_live2dAvailable && _live2dError != null)
             Positioned(
