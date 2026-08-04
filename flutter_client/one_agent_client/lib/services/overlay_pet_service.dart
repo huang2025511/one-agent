@@ -142,7 +142,8 @@ class OverlayPetService {
         enableDrag: true,
         overlayTitle: 'One-Agent 桌宠',
         overlayContent: '桌宠运行中',
-        flag: OverlayFlag.defaultFlag,
+        // 使用 focusable 标志：允许悬浮窗内的输入框获取焦点
+        flag: OverlayFlag.focusable,
         visibility: NotificationVisibility.visibilityPublic,
         // positionGravity 设为 none：拖动后保持在用户放置的位置，
         // 不会自动滑回屏幕边缘/中央
