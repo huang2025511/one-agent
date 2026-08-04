@@ -6,6 +6,7 @@ import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import '../api/api_client.dart';
 import '../api/chat_api.dart';
 import '../api/sse_client.dart';
+import '../models/chat_message.dart';
 import '../services/pet_renderer.dart';
 
 /// ⚠️ 悬浮窗入口 overlayMain() 已在 main.dart 中统一定义（避免重复符号冲突）
