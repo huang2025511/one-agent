@@ -63,10 +63,9 @@ class _PetWidgetState extends State<PetWidget> {
       final artboard = file.mainArtboard;
 
       // 尝试找到状态机
-      for (final smc in StateMachineController.extend(artboard)) {
-        _controller = smc;
-        artboard.addController(smc);
-        break;
+      _controller = StateMachineController.fromArtboard(artboard, 'State Machine 1');
+      if (_controller != null) {
+        artboard.addController(_controller!);
       }
 
       if (_controller != null) {

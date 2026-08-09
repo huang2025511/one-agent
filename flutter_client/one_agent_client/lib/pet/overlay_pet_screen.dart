@@ -6,6 +6,7 @@ import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 
 import '../api/api_client.dart';
 import '../api/chat_api.dart';
+import '../api/sse_client.dart';
 import '../models/chat_message.dart';
 import 'pet_brain.dart';
 import 'pet_widget.dart';
