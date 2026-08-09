@@ -26,7 +26,7 @@ class OverlayPetService {
   }
 
   /// 显示悬浮窗宠物
-  Future<bool showOverlay({
+  Future<bool> showOverlay({
     required String baseUrl,
     required String apiKey,
     String? sessionId,
