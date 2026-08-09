@@ -1,4 +1,6 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:rive/rive.dart';
 
 import 'pet_brain.dart';
@@ -24,17 +26,15 @@ class PetWidget extends StatefulWidget {
 }
 
 class _PetWidgetState extends State<PetWidget> {
-  // Rive 运行时控制器
-  RiveArtboard? _artboard;
+  Artboard? _artboard;
+  StateMachineController? _controller;
   SMIInput<bool>? _idleInput;
   SMIInput<bool>? _talkInput;
   SMIInput<bool>? _happyInput;
   SMIInput<bool>? _sleepInput;
   SMIInput<bool>? _thinkInput;
-  SMIInput<double>? _lookInput; // 控制左右看的数值输入
 
   bool _loadFailed = false;
-  String _activeAnimation = '';
 
   @override
   void initState() {
@@ -45,10 +45,15 @@ class _PetWidgetState extends State<PetWidget> {
   @override
   void didUpdateWidget(PetWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 状态变化时切换动画
     if (oldWidget.mood != widget.mood || oldWidget.action != widget.action) {
       _updateAnimation();
     }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
   }
 
   void _loadRive() async {
@@ -58,29 +63,18 @@ class _PetWidgetState extends State<PetWidget> {
       final artboard = file.mainArtboard;
 
       // 尝试找到状态机
-      if (artboard is RuntimeArtboard) {
-        // 遍历控制器，找到 SMI 输入
-        for (final controller in artboard.controllers) {
-          if (controller is SMILinearAnimationInstance) {
-            // 线性动画实例
-          }
-        }
+      for (final smc in StateMachineController.extend(artboard)) {
+        _controller = smc;
+        artboard.addController(smc);
+        break;
       }
 
-      // 尝试创建状态机控制器
-      final smiController = StateMachineController.fromArtboard(
-        artboard,
-        'State Machine 1',
-      );
-
-      if (smiController != null) {
-        artboard.addController(smiController);
-        _idleInput = smiController.findInput<bool>('idle') as SMIInput<bool>?;
-        _talkInput = smiController.findInput<bool>('talk') as SMIInput<bool>?;
-        _happyInput = smiController.findInput<bool>('happy') as SMIInput<bool>?;
-        _sleepInput = smiController.findInput<bool>('sleep') as SMIInput<bool>?;
-        _thinkInput = smiController.findInput<bool>('think') as SMIInput<bool>?;
-        _lookInput = smiController.findInput<double>('look') as SMIInput<double>?;
+      if (_controller != null) {
+        _idleInput = _controller!.findInput<bool>('idle');
+        _talkInput = _controller!.findInput<bool>('talk');
+        _happyInput = _controller!.findInput<bool>('happy');
+        _sleepInput = _controller!.findInput<bool>('sleep');
+        _thinkInput = _controller!.findInput<bool>('think');
       }
 
       if (mounted) {
@@ -90,7 +84,7 @@ class _PetWidgetState extends State<PetWidget> {
         _updateAnimation();
       }
     } catch (e) {
-      debugPrint('Rive 加载失败: $e');
+      debugPrint('Rive 加载失败，使用 Canvas fallback: $e');
       if (mounted) {
         setState(() => _loadFailed = true);
       }
@@ -98,9 +92,8 @@ class _PetWidgetState extends State<PetWidget> {
   }
 
   void _updateAnimation() {
-    if (_artboard == null) return;
+    if (_controller == null) return;
 
-    // 重置所有布尔输入
     _idleInput?.value = false;
     _talkInput?.value = false;
     _happyInput?.value = false;
@@ -110,41 +103,23 @@ class _PetWidgetState extends State<PetWidget> {
     switch (widget.action) {
       case PetAction.idle:
       case PetAction.blink:
-        _idleInput?.value = true;
-        _activeAnimation = 'idle';
-        break;
       case PetAction.lookAround:
-        _idleInput?.value = true;
-        _lookInput?.value = widget.mood == PetMood.curious ? 1.0 : 0.0;
-        _activeAnimation = 'lookAround';
-        break;
       case PetAction.tilt:
         _idleInput?.value = true;
-        _activeAnimation = 'tilt';
         break;
       case PetAction.bounce:
-        _happyInput?.value = true;
-        _activeAnimation = 'bounce';
-        break;
       case PetAction.wave:
+      case PetAction.happy:
         _happyInput?.value = true;
-        _activeAnimation = 'wave';
         break;
       case PetAction.sleep:
         _sleepInput?.value = true;
-        _activeAnimation = 'sleep';
         break;
       case PetAction.talk:
         _talkInput?.value = true;
-        _activeAnimation = 'talk';
         break;
       case PetAction.think:
         _thinkInput?.value = true;
-        _activeAnimation = 'think';
-        break;
-      case PetAction.happy:
-        _happyInput?.value = true;
-        _activeAnimation = 'happy';
         break;
     }
   }
@@ -152,7 +127,6 @@ class _PetWidgetState extends State<PetWidget> {
   @override
   Widget build(BuildContext context) {
     if (_loadFailed) {
-      // Fallback: Canvas 绘制的简单猫
       return SizedBox(
         width: widget.size,
         height: widget.size,
@@ -221,7 +195,6 @@ class _FallbackCatPainter extends CustomPainter {
     // 眼睛
     final eyePaint = Paint()..color = const Color(0xFF3E2723);
     if (mood == PetMood.sleeping) {
-      // 闭眼
       canvas.drawLine(
         Offset(cx - r * 0.3, cy - r * 0.1),
         Offset(cx - r * 0.15, cy - r * 0.1),
@@ -266,17 +239,16 @@ class _FallbackCatPainter extends CustomPainter {
           width: 16,
           height: 10,
         ),
-        0, pi, false, mouthPaint,
+        0, math.pi, false, mouthPaint,
       );
     } else {
-      // 简单微笑
       canvas.drawArc(
         Rect.fromCenter(
           center: Offset(cx - r * 0.08, cy + r * 0.15),
           width: 8,
           height: 6,
         ),
-        0, pi, false, mouthPaint,
+        0, math.pi, false, mouthPaint,
       );
       canvas.drawArc(
         Rect.fromCenter(
@@ -284,7 +256,7 @@ class _FallbackCatPainter extends CustomPainter {
           width: 8,
           height: 6,
         ),
-        0, pi, false, mouthPaint,
+        0, math.pi, false, mouthPaint,
       );
     }
   }

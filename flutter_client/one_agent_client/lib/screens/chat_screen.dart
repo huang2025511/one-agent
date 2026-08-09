@@ -139,7 +139,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 await petService.hideOverlay();
               } else {
                 final ok = await petService.showOverlay(
-                  baseUrl: settings.serverAddress,
+                  baseUrl: settings.baseUrl,
                   apiKey: settings.apiKey,
                 );
                 if (!ok && context.mounted) {
