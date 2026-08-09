@@ -1,7 +1,7 @@
 name: one_agent_client
 description: One-Agent mobile client — full-featured Flutter app for Android/iOS
 publish_to: 'none'
-version: 1.0.81+2081
+version: 1.0.82+2082
 
 environment:
   sdk: '>=3.2.0 <4.0.0'
@@ -35,6 +35,12 @@ dependencies:
   open_filex: ^4.5.0
   path_provider: ^2.1.3
 
+  # 桌宠动画
+  rive: ^0.13.20
+
+  # 悬浮窗
+  flutter_overlay_window: ^0.4.5
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -47,3 +53,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/images/
+    - assets/rive/

@@ -6,6 +6,7 @@ import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:intl/intl.dart';
 
 import '../l10n/app_localizations.dart';
+import '../pet/overlay_pet_service.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/typewriter_text.dart';
@@ -127,6 +128,31 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ],
         ),
         actions: [
+          // 桌宠按钮
+          IconButton(
+            icon: const Icon(Icons.pets),
+            tooltip: '桌宠',
+            onPressed: () async {
+              final settings = ref.read(settingsProvider);
+              final petService = OverlayPetService();
+              if (petService.isActive) {
+                await petService.hideOverlay();
+              } else {
+                final ok = await petService.showOverlay(
+                  baseUrl: settings.serverAddress,
+                  apiKey: settings.apiKey,
+                );
+                if (!ok && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('无法显示悬浮窗，请检查权限'),
+                      duration: Duration(seconds: 3),
+                    ),
+                  );
+                }
+              }
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.delete_outline),
             tooltip: l10n.clearChat,
