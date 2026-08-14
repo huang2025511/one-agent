@@ -138,9 +138,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
               if (petService.isActive) {
                 await petService.hideOverlay();
               } else {
+                final mq = MediaQuery.of(context);
                 final ok = await petService.showOverlay(
                   baseUrl: settings.baseUrl,
                   apiKey: settings.apiKey,
+                  // 传入屏幕逻辑尺寸与像素比：插件的 width/height 是物理像素，
+                  // 初始位置按 dp 计算，避免窗口被裁剪/定位错误
+                  screenSize: mq.size,
+                  devicePixelRatio: mq.devicePixelRatio,
                 );
                 if (!ok && context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(

@@ -23,6 +23,11 @@ class OverlayPetService {
   String? _lastApiKey;
   String? _lastSessionId;
 
+  /// 悬浮窗内容期望尺寸（单位：逻辑像素 dp）。
+  /// 需容纳：气泡消息 + 140dp 宠物 + 输入框。
+  static const double _windowWidthDp = 280;
+  static const double _windowHeightDp = 340;
+
   /// 检查并请求悬浮窗权限
   Future<bool> requestPermission() async {
     final granted = await FlutterOverlayWindow.isPermissionGranted();
@@ -34,10 +39,15 @@ class OverlayPetService {
   }
 
   /// 显示悬浮窗宠物
+  ///
+  /// [screenSize] 主 APP 当前屏幕逻辑尺寸（dp），用于计算初始位置。
+  /// [devicePixelRatio] 设备像素比，用于把 dp 尺寸换算成插件要求的像素值。
   Future<bool> showOverlay({
     required String baseUrl,
     required String apiKey,
     String? sessionId,
+    required Size screenSize,
+    required double devicePixelRatio,
   }) async {
     // 检查权限
     final hasPermission = await requestPermission();
@@ -53,21 +63,39 @@ class OverlayPetService {
     // 先注册主 APP 监听，确保悬浮窗发送的 ready 信号不会被丢弃
     _ensureMainAppListener();
 
+    // ── 关键修复 1：窗口尺寸必须传"物理像素"而非 dp ──────────────
+    // flutter_overlay_window 的 showOverlay(width/height) 会直接作为
+    // WindowManager.LayoutParams 的像素值。之前误传 300×250（被当作像素），
+    // 在高密度屏上仅约 109×91dp，比 140dp 的宠物还小，导致宠物被裁剪
+    // 得只剩中间圆形身体（"只显示一个圆形宠物"的真正根因）。
+    final int widthPx = (_windowWidthDp * devicePixelRatio).round();
+    final int heightPx = (_windowHeightDp * devicePixelRatio).round();
+
+    // ── 关键修复 2：初始位置放在屏幕右侧中部（单位 dp，插件内部转像素）──
+    // 用 topLeft 重力 + startPosition 精确定位，避免 centerRight 重力
+    // 触发插件的 X 轴反向拖动逻辑导致"拖到旁边就消失"。
+    double startX = screenSize.width - _windowWidthDp - 8;
+    if (startX < 0) startX = 0;
+    double startY = (screenSize.height - _windowHeightDp) / 2;
+    if (startY < 0) startY = 0;
+
     // 显示悬浮窗
     await FlutterOverlayWindow.showOverlay(
       enableDrag: true,
       overlayTitle: 'One-Agent 桌宠',
       overlayContent: '桌宠运行中',
       // focusPointer：允许悬浮窗内的输入框获取键盘焦点。
-      // 之前误用 OverlayFlag.focusable（不存在的枚举）导致构建失败，
-      // 回退到 defaultFlag 后又导致输入框无法弹键盘。
       flag: OverlayFlag.focusPointer,
       visibility: NotificationVisibility.visibilityPublic,
+      // none：拖动后保持在用户放置的位置，不自动吸附边缘
       positionGravity: PositionGravity.none,
-      // 初始位置放屏幕右侧中部，避免挡状态栏/底部导航
-      alignment: OverlayAlignment.centerRight,
-      height: 250,
-      width: 300,
+      // topLeft：x/y 从左上角计量，拖动方向与手指一致，无反向问题
+      alignment: OverlayAlignment.topLeft,
+      // startPosition 单位为 dp（插件内部 moveOverlay 会 dpToPx 转换）
+      startPosition: OverlayPosition(startX, startY),
+      // 注意：此处 width/height 为物理像素
+      width: widthPx,
+      height: heightPx,
     );
 
     _isActive = true;
