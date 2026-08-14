@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -23,13 +24,13 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.webkit.WebViewAssetLoader
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLDecoder
 
 /**
  * 原生桌宠悬浮窗服务。
@@ -47,6 +48,13 @@ class PetOverlayService : Service() {
         private const val TAG = "PetOverlayService"
         private const val NOTIF_ID = 10086
         private const val CHANNEL_ID = "pet_overlay_channel"
+
+        // WebViewAssetLoader 虚拟域名（androidx.webkit 官方方案）。
+        // Chromium 对 file:// 的 XHR/fetch 有严格同源限制，会导致
+        // Live2D 模型资源加载被 CORS 拦截（"模型加载中"卡死的根因）。
+        // 走 https 虚拟域名后页面与模型资源同源，无任何限制。
+        private const val WEB_BASE = "https://appassets.androidplatform.net/live2d"
+        private const val MODELS_BASE = "https://appassets.androidplatform.net/models"
 
         var instance: PetOverlayService? = null
             private set
@@ -98,9 +106,8 @@ class PetOverlayService : Service() {
             return START_NOT_STICKY
         }
 
-        if (!mp.isNullOrEmpty() && !mf.isNullOrEmpty()) {
-            modelUrl = resolveModelUrl(mp, mf)
-        }
+        // 始终解析模型 URL：无导入模型时回退内置 Hiyori（否则宠物窗口空白）
+        modelUrl = resolveModelUrl(mp, mf)
 
         startForegroundCompat()
         if (overlayView == null) {
@@ -127,12 +134,23 @@ class PetOverlayService : Service() {
 
     /** 解析模型 URL：传了路径用导入模型，否则用内置 hiyori */
     private fun resolveModelUrl(mp: String?, mf: String?): String {
-        return if (!mp.isNullOrEmpty() && !mf.isNullOrEmpty()) {
-            "file://" + File(mp, mf).absolutePath
-        } else {
-            val dir = webDir ?: prepareWebDir()
-            "file://" + File(dir, "models/hiyori/Hiyori.model3.json").absolutePath
+        if (!mp.isNullOrEmpty() && !mf.isNullOrEmpty()) {
+            // 导入模型位于 app_flutter/live2d_models/<名>/（path_provider 的文档目录）
+            val modelsRoot = File(getDir("flutter", Context.MODE_PRIVATE), "live2d_models")
+            try {
+                val abs = File(mp).canonicalFile
+                val rootPath = modelsRoot.canonicalPath
+                if (abs.path.startsWith("$rootPath/")) {
+                    val rel = abs.path.substring(rootPath.length + 1) + "/" + mf
+                    val encoded = rel.split('/').joinToString("/") { Uri.encode(it) }
+                    return "$MODELS_BASE/$encoded"
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "resolve model url: $e")
+            }
         }
+        webDir ?: prepareWebDir()
+        return "$WEB_BASE/models/hiyori/Hiyori.model3.json"
     }
 
     // ── 前台服务通知 ────────────────────────────────────────
@@ -196,35 +214,36 @@ class PetOverlayService : Service() {
             allowFileAccess = true
             allowContentAccess = true
             mediaPlaybackRequiresUserGesture = false
-            @Suppress("DEPRECATION")
-            allowFileAccessFromFileURLs = true
-            @Suppress("DEPRECATION")
-            allowUniversalAccessFromFileURLs = true
         }
         wv.setBackgroundColor(Color.TRANSPARENT)
         wv.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         wv.addJavascriptInterface(Bridge(), "PetBridge")
+
+        // WebViewAssetLoader：本地文件通过 https 虚拟域名提供（Google 官方方案）
+        // - /live2d/* → filesDir/live2d_web（页面 + 内置 Hiyori 模型）
+        // - /models/* → app_flutter/live2d_models（用户导入的模型）
+        webDir = prepareWebDir()
+        val webRoot = webDir!!
+        val modelsRoot = File(getDir("flutter", Context.MODE_PRIVATE), "live2d_models")
+        val assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/live2d/", WebViewAssetLoader.PathHandler { path ->
+                serveFile(webRoot, path)
+            })
+            .addPathHandler("/models/", WebViewAssetLoader.PathHandler { path ->
+                serveFile(modelsRoot, path)
+            })
+            .build()
+
         wv.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 if (modelUrl.isNotEmpty()) loadModel(modelUrl)
             }
 
-            // 拦截 file:// 请求直接读本地文件，保证 WebView 能加载模型资源
             override fun shouldInterceptRequest(
                 view: WebView?, request: WebResourceRequest
             ): WebResourceResponse? {
-                val url = request.url.toString()
-                if (url.startsWith("file://")) {
-                    val path = try {
-                        URLDecoder.decode(url.removePrefix("file://"), "UTF-8")
-                    } catch (e: Exception) {
-                        url.removePrefix("file://")
-                    }
-                    val f = File(path)
-                    if (f.exists() && f.isFile) {
-                        return WebResourceResponse(mimeOf(f.name), "UTF-8", f.inputStream())
-                    }
-                }
+                val resp = assetLoader.shouldInterceptRequest(request.url)
+                if (resp != null) return resp
                 return super.shouldInterceptRequest(view, request)
             }
         }
@@ -242,10 +261,15 @@ class PetOverlayService : Service() {
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
+        // 关键修复（挡全屏问题）：不加 FLAG_NOT_TOUCH_MODAL 时，可聚焦窗口
+        // 会消费【所有】指针事件（包括窗口外的），导致宠物悬浮窗挡住整个屏幕。
+        // 加上 NOT_TOUCH_MODAL：窗口外触摸透传给下层应用；窗口仍可聚焦，
+        // 输入框能弹键盘。WATCH_OUTSIDE_TOUCH 让窗口感知外部触摸。
         val p = WindowManager.LayoutParams(
             w, h,
             windowType,
-            0, // 不加 NOT_FOCUSABLE：允许 WebView 输入框弹键盘
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
             PixelFormat.TRANSLUCENT
         )
         p.gravity = Gravity.TOP or Gravity.START
@@ -265,7 +289,20 @@ class PetOverlayService : Service() {
             return
         }
 
-        wv.loadUrl("file://" + File(webDir, "index.html").absolutePath)
+        wv.loadUrl("$WEB_BASE/index.html")
+    }
+
+    /** 从指定根目录安全地提供一个文件（防目录穿越） */
+    private fun serveFile(root: File, path: String?): WebResourceResponse? {
+        if (path.isNullOrEmpty()) return null
+        return try {
+            val rootPath = root.canonicalPath
+            val f = File(root, path).canonicalFile
+            if (!f.path.startsWith("$rootPath/") || !f.isFile) return null
+            WebResourceResponse(mimeOf(f.name), null, f.inputStream())
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun mimeOf(name: String): String = when {

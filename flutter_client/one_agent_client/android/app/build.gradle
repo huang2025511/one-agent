@@ -109,6 +109,14 @@ android {
     }
 }
 
+dependencies {
+    // WebViewAssetLoader：Google 官方方案，把本地文件通过
+    // https://appassets.androidplatform.net 虚拟域名提供给 WebView。
+    // Chromium 对 file:// 的 XHR/fetch 有严格同源限制（模型加载失败的根因），
+    // 走 https 虚拟域名后同源无 CORS 问题。
+    implementation 'androidx.webkit:webkit:1.11.0'
+}
+
 flutter {
     source '../..'
 }

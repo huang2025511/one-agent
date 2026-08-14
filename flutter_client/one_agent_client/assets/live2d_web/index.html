@@ -108,6 +108,12 @@
   }
 
   function loadModel(url) {
+    // 防护：渲染库未就绪时明确提示，避免"加载模型中"永久卡死
+    if (!window.PIXI || !PIXI.live2d || !PIXI.live2d.Live2DModel) {
+      showBubble('渲染库未加载完成', false);
+      if (window.PetBridge) PetBridge.onModelLoaded(false, 'PIXI.live2d 未就绪');
+      return;
+    }
     var L2D = PIXI.live2d;
     showBubble('加载模型中...', true);
     L2D.Live2DModel.from(url, { autoInteract: false }).then(function (m) {
@@ -123,7 +129,11 @@
       playMotion('TapBody');
       if (window.PetBridge) PetBridge.onModelLoaded(true, url);
     }).catch(function (err) {
-      showBubble('模型加载失败: ' + err, false);
+      // 错误气泡保留 8 秒，方便看清原因
+      bubble.style.display = 'block';
+      bubble.innerText = '模型加载失败: ' + err;
+      if (bubbleTimer) { clearTimeout(bubbleTimer); }
+      bubbleTimer = setTimeout(function () { bubble.style.display = 'none'; }, 8000);
       if (window.PetBridge) PetBridge.onModelLoaded(false, String(err));
     });
   }
