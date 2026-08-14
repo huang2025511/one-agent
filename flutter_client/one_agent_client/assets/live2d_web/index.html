@@ -15500,8 +15500,10 @@ var __pow = Math.pow,
     try { ev = JSON.parse(jsonStr); } catch (e) { return; }
     if (ev.status === 'heartbeat') return;
     if (ev.status === 'thinking') {
-      // thinking 阶段：只显示进度文本（首个正文事件到达时会清掉）
-      showBubble(ev.content || '思考中...', true);
+      // thinking 阶段：只显示进度文本（首个正文事件到达时会清掉）。
+      // 关键修复：正文开始后服务端还会推 phase=plan 的完整思考事件，
+      // 若不屏蔽会把已显示的回复整体替换成思考文本（回复"闪没"的根因）
+      if (!inReply) showBubble(ev.content || '思考中...', true);
       return;
     }
     if (ev.error) {
@@ -15532,7 +15534,7 @@ var __pow = Math.pow,
       talking = false; inReply = false;
       // 按回复长度动态计算阅读时间：基础 8s + 每字 0.15s，上限 60s。
       // 之前固定 6 秒，长回复来不及读就消失了。
-      var ms = Math.min(8000 + replyText.length * 150, 60000);
+      var ms = Math.min(12000 + replyText.length * 200, 90000);
       bubble.classList.add('done'); // 尾部显示"✓ 点击收起"
       bubble.scrollTop = bubble.scrollHeight;
       if (bubbleTimer) { clearTimeout(bubbleTimer); }
@@ -15582,16 +15584,36 @@ var __pow = Math.pow,
       try { model.motion(g); } catch (e2) {}
     }
   }
-  // 视线跟随手指：点击/滑动时宠物看向触点
-  document.getElementById('glcanvas').addEventListener('pointermove', function (e) {
-    if (!model) return;
-    try { model.focus(e.clientX, e.clientY); } catch (err) {}
-  });
-  // 定时自动行为：每 12~22 秒随机闲晃（聊天说话时不打断）
+  // 定时自动行为：行为池随机执行（聊天回复期间不打断）
+  // 之前只随机播 Idle 动作，动作细微且无变化，看起来"没有自主行为"
+  var idleChats = [
+    '今天过得怎么样呀？', '陪我聊聊天嘛~', '有点无聊呢...',
+    '要不要休息一下？', '我一直都在哦~', '喝口水吧，对身体好~',
+    '工作时间要专注哦！', '点点我，我什么都能聊~', '肩膀酸不酸？抬头看看远处吧~',
+  ];
+  function autoBehavior() {
+    if (!model || talking || inReply) return;
+    var r = Math.random();
+    if (r < 0.45) {
+      // 随机 Idle 动作
+      playRandomMotion(true);
+    } else if (r < 0.65) {
+      // 表情变化 + 动作
+      randomExpression();
+      playRandomMotion(true);
+    } else if (r < 0.9) {
+      // 主动搭话（气泡 6 秒）
+      showBubble(idleChats[Math.floor(Math.random() * idleChats.length)], false);
+      playRandomMotion(false);
+    } else {
+      // 随机看向一处
+      try { model.focus(Math.random() * window.innerWidth, Math.random() * window.innerHeight * 0.4); } catch (e) {}
+    }
+  }
   function scheduleAutoBehavior() {
-    var delay = 12000 + Math.floor(Math.random() * 10000);
+    var delay = 8000 + Math.floor(Math.random() * 10000);
     setTimeout(function () {
-      if (model && !talking) playRandomMotion(true);
+      autoBehavior();
       scheduleAutoBehavior();
     }, delay);
   }
@@ -15624,11 +15646,31 @@ var __pow = Math.pow,
   }
   // 点击模型 → 切换对话窗口 + 互动动作 + 随机表情 + 气泡回应
   // 双击模型 → 循环切换尺寸档位（原生 cycleSize）
-  // 用 280ms 延迟区分单击/双击：期间无第二次点击才执行单击逻辑
+  // 双指捏合 → 连续缩放（原生 scaleBy），多指时屏蔽单击/双击
   var tapReplies = ['嘿嘿~', '干嘛呀？', '摸摸头~', '你好呀！', '想我了吗？', '今天也要加油哦~'];
   var lastTapTime = 0;
   var singleTapTimer = null;
-  document.getElementById('glcanvas').addEventListener('pointerdown', function (e) {
+  var activePtrs = {};      // pointerId → {x, y}
+  var lastPinchDist = 0;
+  var lastScaleByTs = 0;
+  var glcanvas = document.getElementById('glcanvas');
+
+  function pinchDist() {
+    var ids = Object.keys(activePtrs);
+    if (ids.length < 2) return 0;
+    var a = activePtrs[ids[0]], b = activePtrs[ids[1]];
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+
+  glcanvas.addEventListener('pointerdown', function (e) {
+    activePtrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+    // 多指：进入捏合模式，取消挂起的单击/双击判定
+    if (Object.keys(activePtrs).length >= 2) {
+      lastTapTime = 0;
+      if (singleTapTimer) { clearTimeout(singleTapTimer); singleTapTimer = null; }
+      lastPinchDist = pinchDist();
+      return;
+    }
     var now = Date.now();
     if (now - lastTapTime < 280) {
       // 双击：切换尺寸（取消挂起的单击任务）
@@ -15655,6 +15697,31 @@ var __pow = Math.pow,
       }
     }, 280);
   });
+
+  // 双指移动 → 按距离比例连续缩放（节流 60ms）
+  glcanvas.addEventListener('pointermove', function (e) {
+    if (!(e.pointerId in activePtrs)) {
+      // 单指悬停：视线跟随
+      if (model) { try { model.focus(e.clientX, e.clientY); } catch (err) {} }
+      return;
+    }
+    activePtrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+    if (Object.keys(activePtrs).length < 2 || !lastPinchDist) return;
+    var d = pinchDist();
+    if (!d) return;
+    var now = Date.now();
+    if (now - lastScaleByTs < 60) return;
+    lastScaleByTs = now;
+    if (window.PetBridge) PetBridge.scaleBy(d / lastPinchDist);
+    lastPinchDist = d;
+  });
+
+  function pinchEnd(e) {
+    delete activePtrs[e.pointerId];
+    if (Object.keys(activePtrs).length < 2) lastPinchDist = 0;
+  }
+  glcanvas.addEventListener('pointerup', pinchEnd);
+  glcanvas.addEventListener('pointercancel', pinchEnd);
 
   scheduleAutoBehavior();
 

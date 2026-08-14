@@ -56,11 +56,14 @@ class PetOverlayService : Service() {
         private const val WEB_BASE = "https://appassets.androidplatform.net/live2d"
         private const val MODELS_BASE = "https://appassets.androidplatform.net/models"
 
-        // 尺寸档位（宽x高 dp）：小 / 中（默认）/ 大
-        private val SIZES = arrayOf(200f to 260f, 280f to 360f, 360f to 460f)
+        // 基准尺寸与缩放范围（ratio 相对 280x360）
+        private const val BASE_W = 280f
+        private const val BASE_H = 360f
+        private const val MIN_SCALE = 0.4f
+        private const val MAX_SCALE = 2.5f
         private val SIZE_NAMES = arrayOf("小", "中", "大")
         private const val PREFS = "pet_overlay"
-        private const val KEY_SIZE = "size_index"
+        private const val KEY_SCALE = "scale_ratio"
 
         var instance: PetOverlayService? = null
             private set
@@ -266,11 +269,10 @@ class PetOverlayService : Service() {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT))
 
-        // 初始尺寸：读取持久化的档位（默认中档）
-        val sizeIdx = sizeIndex()
-        val (sw, sh) = SIZES[sizeIdx]
-        val w = dp(sw)
-        val h = dp(sh)
+        // 初始尺寸：读取持久化的缩放比例（默认 1.0）
+        val ratio = scaleRatio()
+        val w = dp(BASE_W * ratio)
+        val h = dp(BASE_H * ratio)
         // TYPE_APPLICATION_OVERLAY 需要 API 26+；更低版本用 TYPE_PHONE
         val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -314,32 +316,45 @@ class PetOverlayService : Service() {
         wv.loadUrl("$WEB_BASE/index.html")
     }
 
-    // ── 尺寸调整（双击宠物循环切换档位）─────────────────────
-    private fun sizeIndex(): Int =
+    // ── 尺寸调整（双击循环档位 / 双指捏合连续缩放）──────────
+    private fun scaleRatio(): Float =
         getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getInt(KEY_SIZE, 1).coerceIn(0, SIZES.size - 1)
+            .getFloat(KEY_SCALE, 1.0f).coerceIn(MIN_SCALE, MAX_SCALE)
 
-    /** 切换到下一档尺寸并持久化，页面 resize 事件会自动重排模型 */
-    private fun cycleSize() {
-        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val next = (sizeIndex() + 1) % SIZES.size
-        prefs.edit().putInt(KEY_SIZE, next).apply()
-        val (sw, sh) = SIZES[next]
-        val w = dp(sw)
-        val h = dp(sh)
+    /** 应用缩放比例并持久化。关键修复：尺寸变化后把窗口位置
+     *  clamp 回屏幕内——否则窗口放大时底部（含发送按钮）会伸出
+     *  屏幕外看不到 */
+    private fun applyScale(ratio: Float, notify: Boolean) {
+        val r = ratio.coerceIn(MIN_SCALE, MAX_SCALE)
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putFloat(KEY_SCALE, r).apply()
+        val w = dp(BASE_W * r)
+        val h = dp(BASE_H * r)
         params?.let { p ->
             p.width = w
             p.height = h
+            val dm = resources.displayMetrics
+            p.x = p.x.coerceIn(0, (dm.widthPixels - w).coerceAtLeast(0))
+            p.y = p.y.coerceIn(0, (dm.heightPixels - h).coerceAtLeast(0))
             try {
                 wm.updateViewLayout(overlayView, p)
-                Log.i(TAG, "size -> ${SIZE_NAMES[next]} ${sw}x${sh}dp")
+                Log.i(TAG, "scale -> ${"%.2f".format(r)} (${w}x${h}px)")
             } catch (e: Exception) {
                 Log.w(TAG, "updateViewLayout: $e")
             }
         }
-        // 回执给页面用于气泡提示
-        webView?.evaluateJavascript(
-            "window.petBubble && window.petBubble('尺寸: ${SIZE_NAMES[next]}', false)", null)
+        if (notify) {
+            webView?.evaluateJavascript(
+                "window.petBubble && window.petBubble('缩放: ${"%.0f".format(r * 100)}%', false)", null)
+        }
+    }
+
+    /** 双击：循环切换三档（0.7 / 1.0 / 1.3） */
+    private fun cycleSize() {
+        val gears = floatArrayOf(0.714f, 1.0f, 1.286f)
+        val cur = scaleRatio()
+        val next = gears.firstOrNull { it > cur + 0.05f } ?: gears[0]
+        applyScale(next, true)
     }
 
     /** 从指定根目录安全地提供一个文件（防目录穿越） */
@@ -458,6 +473,14 @@ class PetOverlayService : Service() {
         @JavascriptInterface
         fun cycleSize() {
             mainHandler.post { this@PetOverlayService.cycleSize() }
+        }
+
+        /** 双指捏合：按距离比例连续缩放（页面节流后调用） */
+        @JavascriptInterface
+        fun scaleBy(delta: Double) {
+            mainHandler.post {
+                applyScale(scaleRatio() * delta.toFloat(), false)
+            }
         }
 
         @JavascriptInterface
