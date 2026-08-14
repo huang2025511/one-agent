@@ -56,6 +56,12 @@ class PetOverlayService : Service() {
         private const val WEB_BASE = "https://appassets.androidplatform.net/live2d"
         private const val MODELS_BASE = "https://appassets.androidplatform.net/models"
 
+        // 尺寸档位（宽x高 dp）：小 / 中（默认）/ 大
+        private val SIZES = arrayOf(200f to 260f, 280f to 360f, 360f to 460f)
+        private val SIZE_NAMES = arrayOf("小", "中", "大")
+        private const val PREFS = "pet_overlay"
+        private const val KEY_SIZE = "size_index"
+
         var instance: PetOverlayService? = null
             private set
     }
@@ -260,8 +266,11 @@ class PetOverlayService : Service() {
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT))
 
-        val w = dp(280f)
-        val h = dp(360f)
+        // 初始尺寸：读取持久化的档位（默认中档）
+        val sizeIdx = sizeIndex()
+        val (sw, sh) = SIZES[sizeIdx]
+        val w = dp(sw)
+        val h = dp(sh)
         // TYPE_APPLICATION_OVERLAY 需要 API 26+；更低版本用 TYPE_PHONE
         val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -303,6 +312,34 @@ class PetOverlayService : Service() {
         }
 
         wv.loadUrl("$WEB_BASE/index.html")
+    }
+
+    // ── 尺寸调整（双击宠物循环切换档位）─────────────────────
+    private fun sizeIndex(): Int =
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_SIZE, 1).coerceIn(0, SIZES.size - 1)
+
+    /** 切换到下一档尺寸并持久化，页面 resize 事件会自动重排模型 */
+    private fun cycleSize() {
+        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val next = (sizeIndex() + 1) % SIZES.size
+        prefs.edit().putInt(KEY_SIZE, next).apply()
+        val (sw, sh) = SIZES[next]
+        val w = dp(sw)
+        val h = dp(sh)
+        params?.let { p ->
+            p.width = w
+            p.height = h
+            try {
+                wm.updateViewLayout(overlayView, p)
+                Log.i(TAG, "size -> ${SIZE_NAMES[next]} ${sw}x${sh}dp")
+            } catch (e: Exception) {
+                Log.w(TAG, "updateViewLayout: $e")
+            }
+        }
+        // 回执给页面用于气泡提示
+        webView?.evaluateJavascript(
+            "window.petBubble && window.petBubble('尺寸: ${SIZE_NAMES[next]}', false)", null)
     }
 
     /** 从指定根目录安全地提供一个文件（防目录穿越） */
@@ -415,6 +452,12 @@ class PetOverlayService : Service() {
         @JavascriptInterface
         fun onClose() {
             mainHandler.post { stopSelf() }
+        }
+
+        /** 双击宠物：循环切换尺寸档位（小/中/大） */
+        @JavascriptInterface
+        fun cycleSize() {
+            mainHandler.post { this@PetOverlayService.cycleSize() }
         }
 
         @JavascriptInterface

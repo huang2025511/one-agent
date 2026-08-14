@@ -15546,6 +15546,9 @@ var __pow = Math.pow,
     }
   };
 
+  // 全局气泡接口（原生切换尺寸后回执提示用）
+  window.petBubble = function (text, sticky) { showBubble(text, sticky); };
+
   // 点击气泡立即收起（选中文本时不触发，方便复制）
   bubble.addEventListener('click', function () {
     try { if (window.getSelection().toString()) return; } catch (e) {}
@@ -15620,21 +15623,37 @@ var __pow = Math.pow,
     bar.style.display = bar.style.display === 'flex' ? 'none' : 'flex';
   }
   // 点击模型 → 切换对话窗口 + 互动动作 + 随机表情 + 气泡回应
+  // 双击模型 → 循环切换尺寸档位（原生 cycleSize）
+  // 用 280ms 延迟区分单击/双击：期间无第二次点击才执行单击逻辑
   var tapReplies = ['嘿嘿~', '干嘛呀？', '摸摸头~', '你好呀！', '想我了吗？', '今天也要加油哦~'];
+  var lastTapTime = 0;
+  var singleTapTimer = null;
   document.getElementById('glcanvas').addEventListener('pointerdown', function (e) {
-    if (!model) { toggleBar(); return; }
-    var hit = null;
-    try {
-      // tap() 需要模型本地坐标，先把屏幕坐标转换过去
-      var p = model.toLocal(new PIXI.Point(e.clientX, e.clientY));
-      hit = model.tap(p.x, p.y);
-    } catch (err) {}
-    toggleBar();
-    if (hit && hit.length > 0) {
-      showBubble(tapReplies[Math.floor(Math.random() * tapReplies.length)], false);
-      playRandomMotion(false);
-      randomExpression();
+    var now = Date.now();
+    if (now - lastTapTime < 280) {
+      // 双击：切换尺寸（取消挂起的单击任务）
+      lastTapTime = 0;
+      if (singleTapTimer) { clearTimeout(singleTapTimer); singleTapTimer = null; }
+      if (window.PetBridge) PetBridge.cycleSize();
+      return;
     }
+    lastTapTime = now;
+    if (singleTapTimer) clearTimeout(singleTapTimer);
+    singleTapTimer = setTimeout(function () {
+      singleTapTimer = null;
+      if (!model) { toggleBar(); return; }
+      var hit = null;
+      try {
+        var p = model.toLocal(new PIXI.Point(e.clientX, e.clientY));
+        hit = model.tap(p.x, p.y);
+      } catch (err) {}
+      toggleBar();
+      if (hit && hit.length > 0) {
+        showBubble(tapReplies[Math.floor(Math.random() * tapReplies.length)], false);
+        playRandomMotion(false);
+        randomExpression();
+      }
+    }, 280);
   });
 
   scheduleAutoBehavior();
