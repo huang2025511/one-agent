@@ -396,15 +396,22 @@ class _NavTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListTile(
       leading: leading != null ? Icon(leading, size: 20) : null,
-      title: Text(title),
+      // 标题/副标题限 2 行截断，避免被右侧长值挤成竖排
+      title: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
       subtitle: subtitle != null
-          ? Text(subtitle!, style: const TextStyle(fontSize: 12))
+          ? Text(subtitle!,
+              style: const TextStyle(fontSize: 12),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis)
           : null,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (value != null)
-            Flexible(
+            // 修复：长模型名（如 sensenova/xxx-flash）不能无限撑宽，
+            // 否则 ListTile 标题被挤成竖排。限宽 + 省略号。
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 140),
               child: Text(
                 value!,
                 style: TextStyle(
