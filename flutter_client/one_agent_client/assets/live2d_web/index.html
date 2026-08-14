@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent; overflow: hidden;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  #glcanvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+  /* 气泡 */
+  #bubble {
+    position: absolute; left: 50%; top: 6px; transform: translateX(-50%);
+    max-width: 82%; padding: 6px 10px; display: none;
+    background: rgba(255,255,255,0.94); border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    font-size: 12px; line-height: 1.4; color: #333;
+    max-height: 34%; overflow: hidden;
+    -webkit-user-select: text; user-select: text;
+    word-break: break-all;
+  }
+  /* 底部操作条 */
+  #bar {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 8px;
+  }
+  #input {
+    flex: 1; border: none; outline: none; border-radius: 16px;
+    padding: 7px 12px; font-size: 12px;
+    background: rgba(255,255,255,0.94); color: #333;
+    -webkit-user-select: text; user-select: text;
+  }
+  .rbtn {
+    width: 32px; height: 32px; border: none; border-radius: 50%;
+    color: #fff; font-size: 15px; line-height: 32px; text-align: center;
+    padding: 0; flex: none;
+  }
+  #send { background: #6366F1; }
+  #close { background: rgba(0,0,0,0.45); }
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<div id="bubble"></div>
+<div id="bar">
+  <input id="input" type="text" placeholder="说点什么吧~" enterkeyhint="send">
+  <button id="send" class="rbtn">➤</button>
+  <button id="close" class="rbtn">✕</button>
+</div>
+
+<script src="pixi.min.js"></script>
+<script src="live2dcubismcore.min.js"></script>
+<script src="index.min.js"></script>
+<script>
+(function () {
+  var bubble = document.getElementById('bubble');
+  var input = document.getElementById('input');
+  var model = null;
+  var app = null;
+  var sessionId = null;
+  var bubbleTimer = null;
+  var talking = false;
+
+  function showBubble(text, sticky) {
+    bubble.style.display = 'block';
+    bubble.innerText = text;
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    if (!sticky) {
+      bubbleTimer = setTimeout(function () {
+        bubble.style.display = 'none';
+      }, 4000);
+    }
+  }
+  function hideBubble() {
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    bubble.style.display = 'none';
+  }
+  window.petBubble = showBubble;
+
+  // ── 初始化 PIXI + Live2D ────────────────────────────────
+  function initPixi() {
+    var canvas = document.getElementById('glcanvas');
+    app = new PIXI.Application({
+      view: canvas,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      backgroundAlpha: 0,
+      antialias: true,
+    });
+    window.addEventListener('resize', function () {
+      app.renderer.resize(window.innerWidth, window.innerHeight);
+      fitModel();
+    });
+  }
+
+  function fitModel() {
+    if (!model) return;
+    // 让模型高度约占窗口 78%，水平居中，底部留出操作条
+    var targetH = window.innerHeight * 0.78;
+    var s = targetH / model.height;
+    model.scale = s;
+    model.x = (window.innerWidth - model.width) / 2;
+    model.y = window.innerHeight - model.height - 40;
+  }
+
+  function loadModel(url) {
+    var L2D = PIXI.live2d;
+    showBubble('加载模型中...', true);
+    L2D.Live2DModel.from(url, { autoInteract: false }).then(function (m) {
+      // 切换模型时移除旧模型，避免叠加
+      if (model) {
+        try { app.stage.removeChild(model); model.destroy({ children: true }); } catch (e) {}
+      }
+      model = m;
+      app.stage.addChild(m);
+      fitModel();
+      hideBubble();
+      // 打招呼动作（TapBody 组），然后回到 Idle 循环
+      playMotion('TapBody');
+      if (window.PetBridge) PetBridge.onModelLoaded(true, url);
+    }).catch(function (err) {
+      showBubble('模型加载失败: ' + err, false);
+      if (window.PetBridge) PetBridge.onModelLoaded(false, String(err));
+    });
+  }
+  window.petLoadModel = loadModel;
+
+  // 播放指定动作组（组名大小写需与 model3.json 一致，如 Idle / TapBody）
+  function playMotion(group) {
+    if (!model) return;
+    try { model.motion(group); } catch (e) {}
+  }
+
+  // 随机表情（模型无表情文件时静默忽略）
+  function randomExpression() {
+    if (!model) return;
+    try {
+      var em = model.internalModel.motionManager.expressionManager;
+      if (em && em.expressions && em.expressions.length > 0) {
+        em.setRandomExpression();
+      }
+    } catch (e) {}
+  }
+
+  // ── 聊天事件（由原生 SSE 转发）──────────────────────────
+  window.onChatEvent = function (jsonStr) {
+    var ev;
+    try { ev = JSON.parse(jsonStr); } catch (e) { return; }
+    if (ev.status === 'heartbeat') return;
+    if (ev.status === 'thinking') {
+      showBubble(ev.content || '思考中...', true);
+      return;
+    }
+    if (ev.error) {
+      showBubble('出错了: ' + ev.error, false);
+      talking = false;
+      return;
+    }
+    // 内容事件：兼容 content / text / delta 三种字段名（与 Flutter 端一致）
+    var content = ev.content || ev.text || ev.delta;
+    if (content) {
+      // 追加内容
+      var cur = bubble.innerText || '';
+      if (bubble.style.display !== 'block') cur = '';
+      showBubble(cur + content, true);
+      if (!talking) {
+        talking = true;
+        // 说话时播放互动动作，让宠物"活"起来
+        playMotion('TapBody');
+      }
+      return;
+    }
+    if (ev.done) {
+      if (ev.session_id) sessionId = ev.session_id;
+      talking = false;
+      // 4 秒后自动收起气泡
+      showBubble(bubble.innerText, false);
+    }
+  };
+
+  // ── 交互 ───────────────────────────────────────────────
+  function sendText() {
+    var text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    input.blur();
+    hideBubble();
+    showBubble('思考中...', true);
+    playMotion('TapBody');
+    if (window.PetBridge) {
+      PetBridge.onSend(JSON.stringify({ text: text, session_id: sessionId }));
+    }
+  }
+  document.getElementById('send').addEventListener('click', sendText);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); sendText(); }
+  });
+  document.getElementById('close').addEventListener('click', function () {
+    if (window.PetBridge) PetBridge.onClose();
+  });
+  // 点击模型 → 互动动作 + 随机表情 + 气泡回应
+  var tapReplies = ['嘿嘿~', '干嘛呀？', '摸摸头~', '你好呀！', '想我了吗？', '今天也要加油哦~'];
+  document.getElementById('glcanvas').addEventListener('pointerdown', function (e) {
+    if (!model) return;
+    var hit = null;
+    try {
+      // tap() 需要模型本地坐标，先把屏幕坐标转换过去
+      var p = model.toLocal(new PIXI.Point(e.clientX, e.clientY));
+      hit = model.tap(p.x, p.y);
+    } catch (err) {}
+    if (hit && hit.length > 0) {
+      showBubble(tapReplies[Math.floor(Math.random() * tapReplies.length)], false);
+      playMotion('TapBody');
+      randomExpression();
+    }
+  });
+
+  initPixi();
+  if (window.PetBridge) PetBridge.onReady();
+})();
+</script>
+</body>
+</html>

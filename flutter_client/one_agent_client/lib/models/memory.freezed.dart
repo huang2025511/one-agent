@@ -27,8 +27,12 @@ mixin _$Memory {
   DateTime? get createdAt => throw _privateConstructorUsedError;
   double? get relevance => throw _privateConstructorUsedError;
 
+  /// Serializes this Memory to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of Memory
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $MemoryCopyWith<Memory> get copyWith => throw _privateConstructorUsedError;
 }
 
@@ -56,6 +60,8 @@ class _$MemoryCopyWithImpl<$Res, $Val extends Memory>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of Memory
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -119,6 +125,8 @@ class __$$MemoryImplCopyWithImpl<$Res>
       _$MemoryImpl _value, $Res Function(_$MemoryImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of Memory
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -206,12 +214,14 @@ class _$MemoryImpl extends _Memory {
                 other.relevance == relevance));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode =>
       Object.hash(runtimeType, id, text, source, tags, createdAt, relevance);
 
-  @JsonKey(ignore: true)
+  /// Create a copy of Memory
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$MemoryImplCopyWith<_$MemoryImpl> get copyWith =>
@@ -249,8 +259,11 @@ abstract class _Memory extends Memory {
   DateTime? get createdAt;
   @override
   double? get relevance;
+
+  /// Create a copy of Memory
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$MemoryImplCopyWith<_$MemoryImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -266,8 +279,12 @@ mixin _$MemoryPage {
   int get page => throw _privateConstructorUsedError;
   int get pageSize => throw _privateConstructorUsedError;
 
+  /// Serializes this MemoryPage to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of MemoryPage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $MemoryPageCopyWith<MemoryPage> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -291,6 +308,8 @@ class _$MemoryPageCopyWithImpl<$Res, $Val extends MemoryPage>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of MemoryPage
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -339,6 +358,8 @@ class __$$MemoryPageImplCopyWithImpl<$Res>
       _$MemoryPageImpl _value, $Res Function(_$MemoryPageImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of MemoryPage
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -413,12 +434,14 @@ class _$MemoryPageImpl implements _MemoryPage {
                 other.pageSize == pageSize));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(runtimeType,
       const DeepCollectionEquality().hash(_items), total, page, pageSize);
 
-  @JsonKey(ignore: true)
+  /// Create a copy of MemoryPage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$MemoryPageImplCopyWith<_$MemoryPageImpl> get copyWith =>
@@ -450,8 +473,11 @@ abstract class _MemoryPage implements MemoryPage {
   int get page;
   @override
   int get pageSize;
+
+  /// Create a copy of MemoryPage
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$MemoryPageImplCopyWith<_$MemoryPageImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }

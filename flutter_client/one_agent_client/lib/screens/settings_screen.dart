@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/system_api.dart';
+import '../pet/overlay_pet_service.dart';
+import '../providers/live2d_model_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/server_config_provider.dart';
 import '../providers/system_provider.dart';
 import '../providers/update_provider.dart';
+import 'model_manager_screen.dart';
 
 /// 设置页面 — 统一管理所有 One-Agent 设置
 ///
@@ -266,6 +269,8 @@ class _UnifiedSettingsViewState extends ConsumerState<_UnifiedSettingsView> {
               _ConnectionInfoSection(ref: ref),
               const SizedBox(height: 16),
               const _AppearanceSection(),
+              const SizedBox(height: 16),
+              const _PetSection(),
               const SizedBox(height: 16),
               const _AboutSection(),
             ],
@@ -2328,6 +2333,83 @@ class _AppearanceSection extends ConsumerWidget {
             ),
           ),
           contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+        ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  桌宠（Live2D）分区
+// ════════════════════════════════════════════════════════════════
+class _PetSection extends ConsumerWidget {
+  const _PetSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final modelState = ref.watch(live2dModelProvider);
+    final currentName = modelState.currentModel?.name ?? '内置 Hiyori';
+
+    return _SettingsSection(
+      icon: Icons.pets,
+      title: '桌宠（Live2D）',
+      children: [
+        ListTile(
+          leading: const Icon(Icons.wallpaper, size: 20),
+          title: const Text('悬浮窗桌宠'),
+          subtitle: const Text(
+            'Live2D 模型 + 气泡聊天，点击模型互动、可拖动、✕ 关闭',
+            style: TextStyle(fontSize: 12),
+          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+        ),
+        _NavTile(
+          title: 'Live2D 模型管理',
+          value: currentName,
+          leading: Icons.face_retouching_natural,
+          onTap: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const ModelManagerScreen()),
+            );
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.play_circle_outline, size: 20),
+          title: const Text('启动 / 关闭桌宠'),
+          subtitle: const Text(
+            '聊天页右上角宠物图标同样可以开关',
+            style: TextStyle(fontSize: 12),
+          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 20),
+          trailing: const Icon(Icons.chevron_right, size: 20),
+          onTap: () async {
+            final settings = ref.read(settingsProvider);
+            final service = OverlayPetService();
+            await service.syncState();
+            if (service.isActive) {
+              await service.hideOverlay();
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('桌宠已关闭')),
+                );
+              }
+              return;
+            }
+            final model = modelState.currentModel;
+            final ok = await service.showOverlay(
+              baseUrl: settings.baseUrl,
+              apiKey: settings.apiKey,
+              modelPath: model?.dirPath,
+              modelFileName: model?.modelFileName,
+            );
+            if (!ok && context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('悬浮窗未启动，请在系统设置中开启"显示在其他应用上层"权限'),
+                ),
+              );
+            }
+          },
         ),
       ],
     );

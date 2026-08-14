@@ -29,8 +29,12 @@ mixin _$Session {
   String? get source => throw _privateConstructorUsedError;
   Map<String, dynamic>? get metadata => throw _privateConstructorUsedError;
 
+  /// Serializes this Session to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of Session
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $SessionCopyWith<Session> get copyWith => throw _privateConstructorUsedError;
 }
 
@@ -60,6 +64,8 @@ class _$SessionCopyWithImpl<$Res, $Val extends Session>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of Session
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -135,6 +141,8 @@ class __$$SessionImplCopyWithImpl<$Res>
       _$SessionImpl _value, $Res Function(_$SessionImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of Session
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -249,7 +257,7 @@ class _$SessionImpl extends _Session {
             const DeepCollectionEquality().equals(other._metadata, _metadata));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(
       runtimeType,
@@ -262,7 +270,9 @@ class _$SessionImpl extends _Session {
       source,
       const DeepCollectionEquality().hash(_metadata));
 
-  @JsonKey(ignore: true)
+  /// Create a copy of Session
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$SessionImplCopyWith<_$SessionImpl> get copyWith =>
@@ -306,8 +316,11 @@ abstract class _Session extends Session {
   String? get source;
   @override
   Map<String, dynamic>? get metadata;
+
+  /// Create a copy of Session
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$SessionImplCopyWith<_$SessionImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -323,8 +336,12 @@ mixin _$SessionDetail {
   DateTime? get createdAt => throw _privateConstructorUsedError;
   Map<String, dynamic>? get metadata => throw _privateConstructorUsedError;
 
+  /// Serializes this SessionDetail to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of SessionDetail
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $SessionDetailCopyWith<SessionDetail> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -352,6 +369,8 @@ class _$SessionDetailCopyWithImpl<$Res, $Val extends SessionDetail>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of SessionDetail
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -404,6 +423,8 @@ class __$$SessionDetailImplCopyWithImpl<$Res>
       _$SessionDetailImpl _value, $Res Function(_$SessionDetailImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of SessionDetail
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -486,7 +507,7 @@ class _$SessionDetailImpl implements _SessionDetail {
             const DeepCollectionEquality().equals(other._metadata, _metadata));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(
       runtimeType,
@@ -495,7 +516,9 @@ class _$SessionDetailImpl implements _SessionDetail {
       createdAt,
       const DeepCollectionEquality().hash(_metadata));
 
-  @JsonKey(ignore: true)
+  /// Create a copy of SessionDetail
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$SessionDetailImplCopyWith<_$SessionDetailImpl> get copyWith =>
@@ -527,8 +550,11 @@ abstract class _SessionDetail implements SessionDetail {
   DateTime? get createdAt;
   @override
   Map<String, dynamic>? get metadata;
+
+  /// Create a copy of SessionDetail
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$SessionDetailImplCopyWith<_$SessionDetailImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }

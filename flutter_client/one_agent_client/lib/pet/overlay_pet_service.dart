@@ -1,174 +1,89 @@
-import 'dart:async';
-import 'dart:convert';
+import 'package:flutter/services.dart';
 
-import 'package:flutter/material.dart';
-import 'package:flutter_overlay_window/flutter_overlay_window.dart';
-
-/// 悬浮窗宠物服务
+/// 桌宠悬浮窗服务（原生 WebView + Live2D 渲染）
 ///
-/// 负责请求权限、显示/关闭悬浮窗、主APP与悬浮窗之间通信
+/// 通过 MethodChannel 调用 Android 原生 [PetOverlayService]：
+/// 系统悬浮窗 + WebView 渲染 Live2D 模型（pixi-live2d-display），
+/// 支持 SSE 流式聊天、气泡消息、点击互动、拖动、关闭。
+///
+/// 之前的 flutter_overlay_window（Flutter 引擎渲染）方案在系统悬浮窗中
+/// 只能显示简单 Canvas 图形（"圆形宠物"），无法渲染 Live2D 模型，
+/// 已替换为开源社区验证过的原生 WebView 方案。
 class OverlayPetService {
   static final OverlayPetService _instance = OverlayPetService._();
   factory OverlayPetService() => _instance;
   OverlayPetService._();
 
+  static const _channel = MethodChannel('com.oneagent/pet_overlay');
+
   bool _isActive = false;
   bool get isActive => _isActive;
 
-  // 主 APP 对悬浮窗消息的监听（响应悬浮窗 ready 信号后补发配置）
-  StreamSubscription<dynamic>? _mainAppSub;
-
-  // 最近一次下发的配置，供悬浮窗就绪后补发
-  String? _lastBaseUrl;
-  String? _lastApiKey;
-  String? _lastSessionId;
-
-  /// 悬浮窗内容期望尺寸（单位：逻辑像素 dp）。
-  /// 需容纳：气泡消息 + 140dp 宠物 + 输入框。
-  static const double _windowWidthDp = 280;
-  static const double _windowHeightDp = 340;
-
-  /// 检查并请求悬浮窗权限
-  Future<bool> requestPermission() async {
-    final granted = await FlutterOverlayWindow.isPermissionGranted();
-    if (!granted) {
-      final result = await FlutterOverlayWindow.requestPermission();
-      return result ?? false;
+  /// 检查悬浮窗权限是否已授予
+  Future<bool> isPermissionGranted() async {
+    try {
+      return await _channel.invokeMethod<bool>('isPermissionGranted') ?? false;
+    } on PlatformException {
+      return false;
     }
-    return true;
   }
 
-  /// 显示悬浮窗宠物
+  /// 显示桌宠悬浮窗
   ///
-  /// [screenSize] 主 APP 当前屏幕逻辑尺寸（dp），用于计算初始位置。
-  /// [devicePixelRatio] 设备像素比，用于把 dp 尺寸换算成插件要求的像素值。
+  /// 未授权悬浮窗权限时，原生侧会跳转系统设置页并在授权后自动启动，
+  /// 此时返回 false（本次调用未直接启动）。
+  ///
+  /// [modelPath]/[modelFileName] 为用户导入的 Live2D 模型路径，
+  /// 为空时使用内置 Hiyori 模型。
   Future<bool> showOverlay({
     required String baseUrl,
     required String apiKey,
-    String? sessionId,
-    required Size screenSize,
-    required double devicePixelRatio,
+    String? modelPath,
+    String? modelFileName,
   }) async {
-    // 检查权限
-    final hasPermission = await requestPermission();
-    if (!hasPermission) {
-      debugPrint('悬浮窗权限未授予');
+    try {
+      final ok = await _channel.invokeMethod<bool>('show', {
+        'baseUrl': baseUrl,
+        'apiKey': apiKey,
+        'modelPath': modelPath,
+        'modelFileName': modelFileName,
+      });
+      _isActive = ok == true;
+      return _isActive;
+    } on PlatformException {
       return false;
     }
-
-    _lastBaseUrl = baseUrl;
-    _lastApiKey = apiKey;
-    _lastSessionId = sessionId;
-
-    // 先注册主 APP 监听，确保悬浮窗发送的 ready 信号不会被丢弃
-    _ensureMainAppListener();
-
-    // ── 关键修复 1：窗口尺寸必须传"物理像素"而非 dp ──────────────
-    // flutter_overlay_window 的 showOverlay(width/height) 会直接作为
-    // WindowManager.LayoutParams 的像素值。之前误传 300×250（被当作像素），
-    // 在高密度屏上仅约 109×91dp，比 140dp 的宠物还小，导致宠物被裁剪
-    // 得只剩中间圆形身体（"只显示一个圆形宠物"的真正根因）。
-    final int widthPx = (_windowWidthDp * devicePixelRatio).round();
-    final int heightPx = (_windowHeightDp * devicePixelRatio).round();
-
-    // ── 关键修复 2：初始位置放在屏幕右侧中部（单位 dp，插件内部转像素）──
-    // 用 topLeft 重力 + startPosition 精确定位，避免 centerRight 重力
-    // 触发插件的 X 轴反向拖动逻辑导致"拖到旁边就消失"。
-    double startX = screenSize.width - _windowWidthDp - 8;
-    if (startX < 0) startX = 0;
-    double startY = (screenSize.height - _windowHeightDp) / 2;
-    if (startY < 0) startY = 0;
-
-    // 显示悬浮窗
-    await FlutterOverlayWindow.showOverlay(
-      enableDrag: true,
-      overlayTitle: 'One-Agent 桌宠',
-      overlayContent: '桌宠运行中',
-      // focusPointer：允许悬浮窗内的输入框获取键盘焦点。
-      flag: OverlayFlag.focusPointer,
-      visibility: NotificationVisibility.visibilityPublic,
-      // none：拖动后保持在用户放置的位置，不自动吸附边缘
-      positionGravity: PositionGravity.none,
-      // topLeft：x/y 从左上角计量，拖动方向与手指一致，无反向问题
-      alignment: OverlayAlignment.topLeft,
-      // startPosition 单位为 dp（插件内部 moveOverlay 会 dpToPx 转换）
-      startPosition: OverlayPosition(startX, startY),
-      // 注意：此处 width/height 为物理像素
-      width: widthPx,
-      height: heightPx,
-    );
-
-    _isActive = true;
-
-    // 延迟发送配置（等悬浮窗 UI 加载完成）。悬浮窗初始化完成后还会
-    // 通过 ready 信号再次补发，避免首次配置因监听器未注册而丢失。
-    await Future.delayed(const Duration(seconds: 1));
-    await _sendConfig(baseUrl, apiKey, sessionId);
-
-    return true;
   }
 
   /// 关闭悬浮窗
   Future<void> hideOverlay() async {
-    await FlutterOverlayWindow.closeOverlay();
+    try {
+      await _channel.invokeMethod('hide');
+    } on PlatformException catch (_) {}
     _isActive = false;
   }
 
-  /// 注册主 APP 对悬浮窗消息的监听。
+  /// 悬浮窗运行中切换模型（实时生效）
   ///
-  /// 悬浮窗加载完成后会发送 `ready` 信号，收到后补发配置，
-  /// 防止悬浮窗引擎初始化慢于上面的 1 秒延迟导致配置丢失、聊天不可用。
-  void _ensureMainAppListener() {
-    if (_mainAppSub != null) return;
-    _mainAppSub = FlutterOverlayWindow.overlayListener.listen((event) {
-      try {
-        final json = decodeOverlayMessage(event);
-        if (json != null && json['type'] == 'ready') {
-          _sendConfig(_lastBaseUrl ?? '', _lastApiKey ?? '', _lastSessionId);
-        }
-      } catch (e) {
-        debugPrint('主APP监听悬浮窗消息失败: $e');
-      }
-    });
+  /// 参数为空时切回内置 Hiyori 模型。
+  Future<void> updateModel({String? modelPath, String? modelFileName}) async {
+    try {
+      await _channel.invokeMethod('updateModel', {
+        'modelPath': modelPath,
+        'modelFileName': modelFileName,
+      });
+    } on PlatformException catch (_) {}
   }
 
-  /// 发送配置到悬浮窗
+  /// 同步真实运行状态
   ///
-  /// 直接传 Map 给 BasicMessageChannel(JSONMessageCodec)，避免
-  /// 先 jsonEncode 再编码导致的 JSON 双重编码。
-  Future<void> _sendConfig(String baseUrl, String apiKey, String? sessionId) async {
-    await FlutterOverlayWindow.shareData({
-      'type': 'config',
-      'data': {
-        'baseUrl': baseUrl,
-        'apiKey': apiKey,
-        'sessionId': sessionId,
-      },
-    });
-  }
-
-  /// 通知悬浮窗关闭
-  Future<void> notifyClose() async {
-    await FlutterOverlayWindow.shareData({'type': 'close'});
-    _isActive = false;
-  }
-}
-
-/// 将 BasicMessageChannel 收到的消息解析为 Map。
-///
-/// shareData 现在直接传 Map（推荐），JSONMessageCodec 解码后即为 Map；
-/// 兼容旧代码传入的 JSON 字符串。
-Map<String, dynamic>? decodeOverlayMessage(dynamic event) {
-  try {
-    if (event is Map) {
-      return Map<String, dynamic>.from(event);
+  /// 悬浮窗可能被用户通过 ✕ 按钮或系统回收关闭，
+  /// 操作前先同步一次，避免本地状态与原生不一致。
+  Future<void> syncState() async {
+    try {
+      _isActive = await _channel.invokeMethod<bool>('isActive') ?? false;
+    } on PlatformException {
+      _isActive = false;
     }
-    if (event is String) {
-      final decoded = jsonDecode(event);
-      if (decoded is Map) return Map<String, dynamic>.from(decoded);
-    }
-  } catch (_) {
-    // 忽略解析失败，由调用方处理
   }
-  return null;
 }

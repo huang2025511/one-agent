@@ -31,8 +31,12 @@ mixin _$ChatMessage {
   String? get errorMessage => throw _privateConstructorUsedError;
   Map<String, dynamic>? get metadata => throw _privateConstructorUsedError;
 
+  /// Serializes this ChatMessage to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of ChatMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $ChatMessageCopyWith<ChatMessage> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -66,6 +70,8 @@ class _$ChatMessageCopyWithImpl<$Res, $Val extends ChatMessage>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of ChatMessage
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -154,6 +160,8 @@ class __$$ChatMessageImplCopyWithImpl<$Res>
       _$ChatMessageImpl _value, $Res Function(_$ChatMessageImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of ChatMessage
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -288,7 +296,7 @@ class _$ChatMessageImpl extends _ChatMessage {
             const DeepCollectionEquality().equals(other._metadata, _metadata));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(
       runtimeType,
@@ -303,7 +311,9 @@ class _$ChatMessageImpl extends _ChatMessage {
       errorMessage,
       const DeepCollectionEquality().hash(_metadata));
 
-  @JsonKey(ignore: true)
+  /// Create a copy of ChatMessage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$ChatMessageImplCopyWith<_$ChatMessageImpl> get copyWith =>
@@ -354,8 +364,11 @@ abstract class _ChatMessage extends ChatMessage {
   String? get errorMessage;
   @override
   Map<String, dynamic>? get metadata;
+
+  /// Create a copy of ChatMessage
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$ChatMessageImplCopyWith<_$ChatMessageImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -369,12 +382,18 @@ mixin _$StreamEvent {
   String get type => throw _privateConstructorUsedError;
   String? get content => throw _privateConstructorUsedError;
   String? get status => throw _privateConstructorUsedError;
+  String? get phase =>
+      throw _privateConstructorUsedError; // 思考阶段：planning/thinking/reflection/plan
   String? get sessionId => throw _privateConstructorUsedError;
   bool? get done => throw _privateConstructorUsedError;
   Map<String, dynamic>? get metadata => throw _privateConstructorUsedError;
 
+  /// Serializes this StreamEvent to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of StreamEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $StreamEventCopyWith<StreamEvent> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -389,6 +408,7 @@ abstract class $StreamEventCopyWith<$Res> {
       {String type,
       String? content,
       String? status,
+      String? phase,
       String? sessionId,
       bool? done,
       Map<String, dynamic>? metadata});
@@ -404,12 +424,15 @@ class _$StreamEventCopyWithImpl<$Res, $Val extends StreamEvent>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of StreamEvent
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
     Object? type = null,
     Object? content = freezed,
     Object? status = freezed,
+    Object? phase = freezed,
     Object? sessionId = freezed,
     Object? done = freezed,
     Object? metadata = freezed,
@@ -426,6 +449,10 @@ class _$StreamEventCopyWithImpl<$Res, $Val extends StreamEvent>
       status: freezed == status
           ? _value.status
           : status // ignore: cast_nullable_to_non_nullable
+              as String?,
+      phase: freezed == phase
+          ? _value.phase
+          : phase // ignore: cast_nullable_to_non_nullable
               as String?,
       sessionId: freezed == sessionId
           ? _value.sessionId
@@ -455,6 +482,7 @@ abstract class _$$StreamEventImplCopyWith<$Res>
       {String type,
       String? content,
       String? status,
+      String? phase,
       String? sessionId,
       bool? done,
       Map<String, dynamic>? metadata});
@@ -468,12 +496,15 @@ class __$$StreamEventImplCopyWithImpl<$Res>
       _$StreamEventImpl _value, $Res Function(_$StreamEventImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of StreamEvent
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
     Object? type = null,
     Object? content = freezed,
     Object? status = freezed,
+    Object? phase = freezed,
     Object? sessionId = freezed,
     Object? done = freezed,
     Object? metadata = freezed,
@@ -490,6 +521,10 @@ class __$$StreamEventImplCopyWithImpl<$Res>
       status: freezed == status
           ? _value.status
           : status // ignore: cast_nullable_to_non_nullable
+              as String?,
+      phase: freezed == phase
+          ? _value.phase
+          : phase // ignore: cast_nullable_to_non_nullable
               as String?,
       sessionId: freezed == sessionId
           ? _value.sessionId
@@ -514,6 +549,7 @@ class _$StreamEventImpl implements _StreamEvent {
       {required this.type,
       this.content,
       this.status,
+      this.phase,
       this.sessionId,
       this.done,
       final Map<String, dynamic>? metadata})
@@ -528,6 +564,9 @@ class _$StreamEventImpl implements _StreamEvent {
   final String? content;
   @override
   final String? status;
+  @override
+  final String? phase;
+// 思考阶段：planning/thinking/reflection/plan
   @override
   final String? sessionId;
   @override
@@ -544,7 +583,7 @@ class _$StreamEventImpl implements _StreamEvent {
 
   @override
   String toString() {
-    return 'StreamEvent(type: $type, content: $content, status: $status, sessionId: $sessionId, done: $done, metadata: $metadata)';
+    return 'StreamEvent(type: $type, content: $content, status: $status, phase: $phase, sessionId: $sessionId, done: $done, metadata: $metadata)';
   }
 
   @override
@@ -555,18 +594,21 @@ class _$StreamEventImpl implements _StreamEvent {
             (identical(other.type, type) || other.type == type) &&
             (identical(other.content, content) || other.content == content) &&
             (identical(other.status, status) || other.status == status) &&
+            (identical(other.phase, phase) || other.phase == phase) &&
             (identical(other.sessionId, sessionId) ||
                 other.sessionId == sessionId) &&
             (identical(other.done, done) || other.done == done) &&
             const DeepCollectionEquality().equals(other._metadata, _metadata));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
-  int get hashCode => Object.hash(runtimeType, type, content, status, sessionId,
-      done, const DeepCollectionEquality().hash(_metadata));
+  int get hashCode => Object.hash(runtimeType, type, content, status, phase,
+      sessionId, done, const DeepCollectionEquality().hash(_metadata));
 
-  @JsonKey(ignore: true)
+  /// Create a copy of StreamEvent
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$StreamEventImplCopyWith<_$StreamEventImpl> get copyWith =>
@@ -585,6 +627,7 @@ abstract class _StreamEvent implements StreamEvent {
       {required final String type,
       final String? content,
       final String? status,
+      final String? phase,
       final String? sessionId,
       final bool? done,
       final Map<String, dynamic>? metadata}) = _$StreamEventImpl;
@@ -599,13 +642,18 @@ abstract class _StreamEvent implements StreamEvent {
   @override
   String? get status;
   @override
+  String? get phase; // 思考阶段：planning/thinking/reflection/plan
+  @override
   String? get sessionId;
   @override
   bool? get done;
   @override
   Map<String, dynamic>? get metadata;
+
+  /// Create a copy of StreamEvent
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$StreamEventImplCopyWith<_$StreamEventImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }

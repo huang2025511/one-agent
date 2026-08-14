@@ -20,18 +20,28 @@ SystemStats _$SystemStatsFromJson(Map<String, dynamic> json) {
 
 /// @nodoc
 mixin _$SystemStats {
+  @JsonKey(name: 'uptime_seconds')
   int? get uptimeSeconds => throw _privateConstructorUsedError;
+  @JsonKey(name: 'bus_metrics')
   Map<String, dynamic>? get busMetrics => throw _privateConstructorUsedError;
+  @JsonKey(name: 'llm_stats')
   Map<String, dynamic>? get llmStats => throw _privateConstructorUsedError;
+  @JsonKey(name: 'memory_stats')
   Map<String, dynamic>? get memoryStats => throw _privateConstructorUsedError;
+  @JsonKey(name: 'skills_count')
   int? get skillsCount => throw _privateConstructorUsedError;
   Map<String, dynamic>? get sessions => throw _privateConstructorUsedError;
   Map<String, dynamic>? get messages => throw _privateConstructorUsedError;
+  @JsonKey(name: 'knowledge_graph')
   Map<String, dynamic>? get knowledgeGraph =>
       throw _privateConstructorUsedError;
 
+  /// Serializes this SystemStats to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of SystemStats
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $SystemStatsCopyWith<SystemStats> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -43,14 +53,14 @@ abstract class $SystemStatsCopyWith<$Res> {
       _$SystemStatsCopyWithImpl<$Res, SystemStats>;
   @useResult
   $Res call(
-      {int? uptimeSeconds,
-      Map<String, dynamic>? busMetrics,
-      Map<String, dynamic>? llmStats,
-      Map<String, dynamic>? memoryStats,
-      int? skillsCount,
+      {@JsonKey(name: 'uptime_seconds') int? uptimeSeconds,
+      @JsonKey(name: 'bus_metrics') Map<String, dynamic>? busMetrics,
+      @JsonKey(name: 'llm_stats') Map<String, dynamic>? llmStats,
+      @JsonKey(name: 'memory_stats') Map<String, dynamic>? memoryStats,
+      @JsonKey(name: 'skills_count') int? skillsCount,
       Map<String, dynamic>? sessions,
       Map<String, dynamic>? messages,
-      Map<String, dynamic>? knowledgeGraph});
+      @JsonKey(name: 'knowledge_graph') Map<String, dynamic>? knowledgeGraph});
 }
 
 /// @nodoc
@@ -63,6 +73,8 @@ class _$SystemStatsCopyWithImpl<$Res, $Val extends SystemStats>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of SystemStats
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -121,14 +133,14 @@ abstract class _$$SystemStatsImplCopyWith<$Res>
   @override
   @useResult
   $Res call(
-      {int? uptimeSeconds,
-      Map<String, dynamic>? busMetrics,
-      Map<String, dynamic>? llmStats,
-      Map<String, dynamic>? memoryStats,
-      int? skillsCount,
+      {@JsonKey(name: 'uptime_seconds') int? uptimeSeconds,
+      @JsonKey(name: 'bus_metrics') Map<String, dynamic>? busMetrics,
+      @JsonKey(name: 'llm_stats') Map<String, dynamic>? llmStats,
+      @JsonKey(name: 'memory_stats') Map<String, dynamic>? memoryStats,
+      @JsonKey(name: 'skills_count') int? skillsCount,
       Map<String, dynamic>? sessions,
       Map<String, dynamic>? messages,
-      Map<String, dynamic>? knowledgeGraph});
+      @JsonKey(name: 'knowledge_graph') Map<String, dynamic>? knowledgeGraph});
 }
 
 /// @nodoc
@@ -139,6 +151,8 @@ class __$$SystemStatsImplCopyWithImpl<$Res>
       _$SystemStatsImpl _value, $Res Function(_$SystemStatsImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of SystemStats
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -192,13 +206,14 @@ class __$$SystemStatsImplCopyWithImpl<$Res>
 @JsonSerializable()
 class _$SystemStatsImpl implements _SystemStats {
   const _$SystemStatsImpl(
-      {this.uptimeSeconds,
-      final Map<String, dynamic>? busMetrics,
-      final Map<String, dynamic>? llmStats,
-      final Map<String, dynamic>? memoryStats,
-      this.skillsCount,
+      {@JsonKey(name: 'uptime_seconds') this.uptimeSeconds,
+      @JsonKey(name: 'bus_metrics') final Map<String, dynamic>? busMetrics,
+      @JsonKey(name: 'llm_stats') final Map<String, dynamic>? llmStats,
+      @JsonKey(name: 'memory_stats') final Map<String, dynamic>? memoryStats,
+      @JsonKey(name: 'skills_count') this.skillsCount,
       final Map<String, dynamic>? sessions,
       final Map<String, dynamic>? messages,
+      @JsonKey(name: 'knowledge_graph')
       final Map<String, dynamic>? knowledgeGraph})
       : _busMetrics = busMetrics,
         _llmStats = llmStats,
@@ -211,9 +226,11 @@ class _$SystemStatsImpl implements _SystemStats {
       _$$SystemStatsImplFromJson(json);
 
   @override
+  @JsonKey(name: 'uptime_seconds')
   final int? uptimeSeconds;
   final Map<String, dynamic>? _busMetrics;
   @override
+  @JsonKey(name: 'bus_metrics')
   Map<String, dynamic>? get busMetrics {
     final value = _busMetrics;
     if (value == null) return null;
@@ -224,6 +241,7 @@ class _$SystemStatsImpl implements _SystemStats {
 
   final Map<String, dynamic>? _llmStats;
   @override
+  @JsonKey(name: 'llm_stats')
   Map<String, dynamic>? get llmStats {
     final value = _llmStats;
     if (value == null) return null;
@@ -234,6 +252,7 @@ class _$SystemStatsImpl implements _SystemStats {
 
   final Map<String, dynamic>? _memoryStats;
   @override
+  @JsonKey(name: 'memory_stats')
   Map<String, dynamic>? get memoryStats {
     final value = _memoryStats;
     if (value == null) return null;
@@ -243,6 +262,7 @@ class _$SystemStatsImpl implements _SystemStats {
   }
 
   @override
+  @JsonKey(name: 'skills_count')
   final int? skillsCount;
   final Map<String, dynamic>? _sessions;
   @override
@@ -266,6 +286,7 @@ class _$SystemStatsImpl implements _SystemStats {
 
   final Map<String, dynamic>? _knowledgeGraph;
   @override
+  @JsonKey(name: 'knowledge_graph')
   Map<String, dynamic>? get knowledgeGraph {
     final value = _knowledgeGraph;
     if (value == null) return null;
@@ -299,7 +320,7 @@ class _$SystemStatsImpl implements _SystemStats {
                 .equals(other._knowledgeGraph, _knowledgeGraph));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(
       runtimeType,
@@ -312,7 +333,9 @@ class _$SystemStatsImpl implements _SystemStats {
       const DeepCollectionEquality().hash(_messages),
       const DeepCollectionEquality().hash(_knowledgeGraph));
 
-  @JsonKey(ignore: true)
+  /// Create a copy of SystemStats
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$SystemStatsImplCopyWith<_$SystemStatsImpl> get copyWith =>
@@ -328,36 +351,46 @@ class _$SystemStatsImpl implements _SystemStats {
 
 abstract class _SystemStats implements SystemStats {
   const factory _SystemStats(
-      {final int? uptimeSeconds,
-      final Map<String, dynamic>? busMetrics,
-      final Map<String, dynamic>? llmStats,
-      final Map<String, dynamic>? memoryStats,
-      final int? skillsCount,
+      {@JsonKey(name: 'uptime_seconds') final int? uptimeSeconds,
+      @JsonKey(name: 'bus_metrics') final Map<String, dynamic>? busMetrics,
+      @JsonKey(name: 'llm_stats') final Map<String, dynamic>? llmStats,
+      @JsonKey(name: 'memory_stats') final Map<String, dynamic>? memoryStats,
+      @JsonKey(name: 'skills_count') final int? skillsCount,
       final Map<String, dynamic>? sessions,
       final Map<String, dynamic>? messages,
+      @JsonKey(name: 'knowledge_graph')
       final Map<String, dynamic>? knowledgeGraph}) = _$SystemStatsImpl;
 
   factory _SystemStats.fromJson(Map<String, dynamic> json) =
       _$SystemStatsImpl.fromJson;
 
   @override
+  @JsonKey(name: 'uptime_seconds')
   int? get uptimeSeconds;
   @override
+  @JsonKey(name: 'bus_metrics')
   Map<String, dynamic>? get busMetrics;
   @override
+  @JsonKey(name: 'llm_stats')
   Map<String, dynamic>? get llmStats;
   @override
+  @JsonKey(name: 'memory_stats')
   Map<String, dynamic>? get memoryStats;
   @override
+  @JsonKey(name: 'skills_count')
   int? get skillsCount;
   @override
   Map<String, dynamic>? get sessions;
   @override
   Map<String, dynamic>? get messages;
   @override
+  @JsonKey(name: 'knowledge_graph')
   Map<String, dynamic>? get knowledgeGraph;
+
+  /// Create a copy of SystemStats
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$SystemStatsImplCopyWith<_$SystemStatsImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -373,8 +406,12 @@ mixin _$SystemHealth {
   String? get version => throw _privateConstructorUsedError;
   Map<String, dynamic>? get components => throw _privateConstructorUsedError;
 
+  /// Serializes this SystemHealth to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of SystemHealth
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $SystemHealthCopyWith<SystemHealth> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -402,6 +439,8 @@ class _$SystemHealthCopyWithImpl<$Res, $Val extends SystemHealth>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of SystemHealth
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -454,6 +493,8 @@ class __$$SystemHealthImplCopyWithImpl<$Res>
       _$SystemHealthImpl _value, $Res Function(_$SystemHealthImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of SystemHealth
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -529,12 +570,14 @@ class _$SystemHealthImpl implements _SystemHealth {
                 .equals(other._components, _components));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(runtimeType, status, uptime, version,
       const DeepCollectionEquality().hash(_components));
 
-  @JsonKey(ignore: true)
+  /// Create a copy of SystemHealth
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$SystemHealthImplCopyWith<_$SystemHealthImpl> get copyWith =>
@@ -566,8 +609,11 @@ abstract class _SystemHealth implements SystemHealth {
   String? get version;
   @override
   Map<String, dynamic>? get components;
+
+  /// Create a copy of SystemHealth
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$SystemHealthImplCopyWith<_$SystemHealthImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -580,13 +626,21 @@ CostStats _$CostStatsFromJson(Map<String, dynamic> json) {
 mixin _$CostStats {
   Map<String, dynamic>? get daily => throw _privateConstructorUsedError;
   Map<String, dynamic>? get monthly => throw _privateConstructorUsedError;
+  @JsonKey(name: 'by_provider')
   Map<String, dynamic>? get byProvider => throw _privateConstructorUsedError;
+  @JsonKey(name: 'by_model')
   Map<String, dynamic>? get byModel => throw _privateConstructorUsedError;
+  @JsonKey(name: 'total_tokens')
   int? get totalTokens => throw _privateConstructorUsedError;
+  @JsonKey(name: 'total_cost')
   double? get totalCost => throw _privateConstructorUsedError;
 
+  /// Serializes this CostStats to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of CostStats
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $CostStatsCopyWith<CostStats> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -599,10 +653,10 @@ abstract class $CostStatsCopyWith<$Res> {
   $Res call(
       {Map<String, dynamic>? daily,
       Map<String, dynamic>? monthly,
-      Map<String, dynamic>? byProvider,
-      Map<String, dynamic>? byModel,
-      int? totalTokens,
-      double? totalCost});
+      @JsonKey(name: 'by_provider') Map<String, dynamic>? byProvider,
+      @JsonKey(name: 'by_model') Map<String, dynamic>? byModel,
+      @JsonKey(name: 'total_tokens') int? totalTokens,
+      @JsonKey(name: 'total_cost') double? totalCost});
 }
 
 /// @nodoc
@@ -615,6 +669,8 @@ class _$CostStatsCopyWithImpl<$Res, $Val extends CostStats>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of CostStats
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -665,10 +721,10 @@ abstract class _$$CostStatsImplCopyWith<$Res>
   $Res call(
       {Map<String, dynamic>? daily,
       Map<String, dynamic>? monthly,
-      Map<String, dynamic>? byProvider,
-      Map<String, dynamic>? byModel,
-      int? totalTokens,
-      double? totalCost});
+      @JsonKey(name: 'by_provider') Map<String, dynamic>? byProvider,
+      @JsonKey(name: 'by_model') Map<String, dynamic>? byModel,
+      @JsonKey(name: 'total_tokens') int? totalTokens,
+      @JsonKey(name: 'total_cost') double? totalCost});
 }
 
 /// @nodoc
@@ -679,6 +735,8 @@ class __$$CostStatsImplCopyWithImpl<$Res>
       _$CostStatsImpl _value, $Res Function(_$CostStatsImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of CostStats
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -724,10 +782,10 @@ class _$CostStatsImpl implements _CostStats {
   const _$CostStatsImpl(
       {final Map<String, dynamic>? daily,
       final Map<String, dynamic>? monthly,
-      final Map<String, dynamic>? byProvider,
-      final Map<String, dynamic>? byModel,
-      this.totalTokens,
-      this.totalCost})
+      @JsonKey(name: 'by_provider') final Map<String, dynamic>? byProvider,
+      @JsonKey(name: 'by_model') final Map<String, dynamic>? byModel,
+      @JsonKey(name: 'total_tokens') this.totalTokens,
+      @JsonKey(name: 'total_cost') this.totalCost})
       : _daily = daily,
         _monthly = monthly,
         _byProvider = byProvider,
@@ -758,6 +816,7 @@ class _$CostStatsImpl implements _CostStats {
 
   final Map<String, dynamic>? _byProvider;
   @override
+  @JsonKey(name: 'by_provider')
   Map<String, dynamic>? get byProvider {
     final value = _byProvider;
     if (value == null) return null;
@@ -768,6 +827,7 @@ class _$CostStatsImpl implements _CostStats {
 
   final Map<String, dynamic>? _byModel;
   @override
+  @JsonKey(name: 'by_model')
   Map<String, dynamic>? get byModel {
     final value = _byModel;
     if (value == null) return null;
@@ -777,8 +837,10 @@ class _$CostStatsImpl implements _CostStats {
   }
 
   @override
+  @JsonKey(name: 'total_tokens')
   final int? totalTokens;
   @override
+  @JsonKey(name: 'total_cost')
   final double? totalCost;
 
   @override
@@ -802,7 +864,7 @@ class _$CostStatsImpl implements _CostStats {
                 other.totalCost == totalCost));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(
       runtimeType,
@@ -813,7 +875,9 @@ class _$CostStatsImpl implements _CostStats {
       totalTokens,
       totalCost);
 
-  @JsonKey(ignore: true)
+  /// Create a copy of CostStats
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$CostStatsImplCopyWith<_$CostStatsImpl> get copyWith =>
@@ -831,10 +895,10 @@ abstract class _CostStats implements CostStats {
   const factory _CostStats(
       {final Map<String, dynamic>? daily,
       final Map<String, dynamic>? monthly,
-      final Map<String, dynamic>? byProvider,
-      final Map<String, dynamic>? byModel,
-      final int? totalTokens,
-      final double? totalCost}) = _$CostStatsImpl;
+      @JsonKey(name: 'by_provider') final Map<String, dynamic>? byProvider,
+      @JsonKey(name: 'by_model') final Map<String, dynamic>? byModel,
+      @JsonKey(name: 'total_tokens') final int? totalTokens,
+      @JsonKey(name: 'total_cost') final double? totalCost}) = _$CostStatsImpl;
 
   factory _CostStats.fromJson(Map<String, dynamic> json) =
       _$CostStatsImpl.fromJson;
@@ -844,15 +908,22 @@ abstract class _CostStats implements CostStats {
   @override
   Map<String, dynamic>? get monthly;
   @override
+  @JsonKey(name: 'by_provider')
   Map<String, dynamic>? get byProvider;
   @override
+  @JsonKey(name: 'by_model')
   Map<String, dynamic>? get byModel;
   @override
+  @JsonKey(name: 'total_tokens')
   int? get totalTokens;
   @override
+  @JsonKey(name: 'total_cost')
   double? get totalCost;
+
+  /// Create a copy of CostStats
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$CostStatsImplCopyWith<_$CostStatsImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -864,10 +935,17 @@ AppConfig _$AppConfigFromJson(Map<String, dynamic> json) {
 /// @nodoc
 mixin _$AppConfig {
   Map<String, dynamic>? get config => throw _privateConstructorUsedError;
+
+  /// 服务端返回 float epoch（time.time()），不是 ISO 字符串。
+  /// 用 double? 原样保存，避免 DateTime.parse 抛异常。
   double? get timestamp => throw _privateConstructorUsedError;
 
+  /// Serializes this AppConfig to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of AppConfig
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $AppConfigCopyWith<AppConfig> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -890,6 +968,8 @@ class _$AppConfigCopyWithImpl<$Res, $Val extends AppConfig>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of AppConfig
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -928,6 +1008,8 @@ class __$$AppConfigImplCopyWithImpl<$Res>
       _$AppConfigImpl _value, $Res Function(_$AppConfigImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of AppConfig
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -966,6 +1048,8 @@ class _$AppConfigImpl implements _AppConfig {
     return EqualUnmodifiableMapView(value);
   }
 
+  /// 服务端返回 float epoch（time.time()），不是 ISO 字符串。
+  /// 用 double? 原样保存，避免 DateTime.parse 抛异常。
   @override
   final double? timestamp;
 
@@ -984,12 +1068,14 @@ class _$AppConfigImpl implements _AppConfig {
                 other.timestamp == timestamp));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(
       runtimeType, const DeepCollectionEquality().hash(_config), timestamp);
 
-  @JsonKey(ignore: true)
+  /// Create a copy of AppConfig
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$AppConfigImplCopyWith<_$AppConfigImpl> get copyWith =>
@@ -1013,10 +1099,16 @@ abstract class _AppConfig implements AppConfig {
 
   @override
   Map<String, dynamic>? get config;
+
+  /// 服务端返回 float epoch（time.time()），不是 ISO 字符串。
+  /// 用 double? 原样保存，避免 DateTime.parse 抛异常。
   @override
   double? get timestamp;
+
+  /// Create a copy of AppConfig
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$AppConfigImplCopyWith<_$AppConfigImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }

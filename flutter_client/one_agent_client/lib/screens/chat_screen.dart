@@ -8,6 +8,7 @@ import 'package:intl/intl.dart';
 import '../l10n/app_localizations.dart';
 import '../pet/overlay_pet_service.dart';
 import '../providers/chat_provider.dart';
+import '../providers/live2d_model_provider.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/typewriter_text.dart';
 import '../providers/session_provider.dart';
@@ -128,33 +129,33 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           ],
         ),
         actions: [
-          // 桌宠按钮
+          // 桌宠按钮（原生 WebView 渲染 Live2D 模型）
           IconButton(
             icon: const Icon(Icons.pets),
             tooltip: '桌宠',
             onPressed: () async {
               final settings = ref.read(settingsProvider);
               final petService = OverlayPetService();
+              // 同步真实状态（悬浮窗可能已被 ✕ 按钮关闭）
+              await petService.syncState();
               if (petService.isActive) {
                 await petService.hideOverlay();
-              } else {
-                final mq = MediaQuery.of(context);
-                final ok = await petService.showOverlay(
-                  baseUrl: settings.baseUrl,
-                  apiKey: settings.apiKey,
-                  // 传入屏幕逻辑尺寸与像素比：插件的 width/height 是物理像素，
-                  // 初始位置按 dp 计算，避免窗口被裁剪/定位错误
-                  screenSize: mq.size,
-                  devicePixelRatio: mq.devicePixelRatio,
+                return;
+              }
+              final model = ref.read(live2dModelProvider).currentModel;
+              final ok = await petService.showOverlay(
+                baseUrl: settings.baseUrl,
+                apiKey: settings.apiKey,
+                modelPath: model?.dirPath,
+                modelFileName: model?.modelFileName,
+              );
+              if (!ok && context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('悬浮窗未启动，请在系统设置中开启"显示在其他应用上层"权限'),
+                    duration: Duration(seconds: 3),
+                  ),
                 );
-                if (!ok && context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('无法显示悬浮窗，请检查权限'),
-                      duration: Duration(seconds: 3),
-                    ),
-                  );
-                }
               }
             },
           ),

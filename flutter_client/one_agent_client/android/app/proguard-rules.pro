@@ -19,3 +19,9 @@
 # Play Core 缺失类（Flutter 引擎引用但不打包）
 -dontwarn com.google.android.play.core.**
 -keep class com.google.android.play.core.** { *; }
+
+# 桌宠悬浮窗 WebView JS 桥（addJavascriptInterface 方法不能被混淆/裁剪）
+-keep class com.oneagent.PetOverlayService { *; }
+-keepclassmembers class com.oneagent.PetOverlayService$Bridge {
+    @android.webkit.JavascriptInterface <methods>;
+}

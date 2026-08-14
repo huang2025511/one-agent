@@ -31,8 +31,12 @@ mixin _$Skill {
   bool? get isBuiltin => throw _privateConstructorUsedError;
   bool? get isProcedural => throw _privateConstructorUsedError;
 
+  /// Serializes this Skill to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of Skill
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $SkillCopyWith<Skill> get copyWith => throw _privateConstructorUsedError;
 }
 
@@ -64,6 +68,8 @@ class _$SkillCopyWithImpl<$Res, $Val extends Skill>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of Skill
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -151,6 +157,8 @@ class __$$SkillImplCopyWithImpl<$Res>
       _$SkillImpl _value, $Res Function(_$SkillImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of Skill
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -286,7 +294,7 @@ class _$SkillImpl extends _Skill {
                 other.isProcedural == isProcedural));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(
       runtimeType,
@@ -301,7 +309,9 @@ class _$SkillImpl extends _Skill {
       isBuiltin,
       isProcedural);
 
-  @JsonKey(ignore: true)
+  /// Create a copy of Skill
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$SkillImplCopyWith<_$SkillImpl> get copyWith =>
@@ -351,8 +361,11 @@ abstract class _Skill extends Skill {
   bool? get isBuiltin;
   @override
   bool? get isProcedural;
+
+  /// Create a copy of Skill
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$SkillImplCopyWith<_$SkillImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -371,8 +384,12 @@ mixin _$MarketplacePackage {
   List<String>? get tags => throw _privateConstructorUsedError;
   bool? get installed => throw _privateConstructorUsedError;
 
+  /// Serializes this MarketplacePackage to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of MarketplacePackage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $MarketplacePackageCopyWith<MarketplacePackage> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -403,6 +420,8 @@ class _$MarketplacePackageCopyWithImpl<$Res, $Val extends MarketplacePackage>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of MarketplacePackage
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -473,6 +492,8 @@ class __$$MarketplacePackageImplCopyWithImpl<$Res>
       $Res Function(_$MarketplacePackageImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of MarketplacePackage
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -578,12 +599,14 @@ class _$MarketplacePackageImpl implements _MarketplacePackage {
                 other.installed == installed));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(runtimeType, name, description, version,
       author, downloads, const DeepCollectionEquality().hash(_tags), installed);
 
-  @JsonKey(ignore: true)
+  /// Create a copy of MarketplacePackage
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$MarketplacePackageImplCopyWith<_$MarketplacePackageImpl> get copyWith =>
@@ -625,8 +648,11 @@ abstract class _MarketplacePackage implements MarketplacePackage {
   List<String>? get tags;
   @override
   bool? get installed;
+
+  /// Create a copy of MarketplacePackage
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$MarketplacePackageImplCopyWith<_$MarketplacePackageImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }

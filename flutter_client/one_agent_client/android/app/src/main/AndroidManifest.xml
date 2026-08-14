@@ -36,9 +36,9 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2"/>
-        <!-- 悬浮窗服务 -->
+        <!-- 桌宠悬浮窗服务（原生 WebView 渲染 Live2D） -->
         <service
-            android:name="flutter.overlay.window.flutter_overlay_window.OverlayService"
+            android:name=".PetOverlayService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property

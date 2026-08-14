@@ -4,11 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:flutter_overlay_window/flutter_overlay_window.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'l10n/app_localizations.dart';
-import 'pet/overlay_pet_screen.dart';
 import 'providers/settings_provider.dart';
 import 'screens/main_screen.dart';
 
@@ -118,18 +116,4 @@ class OneAgentApp extends ConsumerWidget {
       home: const MainScreen(),
     );
   }
-}
-
-/// 悬浮窗入口点
-///
-/// flutter_overlay_window 需要一个顶层的 overlayMain 函数作为悬浮窗的 main()
-@pragma('vm:entry-point')
-void overlayMain() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(
-    const MaterialApp(
-      debugShowCheckedModeBanner: false,
-      home: OverlayPetScreen(),
-    ),
-  );
 }

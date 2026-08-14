@@ -31,8 +31,12 @@ mixin _$Role {
   DateTime? get createdAt => throw _privateConstructorUsedError;
   DateTime? get updatedAt => throw _privateConstructorUsedError;
 
+  /// Serializes this Role to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of Role
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $RoleCopyWith<Role> get copyWith => throw _privateConstructorUsedError;
 }
 
@@ -59,10 +63,13 @@ class _$RoleCopyWithImpl<$Res, $Val extends Role>
     implements $RoleCopyWith<$Res> {
   _$RoleCopyWithImpl(this._value, this._then);
 
-  final Role _value;
   // ignore: unused_field
-  final $Res Function(Role) _then;
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
 
+  /// Create a copy of Role
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -149,6 +156,8 @@ class __$$RoleImplCopyWithImpl<$Res>
   __$$RoleImplCopyWithImpl(_$RoleImpl _value, $Res Function(_$RoleImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of Role
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -210,7 +219,7 @@ class __$$RoleImplCopyWithImpl<$Res>
 
 /// @nodoc
 @JsonSerializable()
-class _$RoleImpl implements _Role {
+class _$RoleImpl extends _Role {
   const _$RoleImpl(
       {required this.id,
       required this.name,
@@ -221,7 +230,8 @@ class _$RoleImpl implements _Role {
       this.isActive = false,
       this.isBuiltin = false,
       this.createdAt,
-      this.updatedAt});
+      this.updatedAt})
+      : super._();
 
   factory _$RoleImpl.fromJson(Map<String, dynamic> json) =>
       _$$RoleImplFromJson(json);
@@ -281,12 +291,24 @@ class _$RoleImpl implements _Role {
                 other.updatedAt == updatedAt));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
-  int get hashCode => Object.hash(runtimeType, id, name, description,
-      systemPromptOverride, icon, color, isActive, isBuiltin, createdAt, updatedAt);
+  int get hashCode => Object.hash(
+      runtimeType,
+      id,
+      name,
+      description,
+      systemPromptOverride,
+      icon,
+      color,
+      isActive,
+      isBuiltin,
+      createdAt,
+      updatedAt);
 
-  @JsonKey(ignore: true)
+  /// Create a copy of Role
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$RoleImplCopyWith<_$RoleImpl> get copyWith =>
@@ -294,12 +316,13 @@ class _$RoleImpl implements _Role {
 
   @override
   Map<String, dynamic> toJson() {
-    return _$$RoleImplToJson(this);
+    return _$$RoleImplToJson(
+      this,
+    );
   }
 }
 
-/// @nodoc
-abstract class _Role implements Role {
+abstract class _Role extends Role {
   const factory _Role(
       {required final int id,
       required final String name,
@@ -311,6 +334,7 @@ abstract class _Role implements Role {
       final bool isBuiltin,
       final DateTime? createdAt,
       final DateTime? updatedAt}) = _$RoleImpl;
+  const _Role._() : super._();
 
   factory _Role.fromJson(Map<String, dynamic> json) = _$RoleImpl.fromJson;
 
@@ -334,7 +358,11 @@ abstract class _Role implements Role {
   DateTime? get createdAt;
   @override
   DateTime? get updatedAt;
+
+  /// Create a copy of Role
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
-  _$$RoleImplCopyWith<_$RoleImpl> get copyWith;
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$RoleImplCopyWith<_$RoleImpl> get copyWith =>
+      throw _privateConstructorUsedError;
 }

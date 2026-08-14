@@ -27,8 +27,12 @@ mixin _$ApprovalRequest {
   DateTime? get createdAt => throw _privateConstructorUsedError;
   String? get status => throw _privateConstructorUsedError;
 
+  /// Serializes this ApprovalRequest to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
-  @JsonKey(ignore: true)
+
+  /// Create a copy of ApprovalRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   $ApprovalRequestCopyWith<ApprovalRequest> get copyWith =>
       throw _privateConstructorUsedError;
 }
@@ -58,6 +62,8 @@ class _$ApprovalRequestCopyWithImpl<$Res, $Val extends ApprovalRequest>
   // ignore: unused_field
   final $Res Function($Val) _then;
 
+  /// Create a copy of ApprovalRequest
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -122,6 +128,8 @@ class __$$ApprovalRequestImplCopyWithImpl<$Res>
       _$ApprovalRequestImpl _value, $Res Function(_$ApprovalRequestImpl) _then)
       : super(_value, _then);
 
+  /// Create a copy of ApprovalRequest
+  /// with the given fields replaced by the non-null parameter values.
   @pragma('vm:prefer-inline')
   @override
   $Res call({
@@ -210,12 +218,14 @@ class _$ApprovalRequestImpl extends _ApprovalRequest {
             (identical(other.status, status) || other.status == status));
   }
 
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(
       runtimeType, id, operation, details, riskLevel, createdAt, status);
 
-  @JsonKey(ignore: true)
+  /// Create a copy of ApprovalRequest
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   @pragma('vm:prefer-inline')
   _$$ApprovalRequestImplCopyWith<_$ApprovalRequestImpl> get copyWith =>
@@ -255,8 +265,11 @@ abstract class _ApprovalRequest extends ApprovalRequest {
   DateTime? get createdAt;
   @override
   String? get status;
+
+  /// Create a copy of ApprovalRequest
+  /// with the given fields replaced by the non-null parameter values.
   @override
-  @JsonKey(ignore: true)
+  @JsonKey(includeFromJson: false, includeToJson: false)
   _$$ApprovalRequestImplCopyWith<_$ApprovalRequestImpl> get copyWith =>
       throw _privateConstructorUsedError;
 }
