@@ -18,14 +18,14 @@
     background: rgba(255,255,255,0.94); border-radius: 12px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.18);
     font-size: 12px; line-height: 1.4; color: #333;
-    max-height: 34%; overflow: hidden;
+    max-height: 55%; overflow-y: auto;
     -webkit-user-select: text; user-select: text;
     word-break: break-all;
   }
-  /* 底部操作条 */
+  /* 底部操作条（默认隐藏，点击宠物切换） */
   #bar {
     position: absolute; left: 0; right: 0; bottom: 0;
-    display: flex; align-items: center; gap: 6px;
+    display: none; align-items: center; gap: 6px;
     padding: 6px 8px;
   }
   #input {
@@ -15328,6 +15328,8 @@ var __pow = Math.pow,
   function showBubble(text, sticky) {
     bubble.style.display = 'block';
     bubble.innerText = text;
+    // 流式回复时自动滚到最新内容
+    bubble.scrollTop = bubble.scrollHeight;
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
     if (!sticky) {
       bubbleTimer = setTimeout(function () {
@@ -15449,8 +15451,8 @@ var __pow = Math.pow,
       app.stage.addChild(m);
       fitModel();
       hideBubble();
-      // 打招呼动作（TapBody 组），然后回到 Idle 循环
-      playMotion('TapBody');
+      // 打招呼：随机播放一个动作，之后回到 Idle 自动循环
+      playRandomMotion(false);
       if (window.PetBridge) PetBridge.onModelLoaded(true, url);
     }).catch(function (err) {
       // 错误气泡保留 8 秒，方便看清原因
@@ -15481,50 +15483,98 @@ var __pow = Math.pow,
   }
 
   // ── 聊天事件（由原生 SSE 转发）──────────────────────────
+  var replyText = '';   // 当前回复的累积文本
+  var inReply = false;  // 是否已进入正文阶段（用于和 thinking 阶段区分）
   window.onChatEvent = function (jsonStr) {
     var ev;
     try { ev = JSON.parse(jsonStr); } catch (e) { return; }
     if (ev.status === 'heartbeat') return;
     if (ev.status === 'thinking') {
+      // thinking 阶段：只显示进度文本（首个正文事件到达时会清掉）
       showBubble(ev.content || '思考中...', true);
       return;
     }
     if (ev.error) {
       showBubble('出错了: ' + ev.error, false);
-      talking = false;
+      talking = false; inReply = false;
       return;
     }
     // 内容事件：兼容 content / text / delta 三种字段名（与 Flutter 端一致）
     var content = ev.content || ev.text || ev.delta;
     if (content) {
-      // 追加内容
-      var cur = bubble.innerText || '';
-      if (bubble.style.display !== 'block') cur = '';
-      showBubble(cur + content, true);
-      if (!talking) {
-        talking = true;
-        // 说话时播放互动动作，让宠物"活"起来
-        playMotion('TapBody');
+      // 关键修复：回复正文到达时清掉 thinking 文本、单独累积。
+      // 之前把回复追加在 thinking 后面，气泡 overflow:hidden 只显示
+      // 开头，回复全部被裁掉，看起来像"只有思考没有回复"。
+      if (!inReply) {
+        inReply = true;
+        replyText = '';
+        // 开始说话：随机播放一个互动动作
+        playRandomMotion(false);
       }
+      replyText += content;
+      showBubble(replyText, true);
+      talking = true;
       return;
     }
     if (ev.done) {
       if (ev.session_id) sessionId = ev.session_id;
-      talking = false;
-      // 4 秒后自动收起气泡
-      showBubble(bubble.innerText, false);
+      talking = false; inReply = false;
+      // 6 秒后自动收起气泡（回复通常较长，给足阅读时间）
+      if (bubbleTimer) { clearTimeout(bubbleTimer); }
+      bubbleTimer = setTimeout(function () { bubble.style.display = 'none'; }, 6000);
     }
   };
 
+  // ── 自动行为系统：随机动作 + 视线跟随 ───────────────────
+  // 获取模型全部动作组（如 Idle / TapBody）
+  function motionGroups() {
+    try {
+      return Object.keys(model.internalModel.settings.motions || {});
+    } catch (e) { return []; }
+  }
+  // 随机播放动作。idleOnly=true 只播 Idle 组（自动闲晃用），false 时任意组
+  function playRandomMotion(idleOnly) {
+    if (!model) return;
+    var groups = motionGroups();
+    if (idleOnly) {
+      groups = groups.filter(function (g) { return g.toLowerCase() === 'idle'; });
+    }
+    if (!groups.length) return;
+    var g = groups[Math.floor(Math.random() * groups.length)];
+    try {
+      // 传 index 随机选组内某个动作（Idle 组有 9 个）
+      var list = model.internalModel.settings.motions[g] || [];
+      var idx = list.length > 1 ? Math.floor(Math.random() * list.length) : undefined;
+      model.motion(g, idx);
+    } catch (e) {
+      try { model.motion(g); } catch (e2) {}
+    }
+  }
+  // 视线跟随手指：点击/滑动时宠物看向触点
+  document.getElementById('glcanvas').addEventListener('pointermove', function (e) {
+    if (!model) return;
+    try { model.focus(e.clientX, e.clientY); } catch (err) {}
+  });
+  // 定时自动行为：每 12~22 秒随机闲晃（聊天说话时不打断）
+  function scheduleAutoBehavior() {
+    var delay = 12000 + Math.floor(Math.random() * 10000);
+    setTimeout(function () {
+      if (model && !talking) playRandomMotion(true);
+      scheduleAutoBehavior();
+    }, delay);
+  }
+
   // ── 交互 ───────────────────────────────────────────────
+  var bar = document.getElementById('bar');
   function sendText() {
     var text = input.value.trim();
     if (!text) return;
     input.value = '';
     input.blur();
+    replyText = ''; inReply = false;
     hideBubble();
     showBubble('思考中...', true);
-    playMotion('TapBody');
+    playRandomMotion(false);
     if (window.PetBridge) {
       PetBridge.onSend(JSON.stringify({ text: text, session_id: sessionId }));
     }
@@ -15536,22 +15586,29 @@ var __pow = Math.pow,
   document.getElementById('close').addEventListener('click', function () {
     if (window.PetBridge) PetBridge.onClose();
   });
-  // 点击模型 → 互动动作 + 随机表情 + 气泡回应
+  // 对话窗口默认隐藏；点击宠物切换显示/隐藏
+  function toggleBar() {
+    bar.style.display = bar.style.display === 'flex' ? 'none' : 'flex';
+  }
+  // 点击模型 → 切换对话窗口 + 互动动作 + 随机表情 + 气泡回应
   var tapReplies = ['嘿嘿~', '干嘛呀？', '摸摸头~', '你好呀！', '想我了吗？', '今天也要加油哦~'];
   document.getElementById('glcanvas').addEventListener('pointerdown', function (e) {
-    if (!model) return;
+    if (!model) { toggleBar(); return; }
     var hit = null;
     try {
       // tap() 需要模型本地坐标，先把屏幕坐标转换过去
       var p = model.toLocal(new PIXI.Point(e.clientX, e.clientY));
       hit = model.tap(p.x, p.y);
     } catch (err) {}
+    toggleBar();
     if (hit && hit.length > 0) {
       showBubble(tapReplies[Math.floor(Math.random() * tapReplies.length)], false);
-      playMotion('TapBody');
+      playRandomMotion(false);
       randomExpression();
     }
   });
+
+  scheduleAutoBehavior();
 
   initPixi();
   // 上报组件就绪状态到原生 logcat，便于远程诊断
