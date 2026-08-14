@@ -408,6 +408,11 @@ class PetOverlayService : Service() {
         }
 
         @JavascriptInterface
+        fun log(msg: String) {
+            Log.d(TAG, "[js] $msg")
+        }
+
+        @JavascriptInterface
         fun onClose() {
             mainHandler.post { stopSelf() }
         }
