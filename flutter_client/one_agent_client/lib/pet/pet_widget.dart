@@ -35,9 +35,6 @@ class _PetWidgetState extends State<PetWidget>
   // 当前动作的瞬时动画（如 bounce 弹跳一次）
   late final AnimationController _actionAnim;
 
-  // 上次的 action，用于检测动作切换并触发一次性动画
-  PetAction? _lastAction;
-
   // 眨眼调度
   int _nextBlinkAt = 0;
 
@@ -75,8 +72,7 @@ class _PetWidgetState extends State<PetWidget>
       }
     });
 
-    _lastAction = widget.action;
-    // 动作切换时触发一次性动画
+    // 首次构建时触发当前动作的一次性动画（如弹跳/挥手/歪头）
     _maybeFireActionAnim(widget.action);
   }
 
@@ -84,7 +80,6 @@ class _PetWidgetState extends State<PetWidget>
   void didUpdateWidget(PetWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.action != widget.action) {
-      _lastAction = widget.action;
       _maybeFireActionAnim(widget.action);
     }
   }

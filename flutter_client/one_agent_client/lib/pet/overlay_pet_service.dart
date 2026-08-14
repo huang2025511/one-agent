@@ -43,12 +43,16 @@ class OverlayPetService {
       enableDrag: true,
       overlayTitle: 'One-Agent 桌宠',
       overlayContent: '桌宠运行中',
-      flag: OverlayFlag.defaultFlag,
+      // focusPointer：允许悬浮窗内的输入框获取键盘焦点。
+      // 之前误用 OverlayFlag.focusable（不存在的枚举）导致构建失败，
+      // 回退到 defaultFlag 后又导致输入框无法弹键盘。
+      flag: OverlayFlag.focusPointer,
       visibility: NotificationVisibility.visibilityPublic,
       positionGravity: PositionGravity.none,
+      // 初始位置放屏幕右侧中部，避免挡状态栏/底部导航
+      alignment: OverlayAlignment.centerRight,
       height: 250,
       width: 300,
-      startPosition: const OverlayPosition(0, 0),
     );
 
     _isActive = true;

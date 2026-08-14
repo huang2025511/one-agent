@@ -13,7 +13,7 @@ import 'pet_widget.dart';
 
 /// 悬浮窗宠物页面
 ///
-/// 集成 Rive 动画 + PetBrain 自主行动 + SSE 对话
+/// 集成 Canvas 动画宠物 + PetBrain 自主行动 + SSE 对话
 /// 退出时调用 [PetBrain.stop] 清理定时器
 class OverlayPetScreen extends StatefulWidget {
   const OverlayPetScreen({super.key});
@@ -140,7 +140,7 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
 
           if (event.content != null && event.content!.isNotEmpty) {
             _replyBuffer.write(event.content);
-            if (!_brain.mood.toString().contains('talking')) {
+            if (_brain.mood != PetMood.talking) {
               _brain.startTalking();
             }
             setState(() {
@@ -189,20 +189,7 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
     _brain.onPetTap();
     setState(() {
       _showInput = !_showInput;
-      if (_showInput && _bubbleText.isEmpty) {
-        _bubbleText = _getRandomGreeting();
-        Timer(const Duration(seconds: 3), () {
-          if (mounted && _bubbleText == _getRandomGreeting()) {
-            // 如果还是问候语，清掉
-          }
-        });
-      }
     });
-  }
-
-  String _getRandomGreeting() {
-    final greetings = ['喵~', '在呢~', '怎么了？', '找我吗？', '嗨！'];
-    return greetings[DateTime.now().millisecond % greetings.length];
   }
 
   @override
@@ -246,7 +233,7 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
                   ),
                 ),
               ),
-            // Rive 宠物
+            // 宠物（Canvas 动画）
             PetWidget(
               mood: _brain.mood,
               action: _brain.currentAction,
