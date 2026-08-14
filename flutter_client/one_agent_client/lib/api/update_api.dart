@@ -124,6 +124,12 @@ class UpdateApi {
   }
 
   /// 从 Gitee API 获取最新 Release（国内网络更稳定）
+  ///
+  /// 关键修复：不能用 /releases/latest 端点！Gitee 的 latest 返回的是
+  /// 网页端手动标记"最新版"的 release（通常停留在最早创建的那个），
+  /// 而非真正最新的。之前它返回过 v2085 旧版，导致客户端比较
+  /// 4089 >= 2085 → 误判"已是最新"，只能走强制更新。
+  /// 现改为拉取 releases 列表，取【版本号最大且带 APK】的那个。
   static Future<ReleaseInfo?> _fetchFromGitee() async {
     final dio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 15),
@@ -132,47 +138,74 @@ class UpdateApi {
 
     try {
       final resp = await dio.get(
-        'https://gitee.com/api/v5/repos/$_giteeRepo/releases/latest',
+        'https://gitee.com/api/v5/repos/$_giteeRepo/releases',
+        queryParameters: {
+          'per_page': 50,
+          'direction': 'desc',
+          'sort': 'created_at',
+        },
       );
-      final data = resp.data as Map<String, dynamic>;
-      final tagName = data['tag_name'] as String? ?? '';
-      final name = data['name'] as String? ?? tagName;
-      final body = data['body'] as String?;
-      final publishedAt = data['created_at'] as String?;
+      final list = resp.data;
+      if (list is! List || list.isEmpty) return null;
 
-      String? apkUrl;
-      String? giteeApkUrl;
-      int apkSize = 0;
-      for (final asset in (data['assets'] as List<dynamic>? ?? [])) {
-        final assetName = asset['name'] as String? ?? '';
-        if (assetName.endsWith('.apk')) {
-          giteeApkUrl = asset['browser_download_url'] as String?;
-          apkSize = (asset['size'] as num?)?.toInt() ?? 0;
-          // 优先取 arm64-v8a（主流架构）
-          if (assetName.contains('arm64-v8a')) break;
+      // 解析所有 release，选版本号最大且带 arm64 APK 的
+      ReleaseInfo? best;
+      for (final item in list) {
+        if (item is! Map<String, dynamic>) continue;
+        final tagName = item['tag_name'] as String? ?? '';
+        if (tagName.isEmpty) continue;
+
+        final info = _parseGiteeRelease(item, tagName);
+        if (info == null) continue;
+        if (best == null || info.versionNumber > best.versionNumber) {
+          best = info;
         }
       }
-
-      if (giteeApkUrl == null) return null;
-
-      // 用 Gitee 文件名构造 GitHub 下载地址（作为备用）
-      final ghApkUrl = apkUrl ??
-          'https://github.com/$_ghRepo/releases/download/$tagName/${giteeApkUrl.split('/').last}';
-
-      return ReleaseInfo(
-        tagName: tagName,
-        name: name,
-        body: body,
-        publishedAt: publishedAt,
-        apkUrl: ghApkUrl,
-        giteeApkUrl: giteeApkUrl,
-        apkSize: apkSize,
-      );
+      return best;
     } on DioException {
       return null;
     } finally {
       dio.close();
     }
+  }
+
+  /// 解析单个 Gitee release（tag 需形如 app-vNNNN）
+  static ReleaseInfo? _parseGiteeRelease(
+      Map<String, dynamic> data, String tagName) {
+    final RegExp tagNum = RegExp(r'^[a-zA-Z-]*v?(\d+)$');
+    if (!tagNum.hasMatch(tagName)) return null;
+
+    final name = data['name'] as String? ?? tagName;
+    final body = data['body'] as String?;
+    final publishedAt = data['created_at'] as String?;
+
+    String? giteeApkUrl;
+    int apkSize = 0;
+    for (final asset in (data['assets'] as List<dynamic>? ?? [])) {
+      if (asset is! Map<String, dynamic>) continue;
+      final assetName = asset['name'] as String? ?? '';
+      if (assetName.endsWith('.apk')) {
+        giteeApkUrl = asset['browser_download_url'] as String?;
+        apkSize = (asset['size'] as num?)?.toInt() ?? 0;
+        // 优先取 arm64-v8a（主流架构）
+        if (assetName.contains('arm64-v8a')) break;
+      }
+    }
+    if (giteeApkUrl == null) return null;
+
+    final fileName = giteeApkUrl.split('/').last;
+    final ghApkUrl =
+        'https://github.com/$_ghRepo/releases/download/$tagName/$fileName';
+
+    return ReleaseInfo(
+      tagName: tagName,
+      name: name,
+      body: body,
+      publishedAt: publishedAt,
+      apkUrl: ghApkUrl,
+      giteeApkUrl: giteeApkUrl,
+      apkSize: apkSize,
+    );
   }
 
   /// 下载 APK 到临时目录，返回本地文件路径

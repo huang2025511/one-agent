@@ -84,13 +84,27 @@
   // ── 初始化 PIXI + Live2D ────────────────────────────────
   function initPixi() {
     var canvas = document.getElementById('glcanvas');
-    app = new PIXI.Application({
-      view: canvas,
-      width: window.innerWidth,
-      height: window.innerHeight,
-      backgroundAlpha: 0,
-      antialias: true,
-    });
+    try {
+      app = new PIXI.Application({
+        view: canvas,
+        width: window.innerWidth,
+        height: window.innerHeight,
+        backgroundAlpha: 0,
+        antialias: true,
+      });
+    } catch (e) {
+      // WebGL 上下文创建失败（如窗口未硬件加速）——明确报错而非卡死
+      showBubble('WebGL 初始化失败: ' + e, true);
+      if (window.PetBridge) PetBridge.onModelLoaded(false, 'WebGL init: ' + e);
+      return;
+    }
+    // WebGL 上下文自检：拿不到 context 同样说明 GPU 渲染不可用
+    var gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    if (!gl) {
+      showBubble('GPU 渲染不可用（WebGL 上下文为空）', true);
+      if (window.PetBridge) PetBridge.onModelLoaded(false, 'no webgl context');
+      return;
+    }
     window.addEventListener('resize', function () {
       app.renderer.resize(window.innerWidth, window.innerHeight);
       fitModel();

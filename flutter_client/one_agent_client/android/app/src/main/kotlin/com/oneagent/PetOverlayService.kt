@@ -248,6 +248,14 @@ class PetOverlayService : Service() {
             }
         }
 
+        // 把页面 console 输出转到 logcat，方便排查模型加载问题
+        wv.webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onConsoleMessage(msg: android.webkit.ConsoleMessage): Boolean {
+                Log.d("PetWeb", "[${msg.lineNumber()}] ${msg.message()}")
+                return true
+            }
+        }
+
         layout.addView(wv, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT))
@@ -261,6 +269,10 @@ class PetOverlayService : Service() {
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
+        // 关键修复（模型不显示的根因）：Service 通过 WindowManager 添加的
+        // 窗口默认【不做硬件加速】（只有 Activity 窗口默认开启），必须在
+        // addView 前显式设置 FLAG_HARDWARE_ACCELERATED。否则 WebView 的
+        // WebGL 上下文创建失败，Live2D 模型永远渲染不出来。
         // 关键修复（挡全屏问题）：不加 FLAG_NOT_TOUCH_MODAL 时，可聚焦窗口
         // 会消费【所有】指针事件（包括窗口外的），导致宠物悬浮窗挡住整个屏幕。
         // 加上 NOT_TOUCH_MODAL：窗口外触摸透传给下层应用；窗口仍可聚焦，
@@ -269,7 +281,8 @@ class PetOverlayService : Service() {
             w, h,
             windowType,
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         )
         p.gravity = Gravity.TOP or Gravity.START
