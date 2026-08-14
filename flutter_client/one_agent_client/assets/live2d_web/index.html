@@ -22,6 +22,16 @@
     -webkit-user-select: text; user-select: text;
     word-break: break-all;
   }
+  /* 回复完成态：尾部显示"点击收起"提示 */
+  #bubble.done::after {
+    content: '✓ 点击收起';
+    display: block;
+    text-align: right;
+    font-size: 10px;
+    color: #10b981;
+    margin-top: 3px;
+    -webkit-user-select: none; user-select: none;
+  }
   /* 底部操作条（默认隐藏，点击宠物切换） */
   #bar {
     position: absolute; left: 0; right: 0; bottom: 0;
@@ -15512,6 +15522,7 @@ var __pow = Math.pow,
         playRandomMotion(false);
       }
       replyText += content;
+      bubble.classList.remove('done'); // 流式中，撤下完成标记
       showBubble(replyText, true);
       talking = true;
       return;
@@ -15519,11 +15530,29 @@ var __pow = Math.pow,
     if (ev.done) {
       if (ev.session_id) sessionId = ev.session_id;
       talking = false; inReply = false;
-      // 6 秒后自动收起气泡（回复通常较长，给足阅读时间）
+      // 按回复长度动态计算阅读时间：基础 8s + 每字 0.15s，上限 60s。
+      // 之前固定 6 秒，长回复来不及读就消失了。
+      var ms = Math.min(8000 + replyText.length * 150, 60000);
+      bubble.classList.add('done'); // 尾部显示"✓ 点击收起"
+      bubble.scrollTop = bubble.scrollHeight;
       if (bubbleTimer) { clearTimeout(bubbleTimer); }
-      bubbleTimer = setTimeout(function () { bubble.style.display = 'none'; }, 6000);
+      bubbleTimer = setTimeout(function () {
+        bubble.style.display = 'none';
+        bubble.classList.remove('done');
+      }, ms);
+      if (window.PetBridge) {
+        PetBridge.log('回复完成: ' + replyText.length + ' 字，显示 ' + Math.round(ms / 1000) + 's');
+      }
     }
   };
+
+  // 点击气泡立即收起（选中文本时不触发，方便复制）
+  bubble.addEventListener('click', function () {
+    try { if (window.getSelection().toString()) return; } catch (e) {}
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    bubble.style.display = 'none';
+    bubble.classList.remove('done');
+  });
 
   // ── 自动行为系统：随机动作 + 视线跟随 ───────────────────
   // 获取模型全部动作组（如 Idle / TapBody）
