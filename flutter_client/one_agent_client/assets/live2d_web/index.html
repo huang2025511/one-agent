@@ -15342,8 +15342,34 @@ var __pow = Math.pow,
   window.petBubble = showBubble;
 
   // ── 初始化 PIXI + Live2D ────────────────────────────────
+  var pendingModelUrl = null; // app 未就绪时排队的模型 URL
+
   function initPixi() {
     var canvas = document.getElementById('glcanvas');
+    // 关键修复：悬浮窗 addView 后立即 loadUrl，本地资源加载极快，
+    // 脚本执行时 WebView 首次 layout 可能未完成 → innerWidth=0 →
+    // 画布 0×0，模型加载成功也完全不可见（无任何报错）。
+    // 必须等拿到非零视口尺寸再创建渲染器。
+    if (!window.innerWidth || !window.innerHeight) {
+      if (window.PetBridge) PetBridge.log('视口为 0，等待 WebView layout...');
+      var waited = 0;
+      var timer = setInterval(function () {
+        waited += 50;
+        if (window.innerWidth && window.innerHeight) {
+          clearInterval(timer);
+          createApp(canvas);
+        } else if (waited >= 5000) {
+          clearInterval(timer);
+          showBubble('窗口尺寸无效: ' + window.innerWidth + 'x' + window.innerHeight, true);
+          if (window.PetBridge) PetBridge.onModelLoaded(false, 'viewport 0x0');
+        }
+      }, 50);
+      return;
+    }
+    createApp(canvas);
+  }
+
+  function createApp(canvas) {
     try {
       app = new PIXI.Application({
         view: canvas,
@@ -15358,27 +15384,39 @@ var __pow = Math.pow,
       if (window.PetBridge) PetBridge.onModelLoaded(false, 'WebGL init: ' + e);
       return;
     }
-    // WebGL 上下文自检：拿不到 context 同样说明 GPU 渲染不可用
-    var gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-    if (!gl) {
-      showBubble('GPU 渲染不可用（WebGL 上下文为空）', true);
-      if (window.PetBridge) PetBridge.onModelLoaded(false, 'no webgl context');
-      return;
+    if (window.PetBridge) {
+      PetBridge.log('渲染器就绪: ' + window.innerWidth + 'x' + window.innerHeight);
+    }
+    // app 就绪后执行排队的模型加载
+    if (pendingModelUrl) {
+      var u = pendingModelUrl;
+      pendingModelUrl = null;
+      loadModel(u);
     }
     window.addEventListener('resize', function () {
+      if (!app) return;
       app.renderer.resize(window.innerWidth, window.innerHeight);
       fitModel();
     });
   }
 
   function fitModel() {
-    if (!model) return;
+    if (!model || !app) return;
+    // 数值防护：模型 bounds 未就绪时 height 可能为 0，scale 会变 Infinity 导致不渲染
+    var mh = model.height || model.internalModel.height || 200;
+    var mw = model.width || mh;
     // 让模型高度约占窗口 78%，水平居中，底部留出操作条
     var targetH = window.innerHeight * 0.78;
-    var s = targetH / model.height;
-    model.scale = s;
-    model.x = (window.innerWidth - model.width) / 2;
-    model.y = window.innerHeight - model.height - 40;
+    var s = targetH / mh;
+    if (!isFinite(s) || s <= 0) s = 1;
+    model.scale.set(s);
+    var w2 = mh === model.height ? model.width : mw * s;
+    model.x = (window.innerWidth - w2) / 2;
+    model.y = window.innerHeight - mh * s - 40;
+    if (window.PetBridge) {
+      PetBridge.log('fit: scale=' + s.toFixed(2) + ' 模型=' + model.width.toFixed(0) + 'x' +
+        model.height.toFixed(0) + ' 画布=' + window.innerWidth + 'x' + window.innerHeight);
+    }
   }
 
   function loadModel(url) {
@@ -15394,6 +15432,13 @@ var __pow = Math.pow,
       return;
     }
     var L2D = PIXI.live2d;
+    // 关键修复：app 未就绪（视口等待中/WebGL 初始化失败）时排队，
+    // 避免 app.stage 为 null 抛 TypeError 导致气泡永远卡在"加载模型中"
+    if (!app) {
+      pendingModelUrl = url;
+      if (window.PetBridge) PetBridge.log('渲染器未就绪，模型排队: ' + url);
+      return;
+    }
     showBubble('加载模型中...', true);
     L2D.Live2DModel.from(url, { autoInteract: false }).then(function (m) {
       // 切换模型时移除旧模型，避免叠加
