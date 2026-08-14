@@ -62,9 +62,11 @@ class _PetWidgetState extends State<PetWidget>
       final now = DateTime.now().millisecondsSinceEpoch;
       if (now >= _nextBlinkAt) {
         _blink.forward(from: 0).then((_) {
+          // 悬浮窗可能已关闭，动画控制器已被 dispose，需检查 mounted
+          if (!mounted) return;
           // 短暂闭眼后睁开
           Future.delayed(const Duration(milliseconds: 60), () {
-            _blink.reverse();
+            if (mounted) _blink.reverse();
           });
         });
         // 下次眨眼：2.5~6 秒后

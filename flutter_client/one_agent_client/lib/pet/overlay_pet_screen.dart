@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_overlay_window/flutter_overlay_window.dart';
@@ -8,6 +7,7 @@ import '../api/api_client.dart';
 import '../api/chat_api.dart';
 import '../api/sse_client.dart';
 import '../models/chat_message.dart';
+import 'overlay_pet_service.dart';
 import 'pet_brain.dart';
 import 'pet_widget.dart';
 
@@ -59,8 +59,13 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
 
     // 监听主 APP 消息
     _mainAppSub = FlutterOverlayWindow.overlayListener.listen((event) {
-      _handleMainAppMessage(event.toString());
+      _handleMainAppMessage(event);
     });
+
+    // 通知主 APP 悬浮窗已就绪，请求补发配置。
+    // 主 APP 在 1 秒后发送的首次配置可能因本监听器尚未注册而丢失，
+    // 通过 ready 信号让主 APP 再补发一次，确保 baseUrl/apiKey 必达。
+    FlutterOverlayWindow.shareData({'type': 'ready'});
   }
 
   @override
@@ -73,10 +78,11 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
     super.dispose();
   }
 
-  void _handleMainAppMessage(String raw) {
+  void _handleMainAppMessage(dynamic event) {
     try {
-      final json = jsonDecode(raw) as Map<String, dynamic>;
-      final type = json['type'] as String;
+      final json = decodeOverlayMessage(event);
+      if (json == null) return;
+      final type = json['type'] as String?;
       final data = (json['data'] as Map<String, dynamic>?) ?? {};
 
       switch (type) {
@@ -111,13 +117,16 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
     _brain.startThinking();
 
     try {
+      // 释放上一次的 SSE 客户端，避免连续发送时连接泄漏
+      _streamSub?.cancel();
+      _sseClient?.dispose();
+
       final result = ChatApi.sendMessageStream(
         text: text,
         sessionId: _sessionId,
       );
       _sseClient = result.client;
 
-      _streamSub?.cancel();
       _streamSub = result.stream.listen(
         (event) {
           if (event.type == 'heartbeat') return;
@@ -250,6 +259,8 @@ class _OverlayPetScreenState extends State<OverlayPetScreen> {
                     Expanded(
                       child: TextField(
                         controller: _inputController,
+                        // 输入框出现时自动聚焦弹出键盘
+                        autofocus: true,
                         style: const TextStyle(fontSize: 12),
                         decoration: InputDecoration(
                           hintText: '说点什么吧~',
