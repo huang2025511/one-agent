@@ -193,15 +193,23 @@ jobs:
               fi
             fi
 
-            # 422 通常表示 tag 已存在，尝试获取已存在的 release
-            # 400 也可能表示"该标签已经存在发行版"（Gitee API 行为不一致）
+            # 422/400 表示 tag 已存在发行版。
+            # 关键修复：不能复用旧 release！旧 release 的附件是旧 APK，
+            # 会导致用户应用内更新下载到旧版本（v2089 事故根因）。
+            # 正确做法：删除旧 release，下一轮循环重新创建。
             if [ "$HTTP_CODE" = "422" ] || [ "$HTTP_CODE" = "400" ]; then
-              echo "Tag 已存在，尝试获取已有 Release..."
+              echo "Tag 已存在，删除旧 Release 后重建（确保附件是最新 APK）..."
               GET_RESP=$(curl -s "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/tags/${TAG}?access_token=${GITEE_TOKEN}")
-              REL_ID=$(echo "$GET_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
-              if [ -n "$REL_ID" ]; then
-                echo "✅ 获取到已存在的 Release，ID: $REL_ID"
-                break
+              OLD_REL_ID=$(echo "$GET_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+              if [ -n "$OLD_REL_ID" ]; then
+                DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+                  "https://gitee.com/api/v5/repos/huang20260511/one-agent/releases/${OLD_REL_ID}?access_token=${GITEE_TOKEN}")
+                echo "删除旧 Release $OLD_REL_ID -> HTTP $DEL_CODE"
+              fi
+              # 等待 Gitee 删除生效后继续下一轮创建
+              if [ $i -lt $MAX_RETRIES ]; then
+                sleep 3
+                continue
               fi
             fi
 
