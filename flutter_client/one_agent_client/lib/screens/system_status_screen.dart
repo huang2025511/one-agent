@@ -9,6 +9,7 @@ import '../api/system_api.dart';
 import '../models/session.dart';
 import '../providers/system_provider.dart';
 import '../providers/settings_provider.dart';
+import '../providers/update_provider.dart';
 import 'log_viewer_screen.dart';
 import 'settings_screen.dart';
 
@@ -118,7 +119,10 @@ class _SystemStatusScreenState extends ConsumerState<SystemStatusScreen> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        _ConnectionCard(isConnected: settings.isConnected),
+        _ConnectionCard(
+          isConnected: settings.isConnected,
+          serverVersion: state.health?.version,
+        ),
         const SizedBox(height: 16),
         _StatsGrid(
           stats: state.stats,
@@ -152,59 +156,186 @@ class _SystemStatusScreenState extends ConsumerState<SystemStatusScreen> {
   }
 }
 
-class _ConnectionCard extends StatelessWidget {
+/// 连接状态卡片 — 展示连接状态、服务端/客户端版本号，并集成检查更新功能
+class _ConnectionCard extends ConsumerWidget {
   final bool isConnected;
+  final String? serverVersion;
 
-  const _ConnectionCard({required this.isConnected});
+  const _ConnectionCard({
+    required this.isConnected,
+    this.serverVersion,
+  });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
+    final updateState = ref.watch(updateProvider);
 
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 48,
-              height: 48,
-              decoration: BoxDecoration(
-                color: isConnected
-                    ? theme.colorScheme.primaryContainer
-                    : theme.colorScheme.errorContainer,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                isConnected ? Icons.wifi : Icons.wifi_off,
-                color: isConnected
-                    ? theme.colorScheme.onPrimaryContainer
-                    : theme.colorScheme.onErrorContainer,
+            Row(
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: isConnected
+                        ? theme.colorScheme.primaryContainer
+                        : theme.colorScheme.errorContainer,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    isConnected ? Icons.wifi : Icons.wifi_off,
+                    color: isConnected
+                        ? theme.colorScheme.onPrimaryContainer
+                        : theme.colorScheme.onErrorContainer,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        isConnected ? '已连接' : '未连接',
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        isConnected
+                            ? '服务器连接正常'
+                            : '无法连接到服务器，请检查设置',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.outline,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            // 版本信息：服务端 + 客户端
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '服务端版本',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.outline,
+                  ),
+                ),
+                Text(
+                  serverVersion ?? '-',
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '客户端版本',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.outline,
+                  ),
+                ),
+                Text(
+                  'v${updateState.currentVersionName ?? 'unknown'}',
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // 检查更新按钮
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: updateState.isChecking || updateState.isDownloading
+                    ? null
+                    : () async {
+                        await ref
+                            .read(updateProvider.notifier)
+                            .checkForUpdate();
+                        if (!context.mounted) return;
+                        final s = ref.read(updateProvider);
+                        final msg = s.error != null
+                            ? s.error!
+                            : s.hasUpdate
+                                ? '发现新版本: ${s.latestRelease!.tagName}'
+                                : '已是最新版本';
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(msg),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                icon: updateState.isChecking
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.system_update, size: 16),
+                label: Text(
+                  updateState.isChecking ? '检查中...' : '检查更新',
+                  style: const TextStyle(fontSize: 14),
+                ),
               ),
             ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            // 发现新版本时显示下载按钮
+            if (updateState.hasUpdate && !updateState.isDownloading) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: updateState.isChecking
+                      ? null
+                      : () => ref
+                          .read(updateProvider.notifier)
+                          .downloadAndInstall(),
+                  icon: const Icon(Icons.download, size: 16),
+                  label: Text(
+                    updateState.latestRelease != null
+                        ? '下载 ${updateState.latestRelease!.tagName}'
+                        : '下载更新',
+                    style: const TextStyle(fontSize: 14),
+                  ),
+                ),
+              ),
+            ],
+            // 下载中显示进度
+            if (updateState.isDownloading) ...[
+              const SizedBox(height: 12),
+              Row(
                 children: [
-                  Text(
-                    isConnected ? '已连接' : '未连接',
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
+                  Expanded(
+                    child: LinearProgressIndicator(
+                      value: updateState.downloadProgress,
                     ),
                   ),
-                  const SizedBox(height: 2),
+                  const SizedBox(width: 8),
                   Text(
-                    isConnected
-                        ? '服务器连接正常'
-                        : '无法连接到服务器，请检查设置',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.outline,
-                    ),
+                    '${(updateState.downloadProgress * 100).toInt()}%',
+                    style: const TextStyle(fontSize: 12),
                   ),
                 ],
               ),
-            ),
+            ],
           ],
         ),
       ),

@@ -2681,7 +2681,7 @@ class _PetSection extends ConsumerWidget {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  关于分区
+//  关于分区 — 检查更新功能已迁移至系统状态页面的连接状态卡片
 // ════════════════════════════════════════════════════════════════
 class _AboutSection extends ConsumerWidget {
   const _AboutSection();
@@ -2690,36 +2690,13 @@ class _AboutSection extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final updateState = ref.watch(updateProvider);
 
-    // 问题4 修复：使用 hasUpdate（基于版本号比较）而非 latestRelease != null。
-    // 之前 latestRelease 在"当前版本 >= 服务端版本"时为 null，导致 UI 无法
-    // 显示服务端最新版本信息。现在始终存储 latestRelease，subtitle 可以同时
-    // 展示当前版本和服务端最新版本，让用户清楚知道是否有更新。
-    String? subtitle;
-    if (updateState.error != null) {
-      subtitle = updateState.error;
-    } else if (updateState.latestRelease != null) {
-      final latest = updateState.latestRelease!;
-      if (updateState.hasUpdate) {
-        subtitle = '新版本可用: ${latest.tagName} (v${latest.versionNumber})';
-      } else {
-        // 问题4：当前版本 >= 服务端版本时，仍展示服务端最新版本信息，
-        // 让用户知道服务端有什么版本，可手动强制下载。
-        subtitle = '服务端最新: ${latest.tagName}（当前已是最新或更新）';
-      }
-    } else if (updateState.lastCheckedAt != null) {
-      final t = updateState.lastCheckedAt!;
-      final timeStr =
-          '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
-      subtitle = '已是最新版本（$timeStr 检查）';
-    }
-
     return _SettingsSection(
       icon: Icons.info,
       title: '关于',
       children: [
         ListTile(
           leading: const Icon(Icons.apps, size: 20),
-          title: const Text('版本'),
+          title: const Text('客户端版本'),
           trailing: Text(
             'v${updateState.currentVersionName} (${updateState.currentVersion})',
             style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
@@ -2727,106 +2704,16 @@ class _AboutSection extends ConsumerWidget {
           contentPadding: const EdgeInsets.symmetric(horizontal: 20),
         ),
         ListTile(
-          leading: updateState.isChecking
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.system_update, size: 20),
+          leading: const Icon(Icons.system_update, size: 20),
           title: const Text('检查更新'),
-          trailing: updateState.isDownloading
-              ? SizedBox(
-                  width: 80,
-                  child: LinearProgressIndicator(
-                    value: updateState.downloadProgress,
-                  ),
-                )
-              : const Icon(Icons.chevron_right, size: 20),
-          subtitle: subtitle != null
-              ? Text(subtitle,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: updateState.error != null
-                        ? Colors.red
-                        : updateState.hasUpdate
-                            ? Colors.orange
-                            : Colors.green,
-                  ))
-              : null,
-          onTap: updateState.isChecking || updateState.isDownloading
-              ? null
-              : () async {
-                  await ref.read(updateProvider.notifier).checkForUpdate();
-                  // 检查完成后给出 SnackBar 反馈
-                  if (!context.mounted) return;
-                  final s = ref.read(updateProvider);
-                  final msg = s.error != null
-                      ? s.error!
-                      : s.hasUpdate
-                          ? '发现新版本: ${s.latestRelease!.tagName}'
-                          : '已是最新版本';
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(msg),
-                      behavior: SnackBarBehavior.floating,
-                    ),
-                  );
-                },
+          subtitle: const Text(
+            '已移至「系统状态」页面的服务器连接状态卡片',
+            style: TextStyle(fontSize: 12),
+          ),
+          trailing: const Icon(Icons.chevron_right, size: 20),
+          onTap: () => Navigator.of(context).pop(),
           contentPadding: const EdgeInsets.symmetric(horizontal: 20),
         ),
-        // 问题4：发现新版本时显示下载按钮（直接下载，无需进入二级页面）
-        if (updateState.hasUpdate && !updateState.isDownloading) ...[
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: FilledButton.icon(
-              onPressed: updateState.isChecking
-                  ? null
-                  : () => ref.read(updateProvider.notifier).downloadAndInstall(),
-              icon: const Icon(Icons.download, size: 18),
-              label: Text(updateState.latestRelease != null
-                  ? '下载 ${updateState.latestRelease!.tagName}'
-                  : '下载更新'),
-            ),
-          ),
-          const SizedBox(height: 4),
-        ],
-        // 问题4：下载中显示进度
-        if (updateState.isDownloading) ...[
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Row(
-              children: [
-                Expanded(
-                  child: LinearProgressIndicator(
-                    value: updateState.downloadProgress,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  '${(updateState.downloadProgress * 100).toInt()}%',
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 4),
-        ],
-        // 问题4：即使版本号比较认为"无需更新"，也允许用户强制下载服务端最新版
-        // （用于调试或绕过版本比较失误）
-        if (updateState.latestRelease != null &&
-            !updateState.hasUpdate &&
-            !updateState.isDownloading &&
-            !updateState.isChecking) ...[
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: OutlinedButton.icon(
-              onPressed: () => ref.read(updateProvider.notifier).downloadAndInstall(),
-              icon: const Icon(Icons.download_for_offline, size: 18),
-              label: const Text('强制下载服务端最新版'),
-            ),
-          ),
-          const SizedBox(height: 4),
-        ],
       ],
     );
   }
