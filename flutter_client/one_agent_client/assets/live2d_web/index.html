@@ -22,7 +22,10 @@
     max-height: 62%; overflow-y: auto;
     -webkit-user-select: text; user-select: text;
     word-break: break-word; white-space: pre-wrap;
+    transition: opacity .18s ease, transform .18s ease;
   }
+  /* 淡出态：display 切换不再生硬跳变 */
+  #bubble.hide-fade { opacity: 0; transform: translateX(-50%) scale(0.94); }
   /* 回复完成态：尾部显示"点击收起"提示 */
   #bubble.done::after {
     content: '✓ 点击收起';
@@ -15334,23 +15337,42 @@ var __pow = Math.pow,
   var app = null;
   var sessionId = null;
   var bubbleTimer = null;
+  var bubbleFade = null;
   var talking = false;
 
-  function showBubble(text, sticky) {
-    bubble.style.display = 'block';
+  // 淡入：display 打开后下一帧撤掉透明态，让过渡真正生效
+  function bubbleShowNow() {
+    if (bubbleFade) { clearTimeout(bubbleFade); bubbleFade = null; }
+    bubble.classList.remove('hide-fade');
+    if (bubble.style.display !== 'block') {
+      bubble.style.display = 'block';
+      bubble.classList.add('hide-fade');
+      void bubble.offsetHeight; // 强制重排，过渡从透明态起始
+      bubble.classList.remove('hide-fade');
+    }
+  }
+  // 淡出：先过渡到透明，再收起 display
+  function bubbleHideNow() {
+    if (bubble.style.display !== 'block') return;
+    bubble.classList.add('hide-fade');
+    if (bubbleFade) clearTimeout(bubbleFade);
+    bubbleFade = setTimeout(function () {
+      bubble.style.display = 'none';
+      bubble.classList.remove('hide-fade');
+      bubble.classList.remove('done');
+    }, 190);
+  }
+  function showBubble(text, sticky, ms) {
+    bubbleShowNow();
     bubble.innerText = text;
     // 流式回复时自动滚到最新内容
     bubble.scrollTop = bubble.scrollHeight;
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    if (!sticky) {
-      bubbleTimer = setTimeout(function () {
-        bubble.style.display = 'none';
-      }, 4000);
-    }
+    if (!sticky) bubbleTimer = setTimeout(bubbleHideNow, ms || 4000);
   }
   function hideBubble() {
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    bubble.style.display = 'none';
+    bubbleHideNow();
   }
   window.petBubble = showBubble;
 
@@ -15462,31 +15484,20 @@ var __pow = Math.pow,
   var life = null;
   var lifeGen = 0;
 
-  // 参数叠加写法：先抵消上一帧的叠加量再写新值。渲染管线末尾的
-  // loadParameters 会把本帧值持久化到下一帧，纯 add 会在 motion
-  // 未覆盖的参数上逐帧累加、最终饱和钉死在极值上（越动越僵的根因）
+  // 参数叠加写法：纯 add，一次/帧。
+  // 注入点选在 beforeModelUpdate 事件（coreModel.update() 渲染前最后一
+  // 刻），而管线帧末的 loadParameters() 会把参数还原为 motion 快照——
+  // 快照保存发生在我们叠加之前，所以下一帧基线永远是干净的 motion 值：
+  // 数学上不可能累加或污染，也不与 idle motion 抢参数。
+  // （旧的 motionManager.update 包装写法挂在快照保存之前，叠加量会被
+  // 持久化进快照、再被 motion 的 load 恢复，抵消逻辑存在偏差——
+  // 这是"只看到整体缩放、手脚不动"的根因之一）
+  // core 的 addParameterValueById 自带 min/max 截断，不会溢出范围
   function applyOffsets(L, o) {
-    var core = L.core, id, v, cur, prev;
-    for (id in o) {
-      v = o[id];
-      if (!isFinite(v) || L.bad[id]) continue;
-      try {
-        cur = core.getParameterValueById(id);
-        if (typeof cur !== 'number' || !isFinite(cur)) { L.bad[id] = 1; continue; }
-        prev = L.offPrev[id] || 0;
-        core.setParameterValueById(id, cur - prev + v);
-        L.offPrev[id] = v;
-        L.offUsed[id] = 1;
-      } catch (e) { L.bad[id] = 1; }
-    }
-    for (id in L.offPrev) {
-      if (!L.offUsed[id]) {
-        try {
-          cur = core.getParameterValueById(id);
-          core.setParameterValueById(id, cur - L.offPrev[id]);
-        } catch (e) {}
-        delete L.offPrev[id];
-      }
+    var core = L.core;
+    for (var id in o) {
+      var v = o[id];
+      if (isFinite(v)) core.addParameterValueById(id, v);
     }
   }
 
@@ -15498,13 +15509,17 @@ var __pow = Math.pow,
     L.jumping = true; L.jumpY = -0.05; L.jumpV = v;
   }
 
+  // 注意取值范围（由 Hiyori 官方 motion 曲线校准）：
+  // EyeLSmile 0~8.57 / EyeRSmile 0~4.4 / Cheek 0~5.37 / Breath 0~8.57 /
+  // MouthForm -2~6.63 / MouthOpenY 0~6.63 / Shoulder -1~5.37 / Leg 0~4.79。
+  // 旧代码按 0~1 取值，实际只有约 10% 效果——表情几乎不可见的根因
   var MOODS = {
-    normal:  { sway: 1.0, spd: 1.0,  face: { ParamMouthForm: 0.12, ParamEyeLSmile: 0.12, ParamEyeRSmile: 0.12 } },
-    happy:   { sway: 1.25, spd: 1.2, face: { ParamMouthForm: 0.7, ParamEyeLSmile: 0.85, ParamEyeRSmile: 0.85, ParamCheek: 0.18 } },
-    excited: { sway: 1.5, spd: 1.5,  face: { ParamMouthForm: 0.8, ParamEyeLSmile: 0.95, ParamEyeRSmile: 0.95 } },
-    curious: { sway: 0.9, spd: 1.1,  face: { ParamMouthForm: 0.25, ParamBrowLY: 0.5, ParamBrowRY: 0.5 } },
-    sleepy:  { sway: 0.5, spd: 0.55, face: { ParamMouthForm: -0.1, ParamBrowLY: -0.2, ParamBrowRY: -0.2 } },
-    bored:   { sway: 0.7, spd: 0.75, face: { ParamMouthForm: -0.15, ParamBrowLY: -0.1, ParamBrowRY: -0.1 } }
+    normal:  { sway: 1.0, spd: 1.0,  face: { ParamMouthForm: 0.5, ParamEyeLSmile: 0.8, ParamEyeRSmile: 0.4 } },
+    happy:   { sway: 1.25, spd: 1.2, face: { ParamMouthForm: 2.2, ParamEyeLSmile: 5, ParamEyeRSmile: 2.5, ParamCheek: 2.5 } },
+    excited: { sway: 1.5, spd: 1.5,  face: { ParamMouthForm: 2.4, ParamEyeLSmile: 5.5, ParamEyeRSmile: 2.8 } },
+    curious: { sway: 0.9, spd: 1.1,  face: { ParamMouthForm: 1.0, ParamBrowLY: 1.8, ParamBrowRY: 1.8 } },
+    sleepy:  { sway: 0.5, spd: 0.55, face: { ParamMouthForm: -0.6, ParamBrowLForm: -0.5, ParamBrowRForm: -0.5, ParamEyeLOpen: -0.45, ParamEyeROpen: -0.45 } },
+    bored:   { sway: 0.7, spd: 0.75, face: { ParamMouthForm: -0.4, ParamBrowLForm: -0.4, ParamBrowRForm: -0.4 } }
   };
 
   function setMood(name, durSec) {
@@ -15520,9 +15535,12 @@ var __pow = Math.pow,
       start: function (L) { launch(L, -620 - Math.random() * 180); },
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamArmLA = b * 6; a.ParamArmRA = b * 6;
-        a.ParamAngleZ = Math.sin(p * Math.PI * 2) * 4;
-        a.ParamMouthForm = b * 0.5;
+        a.ParamArmLA = b * 7; a.ParamArmRA = b * 6;      // 双臂上摆
+        a.ParamHandLB = b * 5; a.ParamHandRB = b * 5;    // 手掌张开
+        a.ParamShoulder = b * 1.5;                        // 耸肩
+        a.ParamAngleZ = Math.sin(p * Math.PI * 2) * 5;
+        a.ParamMouthForm = b * 1.2; a.ParamMouthOpenY = b * 1.2;
+        a.ParamEyeLSmile = b * 3; a.ParamEyeRSmile = b * 1.5;
       }
     },
     // 转体跳：空中大幅转身 + 挥臂，最具"大动作"感
@@ -15531,14 +15549,15 @@ var __pow = Math.pow,
       start: function (L) { launch(L, -760); setMood('excited', 25); },
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamAngleX = sm(p / 0.7) * 26 - sm((p - 0.7) / 0.25) * 26; // 转头回正
+        a.ParamAngleX = sm(p / 0.7) * 24 - sm((p - 0.7) / 0.25) * 24; // 转头回正
         a.ParamAngleZ = sm(p / 0.7) * 10 - sm((p - 0.7) / 0.25) * 10;
         a.ParamBodyAngleX = Math.sin(p * Math.PI) * 8;
-        a.ParamArmLA = b * 9; a.ParamArmRA = b * 9;
-        a.ParamArmLB = Math.sin(t * 9) * 5 * b;
-        a.ParamArmRB = -Math.sin(t * 9) * 5 * b;
-        a.ParamMouthOpenY = b * 0.5;
-        a.ParamEyeLSmile = b; a.ParamEyeRSmile = b;
+        a.ParamArmLA = b * 8.5; a.ParamArmRA = b * 6.5;
+        a.ParamArmLB = Math.sin(t * 9) * 6 * b;
+        a.ParamArmRB = -Math.sin(t * 9) * 6 * b;
+        a.ParamLeg = b * 2;                               // 收腿
+        a.ParamMouthOpenY = b * 2;
+        a.ParamEyeLSmile = b * 5; a.ParamEyeRSmile = b * 2.5;
       }
     },
     happyJump: {
@@ -15547,10 +15566,12 @@ var __pow = Math.pow,
       fn: function (p, t, a, L, d) {
         if (p > 0.42 && !d.hop2) { d.hop2 = 1; launch(L, -460); }
         var b = bell(p);
-        a.ParamArmLA = b * 8; a.ParamArmRA = b * 8;
-        a.ParamEyeLSmile = b * 0.9; a.ParamEyeRSmile = b * 0.9;
-        a.ParamMouthForm = b * 0.8; a.ParamMouthOpenY = b * 0.3;
-        a.ParamAngleY = b * 4; a.ParamAngleZ = Math.sin(t * 5) * 4 * b;
+        a.ParamArmLA = b * 8; a.ParamArmRA = b * 6.5;
+        a.ParamArmLB = b * 7; a.ParamArmRB = b * 5;
+        a.ParamEyeLSmile = b * 5.5; a.ParamEyeRSmile = b * 2.8;
+        a.ParamMouthForm = b * 2.2; a.ParamMouthOpenY = b * 1.6;
+        a.ParamAngleY = b * 5; a.ParamAngleZ = Math.sin(t * 5) * 5 * b;
+        a.ParamLeg = b * 1.5;
       }
     },
     walk: {
@@ -15563,13 +15584,17 @@ var __pow = Math.pow,
         var step = Math.sin(t * 9);
         var fade = sm((1 - p) / 0.18);
         L.m.x = from + (to - from) * sm(p);
-        L.bobY = -Math.abs(step) * 7 * fade;
-        a.ParamLeg = 1 - Math.abs(step) * 0.22;          // 迈步
-        a.ParamBodyAngleY = 2.2;                          // 前倾
-        a.ParamBodyAngleZ = dir * 2.2 + step * 1.4;
-        a.ParamAngleX = dir * 10 * sm(p / 0.2) * fade;    // 面朝行进方向
+        L.bobY = -Math.abs(step) * 8 * fade;
+        a.ParamLeg = Math.abs(step) * 3 * fade;           // 迈步（范围 0~4.79）
+        a.ParamBodyAngleY = 2.5;                          // 前倾
+        a.ParamBodyAngleZ = dir * 2 + step * 1.6;
+        a.ParamBodyAngleX = step * 1.2;
+        a.ParamAngleX = dir * 12 * sm(p / 0.2) * fade;    // 面朝行进方向
         a.ParamEyeBallX = dir * 0.5;
-        a.ParamArmLB = step * 3; a.ParamArmRB = -step * 3;
+        // 手脚联动：手臂与腿反相摆动（同侧手脚互逆，拟真步态）
+        a.ParamArmLA = step * 3.5; a.ParamArmRA = -step * 3.5;
+        a.ParamArmLB = step * 1.5; a.ParamArmRB = -step * 1.5;
+        a.ParamHandLB = step * 2; a.ParamHandRB = -step * 2;
       }
     },
     lookAround: {
@@ -15582,7 +15607,9 @@ var __pow = Math.pow,
         a.ParamEyeBallX = x * 0.85;
         a.ParamAngleY = bell(p) * 4;
         a.ParamAngleZ = Math.sin(t * 2) * 3;
-        a.ParamBrowLY = bell(p) * 0.3; a.ParamBrowRY = bell(p) * 0.3;
+        a.ParamBrowLY = bell(p) * 1.5; a.ParamBrowRY = bell(p) * 1.5;
+        a.ParamMouthForm = bell(p) * 0.8;
+        a.ParamBodyAngleZ = x * 2;                        // 身体跟随视线
       }
     },
     nod: {
@@ -15590,6 +15617,8 @@ var __pow = Math.pow,
       fn: function (p, t, a) {
         a.ParamAngleY = -Math.sin(p * Math.PI * 2) * 6.5;
         a.ParamEyeBallY = -0.2 * bell(p);
+        a.ParamMouthForm = bell(p) * 0.6;
+        a.ParamBodyAngleY = bell(p) * 1.5;               // 身体随点头微动
       }
     },
     shakeHead: {
@@ -15598,7 +15627,9 @@ var __pow = Math.pow,
         var s = Math.sin(p * Math.PI * 3);
         a.ParamAngleX = s * 14;
         a.ParamAngleZ = s * 4;
-        a.ParamBrowLY = 0.3 * bell(p); a.ParamBrowRY = 0.3 * bell(p);
+        a.ParamBrowLY = 0.8 * bell(p); a.ParamBrowRY = 0.8 * bell(p);
+        a.ParamMouthForm = -0.5 * bell(p);
+        a.ParamBodyAngleZ = s * 2;
       }
     },
     tiltCurious: {
@@ -15606,20 +15637,23 @@ var __pow = Math.pow,
       fn: function (p, t, a) {
         var b = bell(p);
         a.ParamAngleZ = b * 9; a.ParamAngleX = b * 6;
-        a.ParamBrowLY = b * 0.6; a.ParamBrowRY = b * 0.6;
-        a.ParamEyeBallY = b * 0.25; a.ParamBodyAngleY = b * 2;
-        a.ParamMouthForm = b * 0.25;
+        a.ParamBrowLY = b * 2; a.ParamBrowRY = b * 2;
+        a.ParamEyeBallY = b * 0.3; a.ParamBodyAngleY = b * 2;
+        a.ParamMouthForm = b * 1;
+        a.ParamArmLB = b * 4; a.ParamHandLB = b * 3;     // 手抬到脸边
+        a.ParamShoulder = b * 1.5;
       }
     },
     surprise: {
       dur: 1.2,
       fn: function (p, t, a) {
         var b = sm(p / 0.15) * sm((1 - p) / 0.4);
-        a.ParamBodyAngleX = -b * 6;
-        a.ParamBrowLY = b * 1.5; a.ParamBrowRY = b * 1.5;
-        a.ParamMouthOpenY = b * 0.55;
+        a.ParamBodyAngleX = -b * 6;                       // 后仰
+        a.ParamBrowLY = b * 3.5; a.ParamBrowRY = b * 3.5; // 眉毛高挑
+        a.ParamMouthOpenY = b * 3;                        // 张嘴
         a.ParamAngleY = b * 4;
-        a.ParamArmLA = b * 4; a.ParamArmRA = b * 4;
+        a.ParamArmLB = b * 5; a.ParamArmRB = b * 4;       // 双臂张开
+        a.ParamEyeLOpen = b * 1.5; a.ParamEyeROpen = b * 1.5; // 瞪大眼
         a.ParamEyeBallY = b * 0.3;
       }
     },
@@ -15627,48 +15661,57 @@ var __pow = Math.pow,
       dur: 2.3,
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamCheek = b * 0.9;
-        a.ParamEyeLSmile = b * 0.9; a.ParamEyeRSmile = b * 0.9;
+        a.ParamCheek = b * 4.5;                           // 脸红（范围 0~5.37）
+        a.ParamEyeLSmile = b * 5; a.ParamEyeRSmile = b * 2.5;
         a.ParamAngleX = b * 13; a.ParamAngleZ = -b * 6;
-        a.ParamMouthForm = b * 0.6;
+        a.ParamMouthForm = b * 1.8;
         a.ParamBodyAngleX = b * 3;
-        a.ParamArmLB = b * 6; a.ParamArmRB = b * 6;
+        a.ParamArmLB = b * 5; a.ParamArmRB = b * 4;       // 抬手捂脸
+        a.ParamHandLB = -b * 3; a.ParamHandRB = -b * 3;
+        a.ParamBrowLY = b * 1.2;
       }
     },
     yawn: {
       dur: 3.0,
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamMouthOpenY = b;
+        a.ParamMouthOpenY = b * 6.5;                      // 大张嘴（范围 0~6.63）
+        a.ParamMouthForm = -b * 1.2;
         a.ParamAngleY = -b * 7;
-        a.ParamBrowLY = b * 0.7; a.ParamBrowRY = b * 0.7;
+        a.ParamBrowLY = b * 2; a.ParamBrowRY = b * 2;
         a.ParamBodyAngleY = -b * 2;
         a.ParamEyeBallY = -b * 0.3;
-        a.ParamMouthForm = -b * 0.3;
+        a.ParamEyeLOpen = -b * 0.7; a.ParamEyeROpen = -b * 0.7; // 眯眼
+        a.ParamBreath = b * 2.5;
+        a.ParamShoulder = b * 2;
       }
     },
     stretch: {
       dur: 2.6,
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamArmLA = b * 9.5; a.ParamArmRA = b * 9.5;
-        a.ParamBreath = b * 0.9;
+        a.ParamArmLA = b * 8.5; a.ParamArmRA = b * 6.8;   // 双臂上举到顶
+        a.ParamBreath = b * 5.5;                          // 深呼吸
         a.ParamBodyAngleY = b * 4;
         a.ParamAngleY = -b * 5;
         a.ParamAngleZ = p > 0.7 ? Math.sin((p - 0.7) * 45) * 2.5 : 0;
-        a.ParamMouthOpenY = b * 0.25;
+        a.ParamMouthOpenY = b * 1;
+        a.ParamShoulder = b * 3.5;
+        a.ParamLeg = b * 1.5;                             // 踮脚
       }
     },
     wave: {
       dur: 2.0,
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamArmRA = b * 9;
-        a.ParamHandRB = Math.sin(t * 11) * 7 * b;   // 挥手
+        a.ParamArmRA = b * 6;
+        a.ParamArmRB = b * 4;
+        a.ParamHandRB = Math.sin(t * 11) * 8 * b;         // 挥手
         a.ParamAngleX = b * 7; a.ParamAngleZ = b * 4;
-        a.ParamMouthForm = b * 0.7;
-        a.ParamEyeLSmile = b * 0.7; a.ParamEyeRSmile = b * 0.7;
-        a.ParamBrowLY = b * 0.3; a.ParamBrowRY = b * 0.3;
+        a.ParamMouthForm = b * 2.2;
+        a.ParamEyeLSmile = b * 3.5; a.ParamEyeRSmile = b * 1.8;
+        a.ParamBrowLY = b * 1.5; a.ParamBrowRY = b * 1.5;
+        a.ParamBodyAngleX = -b * 2;                       // 身体朝挥手侧倾
       }
     },
     cheer: {
@@ -15677,34 +15720,40 @@ var __pow = Math.pow,
       fn: function (p, t, a, L, d) {
         if (p > 0.35 && !d.hop) { d.hop = 1; launch(L, -380); }
         var b = bell(p);
-        a.ParamArmLA = b * 9.5; a.ParamArmRA = b * 9.5;
+        a.ParamArmLA = b * 8.5; a.ParamArmRA = b * 6.8;
+        a.ParamArmLB = b * 8; a.ParamArmRB = b * 5;       // 四臂参数全开
         a.ParamAngleY = b * 5;
-        a.ParamMouthOpenY = b * 0.5;
-        a.ParamEyeLSmile = b * 0.9; a.ParamEyeRSmile = b * 0.9;
+        a.ParamMouthOpenY = b * 2.5;
+        a.ParamEyeLSmile = b * 5; a.ParamEyeRSmile = b * 2.5;
+        a.ParamLeg = b * 2;                               // 踮脚
+        a.ParamShoulder = b * 3;
       }
     },
     giggle: {
       dur: 1.5,
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamShoulder = (1 + Math.sin(t * 20) * 1.1) * b;  // 耸肩抖动
-        a.ParamMouthOpenY = (0.5 + 0.5 * Math.sin(t * 15)) * 0.5 * b;
-        a.ParamMouthForm = b * 0.8;
-        a.ParamEyeLSmile = b; a.ParamEyeRSmile = b;
-        a.ParamAngleZ = Math.sin(t * 7) * 3 * b;
-        a.ParamBodyAngleX = Math.sin(t * 7) * 3 * b;
+        a.ParamShoulder = (1 + Math.sin(t * 20)) * 2.2 * b;   // 耸肩抖动
+        a.ParamMouthOpenY = (0.5 + 0.5 * Math.sin(t * 15)) * 1.8 * b;
+        a.ParamMouthForm = b * 2.5;
+        a.ParamEyeLSmile = b * 6; a.ParamEyeRSmile = b * 3;   // 笑成月牙
+        a.ParamAngleZ = Math.sin(t * 7) * 4 * b;
+        a.ParamBodyAngleX = Math.sin(t * 7) * 4 * b;
+        a.ParamHandLB = b * 3; a.ParamHandRB = b * 3;
       }
     },
     sigh: {
       dur: 1.9,
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamBreath = b;
-        a.ParamBrowLY = -b * 0.35; a.ParamBrowRY = -b * 0.35;
+        a.ParamBreath = b * 3.5;
+        a.ParamBrowLForm = -b * 0.8; a.ParamBrowRForm = -b * 0.8; // 八字眉
         a.ParamAngleY = -b * 5;
         a.ParamBodyAngleY = b * 2.5;
-        a.ParamShoulder = -b * 0.8;
-        a.ParamMouthOpenY = b * 0.2;
+        a.ParamShoulder = -b * 0.9;                       // 垂肩
+        a.ParamMouthOpenY = b * 0.9;
+        a.ParamMouthForm = -b * 1;
+        a.ParamAngleX = -b * 4;
       }
     },
     think: {
@@ -15712,10 +15761,12 @@ var __pow = Math.pow,
       fn: function (p, t, a) {
         var b = bell(p);
         a.ParamAngleZ = b * 7; a.ParamAngleX = b * 10;
-        a.ParamEyeBallX = b * 0.5; a.ParamEyeBallY = -b * 0.35;
-        a.ParamBrowLY = b * 0.5; a.ParamBrowRY = b * 0.5;
-        a.ParamArmLB = b * 5.5; a.ParamHandLB = b * 6;
-        a.ParamMouthForm = -b * 0.3;
+        a.ParamEyeBallX = b * 0.6; a.ParamEyeBallY = -b * 0.35; // 眼珠上瞟
+        a.ParamBrowLY = b * 2; a.ParamBrowRY = b * 2;
+        a.ParamArmLB = b * 5.5; a.ParamHandLB = b * 4;    // 托腮
+        a.ParamMouthForm = -b * 0.8;
+        a.ParamBodyAngleX = -b * 2.5;                     // 佝背
+        a.ParamShoulder = b * 1.5;
       }
     },
     sing: {
@@ -15726,11 +15777,13 @@ var __pow = Math.pow,
         a.ParamAngleX = s * 13;
         a.ParamBodyAngleZ = Math.sin(t * 2.1 + 0.9) * 6;
         a.ParamBodyAngleX = Math.sin(t * 1.05) * 3;
-        a.ParamMouthOpenY = Math.pow(0.5 + 0.5 * Math.sin(t * 7.5), 2) * 0.5;
-        a.ParamMouthForm = 0.8;
-        a.ParamEyeLSmile = 0.8; a.ParamEyeRSmile = 0.8;
-        a.ParamArmLB = 2.5 + s * 2.5; a.ParamArmRB = 2.5 - s * 2.5;
-        a.ParamBrowLY = 0.3; a.ParamBrowRY = 0.3;
+        a.ParamMouthOpenY = Math.pow(0.5 + 0.5 * Math.sin(t * 7.5), 2) * 2.8;
+        a.ParamMouthForm = 2.8;
+        a.ParamEyeLSmile = 4; a.ParamEyeRSmile = 2;
+        a.ParamArmLB = 2.5 + s * 3; a.ParamArmRB = 2.5 - s * 3;   // 指挥摆臂
+        a.ParamHandLB = s * 4; a.ParamHandRB = -s * 4;
+        a.ParamBrowLY = 1.5; a.ParamBrowRY = 1.5;
+        a.ParamShoulder = 1 + Math.sin(t * 2.1) * 1.5;
         L.bobY = -Math.abs(Math.sin(t * 2.1)) * 9 * fade;
       }
     },
@@ -15740,16 +15793,17 @@ var __pow = Math.pow,
         var b = Math.sin(t * 6.8);
         var fade = sm((1 - p) / 0.15);
         a.ParamBodyAngleX = b * 7;
-        a.ParamBodyAngleZ = Math.sin(t * 3.4 + 1) * 5;
-        a.ParamShoulder = 1 + b * 1.3;
-        a.ParamArmLB = 2 + b * 4.5; a.ParamArmRB = 2 - b * 4.5;
-        a.ParamHandLB = b * 5 + 5; a.ParamHandRB = -b * 5 + 5;
+        a.ParamBodyAngleZ = Math.sin(t * 3.4 + 1) * 5.5;
+        a.ParamShoulder = 1 + b * 2.5;
+        a.ParamArmLB = 2 + b * 5.5; a.ParamArmRB = 2 - b * 5.5;
+        a.ParamHandLB = b * 6 + 5; a.ParamHandRB = -b * 6 + 5;
         a.ParamAngleZ = Math.sin(t * 6.8 + 0.5) * 6;
         a.ParamAngleY = Math.sin(t * 3.4) * 5;
-        a.ParamAngleX = Math.sin(t * 3.4 + 2) * 10;
-        a.ParamMouthForm = 0.8;
-        a.ParamMouthOpenY = Math.pow(0.5 + 0.5 * b, 2) * 0.4;
-        a.ParamEyeLSmile = 0.8; a.ParamEyeRSmile = 0.8;
+        a.ParamAngleX = Math.sin(t * 3.4 + 2) * 12;
+        a.ParamMouthForm = 2.4;
+        a.ParamMouthOpenY = Math.pow(0.5 + 0.5 * b, 2) * 1.8;
+        a.ParamEyeLSmile = 4; a.ParamEyeRSmile = 2;
+        a.ParamLeg = Math.abs(Math.sin(t * 3.4)) * 2.2;  // 脚步点地
         L.bobY = -Math.abs(Math.sin(t * 3.4)) * 13 * fade;
       }
     },
@@ -15760,15 +15814,17 @@ var __pow = Math.pow,
         var fade = sm((1 - p) / 0.15);
         a.ParamBodyAngleX = h * 5;
         a.ParamBodyAngleZ = Math.sin(t * 4.3 + 1) * 4;
-        a.ParamArmLA = 4 + Math.sin(t * 8.6) * 4;
-        a.ParamArmRA = 4 - Math.sin(t * 8.6) * 4;
-        a.ParamHandL = Math.sin(t * 8.6) * 8;
-        a.ParamHandR = -Math.sin(t * 8.6) * 8;
+        a.ParamArmLA = 3 + Math.sin(t * 8.6) * 4.5;
+        a.ParamArmRA = 3 - Math.sin(t * 8.6) * 4.5;
+        a.ParamHandL = Math.sin(t * 8.6) * 5 + 2;
+        a.ParamHandR = -Math.sin(t * 8.6) * 5 + 2;
         a.ParamAngleY = Math.abs(h) * 4;
         a.ParamAngleX = h * 12;
-        a.ParamMouthForm = 0.8;
-        a.ParamEyeLSmile = 0.9; a.ParamEyeRSmile = 0.9;
-        a.ParamShoulder = 1 + Math.sin(t * 8.6);
+        a.ParamMouthForm = 2.5;
+        a.ParamMouthOpenY = (0.5 + 0.5 * h) * 1.2;
+        a.ParamEyeLSmile = 5; a.ParamEyeRSmile = 2.5;
+        a.ParamShoulder = 1 + Math.sin(t * 8.6) * 2;
+        a.ParamLeg = Math.abs(h) * 2.5;                  // 踏步
         L.bobY = -Math.abs(h) * 15 * fade;
       }
     },
@@ -15779,12 +15835,14 @@ var __pow = Math.pow,
         var fade = sm((1 - p) / 0.15);
         a.ParamBodyAngleZ = w * 8;
         a.ParamBodyAngleX = Math.sin(t * 2.4) * 4;
-        a.ParamArmLB = w * 5 + 2; a.ParamArmRB = -w * 5 + 2;
+        a.ParamArmLB = w * 6 + 2; a.ParamArmRB = -w * 6 + 2;
+        a.ParamHandLB = w * 5; a.ParamHandRB = -w * 5;
         a.ParamAngleX = w * 12;
-        a.ParamAngleZ = Math.sin(t * 4.8 + 0.7) * 6;
-        a.ParamMouthForm = 0.7;
-        a.ParamEyeLSmile = 0.7; a.ParamEyeRSmile = 0.7;
-        a.ParamLeg = 1 - Math.abs(w) * 0.15;
+        a.ParamAngleZ = w * 6;
+        a.ParamMouthForm = 2.2;
+        a.ParamEyeLSmile = 4; a.ParamEyeRSmile = 2;
+        a.ParamLeg = 1.5;
+        a.ParamShoulder = 1.5;
         L.bobY = -Math.abs(w) * 8 * fade;
       }
     }
@@ -15825,33 +15883,30 @@ var __pow = Math.pow,
       jumpY: 0, jumpV: 0, jumping: false,
       squash: 0, squashV: 0, bobY: 0,
       action: null, mood: 'normal', moodUntil: 0,
-      face: {}, offPrev: {}, offUsed: {}, bad: {},
+      face: {},
       eyeT: 0, eyeX: 0, eyeY: 0, eyeTX: 0, eyeTY: 0,
       mouthCur: 0, mouthTarget: 0, sylT: 0, sylPause: 0,
       accent: 0, accentSide: 1
     };
-    var origUpdate = im.motionManager.update;
-    if (typeof origUpdate !== 'function') return;
-    im.motionManager.update = function (cm, now) {
-      var r = origUpdate.call(this, cm, now);
-      if (lifeGen === myGen) {
-        try {
-          var n2 = performance.now();
-          var dt = Math.min((n2 - prev) / 1000, 0.1);
-          prev = n2;
-          lifeTick(dt);
-        } catch (e) {}
-      }
-      return r;
-    };
-    if (window.PetBridge) PetBridge.log('生命系统 v2 启动');
+    // 挂渲染管线事件：coreModel.update() 渲染前最后一刻叠加参数。
+    // 帧末管线自动 loadParameters() 还原 motion 快照 → 每帧基线干净，
+    // 纯 add 一次即可，无累加/无污染（比包装 motionManager.update 更稳）
+    im.on('beforeModelUpdate', function () {
+      if (lifeGen !== myGen || !life) return;
+      try {
+        var n2 = performance.now();
+        var dt = Math.min((n2 - prev) / 1000, 0.1);
+        prev = n2;
+        lifeTick(dt);
+      } catch (e) {}
+    });
+    if (window.PetBridge) PetBridge.log('生命系统 v3 启动');
   }
 
   function lifeTick(dt) {
     if (!model || !life || life.m !== model) return;
     var L = life;
     L.t += dt;
-    L.offUsed = {};
     L.bobY = 0;
     var o = {};
     function ADD(id, v) { o[id] = (o[id] || 0) + v; }
@@ -15872,7 +15927,7 @@ var __pow = Math.pow,
     ADD('ParamAngleX', (Math.sin(ts * 0.53 + 2.2) + 0.5 * Math.sin(ts * 1.31 + 0.4)) * 3.4 * sw);
     ADD('ParamAngleY', Math.sin(ts * 0.37 + 4.1) * 2.4 * sw);
     ADD('ParamAngleZ', Math.sin(ts * 0.29 + 1.9) * 2.8 * sw);
-    ADD('ParamBreath', 0.2 * Math.sin(ts * 1.6));
+    ADD('ParamBreath', 1.1 * Math.sin(ts * 1.6));
     ADD('ParamArmLB', Math.sin(ts * 0.51 + 0.8) * 1.3 * sw);
     ADD('ParamArmRB', Math.sin(ts * 0.51 + 2.4) * 1.3 * sw);
 
@@ -15895,9 +15950,9 @@ var __pow = Math.pow,
           L.sylPause--; L.mouthTarget = 0.05; L.sylT = 0.1 + Math.random() * 0.1;
         } else if (Math.random() < 0.2) {
           L.sylPause = 1 + Math.floor(Math.random() * 2);
-          L.sylT = 0.18 + Math.random() * 0.2; L.mouthTarget = 0.05;
+          L.sylT = 0.18 + Math.random() * 0.2; L.mouthTarget = 0.3;
         } else {                        // 一个音节：开合 + 重音
-          L.mouthTarget = 0.25 + Math.random() * 0.6;
+          L.mouthTarget = 0.8 + Math.random() * 2.4;
           L.sylT = 0.09 + Math.random() * 0.12;
           L.accent = 1; L.accentSide = -L.accentSide;
         }
@@ -15909,10 +15964,10 @@ var __pow = Math.pow,
     L.mouthCur += (L.mouthTarget - L.mouthCur) * Math.min(1, dt * 16);
     if (speaking) {
       ADD('ParamMouthOpenY', L.mouthCur);
-      ADD('ParamMouthForm', 0.15 + L.accent * 0.1);
+      ADD('ParamMouthForm', 0.6 + L.accent * 1.2);
       ADD('ParamAngleY', L.accent * 1.6);
-      ADD('ParamBrowLY', L.accent * 0.25); ADD('ParamBrowRY', L.accent * 0.25);
-      ADD(L.accentSide > 0 ? 'ParamArmRB' : 'ParamArmLB', L.accent * 3.2);
+      ADD('ParamBrowLY', L.accent * 0.8); ADD('ParamBrowRY', L.accent * 0.8);
+      ADD(L.accentSide > 0 ? 'ParamArmRB' : 'ParamArmLB', L.accent * 2.8);
       ADD('ParamBodyAngleY', 1.5);
       ADD('ParamEyeBallX', L.eyeX * 0.5);
       ADD('ParamEyeBallY', L.eyeY * 0.4);
@@ -15923,7 +15978,9 @@ var __pow = Math.pow,
 
     // ── 情绪层：面部缓动 ──
     var mf = M.face || {}, F = L.face;
-    var fkeys = ['ParamMouthForm', 'ParamEyeLSmile', 'ParamEyeRSmile', 'ParamCheek', 'ParamBrowLY', 'ParamBrowRY'];
+    var fkeys = ['ParamMouthForm', 'ParamEyeLSmile', 'ParamEyeRSmile', 'ParamCheek',
+                 'ParamBrowLY', 'ParamBrowRY', 'ParamBrowLForm', 'ParamBrowRForm',
+                 'ParamEyeLOpen', 'ParamEyeROpen'];
     for (var fi = 0; fi < fkeys.length; fi++) {
       var fk = fkeys[fi];
       var ft = typeof mf[fk] === 'number' ? mf[fk] : 0;
@@ -15956,11 +16013,13 @@ var __pow = Math.pow,
     }
     L.squashV += (-L.squash * 150 - L.squashV * 11) * dt;
     L.squash += L.squashV * dt;
-    var sq = Math.max(-0.32, Math.min(0.32, L.squash));
+    // squash 收敛克制（±0.18）：形变只是点缀，动作主体交给参数驱动的
+    // 手脚联动，避免"整体缩放感"
+    var sq = Math.max(-0.18, Math.min(0.18, L.squash));
     var sx = 1 - sq, sy = 1 + sq;
     if (L.jumping) {
       var jv = Math.min(1, Math.abs(L.jumpV) / 750);
-      sx = 1 - jv * 0.14; sy = 1 + jv * 0.2;   // 空中拉长
+      sx = 1 - jv * 0.1; sy = 1 + jv * 0.14;   // 空中轻微拉长
     }
     model.y = L.baseY + L.jumpY + L.bobY;
     model.scale.set(L.baseScale * sx, L.baseScale * sy);
@@ -15972,7 +16031,7 @@ var __pow = Math.pow,
   function pokePet() {
     lastInteract = Date.now();
     if (!life) return;
-    life.squashV = 5.5;
+    life.squashV = 4;
     setMood('happy', 40);
     var pool = ['surprise', 'shy', 'giggle', 'cheer', 'tiltCurious'];
     playAction(pool[Math.floor(Math.random() * pool.length)]);
@@ -16043,10 +16102,7 @@ var __pow = Math.pow,
       if (window.PetBridge) PetBridge.onModelLoaded(true, url);
     }).catch(function (err) {
       // 错误气泡保留 8 秒，方便看清原因
-      bubble.style.display = 'block';
-      bubble.innerText = '模型加载失败: ' + err;
-      if (bubbleTimer) { clearTimeout(bubbleTimer); }
-      bubbleTimer = setTimeout(function () { bubble.style.display = 'none'; }, 8000);
+      showBubble('模型加载失败: ' + err, false, 8000);
       if (window.PetBridge) PetBridge.onModelLoaded(false, String(err));
     });
   }
@@ -16107,10 +16163,7 @@ var __pow = Math.pow,
       bubble.classList.add('done'); // 尾部显示"✓ 点击收起"
       bubble.scrollTop = bubble.scrollHeight;
       if (bubbleTimer) { clearTimeout(bubbleTimer); }
-      bubbleTimer = setTimeout(function () {
-        bubble.style.display = 'none';
-        bubble.classList.remove('done');
-      }, ms);
+      bubbleTimer = setTimeout(bubbleHideNow, ms);
       if (window.PetBridge) {
         PetBridge.log('回复完成: ' + replyText.length + ' 字，显示 ' + Math.round(ms / 1000) + 's');
       }
@@ -16124,8 +16177,7 @@ var __pow = Math.pow,
   bubble.addEventListener('click', function () {
     try { if (window.getSelection().toString()) return; } catch (e) {}
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    bubble.style.display = 'none';
-    bubble.classList.remove('done');
+    bubbleHideNow();
   });
 
   // ── 自动行为系统：随机动作 + 视线跟随 ───────────────────
