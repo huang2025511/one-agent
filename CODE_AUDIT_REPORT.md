@@ -54,6 +54,33 @@
 
 ---
 
+## 2026-08-15 第三轮全栈审计（收尾轮）
+
+**范围**: core/ 剩余 30+ 模块、backup_export、webhook_trigger、subprocess_utils、document_search、updater、Flutter screens、跨端 SSE 协议四方一致性、API 路由对齐。
+
+### 确认无问题（重点核查项）
+- **SSE 协议四方一致**：服务端发送字段（status/content/text/delta/error/done/session_id/heartbeat/phase）与 Flutter sse_client、Android handleSseBlock、HTML onChatEvent 解析完全对齐。
+- **API 路由对齐**：Flutter lib/api/ 全部请求路径在服务端均有对应路由，无 404 风险。
+- **backup_export `_import_zip`**：用 `zf.read()` 读入内存解析 JSON，不写盘，无 Zip Slip。
+- **webhook SSRF**：创建需 API key 认证 + http(s) scheme 校验，本地自托管场景风险可接受。
+- **subprocess**：全项目无 `shell=True`；`time.sleep` 仅在同步 `retry_sync` 内。
+- **Flutter screens**：controller 均正确 dispose，无 setState-after-dispose 风险。
+- **document_search/updater**：路径有 `is_path_within_any` 校验，git stash 有提示。
+
+### 死代码清理（已修复）
+1. **`backoff.retry_sync`**（`core/backoff.py`）— 定义但全项目无调用（异步版 `retry` 被 coordinator/deep_research 广泛使用），删除。
+
+### 验证
+- pytest 全量 **524 passed**；py_compile 通过。
+
+### 三轮审计总结
+- 第一轮（app-v8104）：13 项修复（3 安全漏洞 + 6 逻辑错误 + 4 资源/健壮性）
+- 第二轮（app-v8105）：2 项逻辑修复（SSE 串流）+ 2 项死代码清理
+- 第三轮：1 项死代码清理；跨端协议、路由、安全模式全面核查通过
+- 累计：524 个测试持续全绿，CI 三版本 Python 通过，APK 双端发版
+
+---
+
 
 ## 执行摘要
 

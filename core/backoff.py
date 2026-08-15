@@ -102,45 +102,6 @@ class ExponentialBackoff:
 
         raise last_exc  # type: ignore[misc]
 
-    def retry_sync(
-        self,
-        func: Callable[..., Any],
-        *args,
-        on_retry: Optional[Callable[[int, Exception], None]] = None,
-        **kwargs,
-    ) -> T:
-        """Synchronous version of retry()."""
-        import time as _time
-
-        last_exc = None
-
-        for attempt in range(self._config.max_retries + 1):
-            try:
-                result = func(*args, **kwargs)
-                return result
-            except self._config.retryable_exceptions as exc:
-                last_exc = exc
-
-                if attempt < self._config.max_retries:
-                    delay = self.compute_delay(attempt)
-                    logger.debug(
-                        "backoff (sync): attempt %d/%d failed, retrying in %.1fs: %s",
-                        attempt + 1, self._config.max_retries + 1, delay, exc,
-                    )
-                    if on_retry:
-                        try:
-                            on_retry(attempt + 1, exc)
-                        except Exception as exc:
-                            logger.debug("ignored non-critical error: %s", exc)
-                    _time.sleep(delay)
-                else:
-                    logger.error(
-                        "backoff (sync): all %d attempts failed: %s",
-                        self._config.max_retries + 1, exc,
-                    )
-
-        raise last_exc  # type: ignore[misc]
-
 
 # Pre-configured backoff strategies for common scenarios
 
