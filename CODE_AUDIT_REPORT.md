@@ -1071,6 +1071,35 @@ One-Agent 项目整体架构设计良好，采用了事件驱动的微内核架�
 
 ---
 
-**审计完成时间**: 2026-06-15  
-**审计工具**: 手动代码审查 + 静态分析  
+## 七、第三轮审计收尾修复（2026-08-15）
+
+前三轮审计遗留的核实与修复项全部处理完毕，全量测试 554 passed。
+
+### 服务端（Python）
+
+| 文件 | 问题 | 修复 |
+|------|------|------|
+| core/agent_mesh.py | `_parse_plan` 对带编号行（"1. 程序员: xxx"）解析时 role_name 含编号前缀，role_map 查找失败全部回退 RESEARCHER；编号专用正则分支因此不可达（死代码） | 统一先剥编号前缀再匹配，删除死分支 |
+| core/skillweaver.py | ① `split("```")[1]` 在代码栅栏未闭合时抛 IndexError 导致整次分解失败；② SAD 循环仅在描述被改写时记录 candidate_skills，未改写时编排阶段失去检索结果；③ `tuple(e)` 对字符串 edge 会拆成单字符元组污染图；④ `os`/`Path` 死导入 | 新增 `_extract_json_block` 统一健壮提取；候选技能无条件记录；edges 只接受二元组并强转 str；清理死导入 |
+| core/plugin.py | `discover` 对同一包重复 `import_module`；命名空间包 `__file__` 为 None 时 `Path(None)` 抛 TypeError | 复用首次导入结果；`__file__` 为 None 时跳过子模块扫描 |
+| utils/intent_classifier.py | `classify_command_risk` / `_classify_risk` 全项目无调用方（死代码，与 executors/system.classify_command 功能重复） | 删除 |
+
+### Android / Flutter
+
+| 文件 | 问题 | 修复 |
+|------|------|------|
+| PetOverlayService.kt | ① `pushEvent` 中 evaluateJavascript 在 WebView destroy 后可能抛异常；② doChat 的错误推送（服务器错误/连接失败）未做代际门控，被接管的旧请求仍可能污染新气泡；③ 错误消息字符串拼接，`e.message` 含引号/换行时破坏 JSON 字面量导致前端 parse 失败、气泡卡"思考中" | ① try-catch 包裹；② 进入 doChat 即接管代际，所有推送统一 `chatGen == gen` 门控；③ 错误统一 JSONObject 构造（自动转义） |
+| MainActivity.kt | `hide` 无条件 stopService 且恒返回 true，Dart 侧 `_isActive` 与原生状态可能不一致 | 返回服务真实运行状态，未运行时不做无谓 stopService |
+| overlay_pet_service.dart | `hideOverlay` 忽略原生返回值 | 用返回值同步 `_isActive` |
+| MainActivity.kt + settings_provider.dart + secure_store.dart | **API Key 明文存储**：SharedPreferences XML 直接可读，root/备份场景泄露 | 新增 `com.oneagent/secure_storage` 通道，Android Keystore AES-256-GCM 加密后落盘（零新增依赖，密钥不可导出）；含旧明文自动迁移（读取→写入安全存储→删除明文）；沙箱无 Flutter SDK 故不引入 flutter_secure_storage（无法生成 lockfile） |
+
+### 验证
+
+- `python3 -m py_compile` 全部通过
+- `pytest tests/` **554 passed**（排除 2 个依赖真实 LLM API Key 的基准测试，沙箱内熔断属环境限制，与代码无关）
+
+---
+
+**审计完成时间**: 2026-06-15（三轮收尾 2026-08-15）
+**审计工具**: 手动代码审查 + 静态分析
 **审计人员**: AI Assistant

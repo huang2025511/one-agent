@@ -119,10 +119,6 @@ class IntentClassifier:
         """Classify CLI command intent."""
         return self._classify_cli(text)
 
-    def classify_command_risk(self, command: str) -> int:
-        """Classify shell command risk (0=safe, 1=low, 2=medium, 3=dangerous)."""
-        return self._classify_risk(command)
-
     # -------------------------------------------------------------------------
 
     async def _classify(self, text: str, mode: str) -> Tuple[float, Dict[str, Any]]:
@@ -568,30 +564,6 @@ class IntentClassifier:
         ("stat", r"^stat\s+[\w./~_-]+$"),
         ("file", r"^file\s+[\w./~_-]+$"),
     ]
-
-    def _classify_risk(self, command: str) -> int:
-        """Command risk classification."""
-        cmd = command.strip().lower()
-
-        if any(k in cmd for k in ("rm -rf", "rm -fr", "del /f /s /q", "format",
-                                   "mkfs", "dd if=", ":(){ :|:& };:", "chmod -R 777",
-                                   "shutdown", "reboot", "halt")):
-            return 3
-
-        if any(k in cmd for k in ("rm ", "rm *", "rm -r", "rmdir", "del ",
-                                   "> /dev/sda", "> /dev/hda", "wget ", "curl ",
-                                   "python -c", "python3 -c", "eval ", "exec ",
-                                   "sudo ", "su ", "chmod ", "chown ", "passwd ",
-                                   "useradd", "userdel")):
-            return 2
-
-        if any(k in cmd for k in ("git ", "npm ", "pip ", "apt ", "yum ",
-                                   "cat ", "ls ", "grep ", "find ", "echo ",
-                                   "cd ", "pwd ", "mkdir ", "touch ",
-                                   "cp ", "mv ", "tar ", "unzip ", "zip ")):
-            return 1
-
-        return 0
 
     def classify_command(self, command: str) -> Tuple[int, str]:
         """Classify a command into risk level and return (level, reason)."""

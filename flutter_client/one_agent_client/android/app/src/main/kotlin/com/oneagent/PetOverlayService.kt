@@ -509,17 +509,22 @@ class PetOverlayService : Service() {
         if (text.isEmpty()) return
         val sid = req.optString("session_id", sessionId ?: "")
 
+        // 串扰防护：进入即接管代际。旧线程此后所有读取/推送都因代际
+        // 不匹配被丢弃，不会把陈旧事件混入新请求的气泡。
+        val gen = ++chatGen
+
         val cleanBase = baseUrl.trimEnd('/')
         if (cleanBase.isEmpty()) {
-            pushEvent("""{"error":"未配置服务器地址，请在设置中填写","done":true}""")
+            if (chatGen == gen) pushEvent(JSONObject()
+                .put("error", "未配置服务器地址，请在设置中填写")
+                .put("done", true).toString())
             return
         }
         var conn: HttpURLConnection? = null
         try {
-            // 串扰防护：新请求到达时断开上一条未完成的 SSE 连接，
+            // 新请求到达时断开上一条未完成的 SSE 连接，
             // 避免两条流并发向同一个气泡推送事件
             try { chatConn?.disconnect() } catch (_: Exception) {}
-            val gen = ++chatGen
             val url = URL("$cleanBase/api/chat/stream")
             conn = url.openConnection() as HttpURLConnection
             chatConn = conn
@@ -538,7 +543,11 @@ class PetOverlayService : Service() {
             conn.outputStream.use { it.write(body.toString().toByteArray()) }
 
             if (conn.responseCode != 200) {
-                pushEvent("""{"error":"服务器错误: ${conn.responseCode}","done":true}""")
+                // 用 JSONObject 构造错误：responseCode 拼接虽安全，统一走
+                // 转义路径避免将来改动引入未转义字符破坏 JSON
+                if (chatGen == gen) pushEvent(JSONObject()
+                    .put("error", "服务器错误: ${conn.responseCode}")
+                    .put("done", true).toString())
                 return
             }
 
@@ -564,11 +573,15 @@ class PetOverlayService : Service() {
         } catch (e: Exception) {
             // 被新请求接管而断开的连接：readLine 抛异常属预期，静默退出，
             // 不向 WebView 推送"连接失败"（否则会污染新请求的气泡）
-            if (conn != null && chatConn !== conn) {
+            if (chatGen != gen) {
                 Log.d(TAG, "chat superseded, ignore error: $e")
             } else {
                 Log.e(TAG, "chat error: $e")
-                pushEvent("""{"error":"连接失败: ${e.message}","done":true}""")
+                // e.message 可能含引号/换行，直接拼字符串会破坏 JSON 字面量，
+                // 导致前端 JSON.parse 失败、气泡卡在"思考中"。用 JSONObject 转义。
+                pushEvent(JSONObject()
+                    .put("error", "连接失败: ${e.message}")
+                    .put("done", true).toString())
             }
         } finally {
             // 仅当 chatConn 仍是本次连接时才清理（新请求已接管时不动新连接）
@@ -589,8 +602,12 @@ class PetOverlayService : Service() {
 
     private fun pushEvent(dataJson: String) {
         mainHandler.post {
-            webView?.evaluateJavascript(
-                "window.onChatEvent(${JSONObject.quote(dataJson)})", null)
+            // WebView 在 onDestroy 后已 destroy：evaluateJavascript 可能抛异常
+            // 或打警告日志。此处吞掉，避免聊天线程因 UI 生命周期崩溃。
+            try {
+                webView?.evaluateJavascript(
+                    "window.onChatEvent(${JSONObject.quote(dataJson)})", null)
+            } catch (_: Exception) {}
         }
     }
 

@@ -147,18 +147,16 @@ class PluginManager:
             # First, try to import the package __init__ (in case it defines plugins)
             try:
                 pkg_module = importlib.import_module(pkg_name)
-                _collect_from_module(pkg_module, pkg_name, pm, seen, exclude_set)
             except ImportError as exc:
                 logger.warning("could not import package %s: %s", pkg_name, exc)
                 continue
+            _collect_from_module(pkg_module, pkg_name, pm, seen, exclude_set)
 
             # Then scan the package directory for sub-modules
-            try:
-                pkg = importlib.import_module(pkg_name)
-                pkg_path = Path(pkg.__file__).parent
-            except Exception as exc:
-                logger.warning("could not resolve path for %s: %s", pkg_name, exc)
+            # (pkg_module.__file__ is None for namespace packages → skip scan)
+            if getattr(pkg_module, "__file__", None) is None:
                 continue
+            pkg_path = Path(pkg_module.__file__).parent
 
             for file in sorted(pkg_path.glob("*.py")):
                 stem = file.stem

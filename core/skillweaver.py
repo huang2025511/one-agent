@@ -17,13 +17,30 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json_block(text: str) -> str:
+    """Extract JSON payload from an LLM response, handling code fences.
+
+    修复：之前 ``text.split("```")[1]`` 在栅栏未闭合（只有开头的 ``` 没有
+    结尾的 ```）时会抛 IndexError，导致整次分解/编排直接失败。现在未闭合
+    时取栅栏之后的全部剩余文本交给 json.loads 判定。
+    """
+    if "```json" in text:
+        text = text.split("```json", 1)[1]
+        if "```" in text:
+            text = text.split("```", 1)[0]
+    elif "```" in text:
+        text = text.split("```", 1)[1]
+        if "```" in text:
+            text = text.split("```", 1)[0]
+    return text.strip()
+
 
 # ============================================================
 # Data Structures
@@ -450,13 +467,7 @@ class SkillWeaverRouter:
             )
             
             text = resp.get("text", "")
-            # Extract JSON
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-            
-            data = json.loads(text.strip())
+            data = json.loads(_extract_json_block(text))
             subtasks = []
             for item in data.get("subtasks", []):
                 subtasks.append(SubTask(
@@ -504,11 +515,14 @@ class SkillWeaverRouter:
                     )
                     
                     rewritten = resp.get("text", "").strip()
+                    # 修复：候选技能必须无条件记录 — 之前只在描述被改写时
+                    # 才写入 candidate_skills，描述未变时 _compose 拿到的
+                    # 候选列表为空，编排阶段失去检索结果。
+                    subtask.candidate_skills = [c[0] for c in candidates]
                     if rewritten and rewritten != subtask.description:
                         subtask.description = rewritten
-                        subtask.candidate_skills = [c[0] for c in candidates]
                         all_aligned = False
-                        
+
                 except Exception as exc:
                     logger.debug("SAD rewrite failed: %s", exc)
             
@@ -546,13 +560,8 @@ class SkillWeaverRouter:
             )
             
             text = resp.get("text", "")
-            if "```json" in text:
-                text = text.split("```json")[1].split("```")[0]
-            elif "```" in text:
-                text = text.split("```")[1].split("```")[0]
-            
-            data = json.loads(text.strip())
-            
+            data = json.loads(_extract_json_block(text))
+
             nodes = []
             for node_data in data.get("nodes", []):
                 nodes.append(SkillNode(
@@ -561,8 +570,13 @@ class SkillWeaverRouter:
                     args=node_data.get("args", {}),
                     dependencies=node_data.get("dependencies", []),
                 ))
-            
-            edges = [tuple(e) for e in data.get("edges", [])]
+
+            # 修复：LLM 可能把 edge 输出为字符串（如 "task_1-task_2"），
+            # tuple(字符串) 会拆成单字符元组污染图结构。只接受二元组。
+            edges = []
+            for e in data.get("edges", []):
+                if isinstance(e, (list, tuple)) and len(e) == 2:
+                    edges.append((str(e[0]), str(e[1])))
             
             # Find entry points (nodes with no dependencies)
             all_deps = set()

@@ -241,28 +241,24 @@ class AgentMesh:
         }
 
         plan = []
-        for line in text.split("\n"):
-            line = line.strip()
+        for raw_line in text.split("\n"):
+            line = raw_line.strip()
             if not line:
                 continue
 
-            # Try "角色: 任务" format
+            # 修复：先剥掉 "1." / "2、" / "3)" 之类的编号前缀。
+            # 之前带编号的行（"1. 程序员: 写代码"）会让 role_name 变成
+            # "1. 程序员"，role_map 查不到而全部回退 RESEARCHER，
+            # 后面的编号专用正则分支因此永远不可达（死代码）。
+            line = re.sub(r"^\d+[\.\)、]\s*", "", line)
+
+            # "角色: 任务" format
             m = re.match(r"([^:：]+)[：:]\s*(.+)", line)
             if m:
                 role_name = m.group(1).strip()
                 instruction = m.group(2).strip()
                 role = role_map.get(role_name, AgentRole.RESEARCHER)
                 plan.append((role, instruction))
-                continue
-
-            # Try numbered list
-            m = re.match(r"\d+[\.\)、]\s*([^:：]+)[：:]\s*(.+)", line)
-            if m:
-                role_name = m.group(1).strip()
-                instruction = m.group(2).strip()
-                role = role_map.get(role_name, AgentRole.RESEARCHER)
-                plan.append((role, instruction))
-                continue
 
         return plan
 

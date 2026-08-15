@@ -58,9 +58,11 @@ class OverlayPetService {
   /// 关闭悬浮窗
   Future<void> hideOverlay() async {
     try {
-      await _channel.invokeMethod('hide');
-    } on PlatformException catch (_) {}
-    _isActive = false;
+      // 用原生返回值同步状态：服务可能已被用户通过 ✕ 或系统回收关闭
+      _isActive = await _channel.invokeMethod<bool>('hide') ?? false;
+    } on PlatformException {
+      _isActive = false;
+    }
   }
 
   /// 悬浮窗运行中切换模型（实时生效）

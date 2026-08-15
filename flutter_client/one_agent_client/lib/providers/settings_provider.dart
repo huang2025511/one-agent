@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/api_client.dart';
 import '../utils/constants.dart';
+import '../utils/secure_store.dart';
 
 /// 设置状态
 class SettingsState {
@@ -45,7 +46,15 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
     final url = prefs.getString(PrefKeys.baseUrl) ?? ApiConstants.defaultBaseUrl;
-    final key = prefs.getString(PrefKeys.apiKey) ?? '';
+    // API Key 从安全存储（Keystore 加密）读取；首次升级时把旧版
+    // 明文 SharedPreferences 里的 Key 迁移过去并删除明文
+    var key = await SecureStore.read(PrefKeys.apiKey) ?? '';
+    final legacyKey = prefs.getString(PrefKeys.apiKey);
+    if (key.isEmpty && legacyKey != null && legacyKey.isNotEmpty) {
+      await SecureStore.write(PrefKeys.apiKey, legacyKey);
+      await prefs.remove(PrefKeys.apiKey);
+      key = legacyKey;
+    }
     final scale = prefs.getDouble(PrefKeys.fontScale) ?? 1.0;
     state = state.copyWith(baseUrl: url, apiKey: key, fontScale: scale);
     ApiClient.configure(baseUrl: url, apiKey: key);
@@ -69,8 +78,8 @@ class SettingsNotifier extends StateNotifier<SettingsState> {
   }
 
   Future<void> setApiKey(String key) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(PrefKeys.apiKey, key);
+    // API Key 写安全存储（Keystore 加密），不再明文落 SharedPreferences
+    await SecureStore.write(PrefKeys.apiKey, key);
     state = state.copyWith(apiKey: key);
     ApiClient.configure(baseUrl: state.baseUrl, apiKey: key);
     await checkConnection();
