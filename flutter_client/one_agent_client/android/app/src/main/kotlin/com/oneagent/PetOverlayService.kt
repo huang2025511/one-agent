@@ -31,6 +31,8 @@ import java.io.File
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * 原生桌宠悬浮窗服务。
@@ -90,6 +92,11 @@ class PetOverlayService : Service() {
     // 块，用代际判断丢弃，避免旧回复的事件混入新请求的气泡
     @Volatile private var chatGen = 0L
 
+    // 聊天执行器：单线程串行 + 无界队列。替代之前每次发送裸 new Thread ——
+    // 狂点发送会堆积线程（每条都要建 TCP 连接才被代际保护踢出）。
+    // 单线程保证同一时刻至多一条 SSE 连接，天然配合代际接管逻辑。
+    private val chatExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -139,6 +146,8 @@ class PetOverlayService : Service() {
         // 清除所有待执行任务（如 loadModel/showOverlay 的 post），
         // 防止 onDestroy 后仍向已销毁的 WebView 派发操作
         mainHandler.removeCallbacksAndMessages(null)
+        // 关闭聊天执行器：丢弃排队任务并中断进行中的 SSE 读取
+        chatExecutor.shutdownNow()
         // 断开进行中的 SSE 连接，释放线程与socket
         try { chatConn?.disconnect() } catch (_: Exception) {}
         chatConn = null
@@ -215,9 +224,6 @@ class PetOverlayService : Service() {
     // ── 悬浮窗视图 ─────────────────────────────────────────
     private fun showOverlay() {
         if (overlayView != null) return
-
-        // 解压 web 资源与内置模型到内部存储
-        webDir = prepareWebDir()
 
         val layout = DragLayout(this)
         layout.onDrag = { dx, dy ->
@@ -498,7 +504,7 @@ class PetOverlayService : Service() {
 
         @JavascriptInterface
         fun onSend(json: String) {
-            Thread { doChat(json) }.start()
+            chatExecutor.execute { doChat(json) }
         }
     }
 

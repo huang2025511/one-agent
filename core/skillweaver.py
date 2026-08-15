@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -269,6 +270,8 @@ class SkillIndex:
         self._index = None
         self._skill_ids: List[str] = []
         self._skill_descriptions: List[str] = []
+        # 优化：id → 下标 的 dict 索引，get_skill_description 从 O(n) 降为 O(1)
+        self._desc_index: Dict[str, str] = {}
         self._built = False
         
     def _lazy_load(self):
@@ -306,10 +309,11 @@ class SkillIndex:
         
         self._skill_ids = list(skills.keys())
         self._skill_descriptions = [
-            f"{s.title} {s.description}" 
+            f"{s.title} {s.description}"
             for s in skills.values()
         ]
-        
+        self._desc_index = dict(zip(self._skill_ids, self._skill_descriptions))
+
         if not self._skill_ids:
             logger.warning("SkillIndex: no skills to index")
             return False
@@ -361,11 +365,8 @@ class SkillIndex:
         return results
     
     def get_skill_description(self, skill_id: str) -> str:
-        """Get the description for a skill."""
-        if skill_id in self._skill_ids:
-            idx = self._skill_ids.index(skill_id)
-            return self._skill_descriptions[idx]
-        return ""
+        """Get the description for a skill. O(1) via dict index."""
+        return self._desc_index.get(skill_id, "")
 
 
 # ============================================================
@@ -400,9 +401,14 @@ class SkillWeaverRouter:
         self._max_sad_iter = max_sad_iterations
         self._top_k = top_k_candidates
         self._initialized = False
+        self._build_lock = threading.Lock()
         
     def initialize(self) -> bool:
-        """Build semantic index from current skill registry."""
+        """Build semantic index from current skill registry.
+
+        同步构建（CPU 密集，~15s / 2209 技能）。async 路径请用
+        initialize_async()，避免阻塞事件循环。
+        """
         if self._initialized:
             return True
 
@@ -415,6 +421,29 @@ class SkillWeaverRouter:
         # Build index
         self._initialized = self._index.build(skills_dict)
         return self._initialized
+
+    async def initialize_async(self) -> bool:
+        """initialize() 的非阻塞版本：构建在线程池执行。
+
+        build() 需要 encode 全量技能描述（论文口径 ~15s），直接在
+        事件循环里跑会卡死整个服务的所有并发请求。挪到 to_thread，
+        构建期间本协程让出控制权。
+        """
+        if self._initialized:
+            return True
+        self._initialized = await asyncio.to_thread(self._build_index_locked)
+        return self._initialized
+
+    def _build_index_locked(self) -> bool:
+        """线程内执行的构建体；带锁防止并发触发重复构建。"""
+        with self._build_lock:
+            if self._initialized:
+                return True
+            skills_dict = getattr(self._skills, '_skills', {})
+            if not skills_dict:
+                logger.warning("SkillWeaverRouter: no skills registered")
+                return False
+            return self._index.build(skills_dict)
 
     def retrieve_skills(self, query: str, top_k: int = 5) -> List[Tuple[str, float]]:
         """Public API: semantic retrieval of top-K skills for a query.
@@ -437,7 +466,7 @@ class SkillWeaverRouter:
             DAGWorkflow ready for execution
         """
         if not self._initialized:
-            self.initialize()
+            await self.initialize_async()
         
         # Phase 1: Decompose
         subtasks = await self._decompose(query, zh)
@@ -621,24 +650,33 @@ class SkillWeaverRouter:
         dep_wait_timeout_s = 30.0
 
         results: Dict[str, Any] = {}
-        completed: set = set()
+
+        # 优化：事件驱动替代 sleep(0.1) 轮询 — 每个节点一个 Event，
+        # 依赖完成即被唤醒，无空转，DAG 层级多时尾延迟显著降低
+        done_events: Dict[str, asyncio.Event] = {
+            n.subtask_id: asyncio.Event() for n in workflow.nodes
+        }
 
         async def execute_node(node: SkillNode) -> None:
             """Execute a single node, respecting dependencies."""
             # Wait for dependencies — 加超时保护
-            deadline = asyncio.get_running_loop().time() + dep_wait_timeout_s
-            while not all(d in completed for d in node.dependencies):
-                if asyncio.get_running_loop().time() >= deadline:
+            # 用 wait_for(gather)：asyncio.wait() 在 3.11+ 只收 Future/Task
+            dep_events = [done_events[d] for d in node.dependencies if d in done_events]
+            if dep_events:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*(e.wait() for e in dep_events)),
+                        timeout=dep_wait_timeout_s)
+                except asyncio.TimeoutError:
                     logger.error("SkillWeaver: node %s timed out waiting for deps %s",
                                 node.subtask_id, node.dependencies)
                     node.status = "failed"
                     node.error = f"dependency wait timeout ({dep_wait_timeout_s}s)"
                     results[node.subtask_id] = f"Error: {node.error}"
-                    completed.add(node.subtask_id)
+                    done_events[node.subtask_id].set()
                     if on_progress:
                         on_progress(node.subtask_id, "failed")
                     return
-                await asyncio.sleep(0.1)
 
             # Execute skill
             if on_progress:
@@ -661,7 +699,8 @@ class SkillWeaverRouter:
                 if on_progress:
                     on_progress(node.subtask_id, "failed")
 
-            completed.add(node.subtask_id)
+            # 唤醒所有等待本节点的下游节点
+            done_events[node.subtask_id].set()
 
         # Execute all nodes in parallel (dependencies handled internally)
         tasks = [execute_node(node) for node in workflow.nodes]

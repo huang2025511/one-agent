@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 # ── 测试 1: 计划检测模式匹配 ──
-def test_plan_pattern_detection():
+# 注意：本文件的 check_* 函数是脚本式校验（返回结果由 main() 汇总打印），
+# 刻意不用 test_ 前缀，避免 pytest 收集后因"无断言/返回值未用"产生警告
+def check_plan_pattern_detection():
     """测试计划检测模式是否正确匹配且不误判"""
     import re
 
@@ -88,7 +90,7 @@ def test_plan_pattern_detection():
 
 
 # ── 测试 2: 事件总线 publish/subscribe ──
-async def test_event_bus():
+async def check_event_bus():
     """测试事件总线的基本功能"""
     from core.events import EventBus
 
@@ -122,7 +124,7 @@ async def test_event_bus():
 
 
 # ── 测试 3: SSE _ALLOWED_PHASES 白名单 ──
-def test_allowed_phases():
+def check_allowed_phases():
     """测试 SSE 接口的 _ALLOWED_PHASES 白名单是否包含所有需要的 phase"""
     _ALLOWED_PHASES = {
         "planning", "thinking", "reflection", "plan",
@@ -155,7 +157,7 @@ def test_allowed_phases():
 
 
 # ── 测试 4: SSE 事件生成器分流逻辑 ──
-def test_sse_streaming_logic():
+def check_sse_streaming_logic():
     """测试 SSE 生成器中 streaming vs thinking 的分流逻辑"""
     # 模拟 progress_queue 中的数据
     test_events = [
@@ -195,7 +197,7 @@ def test_sse_streaming_logic():
 
 
 # ── 测试 5: streaming delta 增量计算 ──
-def test_streaming_delta_logic():
+def check_streaming_delta_logic():
     """测试 streaming 增量文本计算逻辑"""
     # 模拟 LLM 流式输出
     deltas = [
@@ -237,7 +239,7 @@ def test_streaming_delta_logic():
 
 
 # ── 测试 6: _streamed_content 去重逻辑 ──
-def test_streamed_dedup():
+def check_streamed_dedup():
     """测试 streaming 推送后不再重复推送 reply 的逻辑"""
     test_cases = [
         # (_streamed_content, reply, expected_push_reply)
@@ -275,7 +277,7 @@ async def main():
     # 测试 1
     total_tests += 1
     print("\n📋 测试 1: 计划检测模式匹配")
-    results = test_plan_pattern_detection()
+    results = check_plan_pattern_detection()
     print(f"  正确匹配: {results['match_correct']}/{results['should_match_total']}")
     print(f"  正确不匹配: {results['no_match_correct']}/{results['should_not_match_total']}")
     print(f"  误判: {results['match_false_positive']}")
@@ -291,7 +293,7 @@ async def main():
     # 测试 2
     total_tests += 1
     print("\n📋 测试 2: 事件总线 publish/subscribe")
-    results = await test_event_bus()
+    results = await check_event_bus()
     print(f"  收到事件数: {results['total_events']}")
     print(f"  事件1内容: {results['first_event_message']}")
     print(f"  事件2内容: {results['second_event_message']}")
@@ -307,7 +309,7 @@ async def main():
     # 测试 3
     total_tests += 1
     print("\n📋 测试 3: SSE _ALLOWED_PHASES 白名单完整性")
-    results = test_allowed_phases()
+    results = check_allowed_phases()
     print(f"  所有必需 phase 存在: {results['all_required_present']}")
     print(f"  缺失: {results['missing']}")
     print(f"  白名单总数: {results['total_phases']}")
@@ -322,7 +324,7 @@ async def main():
     # 测试 4
     total_tests += 1
     print("\n📋 测试 4: SSE 事件分流逻辑 (streaming vs thinking)")
-    results = test_sse_streaming_logic()
+    results = check_sse_streaming_logic()
     all_match = True
     for r in results:
         status = "✅" if r['match'] else "❌"
@@ -340,7 +342,7 @@ async def main():
     # 测试 5
     total_tests += 1
     print("\n📋 测试 5: streaming delta 增量计算")
-    results = test_streaming_delta_logic()
+    results = check_streaming_delta_logic()
     print(f"  完整文本: {results['full_text']}")
     print(f"  重构文本: {results['reconstructed']}")
     print(f"  文本匹配: {results['match']}")
@@ -357,7 +359,7 @@ async def main():
     # 测试 6
     total_tests += 1
     print("\n📋 测试 6: _streamed_content 去重逻辑")
-    results = test_streamed_dedup()
+    results = check_streamed_dedup()
     all_match = True
     for r in results:
         status = "✅" if r['match'] else "❌"

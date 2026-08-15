@@ -10,6 +10,7 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -166,24 +167,35 @@ class AgentMesh:
             )
 
         # Phase 2: Execute sub-tasks
-        tasks: List[AgentTask] = []
-        for i, (role, instruction) in enumerate(plan[:max_agents]):
-            if on_progress:
-                on_progress("executing", f"执行中 ({i+1}/{len(plan[:max_agents])}): {role.value}")
+        # 优化：并行执行替代逐个 await — planner 拆出的子任务彼此独立
+        # （各自携带完整任务上下文），总耗时从"求和"降到"取最大"
+        selected = plan[:max_agents]
+        if on_progress:
+            on_progress("executing", f"并行执行 {len(selected)} 个子任务")
 
-            task_id = f"task_{i}"
-            agent_task = AgentTask(
-                task_id=task_id,
+        tasks: List[AgentTask] = [
+            AgentTask(
+                task_id=f"task_{i}",
                 role=role,
                 instruction=instruction,
                 status="running",
                 started_at=time.time(),
             )
-            tasks.append(agent_task)
+            for i, (role, instruction) in enumerate(selected)
+        ]
 
-            result = await self._execute_agent(role, instruction, task, model)
+        results = await asyncio.gather(*(
+            self._execute_agent(t.role, t.instruction, task, model)
+            for t in tasks
+        ))
+
+        for agent_task, result in zip(tasks, results):
             agent_task.result = result
-            agent_task.status = "done"
+            # _execute_agent 失败时返回 "[<role> 执行失败: ...]" 文本，据此标记状态
+            if result.startswith(f"[{agent_task.role.value} 执行失败"):
+                agent_task.status = "failed"
+            else:
+                agent_task.status = "done"
             agent_task.completed_at = time.time()
 
         # Phase 3: Synthesize

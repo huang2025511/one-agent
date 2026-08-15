@@ -1100,6 +1100,41 @@ One-Agent 项目整体架构设计良好，采用了事件驱动的微内核架�
 
 ---
 
-**审计完成时间**: 2026-06-15（三轮收尾 2026-08-15）
+## 八、性能与测试基建优化（2026-08-15 第二批）
+
+全量测试 **550 passed / 0 warnings / 103s**（此前 408s 且带 1 个超时失败）。
+
+### 服务端性能
+
+| 位置 | 问题 | 优化 |
+|------|------|------|
+| skillweaver `initialize` | SkillIndex 构建（encode 全量技能 ~15s）在 async route() 路径同步执行，卡死整个服务的事件循环 | 新增 `initialize_async()`：`asyncio.to_thread` + 构建锁防重复；`route()` 改走异步路径 |
+| skillweaver `execute_workflow` | 依赖等待用 `sleep(0.1)` 轮询，空转 + DAG 层级多时尾延迟高 | 每节点 `asyncio.Event` 事件驱动，`wait_for(gather)` 等全部依赖（3.11+ 版本安全，`asyncio.wait` 不接受 Event） |
+| skillweaver `get_skill_description` | `list.index()` O(n) 查找 | 构建 id→描述 dict 索引，O(1) |
+| agent_mesh `solve` | 子任务逐个 `await` 串行执行 | `asyncio.gather` 并行（子任务彼此独立、各自携带完整上下文），总耗时从"求和"降到"取最大"；据返回文本标记 failed 状态 |
+| i18n `_()` / `get_language()` | 每条消息翻译都过 RLock，但 `_translations` 启动后只读 | 读路径免锁（str 引用读取原子），写路径保留锁 |
+
+### Android
+
+| 位置 | 问题 | 优化 |
+|------|------|------|
+| PetOverlayService `onSend` | 每次发送裸 `new Thread`，狂点堆积线程 | 单线程 `ExecutorService` 串行执行（同刻至多一条 SSE 连接，天然配合代际接管），onDestroy `shutdownNow()` |
+| PetOverlayService `showOverlay` | `prepareWebDir()` 重复调用两次（资源解压做两遍） | 删除多余一处 |
+
+### 测试基建
+
+| 位置 | 问题 | 优化 |
+|------|------|------|
+| benchmark_test 两个 chat 用例 | 打真实免费 LLM API，CI/沙箱无 Key 时熔断 → 不可复现（曾 55% 成功率 / 300s 超时挂死） | mock `chat_completion` + `chat_completion_stream`（流式优先主路径必须一起 mock，否则每请求拖满 30s 客户端超时）；5 用例 2.96s 全绿，可进 CI 门禁 |
+| test_v60_fixes.py | 6 个脚本式校验函数用 `test_` 前缀被 pytest 误收集，产生 warnings | 重命名 `check_*`，脚本入口 `main()` 保留 |
+
+### 验证
+
+- `python3 -m py_compile` 通过
+- `pytest tests/` **550 passed, 0 warnings**（benchmark 全包含，总耗时 103s）
+
+---
+
+**审计完成时间**: 2026-06-15（三轮收尾 + 性能优化 2026-08-15）
 **审计工具**: 手动代码审查 + 静态分析
 **审计人员**: AI Assistant

@@ -166,17 +166,18 @@ def get_language() -> str:
     """Get the current language code.
 
     优先读 ContextVar (随 asyncio.Task 自动隔离), 回退到全局 _current_lang。
+
+    读路径不加锁：_current_lang 是只读 str 引用，CPython 赋值原子，
+    且本函数是每条消息都会走的热路径（翻译查表），锁开销不值得。
     """
     try:
         ctx_lang = _current_lang_ctx.get()
         if ctx_lang and ctx_lang != "en":
             return ctx_lang
         # ContextVar 是默认值 "en" 时, 检查全局是否有手动设置
-        with _lock:
-            return _current_lang if _current_lang != "en" else ctx_lang
+        return _current_lang if _current_lang != "en" else ctx_lang
     except LookupError:
-        with _lock:
-            return _current_lang
+        return _current_lang
 
 
 def set_thread_language(lang: str) -> None:
@@ -265,9 +266,10 @@ def _(key: str, **kwargs) -> str:
         'request body too large (1000 > 500)'
     """
     # Get translation for current language, fall back to English
-    with _lock:
-        lang = get_language()
-        lang_dict = _translations.get(lang, _translations["en"])
+    # 热路径免锁：_translations 启动后只读，str 读取原子（set_language
+    # 写 _current_lang 同样原子），RLock 只保留给 set_language 的写路径
+    lang = get_language()
+    lang_dict = _translations.get(lang, _translations["en"])
     message = lang_dict.get(key, _translations["en"].get(key, key))
 
     # Format with kwargs if provided

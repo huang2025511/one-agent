@@ -1,19 +1,57 @@
-"""Performance benchmark tests — verify system can handle concurrent load."""
+"""Performance benchmark tests — verify system can handle concurrent load.
+
+注意：两个 chat 基准用例 mock 掉 LLM provider —— 基准测的是服务端
+吞吐与并发调度，不是上游 LLM 的可用性。之前打真实免费 API，CI/沙箱
+无 Key 时熔断导致用例随机挂（55% 成功率），测试结果不可复现。
+"""
 import asyncio
 import os
 import sys
 import time
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+_MOCK_LLM_RESP = {
+    "text": "ok",
+    "model": "mock",
+    "finish_reason": "stop",
+    "tool_calls": None,
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+}
+
+# /api/chat 主路径是流式优先（_do_llm_call 先 chat_completion_stream，
+# 失败才回退 chat_completion），两个方法都必须 mock，否则流式调用仍打
+# 真实 API → 熔断 + 回退重试 → 每请求拖满 30s 客户端超时
+async def _mock_stream(**kwargs):
+    yield {"delta": "ok"}
+    yield {"done": True, "tokens_used": 2, "tool_calls": [], "tool_calls_raw": []}
+
+
+class _mock_llm:
+    """context manager：同时 mock chat_completion 与 chat_completion_stream"""
+
+    def __init__(self, app):
+        self._cm = patch.multiple(
+            app.llm,
+            chat_completion=AsyncMock(return_value=_MOCK_LLM_RESP),
+            chat_completion_stream=_mock_stream,
+        )
+
+    def __enter__(self):
+        return self._cm.__enter__()
+
+    def __exit__(self, *exc):
+        return self._cm.__exit__(*exc)
+
 
 
 @pytest.mark.asyncio
 async def test_concurrent_chat_requests(app):
-    """Test 10 concurrent chat requests (free API rate-limit aware)."""
+    """Test 10 concurrent chat requests with mocked LLM (isolated from upstream)."""
     async def send_chat(client, idx: int):
         try:
             r = await client.post(
@@ -25,11 +63,12 @@ async def test_concurrent_chat_requests(app):
         except Exception:
             return False
 
-    # 10 concurrent requests (respects free API limits)
+    # 10 concurrent requests — LLM mock 为即时返回，测的是服务端调度
     start = time.time()
-    async with httpx.AsyncClient() as client:
-        tasks = [send_chat(client, i) for i in range(10)]
-        results = await asyncio.gather(*tasks)
+    with _mock_llm(app):
+        async with httpx.AsyncClient() as client:
+            tasks = [send_chat(client, i) for i in range(10)]
+            results = await asyncio.gather(*tasks)
     elapsed = time.time() - start
 
     success_count = sum(1 for r in results if r)
@@ -41,22 +80,23 @@ async def test_concurrent_chat_requests(app):
 
 @pytest.mark.asyncio
 async def test_rapid_sequential_requests(app):
-    """Test 100 rapid sequential requests to verify no resource leaks."""
+    """Test 20 rapid sequential requests to verify no resource leaks."""
     success_count = 0
     start = time.time()
 
-    async with httpx.AsyncClient() as client:
-        for i in range(20):
-            try:
-                r = await client.post(
-                    "http://127.0.0.1:18792/api/chat",
-                    json={"text": f"hi {i}", "session_id": f"seq-{i}"},
-                    timeout=30.0
-                )
-                if r.status_code == 200:
-                    success_count += 1
-            except Exception:
-                pass
+    with _mock_llm(app):
+        async with httpx.AsyncClient() as client:
+            for i in range(20):
+                try:
+                    r = await client.post(
+                        "http://127.0.0.1:18792/api/chat",
+                        json={"text": f"hi {i}", "session_id": f"seq-{i}"},
+                        timeout=30.0
+                    )
+                    if r.status_code == 200:
+                        success_count += 1
+                except Exception:
+                    pass
 
     elapsed = time.time() - start
     success_rate = success_count / 20
