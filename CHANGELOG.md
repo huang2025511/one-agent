@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `one-agent db stats|check|vacuum|backup`：统一库日常维护
   - `doctor` 集成 integrity_check + 备份概要
 - **数据库维护 REST API**：`GET /api/db/stats`（统计）、`GET /api/db/check`（完整性）、`GET /api/db/backups`（备份列表）、`POST /api/db/backup`（立即备份）
+- **客户端（Flutter）**：
+  - 系统状态页新增「统一数据库」卡片：库大小 / WAL / 表数 / 消息数 / 备份份数与最新时间 / 待迁移旧库数、完整性标签、加密标签、立即备份 / 表明细 / 备份历史
+  - 设置页从 11 个 section 长列表重构为 **6 个分类 Tab**：模型路由 / 智能体 / 消息通道 / 安全成本 / 系统运维 / 客户端
+  - 补齐此前客户端无法设置的服务端配置：gateways 8 个通道开关（含凭据状态提示）、scheduler 调度与每日备份（保留份数 / 加密开关）、skills 技能系统、marketplace 技能市场与市场源、REST 限流、缓存 TTL
 
 ### Changed
 - **Dockerfile**：声明 `VOLUME /app/data`，容器化部署不再丢数据，与"复制一个数据库即可迁移"的架构目标对齐
