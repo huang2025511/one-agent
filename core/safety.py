@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class SafetyReport:
                              + "). Do not output raw sensitive info in your reply.")
         if self.harmful_found:
             if zh:
-                parts.append(f"[安全提示] 检测到可能的有害内容，请谨慎回复。")
+                parts.append("[安全提示] 检测到可能的有害内容，请谨慎回复。")
             else:
                 parts.append("[Safety] Potentially harmful content detected. Respond cautiously.")
         if self.injection_found:

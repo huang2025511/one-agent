@@ -41,7 +41,7 @@ def _tail_file(path: str, max_lines: int = 50, max_bytes: int = 65536) -> str:
             text = data.decode('utf-8', errors='ignore')
             lines = text.splitlines()
             return '\n'.join(lines[-max_lines:])
-    except (OSError, IOError):
+    except OSError:
         return ""
 
 
@@ -148,7 +148,7 @@ class MonitoringPlugin(Plugin):
         _memory = next((p for p in (_ctx._plugins if _ctx else []) if getattr(p, "name", "") == "memory"), None) if _ctx else None
         _skills = next((p for p in (_ctx._plugins if _ctx else []) if getattr(p, "name", "") == "skills"), None) if _ctx else None
 
-        app = FastAPI(title="One-Agent Monitor", version="2.0.0")
+        app = FastAPI(title="One-Agent Monitor", version="2.2.0")
 
         dashboard_html = self._build_dashboard_html()
 

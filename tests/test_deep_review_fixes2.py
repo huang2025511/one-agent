@@ -18,9 +18,8 @@ class TestRouterEvalIntervalZero:
     @pytest.mark.asyncio
     async def test_eval_interval_zero_no_crash(self):
         """eval_interval=0 不应崩溃，应自动重置为 50。"""
-        from router import SmartRouter
         from core.events import Event
-        from core.context import TurnContext
+        from router import SmartRouter
 
         router = SmartRouter()
         router._cfg = {
@@ -181,10 +180,10 @@ class TestSystemExecutorNoPasswordConfig:
 
     def test_configured_password_still_works(self):
         """配置了密码后 verify 应正常工作。"""
-        from executors.system import PasswordManager
-
         # 用一个 legacy SHA-256 hash 测试
         import hashlib
+
+        from executors.system import PasswordManager
         password = "mypassword123"
         hash_hex = hashlib.sha256(password.encode()).hexdigest()
         pm = PasswordManager(hash_hex)
@@ -334,6 +333,7 @@ class TestModelForTierFallback:
            （因为并非"跨层"，而是"无可用模型"）
         """
         import logging
+
         from models import LLMProvider
         from models.tiers import MODEL_TIERS
 

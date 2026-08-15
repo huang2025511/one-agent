@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import json
 import logging
 import os
 import sqlite3
@@ -52,6 +51,12 @@ from i18n import _
 
 logger = logging.getLogger(__name__)
 
+# v2.1.0：版本号统一从 one_agent.__version__ 读取，避免四处硬编码漂移。
+try:
+    from one_agent import __version__ as _AGENT_VERSION
+except Exception:  # pragma: no cover — 早期 import 或独立运行时的兜底
+    _AGENT_VERSION = "2.2.0"
+
 # API configuration constants
 # 默认绑定 127.0.0.1 而非 0.0.0.0 — 安全默认原则：
 # 开发环境够用，生产环境需要用户显式配置为 0.0.0.0 或特定 IP
@@ -71,7 +76,6 @@ def _resolve_config_path() -> str:
       2. ONE_AGENT_ENV 环境变量 → config/{env}_config.yaml
       3. config/default_config.yaml（兜底默认）
     """
-    import os
     explicit = os.environ.get("ONE_AGENT_CONFIG")
     if explicit:
         return explicit
@@ -367,7 +371,7 @@ class RESTAPIGateway(Plugin):
                 return {
                     "status": "healthy",
                     "timestamp": time.time(),
-                    "version": "2.0.0"
+                    "version": _AGENT_VERSION
                 }
 
         @app.get("/ready")
@@ -415,7 +419,7 @@ class RESTAPIGateway(Plugin):
                     "status": "not_ready",
                     "uptime": 0,
                     "timestamp": time.time(),
-                    "version": "2.0.0",
+                    "version": _AGENT_VERSION,
                     "components": {}
                 }
 
@@ -517,7 +521,7 @@ class RESTAPIGateway(Plugin):
                 "status": overall,
                 "uptime": uptime,
                 "timestamp": time.time(),
-                "version": "2.0.0",
+                "version": _AGENT_VERSION,
                 "components": components,
             }
 
@@ -705,7 +709,6 @@ class RESTAPIGateway(Plugin):
                         async def _resync_llm():
                             await _llm_inst.setup(_ctx)
                         try:
-                            loop = asyncio.get_running_loop()
                             # 同步等待 setup 完成，确保 _api_keys 立即更新
                             await _resync_llm()
                         except RuntimeError:
@@ -828,12 +831,8 @@ class RESTAPIGateway(Plugin):
 
     def _register_stats_metrics_routes(self, app, auth, _ctx, _llm, _memory, _bus, _skills, _memory_plugin):
         _cp = self._get_plugin
-        # 修复：新版 fastapi（0.139+）把 JSONResponse 从顶层命名空间移除，
-        # 必须从 fastapi.responses 导入。旧代码 `from fastapi import JSONResponse`
-        # 会在 import 时抛 ImportError，导致整个 REST API gateway start 失败。
-        from fastapi.responses import JSONResponse
         from fastapi import Header
-        from typing import Optional
+
         @app.get("/api/stats")
         async def stats(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             """System statistics for dashboard."""
@@ -986,8 +985,9 @@ class RESTAPIGateway(Plugin):
             - since: Unix 时间戳，只返回该时间之后的日志（用于"本次启动"过滤）
             """
             auth(x_api_key)
-            from pathlib import Path
             import re as _re
+            from pathlib import Path
+
             # v2.1.0：走统一数据目录解析（ONE_AGENT_DATA_DIR > agent.data_dir > ./data）
             from core.hub import resolve_data_dir
             data_dir = resolve_data_dir(_ctx.config) if _ctx else "./data"
@@ -1033,11 +1033,11 @@ class RESTAPIGateway(Plugin):
                 # 按级别过滤
                 if level:
                     level_upper = level.upper()
-                    all_lines = [l for l in all_lines if f"| {level_upper:<7}" in l or f"| {level_upper} |" in l]
+                    all_lines = [ln for ln in all_lines if f"| {level_upper:<7}" in ln or f"| {level_upper} |" in ln]
                 # 关键词搜索
                 if search:
                     search_lower = search.lower()
-                    all_lines = [l for l in all_lines if search_lower in l.lower()]
+                    all_lines = [ln for ln in all_lines if search_lower in ln.lower()]
                 filtered = len(all_lines)
                 # 取最后 tail 行
                 result_lines = all_lines[-tail:] if len(all_lines) > tail else all_lines
@@ -1061,7 +1061,6 @@ class RESTAPIGateway(Plugin):
             test_key = body.get("api_key", "")
             try:
                 # 发送一个简短的测试请求
-                import asyncio as _aio
                 test_messages = [{"role": "user", "content": "Hi"}]
                 # 如果提供了 api_key，临时设置
                 if test_key and "/" in model:
@@ -1220,8 +1219,8 @@ class RESTAPIGateway(Plugin):
                 # 使用 ModelCatalog 拉取并分类模型（含 is_free / pricing /
                 # description / tier / capabilities 等元数据），让客户端可以
                 # 分免费/付费两组展示，并显示模型介绍。
-                from models.catalog import ModelCatalog, auto_classify_tier
                 from models.capabilities import detect_capabilities
+                from models.catalog import ModelCatalog
                 cat = ModelCatalog(base_url=base_url, api_key=api_key, provider=provider, ttl=0)
                 try:
                     await cat.refresh(force=True)
@@ -1443,7 +1442,7 @@ class RESTAPIGateway(Plugin):
             return self._audit_log.stats()
 
     def _register_chat_routes(self, app, auth, _agent, _app_instance, _llm):
-        from fastapi import Header, HTTPException, Body, Request
+        from fastapi import Body, Header, HTTPException, Request  # noqa: F401 — 依赖探测
         @app.post("/api/chat")
         async def chat(request: Request, body: dict = Body(...), x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
             auth(x_api_key)
@@ -1854,7 +1853,7 @@ class RESTAPIGateway(Plugin):
                 role = store.update(role_id, **body)
             except Exception as exc:
                 if "UNIQUE" in str(exc):
-                    raise HTTPException(409, f"role name already exists")
+                    raise HTTPException(409, "role name already exists")
                 raise HTTPException(500, str(exc))
             return {"role": role}
 
@@ -1981,8 +1980,8 @@ class RESTAPIGateway(Plugin):
             """
             auth(x_api_key)
 
-            from pathlib import Path as _Path
             import shutil as _shutil
+            from pathlib import Path as _Path
 
             # v2.1.0：走统一数据目录解析（ONE_AGENT_DATA_DIR > agent.data_dir > ./data）
             from core.hub import resolve_data_dir
@@ -2286,8 +2285,8 @@ class RESTAPIGateway(Plugin):
                             if _llm_inst is not None:
                                 try:
                                     import asyncio
-                                    async def _resync_llm():
-                                        await _llm_inst.setup(_ctx)
+                                    async def _resync_llm(_inst=_llm_inst):
+                                        await _inst.setup(_ctx)
                                     try:
                                         # 问题1 修复：同步等待 setup 完成
                                         await _resync_llm()
@@ -2580,6 +2579,7 @@ class RESTAPIGateway(Plugin):
         让"事件→HTTP webhook"链路可通过 REST API 配置。
         """
         from dataclasses import asdict
+
         from fastapi import Header, HTTPException
 
         def _webhook_to_dict(w):
@@ -2612,7 +2612,7 @@ class RESTAPIGateway(Plugin):
             retry_delay。
             """
             auth(x_api_key)
-            from core.webhook_trigger import get_webhook_trigger, Webhook
+            from core.webhook_trigger import Webhook, get_webhook_trigger
             trigger = get_webhook_trigger()
             url = (body.get("url") or "").strip()
             if not url:
@@ -2685,6 +2685,7 @@ class RESTAPIGateway(Plugin):
         这里暴露 3 个端点让该模块真正生效。
         """
         from fastapi import Header, HTTPException
+
         from core.backup_export import (
             DataExporter,
             DataImporter,
@@ -2792,6 +2793,54 @@ class RESTAPIGateway(Plugin):
                 "formats": [f.value for f in ExportFormat],
             }
 
+    def _register_db_routes(self, app, auth, _ctx):
+        """v2.2.0 统一库维护端点：统计 / 完整性 / 立即备份 / 备份列表。"""
+        from fastapi import Header, HTTPException
+
+        def _data_dir() -> str:
+            if _ctx is None or not isinstance(_ctx.config, dict):
+                from core.hub import resolve_data_dir
+                return resolve_data_dir()
+            return resolve_data_dir(_ctx.config)
+
+        @app.get("/api/db/stats")
+        async def db_stats(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """统一库运行统计：大小 / 表行数 / schema 版本 / 待迁移 / 备份概要。"""
+            auth(x_api_key)
+            from core.db_maintenance import db_stats as _stats
+            return _stats(_data_dir())
+
+        @app.get("/api/db/check")
+        async def db_check(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """统一库完整性检查（PRAGMA quick_check，快速非阻塞）。"""
+            auth(x_api_key)
+            from core.db_maintenance import integrity_check
+            return integrity_check(_data_dir())
+
+        @app.get("/api/db/backups")
+        async def db_backups(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+            """列出现有自动备份（新→旧）。"""
+            auth(x_api_key)
+            from core.db_maintenance import list_backups
+            return {"backups": list_backups(_data_dir())}
+
+        @app.post("/api/db/backup")
+        async def db_backup_now(
+            keep: int = 7,
+            x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+        ):
+            """立即执行一次自动备份（含可选加密与轮换）。"""
+            auth(x_api_key)
+            if _ctx is None:
+                raise HTTPException(503, "Context not initialized")
+            import asyncio
+
+            from core.db_maintenance import run_auto_backup
+            result = await asyncio.to_thread(run_auto_backup, _data_dir(), keep, None)
+            if not result.get("ok"):
+                raise HTTPException(500, f"Backup failed: {result.get('error')}")
+            return result
+
     async def start(self) -> None:
         if not self._enabled:
             return
@@ -2812,7 +2861,7 @@ class RESTAPIGateway(Plugin):
 
         app = FastAPI(
             title="One-Agent API",
-            version="2.0.0",
+            version=_AGENT_VERSION,
             description="REST API for One-Agent integration",
         )
         app.add_middleware(
@@ -2979,6 +3028,9 @@ class RESTAPIGateway(Plugin):
 
         # ---------------------------------------------------------------- Backup & Export
         self._register_backup_routes(app, auth, _ctx, _llm, _memory, _bus, _skills, _app_instance, _memory_plugin)
+
+        # ---------------------------------------------------------------- Database maintenance (v2.2.0)
+        self._register_db_routes(app, auth, _ctx)
 
         @app.exception_handler(Exception)
         async def all_exception(request: Request, exc: Exception):

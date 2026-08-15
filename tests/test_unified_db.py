@@ -83,8 +83,8 @@ class TestUnifiedDatabase:
     def test_schema_version_per_store(self, isolated_data_dir):
         """多个 BaseSQLiteStore 共库时 schema 版本互不干扰。"""
         from core.hub import database_path
-        from memory.session_store import SessionStore
         from memory.knowledge_graph import KnowledgeGraph
+        from memory.session_store import SessionStore
         db = database_path(str(isolated_data_dir))
 
         s = SessionStore(db)   # SCHEMA_VERSION = 2
@@ -109,7 +109,7 @@ class TestUnifiedDatabase:
 
 class TestLegacyMigration:
     def test_sessions_migrated_with_data_and_version(self, isolated_data_dir):
-        from core.hub import migrate_legacy, database_path
+        from core.hub import database_path, migrate_legacy
         _make_legacy_sessions(isolated_data_dir / "memory" / "sessions.db")
 
         report = migrate_legacy(str(isolated_data_dir))
@@ -130,7 +130,7 @@ class TestLegacyMigration:
         assert (isolated_data_dir / "memory" / "sessions.db.migrated").exists()
 
     def test_fts5_memory_with_rowid_linked_weights(self, isolated_data_dir):
-        from core.hub import migrate_legacy, database_path
+        from core.hub import database_path, migrate_legacy
         legacy = isolated_data_dir / "memory" / "longterm.sqlite"
         legacy.parent.mkdir(parents=True)
         c = sqlite3.connect(legacy)
@@ -170,7 +170,7 @@ class TestLegacyMigration:
 class TestCopyOneFileDeployment:
     def test_copy_db_to_new_env_restores_everything(self, isolated_data_dir, tmp_path, monkeypatch):
         """端到端：配置 + 聊天记录 + 技能包 → 拷贝单文件 → 新环境全部就位。"""
-        from core.hub import get_hub, database_path
+        from core.hub import database_path, get_hub
 
         # 环境 A：写配置、会话、技能包
         hub = get_hub(str(isolated_data_dir))
@@ -240,7 +240,6 @@ class TestBackupExportImport:
     """v2.1.0：备份导出/导入走统一库（不再碰旧分散库与 YAML）。"""
 
     def _seed(self, data_dir):
-        import json as _json
         from core.hub import database_path
         db = database_path(str(data_dir))
         from memory.session_store import SessionStore
@@ -270,14 +269,14 @@ class TestBackupExportImport:
                      (ids["张三"], "参与", ids["项目A"]))
         conn.commit()
         conn.close()
-        from core.config_store import get_config_store, close_config_store
+        from core.config_store import close_config_store, get_config_store
         get_config_store(db).seed_if_empty({"agent": {"name": "BackupAgent"}})
         close_config_store(db)
         return db
 
     def test_zip_roundtrip_across_envs(self, isolated_data_dir, tmp_path, monkeypatch):
         from core.backup_export import DataExporter, DataImporter
-        db = self._seed(isolated_data_dir)
+        self._seed(isolated_data_dir)
 
         archive = tmp_path / "backup.zip"
         result = DataExporter(data_dir=str(isolated_data_dir)).export_all(str(archive))
@@ -329,7 +328,7 @@ class TestBackupExportImport:
         imp = DataImporter(data_dir=str(isolated_data_dir))
         assert imp._import_config({"agent": {"language": "zh"}}, merge=True) == 1
         assert imp._import_config({"agent": {"name": "Restored"}}, merge=False) == 1
-        from core.config_store import get_config_store, close_config_store
+        from core.config_store import close_config_store, get_config_store
         db = database_path(str(isolated_data_dir))
         snap = get_config_store(db).snapshot()
         close_config_store(db)

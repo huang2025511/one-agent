@@ -8,7 +8,6 @@
 """
 
 import json
-import os
 import stat
 import time
 from pathlib import Path
@@ -16,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from core.config_store import (
-    ConfigStore,
     close_config_store,
     config_db_path,
     get_config_store,
@@ -178,7 +176,7 @@ class TestApprovalPersistence:
     def test_memory_only_mode_when_db_fails(self, tmp_path):
         """DB 路径非法时降级纯内存，功能不受影响。"""
         from core.approval import ApprovalManager
-        m = ApprovalManager(db_path=str(tmp_path / "no" / "perm" / "x" / "approvals.db"))
+        ApprovalManager(db_path=str(tmp_path / "no" / "perm" / "x" / "approvals.db"))
         # create_sqlite_connection 会自动建目录……用文件当目录的方式制造失败：
         blocker = tmp_path / "blocker"
         blocker.write_text("i am a file", encoding="utf-8")

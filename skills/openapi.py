@@ -9,7 +9,6 @@ Provides:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -122,7 +121,6 @@ class OpenAPISkill:
             body: request body (for POST/PUT)
             headers: additional headers
         """
-        spec = self._specs.get(name)
         base_url = self._base_urls.get(name, "")
         auth = self._auth.get(name, {})
 

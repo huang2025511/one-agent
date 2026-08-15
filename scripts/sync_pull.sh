@@ -13,10 +13,11 @@ echo "=========================================="
 echo " 从 Gitee 拉取最新代码 (Gitee = 主仓库)"
 echo "=========================================="
 
-# 1. 检查 gitee remote 是否存在
-if ! git remote get-url gitee &>/dev/null; then
-    echo "[!] 未找到 gitee 远程仓库，正在添加..."
-    git remote add gitee https://gitee.com/huang20260511/one-agent.git
+# 1. 检查 origin (Gitee) remote 是否存在
+# v2.1.0 修复：与 sync_push.sh 一致，remote 实际叫 origin (Gitee) 和 github (GitHub)
+if ! git remote get-url origin &>/dev/null; then
+    echo "[!] 未找到 origin (Gitee) 远程仓库，正在添加..."
+    git remote add origin https://gitee.com/huang20260511/one-agent.git
 fi
 
 # 2. 检查当前是否在 main 分支
@@ -37,11 +38,11 @@ fi
 
 # 4. 拉取 Gitee 最新代码
 echo "[*] 正在拉取 Gitee main..."
-git fetch gitee main
+git fetch origin main
 
 # 5. 合并 Gitee 代码（Gitee 为主，冲突时以 Gitee 为准）
 LOCAL_BEFORE=$(git rev-parse HEAD)
-GITEE_HEAD=$(git rev-parse gitee/main)
+GITEE_HEAD=$(git rev-parse origin/main)
 
 if [ "$LOCAL_BEFORE" = "$GITEE_HEAD" ]; then
     echo "[✓] 本地已是最新，无需更新"
@@ -49,10 +50,10 @@ else
     echo "[*] 合并 Gitee 最新提交..."
     if git merge-base --is-ancestor "$LOCAL_BEFORE" "$GITEE_HEAD"; then
         # 快进合并
-        git merge --ff-only gitee/main
+        git merge --ff-only origin/main
     else
         # 有分叉，合并时冲突以 Gitee 为准 (theirs strategy)
-        git merge gitee/main --no-edit -X theirs || {
+        git merge origin/main --no-edit -X theirs || {
             echo "[!] 仍有冲突，使用 Gitee 版本解决..."
             git checkout --theirs .
             git add .

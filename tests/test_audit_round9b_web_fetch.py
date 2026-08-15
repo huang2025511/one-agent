@@ -9,11 +9,7 @@
 """
 
 import asyncio
-import re
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 
 def _get_web_fetch_handler():

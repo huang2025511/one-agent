@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, field_validator
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 from core.context import AgentContext  # noqa: E402
 from core.plugin import PluginManager  # noqa: E402
@@ -126,7 +126,7 @@ class MemoryConfig(BaseModel):
 class AgentConfig(BaseModel):
     name: str = "One-Agent"
     description: str = "Token-efficient self-evolving microkernel AI agent"
-    version: str = "2.0.0"
+    version: str = "2.2.0"
     data_dir: str = "./data"
     log_level: str = Field(default="INFO")
     timezone: str = Field(default="UTC")
@@ -255,7 +255,10 @@ def load_config(path: str) -> FullConfig:
     # path 位于项目 config/ 之外的 yaml（单测自建文件）不叠加：完全接管。
     try:
         from core.config_store import (
-            config_db_path, get_config_store, overlay_enabled, resolve_data_dir,
+            config_db_path,
+            get_config_store,
+            overlay_enabled,
+            resolve_data_dir,
         )
         if overlay_enabled(path):
             _dd = resolve_data_dir(raw)
@@ -352,6 +355,9 @@ class OneAgentApp:
     def __init__(self, config_path: str) -> None:
         from api import RESTAPIGateway
         from core.coordinator import Coordinator
+
+        # v2.2.0：统一库每日自动备份（订阅 scheduler 的 db_backup cron）
+        from core.db_maintenance import DBMaintenancePlugin
         from core.events import EventBus
         from executors import BrowserExecutor, DockerExecutor, PythonExecutor, ShellExecutor
 
@@ -367,6 +373,7 @@ class OneAgentApp:
         from router import SmartRouter
         from scheduler import SchedulerPlugin
         from skills import SkillManager
+        self.db_maintenance = DBMaintenancePlugin()
         self.cli = CLIGateway()
 
         gateways_to_load = [
@@ -454,7 +461,7 @@ class OneAgentApp:
             self.cli, self.telegram, self.wecom, self.dingtalk, self.feishu,
             self.discord, self.slack, self.web, self.wechat_personal,
             self.multimodal, self.rest_api, self.monitor, self.marketplace,
-            self._alert_manager,
+            self._alert_manager, self.db_maintenance,
         ):
             if p is not None:
                 self._pm.register(p)
@@ -474,14 +481,14 @@ class OneAgentApp:
         # 在单线程的 start() 阶段同步预热, 后续 get_xxx() 只读返回, 无竞态。
         try:
             from core.alerting import get_alert_manager
+            from core.chart_gen import get_chart_generator
             from core.circuit_breaker import get_circuit_manager
-            from core.rate_limiter import get_rate_limiter
+            from core.conv_branch import get_branch_manager
             from core.failure_recovery import get_failure_recovery
+            from core.rate_limiter import get_rate_limiter
+            from core.streaming import StreamingBuffer
             from core.tool_cache import get_tool_cache
             from core.webhook_trigger import get_webhook_trigger
-            from core.chart_gen import get_chart_generator
-            from core.conv_branch import get_branch_manager
-            from core.streaming import StreamingBuffer
 
             mgr = get_alert_manager()
             mgr.setup_default_rules()
@@ -1136,6 +1143,10 @@ def cli():
       one-agent version    — 显示版本号
       one-agent config     — 检查配置文件路径和状态
       one-agent serve      — 启动后台服务（无 CLI 交互）
+      one-agent export     — 导出全部数据（zip 含统一库，可异地部署）
+      one-agent import     — 从备份导入（--restore-db 整库还原）
+      one-agent migrate    — 旧版分散库迁入统一库（--dry-run 预览）
+      one-agent db         — 统一库维护（stats/check/vacuum/backup）
     """
     args = sys.argv[1:]
 
@@ -1162,11 +1173,163 @@ def cli():
         except KeyboardInterrupt:
             print()
             sys.exit(0)
+    elif cmd == "export":
+        _cmd_export(rest)
+    elif cmd == "import":
+        _cmd_import(rest)
+    elif cmd == "migrate":
+        _cmd_migrate(rest)
+    elif cmd == "db":
+        _cmd_db(rest)
     elif cmd in ("-h", "--help", "help"):
         _cmd_help()
     else:
         print(f"Unknown command: {cmd}")
         print("Run 'one-agent help' for usage.")
+        sys.exit(1)
+
+
+def _cmd_export(args):
+    """导出全部数据：one-agent export <path.zip>"""
+    if not args:
+        print("用法: one-agent export <输出路径.zip>")
+        sys.exit(1)
+    from core.backup_export import DataExporter
+    from core.hub import resolve_data_dir
+
+    data_dir = resolve_data_dir()
+    print(f"  导出数据目录: {data_dir}")
+    result = DataExporter(data_dir=data_dir).export_all(args[0])
+    if result.success:
+        print(f"  ✓ 导出成功: {result.file_path} "
+              f"({result.size_bytes} bytes, {result.duration_seconds:.2f}s)")
+        for key, val in result.items_exported.items():
+            print(f"    - {key}: {val}")
+        print("  提示: 该 zip 含 one_agent.db，可直接用于新环境部署"
+              "（one-agent import <zip> --restore-db）")
+    else:
+        print(f"  ✗ 导出失败: {result.error}")
+        sys.exit(1)
+
+
+def _cmd_import(args):
+    """从备份导入：one-agent import <backup.zip> [--restore-db]"""
+    if not args:
+        print("用法: one-agent import <备份.zip> [--restore-db]")
+        print("  --restore-db  用归档内 one_agent.db 整库还原（新环境部署）")
+        sys.exit(1)
+    path = args[0]
+    restore_db = "--restore-db" in args[1:]
+    from core.backup_export import DataImporter
+    from core.hub import resolve_data_dir
+
+    data_dir = resolve_data_dir()
+    print(f"  目标数据目录: {data_dir}")
+    if restore_db:
+        print("  模式: 整库还原（现有库将另存为 one_agent.db.pre_import）")
+    result = DataImporter(data_dir=data_dir).import_from_file(
+        path, merge=True, restore_db=restore_db)
+    if result.success:
+        print(f"  ✓ 导入成功 ({result.duration_seconds:.2f}s)")
+        for key, val in result.items_imported.items():
+            print(f"    - {key}: {val}")
+    else:
+        print(f"  ✗ 导入失败: {result.error}")
+        sys.exit(1)
+
+
+def _cmd_migrate(args):
+    """旧库迁移：one-agent migrate [--dry-run]"""
+    dry_run = "--dry-run" in args
+    from core.hub import migrate_legacy, resolve_data_dir
+
+    data_dir = resolve_data_dir()
+    print(f"  数据目录: {data_dir}")
+    if dry_run:
+        print("  预览模式（不写入、不改名）:\n")
+    else:
+        print("  执行迁移（幂等，可重复运行）:\n")
+    report = migrate_legacy(data_dir, dry_run=dry_run)
+    if not report:
+        print("  没有待迁移的旧版分散库 ✓")
+        return
+    for line in report:
+        print(f"    - {line}")
+    if dry_run:
+        print("\n  运行 'one-agent migrate' 执行实际迁移")
+
+
+def _cmd_db(args):
+    """统一库维护：one-agent db <stats|check|vacuum|backup|backups>"""
+    from core.hub import resolve_data_dir
+
+    sub = args[0] if args else "stats"
+    data_dir = resolve_data_dir()
+
+    if sub == "stats":
+        from core.db_maintenance import db_stats
+        info = db_stats(data_dir)
+        print(f"  统一库: {info.get('path')}")
+        if not info.get("exists"):
+            print("  ✗ 数据库不存在（首次启动时创建）")
+            return
+        size = info.get("size_bytes", 0)
+        print(f"  大小: {size} bytes ({size / 1024:.1f} KiB)  "
+              f"WAL: {info.get('wal_bytes', 0)}  权限: {info.get('mode')}")
+        print(f"  表数量: {info.get('table_count')}  "
+              f"待迁移旧库: {len(info.get('legacy_pending', []))}")
+        tables = info.get("tables", {})
+        for name in sorted(tables):
+            if tables[name] > 0:
+                print(f"    {name}: {tables[name]}")
+        backups = info.get("backups") or {}
+        if backups.get("count"):
+            latest = backups["latest"]
+            print(f"  自动备份: {backups['count']} 份，最新 {latest['file']}")
+        else:
+            print("  自动备份: 无（每天 04:30 自动执行，见 scheduler 配置）")
+    elif sub == "check":
+        from core.db_maintenance import integrity_check
+        result = integrity_check(data_dir)
+        if result.get("ok"):
+            print("  ✓ 数据库完整性检查通过 (quick_check)")
+            wal = result.get("wal_bytes", 0)
+            if wal > 10 * 1024 * 1024:
+                print(f"  ⚠ WAL 达 {wal} bytes，建议 'one-agent db vacuum'")
+        else:
+            print(f"  ✗ 完整性问题: {result.get('error') or result.get('problems')}")
+            sys.exit(1)
+    elif sub == "vacuum":
+        from core.db_maintenance import vacuum
+        print("  执行 checkpoint + VACUUM（需独占访问，建议停服执行）...")
+        result = vacuum(data_dir)
+        if result.get("ok"):
+            print(f"  ✓ {result['before_bytes']} → {result['after_bytes']} bytes "
+                  f"(回收 {result['reclaimed_bytes']})")
+        else:
+            print(f"  ✗ VACUUM 失败: {result.get('error')}")
+            sys.exit(1)
+    elif sub == "backup":
+        from core.db_maintenance import run_auto_backup
+        result = run_auto_backup(data_dir)
+        if result.get("ok"):
+            enc = "已加密" if result.get("encrypted") else "明文"
+            print(f"  ✓ 备份成功: {result['path']} "
+                  f"({result['size_bytes']} bytes, {enc})")
+        else:
+            print(f"  ✗ 备份失败: {result.get('error')}")
+            sys.exit(1)
+    elif sub == "backups":
+        from core.db_maintenance import list_backups
+        backups = list_backups(data_dir)
+        if not backups:
+            print("  暂无自动备份")
+            return
+        for b in backups:
+            print(f"  {b['file']}  {b['size_bytes']} bytes")
+    else:
+        print(f"未知子命令: {sub}")
+        print("用法: one-agent db <stats|check|vacuum|backup|backups>")
         sys.exit(1)
 
 
@@ -1215,7 +1378,7 @@ def _cmd_setup():
     else:
         env_var, provider_key, name, models = info
         if env_var == "OLLAMA_HOST":
-            val = _ask(f"  Ollama 地址 [默认 http://localhost:11434]: ", "http://localhost:11434")
+            val = _ask("  Ollama 地址 [默认 http://localhost:11434]: ", "http://localhost:11434")
         else:
             val = _ask(f"  请输入 {name} API Key: ", "").strip()
             if not val:
@@ -1360,12 +1523,38 @@ def _cmd_doctor():
     if found == 0:
         print("\n  ⚠  未配置任何 API Key，运行 'one-agent setup' 设置")
 
-    # Data dir
-    data_dir = ROOT / "data"
+    # Data dir（v2.2.0：统一走 resolve_data_dir，与运行时一致）
+    from core.hub import resolve_data_dir
+    data_dir = Path(resolve_data_dir())
     print(f"\n  {'✓' if data_dir.exists() else '○'}  数据目录: {data_dir}")
 
+    # Unified database（v2.2.0：doctor 补齐统一库体检）
+    db_file = data_dir / "one_agent.db"
+    if db_file.exists():
+        from core.db_maintenance import db_stats, integrity_check
+        check = integrity_check(str(data_dir))
+        if check.get("ok"):
+            print(f"  ✓  统一数据库: {db_file.name} "
+                  f"({db_file.stat().st_size} bytes, quick_check 通过)")
+        else:
+            print(f"  ✗  统一数据库完整性异常: "
+                  f"{check.get('error') or check.get('problems')}")
+        stats = db_stats(str(data_dir))
+        pending = stats.get("legacy_pending") or []
+        if pending:
+            print(f"  ⚠  待迁移旧库 {len(pending)} 个"
+                  f"（运行 'one-agent migrate --dry-run' 预览）")
+        backups = (stats.get("backups") or {})
+        if backups.get("count"):
+            print(f"  ✓  自动备份: {backups['count']} 份，"
+                  f"最新 {backups['latest']['file']}")
+        else:
+            print("  ○  自动备份: 尚无（服务启动后每天 04:30 自动执行）")
+    else:
+        print("  ○  统一数据库: 尚未创建（首次启动时自动建立）")
+
     print()
-    print("  运行 'one-agent setup' 修改配置")
+    print("  运行 'one-agent setup' 修改配置；'one-agent db stats' 查看数据库")
     print()
 
 
@@ -1380,6 +1569,15 @@ def _cmd_help():
     print("    one-agent serve        启动后台服务（无 CLI）")
     print("    one-agent version      显示版本号")
     print("    one-agent doctor       健康检查")
+    print()
+    print("  数据管理:")
+    print("    one-agent export <zip>       导出全部数据（含统一库）")
+    print("    one-agent import <zip>       从备份导入（--restore-db 整库还原）")
+    print("    one-agent migrate [--dry-run] 旧版分散库迁入统一库")
+    print("    one-agent db stats          统一库统计（表/大小/备份）")
+    print("    one-agent db check          完整性检查（quick_check）")
+    print("    one-agent db vacuum         回收空间（checkpoint+VACUUM）")
+    print("    one-agent db backup         立即备份一次")
     print("    one-agent help         显示此帮助")
     print()
     print("  配置文件:")

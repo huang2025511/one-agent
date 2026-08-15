@@ -116,7 +116,6 @@ def parse_xml_tool_tags(text: str) -> List[Dict[str, Any]]:
     返回 [] 表示没有可解析的工具标签。
     """
     import re as _re
-    import json as _json
 
     if not text or "<" not in text:
         return []
@@ -190,9 +189,9 @@ def parse_markdown_tool_calls(text: str) -> List[Dict[str, Any]]:
 
     返回 [] 表示没有可解析的工具调用。
     """
-    import re as _re
-    import json as _json
     import codecs as _codecs
+    import json as _json
+    import re as _re
 
     if not text:
         return []

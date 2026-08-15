@@ -1,7 +1,8 @@
 """Tests for advanced intelligent features."""
 
-import pytest
 import time
+
+import pytest
 
 
 class TestSemanticCache:
@@ -134,7 +135,7 @@ class TestDialogSummary:
         # But after 7 turns, the last trigger was at turn 5, not 7
         # Let's test at exactly the interval
         summarizer2 = DialogSummarizer(summary_interval=3)
-        for i in range(3):
+        for _ in range(3):
             summarizer2.increment_turn("session-2")
 
         assert summarizer2.should_summarize("session-2") is True  # 3rd turn = interval
@@ -353,6 +354,7 @@ class TestFailureRecovery:
     def test_retry_success(self):
         """Test retry with eventual success."""
         import asyncio
+
         from core.failure_recovery import FailureRecovery
 
         recovery = FailureRecovery(max_retries=2, base_delay=0.01)
@@ -379,6 +381,7 @@ class TestFailureRecovery:
     def test_retry_exhausted(self):
         """Test that retries are exhausted after max attempts."""
         import asyncio
+
         from core.failure_recovery import FailureRecovery
 
         recovery = FailureRecovery(max_retries=1, base_delay=0.01)
@@ -402,7 +405,7 @@ class TestFailureRecovery:
         recovery = FailureRecovery()
 
         # Record 5 failures to trip the breaker
-        for i in range(5):
+        for _i in range(5):
             recovery._record_failure("test-service", Exception("error"))
 
         assert recovery.is_circuit_open("test-service") is True
@@ -446,7 +449,7 @@ class TestFailureRecovery:
         recovery = FailureRecovery()
 
         # Trip gpt-3.5 circuit
-        for i in range(10):
+        for _i in range(10):
             recovery._record_failure("model:gpt-3.5", Exception("rate limit"))
 
         available = ["gpt-4", "gpt-3.5", "claude-3"]

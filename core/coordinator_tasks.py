@@ -5,10 +5,9 @@ and schedules follow-up checks. Extracted as Phase 4 of the
 Coordinator refactoring (P0-1).
 """
 from __future__ import annotations
-import logging
-from typing import Any
 
-from .context import TurnContext
+import logging
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +102,7 @@ async def update_task_state(coord, turn):
                             steps = [str(s).strip()[:200] for s in raw_steps if str(s).strip()][:8]
                     except Exception:
                         # 回退: 行解析
-                        lines = [l.strip() for l in text.split("\n") if l.strip()]
+                        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
                         if lines:
                             task_name = lines[0][:100]
                             steps = lines[1:10] if len(lines) > 1 else []

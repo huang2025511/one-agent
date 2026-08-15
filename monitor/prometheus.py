@@ -25,7 +25,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class Counter:
     def collect(self) -> List[MetricValue]:
         """Collect all values."""
         return [
-            MetricValue(labels=dict(zip(self.label_names, key)), value=val)
+            MetricValue(labels=dict(zip(self.label_names, key, strict=False)), value=val)
             for key, val in self._values.items()
         ]
 
@@ -93,7 +93,7 @@ class Gauge:
 
     def collect(self) -> List[MetricValue]:
         return [
-            MetricValue(labels=dict(zip(self.label_names, key)), value=val)
+            MetricValue(labels=dict(zip(self.label_names, key, strict=False)), value=val)
             for key, val in self._values.items()
         ]
 
@@ -140,7 +140,7 @@ class Histogram:
         """Collect histogram buckets + sum + count."""
         result = []
         for key, buckets in self._cumsum.items():
-            labels_dict = dict(zip(self.label_names, key))
+            labels_dict = dict(zip(self.label_names, key, strict=False))
 
             # Bucket values
             for bucket in self.buckets:
@@ -201,7 +201,7 @@ class Summary:
     def collect(self) -> List[MetricValue]:
         result = []
         for key, values in self._values.items():
-            labels_dict = dict(zip(self.label_names, key))
+            labels_dict = dict(zip(self.label_names, key, strict=False))
 
             if values:
                 sorted_values = sorted(values)

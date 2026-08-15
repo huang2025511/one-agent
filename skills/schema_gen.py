@@ -40,7 +40,7 @@
 
 import inspect
 import re
-from typing import Any, Callable, Dict, List, get_type_hints
+from typing import Any, Callable, Dict, get_type_hints
 
 # Python 类型到 JSON Schema 类型的映射
 TYPE_MAP = {

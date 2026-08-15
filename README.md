@@ -165,7 +165,7 @@ API 兼容性自动降级：`tools → no-tools → minimal-prompt`，当模型�
 ```yaml
 agent:
   name: One-Agent
-  version: 2.0.0
+  version: 2.2.0
   data_dir: ./data
   log_level: INFO          # DEBUG | INFO | WARNING | ERROR
   timezone: UTC
@@ -394,8 +394,8 @@ one_agent/
 ├── api/
 │   └── __init__.py           FastAPI REST 网关（20+ 端点）
 ├── gateways/
-│   ├── __init__.py           CLI / Web UI / Telegram / WeCom / DingTalk / Feishu / Discord / Slack
-│   └── index.html            Web UI 单页应用
+│   └── __init__.py           CLI / Web API / Telegram / WeCom / DingTalk / Feishu / Discord / Slack
+│                            （v2.1.0：index.html 单页 UI 已移除，REST API 才是网关标准入口）
 ├── scheduler/
 │   └── __init__.py           APScheduler 定时任务
 ├── monitor/

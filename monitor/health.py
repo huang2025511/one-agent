@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from core.db import create_sqlite_connection
 from core.hub import database_path
@@ -235,7 +235,6 @@ def _check_llm_provider() -> ComponentCheck:
 def _check_config() -> ComponentCheck:
     """Check if configuration is loaded."""
     try:
-        import os
         from pathlib import Path
 
         config_path = Path("config/default_config.yaml")

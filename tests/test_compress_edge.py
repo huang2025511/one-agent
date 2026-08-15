@@ -1,9 +1,7 @@
 """验证 _compress_context 边界情况：短消息列表不应导致 system 提示词重复。"""
-import asyncio
 import os
 import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 

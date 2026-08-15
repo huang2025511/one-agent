@@ -10,10 +10,10 @@ Provides:
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import re
 import threading
-import contextvars
 from typing import Dict
 
 logger = logging.getLogger(__name__)

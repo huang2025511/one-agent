@@ -21,6 +21,25 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
+# 可选运行库加密（SQLCipher）：
+#   显式设置 ONE_AGENT_DB_CIPHER=1 且安装 pysqlcipher3 时，所有经工厂
+#   创建的连接使用 PRAGMA key 透明加密。默认关闭 —— 既有明文库在设置
+#   密钥后会无法打开，必须由用户显式选择开启（先备份再加密迁移）。
+_CIPHER_MODULE: Optional[str] = None
+if os.environ.get("ONE_AGENT_DB_CIPHER", "").strip() in ("1", "true", "yes"):
+    try:
+        import pysqlcipher3 as _pysqlcipher  # type: ignore
+
+        _CIPHER_MODULE = "pysqlcipher3"
+        _sqlite_connect = _pysqlcipher.sqlite3.connect  # type: ignore[attr-defined]
+    except ImportError:
+        raise RuntimeError(
+            "ONE_AGENT_DB_CIPHER=1 但未安装 pysqlcipher3。"
+            "运行 pip install pysqlcipher3 或取消该环境变量。"
+        ) from None
+else:
+    _sqlite_connect = sqlite3.connect
+
 
 def create_sqlite_connection(
     db_path: str,
@@ -55,8 +74,14 @@ def create_sqlite_connection(
     if str(parent) and not parent.exists():
         os.makedirs(str(parent), exist_ok=True)
 
-    conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=isolation_level)
+    conn = _sqlite_connect(
+        db_path, check_same_thread=False, isolation_level=isolation_level)
     conn.row_factory = sqlite3.Row
+    cipher_key = os.environ.get("ONE_AGENT_DB_KEY")
+    if _CIPHER_MODULE and cipher_key:
+        # SQLCipher 要求 key 是首个 PRAGMA；密钥错误在此即抛出
+        conn.execute(f"PRAGMA key=\"{cipher_key}\"")
+        conn.execute("PRAGMA cipher_page_size=4096")
     if apply_wal:
         try:
             conn.execute("PRAGMA journal_mode=WAL")

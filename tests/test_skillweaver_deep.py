@@ -17,9 +17,8 @@ import os
 import sys
 import time
 import traceback
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock
 
 # 使用 HF 镜像（沙箱无法直连 huggingface.co）
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
@@ -373,8 +372,6 @@ async def check_4_router_caching(result: TestResult):
     print(f"\n--- {name} ---")
     try:
         from core.coordinator import Coordinator
-        from core.context import AgentContext
-        from core.events import EventBus
 
         llm = MockLLMProvider()
         skills = make_test_skills()
@@ -425,8 +422,8 @@ async def check_5_prepare_tools_config_path(result: TestResult):
     name = "check_5_prepare_tools_config_path"
     print(f"\n--- {name} ---")
     try:
-        from core.coordinator import Coordinator
         from core.context import TurnContext
+        from core.coordinator import Coordinator
 
         llm = MockLLMProvider()
         skills = make_test_skills()
@@ -488,8 +485,8 @@ async def check_6_plan_tool_chain_calls_route(result: TestResult):
     name = "check_6_plan_tool_chain_calls_route"
     print(f"\n--- {name} ---")
     try:
-        from core.coordinator import Coordinator
         from core.context import TurnContext
+        from core.coordinator import Coordinator
 
         llm = MockLLMProvider()
         skills = make_test_skills()
@@ -628,7 +625,7 @@ async def check_8_execute_workflow_parallel(result: TestResult):
     name = "check_8_execute_workflow_parallel"
     print(f"\n--- {name} ---")
     try:
-        from core.skillweaver import SkillWeaverRouter, DAGWorkflow, SkillNode
+        from core.skillweaver import DAGWorkflow, SkillNode, SkillWeaverRouter
         from skills import Skill
 
         # 创建可追踪执行顺序的 skills
@@ -692,7 +689,7 @@ async def check_8_execute_workflow_parallel(result: TestResult):
 
         t0 = time.time()
         exec_result = await router.execute_workflow(workflow, on_progress=on_progress)
-        elapsed = time.time() - t0
+        time.time() - t0
 
         # 验证所有节点执行成功
         if exec_result.get("success"):

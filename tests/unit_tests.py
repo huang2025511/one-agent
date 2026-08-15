@@ -173,8 +173,8 @@ def test_router_self_evolution():
 
 def test_router_token_aware_upgrade():
     """长上下文触发 token-aware 升 tier。"""
-    from router import SmartRouter
     from core.context import TurnContext
+    from router import SmartRouter
 
     router = SmartRouter()
     router._cfg = {
@@ -207,6 +207,7 @@ def test_router_token_aware_upgrade():
     router.publish = MM()
 
     import asyncio
+
     from core.events import Event
     turn = TurnContext(session_id="test", input_text="hi")
     asyncio.run(router._on_user_message(Event("user_message", {"turn": turn})))
@@ -222,8 +223,8 @@ def test_router_token_aware_upgrade():
 
 def test_router_token_aware_disabled():
     """token_aware_routing.enabled=false 时不升 tier。"""
-    from router import SmartRouter
     from core.context import TurnContext
+    from router import SmartRouter
 
     router = SmartRouter()
     router._cfg = {
@@ -249,6 +250,7 @@ def test_router_token_aware_disabled():
     router.publish = MagicMock()
 
     import asyncio
+
     from core.events import Event
     turn = TurnContext(session_id="test", input_text="hi")
     asyncio.run(router._on_user_message(Event("user_message", {"turn": turn})))
@@ -2485,10 +2487,6 @@ if __name__ == "__main__":
     test_self_improver_record()
     test_self_improver_patterns()
     test_self_improver_apply()
-
-    print("\n─ sub-agent delegation ─")
-    test_sub_agent_detect_complex()
-    test_sub_agent_detect_simple()
 
     print("\n─ knowledge graph ─")
     test_kg_add_entity()

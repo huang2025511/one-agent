@@ -16,8 +16,6 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 
 # ============================================================
 # 辅助：提取 handler
@@ -424,10 +422,11 @@ class TestResetDeepResearcher:
 
     def test_reset_clears_singleton(self):
         """reset 后单例应为 None，下次 get 创建新实例。"""
-        from core.deep_research import (
-            get_deep_researcher, reset_deep_researcher, _deep_researcher,
-        )
         import core.deep_research as dr_module
+        from core.deep_research import (
+            get_deep_researcher,
+            reset_deep_researcher,
+        )
 
         # 先创建一个实例
         mock_llm = MagicMock()

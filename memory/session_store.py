@@ -1,6 +1,5 @@
 """Session persistence — store/retrieve chat sessions in SQLite."""
 
-import asyncio
 import json
 import logging
 import sqlite3

@@ -15,12 +15,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 from core.db import create_sqlite_connection
@@ -363,7 +364,7 @@ class AsyncTaskScheduler:
             except asyncio.CancelledError:
                 pass
         # Cancel running tasks
-        for task_id, task_handle in list(self._running_tasks.items()):
+        for _task_id, task_handle in list(self._running_tasks.items()):
             task_handle.cancel()
         # Close database connection
         self._store.close()

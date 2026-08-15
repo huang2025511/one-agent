@@ -13,7 +13,8 @@ structured reasoning patterns for expert-level tasks.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 

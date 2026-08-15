@@ -19,15 +19,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sqlite3
 import tarfile
-import tempfile
 import time
 import zipfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, List
 
 from core.db import create_sqlite_connection
 
@@ -228,7 +226,6 @@ class DataExporter:
         items_exported: Dict[str, int],
     ) -> ExportResult:
         """Export to tar.gz format."""
-        import gzip
 
         with tarfile.open(output_path, "w:gz") as tf:
             # v2.1.0：附上统一库原文件（checkpoint 后拷入）
@@ -431,15 +428,25 @@ class DataImporter:
         self,
         file_path: str,
         merge: bool = True,
+        restore_db: bool = False,
     ) -> ImportResult:
-        """Import data from a backup file."""
+        """Import data from a backup file.
+
+        Args:
+            file_path: backup archive (.zip / .json).
+            merge: json 数据增量合并（False = 配置整体替换）。
+            restore_db: 归档含 one_agent.db(.enc) 时，直接还原整个统一库
+                文件（新环境部署路径）。执行前会释放进程内 Hub/ConfigStore
+                单例连接并 checkpoint 现库，现有库另存为
+                ``one_agent.db.pre_import`` 兜底。
+        """
         start_time = time.time()
         items_imported: Dict[str, int] = {}
 
         try:
             path = Path(file_path)
             if path.suffix == ".zip":
-                items_imported = self._import_zip(file_path, merge)
+                items_imported = self._import_zip(file_path, merge, restore_db)
             elif path.suffix == ".json":
                 items_imported = self._import_json(file_path, merge)
             else:
@@ -460,12 +467,18 @@ class DataImporter:
                 error=str(exc),
             )
 
-    def _import_zip(self, file_path: str, merge: bool) -> Dict[str, int]:
+    def _import_zip(self, file_path: str, merge: bool, restore_db: bool = False) -> Dict[str, int]:
         """Import from ZIP archive."""
         items_imported: Dict[str, int] = {}
 
         with zipfile.ZipFile(file_path, "r") as zf:
-            for name in zf.namelist():
+            names = zf.namelist()
+
+            # v2.2.0：整库还原（新环境部署）。加密条目需 ONE_AGENT_DB_KEY。
+            if restore_db and ("one_agent.db" in names or "one_agent.db.enc" in names):
+                items_imported["database_restored"] = self._restore_database(zf, names)
+
+            for name in names:
                 if name.endswith(".json"):
                     content = zf.read(name).decode("utf-8")
                     data = json.loads(content)
@@ -480,6 +493,55 @@ class DataImporter:
                         items_imported["config"] = self._import_config(data, merge)
 
         return items_imported
+
+    def _restore_database(self, zf: zipfile.ZipFile, names: List[str]) -> int:
+        """把归档内的统一库文件原子还原到 data_dir（含加密解包）。"""
+        enc_name = "one_agent.db.enc" in names
+        if enc_name:
+            from core.db_maintenance import decrypt_blob, get_db_passphrase
+
+            passphrase = get_db_passphrase()
+            if not passphrase:
+                raise ValueError(
+                    "备份已加密但未设置 ONE_AGENT_DB_KEY，无法还原统一库")
+            blob = decrypt_blob(zf.read("one_agent.db.enc"), passphrase)
+        else:
+            blob = zf.read("one_agent.db")
+
+        # 释放进程内单例连接（CLI 进程通常没有；防御 API 场景误调用）
+        try:
+            from core.hub import close_hub
+            close_hub(str(self._data_dir))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("close hub before restore failed: %s", exc)
+        try:
+            from core.config_store import close_config_store
+            close_config_store(str(self._db_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("close config store before restore failed: %s", exc)
+
+        # 现库 WAL 落盘后另存兜底，再原子替换
+        if self._db_path.exists():
+            try:
+                from core.hub import get_hub
+                get_hub(str(self._data_dir)).checkpoint()
+                close_hub(str(self._data_dir))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("pre-restore checkpoint failed: %s", exc)
+            backup = self._db_path.with_name(self._db_path.name + ".pre_import")
+            self._db_path.replace(backup)
+            logger.info("existing database kept aside: %s", backup)
+
+        tmp = self._db_path.with_name(self._db_path.name + ".restore_tmp")
+        tmp.write_bytes(blob)
+        for suffix in ("-wal", "-shm"):
+            Path(str(self._db_path) + suffix).unlink(missing_ok=True)
+        tmp.replace(self._db_path)
+        try:
+            os.chmod(self._db_path, 0o600)
+        except OSError:
+            pass
+        return 1
 
     def _import_json(self, file_path: str, merge: bool) -> Dict[str, int]:
         """Import from JSON file."""
@@ -575,7 +637,7 @@ class DataImporter:
             # name → id 映射（含本次新导入的实体），供 relations 解析
             name_to_id = {}
             for entity in data["entities"]:
-                cur = conn.execute(
+                conn.execute(
                     "INSERT OR IGNORE INTO entities(name, type, created_at) "
                     "VALUES (?, ?, ?)",
                     (entity["name"], entity.get("entity_type", "unknown"),

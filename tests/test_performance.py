@@ -1,11 +1,8 @@
 """Performance benchmark tests for startup and response times."""
-import asyncio
 import gc
 import os
 import sys
 import time
-
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -51,7 +48,7 @@ class TestStartupPerformance:
 
         gc.collect()
         start = time.perf_counter()
-        coord = Coordinator()
+        Coordinator()
         elapsed = time.perf_counter() - start
 
         # Coordinator should instantiate in under 1 second
@@ -118,7 +115,7 @@ class TestMemoryPerformance:
         # Add messages to trigger summarization
         session_id = "perf_test_session"
         start = time.perf_counter()
-        for i in range(10):
+        for _i in range(10):
             summarizer.increment_turn(session_id)
         elapsed = time.perf_counter() - start
 

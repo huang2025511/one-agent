@@ -39,13 +39,11 @@ Configuration (config/default_config.yaml):
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import logging
 import os
 import shlex
-import signal
 import subprocess
 import time
 from typing import Any, Dict, Optional, Tuple

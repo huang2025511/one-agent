@@ -287,6 +287,6 @@ class DelegationManager:
             "subtask_results": all_results,
             "subtasks": subtasks,
             "parallel": True,
-            "total_tokens": sum(r.get("tokens_used", 0) for r in results if isinstance(r, dict)) + synth_tokens,
+            "total_tokens": sum(r.get("tokens_used", 0) for r in results if isinstance(r, dict)) + synth_tokens + critic_tokens,
             "duration_ms": (time.time() - start) * 1000,
         }

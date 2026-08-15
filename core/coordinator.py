@@ -28,93 +28,88 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
+from core.agent_mesh import get_agent_mesh
+from core.alerting import AlertSeverity, get_alert_manager
+from core.backoff import llm_backoff
+from core.batch import get_batch_processor
+from core.chart_gen import get_chart_generator
+
+# Round 7: production reliability
+from core.circuit_breaker import CircuitOpenError, get_circuit_manager
 from core.context import TurnContext
-from core.events import Event
-from core.plugin import Plugin
-from core.tool_result import ToolResult
-
-from .coordinator_helpers import (
-    XML_TOOL_NAMES,
-    sanitize_model_output,
-    parse_xml_tool_tags,
-    parse_markdown_tool_calls,
-    strip_executed_xml_tags,
-    needs_web_search,
-    needs_clarification_check as _needs_clarification_check_fn,
-    detect_output_format,
-    parse_planned_tools,
-    append_to_content,
-    prepend_to_content,
-)
-from .coordinator_features import (
-    handle_chart,
-    handle_branch,
-    handle_branch_switch,
-    handle_branch_list,
-    record_conversation_branch,
-    handle_email,
-    handle_calendar,
-    handle_db,
-    handle_mcp,
-    handle_openapi,
-    handle_agent_mesh,
-    handle_workflow,
-)
-from .coordinator_tasks import (
-    update_task_state,
-    append_task_completion_summary,
-    maybe_schedule_followup,
-    followup_check_handler,
-)
-from .coordinator_intelligence import (
-    record_self_improvement_async,
-    record_self_improvement,
-    record_intelligence,
-    extract_topics,
-    generate_suggestions,
-)
-from i18n import get_language
-from models import LLMProvider
-from router import DEFAULT_COMPLEX_THRESHOLD, DEFAULT_SIMPLE_THRESHOLD, DEFAULT_TRIVIAL_THRESHOLD
-from skills import SkillManager
-
-# Intelligent features
-from core.sentiment import get_sentiment_analyzer
-from core.suggestions import get_suggestion_engine
-from memory.user_profile import get_profile_store
-from core.metacognition import get_metacognition_engine
-from core.reasoning import get_step_reasoner
-from core.style_adapter import StyleAdapter
-from core.failure_recovery import get_failure_recovery
-from memory.dialog_summary import get_dialog_summarizer
-from core.safety import scan_input, scan_output
-from core.tool_cache import get_tool_cache
-from core.rate_limiter import get_rate_limiter
-from models.tiers import MODEL_COST
+from core.deep_research import get_deep_researcher
 
 # Round 6: new intelligent features
 from core.eval import get_eval_harness
-from core.batch import get_batch_processor
-from core.deep_research import get_deep_researcher
+from core.events import Event
+from core.failure_recovery import get_failure_recovery
+from core.metacognition import get_metacognition_engine
 from core.model_compare import get_model_comparer
-
-# Round 7: production reliability
-from core.circuit_breaker import get_circuit_manager, CircuitOpenError
-from core.backoff import llm_backoff
-from core.alerting import get_alert_manager, AlertSeverity
-
-# Round 7: tool ecosystem
-from skills.email import get_email_skill
-from skills.calendar import get_calendar_skill
-from skills.database import get_database_skill
-from skills.mcp_server import get_mcp_server
-from skills.openapi import get_openapi_skill
+from core.plugin import Plugin
 
 # Round 7: intelligence depth
 from core.rag_advanced import get_advanced_rag
-from core.agent_mesh import get_agent_mesh
-from core.workflow_engine import get_workflow_engine
-from core.chart_gen import get_chart_generator
+from core.rate_limiter import get_rate_limiter
+from core.reasoning import get_step_reasoner
+from core.safety import scan_input, scan_output
+
+# Intelligent features
+from core.sentiment import get_sentiment_analyzer
+from core.style_adapter import StyleAdapter
+from core.suggestions import get_suggestion_engine
+from core.tool_cache import get_tool_cache
+from core.tool_result import ToolResult
+from i18n import get_language
+from memory.dialog_summary import get_dialog_summarizer
+from memory.user_profile import get_profile_store
+from models import LLMProvider
+from models.tiers import MODEL_COST
+from router import DEFAULT_COMPLEX_THRESHOLD, DEFAULT_SIMPLE_THRESHOLD, DEFAULT_TRIVIAL_THRESHOLD
+from skills import SkillManager
+
+# Round 7: tool ecosystem
+from .coordinator_features import (
+    handle_agent_mesh,
+    handle_branch,
+    handle_branch_list,
+    handle_branch_switch,
+    handle_calendar,
+    handle_chart,
+    handle_db,
+    handle_email,
+    handle_mcp,
+    handle_openapi,
+    handle_workflow,
+    record_conversation_branch,
+)
+from .coordinator_helpers import (
+    XML_TOOL_NAMES,
+    append_to_content,
+    detect_output_format,
+    needs_web_search,
+    parse_markdown_tool_calls,
+    parse_planned_tools,
+    parse_xml_tool_tags,
+    prepend_to_content,
+    sanitize_model_output,
+    strip_executed_xml_tags,
+)
+from .coordinator_helpers import (
+    needs_clarification_check as _needs_clarification_check_fn,
+)
+from .coordinator_intelligence import (
+    extract_topics,
+    generate_suggestions,
+    record_intelligence,
+    record_self_improvement,
+    record_self_improvement_async,
+)
+from .coordinator_tasks import (
+    append_task_completion_summary,
+    followup_check_handler,
+    maybe_schedule_followup,
+    update_task_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2054,7 +2049,7 @@ class Coordinator(Plugin):
                 _sw_cfg.get("enabled", True)
                 and getattr(turn, "estimated_complexity", 0) >= 0.3  # Skip trivial tasks
             )
-            
+
             if use_skillweaver:
                 try:
                     from core.skillweaver import create_skillweaver_router
@@ -2077,7 +2072,7 @@ class Coordinator(Plugin):
                     chosen = self._skills.pick_relevant(turn.input_text, limit=6)
             else:
                 chosen = self._skills.pick_relevant(turn.input_text, limit=6)
-            
+
             # Core tools — always available regardless of keyword match
             for core_id in ("web_search", "web_fetch", "python_execute", "calc", "send_message"):
                 core = self._skills.get(core_id)
@@ -2495,7 +2490,8 @@ class Coordinator(Plugin):
         找到后把结果注入 messages，LLM 就不需要再搜索了。
         """
         import re
-        from models.resolver import KNOWN_PROVIDERS, lookup, _candidate_hosts
+
+        from models.resolver import lookup
 
         text = (turn.input_text or "").strip()
         if not text:
@@ -2716,13 +2712,13 @@ class Coordinator(Plugin):
 
     async def _tool_loop(self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]]) -> None:
         """Execute tool-call loop using ReAct pattern (Reason-Act-Observe).
-        
+
         ReAct 模式流程：
         1. 思考（Reason）: LLM 分析当前状态，决定下一步做什么
         2. 行动（Act）: 调用工具执行
         3. 观察（Observe）: 查看工具返回结果
         4. 再思考（Reason again）: 基于结果继续循环
-        
+
         对于复杂任务，每次迭代都包含思考步骤，让 Agent 真正"思考"后再行动。
         """
         if tools is None:
@@ -2776,7 +2772,7 @@ class Coordinator(Plugin):
                 )
                 messages.append({"role": "user", "content": thought_prompt, "_internal": True})
 
-                async def _do_thought_call():
+                async def _do_thought_call(*, dyn_temp=dyn_temp):
                     with _trace_span("llm.chat_completion") as _span:
                         if _span is not None:
                             _span.set_attribute("model", turn.model or "")
@@ -2808,7 +2804,7 @@ class Coordinator(Plugin):
                     logger.debug("ReAct thought step failed: %s", exc)
                     # 思考失败不阻断，继续执行
 
-            async def _do_llm_call():
+            async def _do_llm_call(*, i=i, dyn_temp=dyn_temp):
                 """Primary LLM call — streaming-first with non-streaming fallback.
 
                 Uses chat_completion_stream as the primary API to get both
@@ -3299,7 +3295,7 @@ class Coordinator(Plugin):
                 ]
                 if failed_for_recovery:
                     try:
-                        from core.failure_recovery import get_failure_recovery, FailureRecovery
+                        from core.failure_recovery import FailureRecovery, get_failure_recovery
                         fr = get_failure_recovery()
                         recovery_actions: list[str] = []
                         for tc, _fail_count in failed_for_recovery[:3]:
@@ -3422,11 +3418,13 @@ class Coordinator(Plugin):
             await self._handle_loop_exhaustion(messages, turn)
             await rate_limiter.acquire(provider)
             try:
+                # for-else 分支：循环已结束，lambda 立即执行；
+                # 默认参数在定义时绑定当前 dyn_temp，无延迟绑定风险。
                 resp = await circuit.acall(
                     lambda: llm_backoff_strategy.retry(
-                        lambda: self._llm.chat_completion(
+                        lambda dyn_temp=dyn_temp: self._llm.chat_completion(  # noqa: B023 — 定义时绑定
                             messages=messages, model=turn.model, max_tokens=self._max_tokens,
-                            temperature=dyn_temp,
+                            temperature=dyn_temp,  # noqa: B023
                         )
                     ),
                 )
@@ -3505,7 +3503,7 @@ class Coordinator(Plugin):
         """生成 ReAct 思考提示，引导 LLM 在每步行动前先思考。"""
         zh = self._is_zh()
         tool_names = [t.get("function", {}).get("name", "") for t in tools]
-        
+
         failed_info = ""
         if failed_skills:
             failed_list = [f"{name} (失败{cnt}次)" for name, cnt in failed_skills.items()]
@@ -3513,7 +3511,7 @@ class Coordinator(Plugin):
                 failed_info = f"\n已失败的工具：{', '.join(failed_list)}"
             else:
                 failed_info = f"\nFailed tools: {', '.join(failed_list)}"
-        
+
         if zh:
             prompt = (
                 f"[思考步骤] 这是第 {iteration + 1} 轮迭代。请分析当前情况：\n"
@@ -3534,7 +3532,7 @@ class Coordinator(Plugin):
                 f"5. Risk assessment: What problems might we encounter if calling tools?\n\n"
                 f"Please answer concisely, just state your thinking."
             )
-        
+
         return prompt
 
     # ------------------------------------------------------------ 阶段二：打破回合制
@@ -3571,15 +3569,15 @@ class Coordinator(Plugin):
             "need more analysis", "need to think further", "further analysis",
             "continue reasoning", "not finished yet", "need more thought",
         ]
-        
+
         if zh:
             has_continue_signal = any(pattern in final_text for pattern in continue_signal_patterns_zh)
         else:
             has_continue_signal = any(pattern.lower() in final_text.lower() for pattern in continue_signal_patterns_en)
-        
+
         if not has_continue_signal:
             return False
-        
+
         # 防止误判：如果回复很长且包含详细的回答内容，continue 信号
         # 可能只是正常回答的一部分（如"建议你继续思考这个问题"）
         # 只有当回复较短（< 300 字符）或信号出现在开头/结尾时才认为是真正的信号
@@ -3598,15 +3596,15 @@ class Coordinator(Plugin):
                                   any(pattern.lower() in tail_lower for pattern in continue_signal_patterns_en)
             if not signal_in_short:
                 return False
-        
+
         # 触发继续思考
         if iteration >= self._max_tool_iterations - 1:
             return False  # 已经是最后一轮了
-        
+
         logger.debug("continue_thinking: detected signal, triggering additional thought round")
         turn.meta["continue_thinking_triggered"] = True
         turn.meta["continue_thinking_count"] = continue_count + 1
-        
+
         # 注入继续思考提示
         if zh:
             continue_prompt = (
@@ -3621,10 +3619,10 @@ class Coordinator(Plugin):
                 "perform internal reasoning. When you're done, give the final answer "
                 "directly without saying 'continue thinking'.]"
             )
-        
+
         messages.append({"role": "assistant", "content": final_text, "_internal": True})
         messages.append({"role": "user", "content": continue_prompt, "_internal": True})
-        
+
         return True
 
     async def _internal_reasoning_loop(
@@ -3755,10 +3753,10 @@ class Coordinator(Plugin):
             if not zh and result.startswith("Conclusion:"):
                 final_conclusion = result[11:].strip()
                 break
-        
+
         if not final_conclusion and reasoning_results:
             final_conclusion = reasoning_results[-1]
-        
+
         return final_conclusion
 
     # ------------------------------------------------------------ 阶段三：任务规划与反思
@@ -3766,26 +3764,26 @@ class Coordinator(Plugin):
         self, messages: List[Dict[str, Any]], turn: TurnContext, tools: List[Dict[str, Any]],
     ) -> List[str]:
         """任务规划 — 复杂任务先拆成子任务，生成执行计划。
-        
+
         对于高复杂度任务，让 Agent 先分析任务并生成详细的执行计划，
         然后按照计划逐步执行。
-        
+
         返回计划步骤列表。
         """
         complexity = getattr(turn, "estimated_complexity", 0.0)
         if complexity < 0.5:
             return []  # 简单任务不需要规划
-        
+
         provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
         circuit = get_circuit_manager().get(f"llm:{provider}")
         llm_backoff_strategy = llm_backoff()
         rate_limiter = get_rate_limiter()
-        
+
         await rate_limiter.acquire(provider)
-        
+
         zh = self._is_zh()
         tool_names = [t.get("function", {}).get("name", "") for t in tools]
-        
+
         user_question = (turn.input_text or "")[:500]
         if zh:
             planning_prompt = (
@@ -3815,12 +3813,12 @@ class Coordinator(Plugin):
                 "Step N: [subtask description]\n\n"
                 "Ensure the plan is complete, feasible, and has logical order between steps."
             )
-        
+
         messages.append({"role": "user", "content": planning_prompt, "_internal": True})
-        
+
         if self._llm is None:
             return []
-        
+
         async def _do_planning_call():
             return await self._llm.chat_completion(
                 messages=messages,
@@ -3828,7 +3826,7 @@ class Coordinator(Plugin):
                 max_tokens=1000,
                 temperature=0.7,
             )
-        
+
         try:
             # 修复：加超时控制
             resp = await asyncio.wait_for(
@@ -3909,28 +3907,28 @@ class Coordinator(Plugin):
         self, messages: List[Dict[str, Any]], turn: TurnContext, result_text: str,
     ) -> bool:
         """执行后反思 — 做完后检查结果，不对就重来。
-        
+
         在生成最终回复后，让 Agent 反思自己的回答是否正确、完整、符合用户需求。
         如果发现问题，返回 True 表示需要重新生成。
-        
+
         返回 True 表示需要重新生成，False 表示结果可以接受。
         """
         complexity = getattr(turn, "estimated_complexity", 0.0)
         if complexity < 0.5:
             return False  # 简单任务不需要反思
-        
+
         if not result_text:
             return False
-        
+
         provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
         circuit = get_circuit_manager().get(f"llm:{provider}")
         llm_backoff_strategy = llm_backoff()
         rate_limiter = get_rate_limiter()
-        
+
         await rate_limiter.acquire(provider)
-        
+
         zh = self._is_zh()
-        
+
         if zh:
             reflection_prompt = (
                 "[执行后反思]\n"
@@ -3957,12 +3955,12 @@ class Coordinator(Plugin):
                 "Please answer 'Yes' or 'No': Does this answer need improvement?\n"
                 "If yes, briefly explain what's wrong."
             )
-        
+
         messages.append({"role": "user", "content": reflection_prompt, "_internal": True})
-        
+
         if self._llm is None:
             return False
-        
+
         async def _do_reflection_call():
             return await self._llm.chat_completion(
                 messages=messages,
@@ -3970,13 +3968,13 @@ class Coordinator(Plugin):
                 max_tokens=500,
                 temperature=0.3,
             )
-        
+
         try:
             resp = await circuit.acall(
                 lambda: llm_backoff_strategy.retry(_do_reflection_call),
             )
             reflection_result = resp.get("text", "") or ""
-            
+
             # 精确检测是否需要重新生成 — 只检查回答的首行/首词
             # 避免 "是" 出现在 "这个回答是准确的" 中导致误判
             if zh:
@@ -3991,13 +3989,13 @@ class Coordinator(Plugin):
                     needs_improvement = False
                 else:
                     needs_improvement = first_line.startswith("yes") or first_line.startswith("need")
-            
+
             if needs_improvement:
                 turn.meta["reflection_needed"] = True
                 turn.meta["reflection_reason"] = reflection_result
                 self._emit_progress(turn, "反思发现问题，正在重新生成..." if zh else "Reflection found issues, regenerating...", "reflection")
                 logger.debug("post_execution_reflection: needs improvement - %s", reflection_result)
-                
+
                 # 注入改进提示
                 if zh:
                     improvement_prompt = (
@@ -4009,15 +4007,15 @@ class Coordinator(Plugin):
                         "[System: Reflection found issues: " + reflection_result[:200] + "\n"
                         "Please regenerate your answer to fix these issues.]"
                     )
-                
+
                 messages.append({"role": "assistant", "content": result_text, "_internal": True})
                 messages.append({"role": "user", "content": improvement_prompt, "_internal": True})
-                
+
                 return True
-            
+
             turn.meta["reflection_completed"] = True
             return False
-            
+
         except Exception as exc:
             logger.debug("post_execution_reflection failed: %s", exc)
             return False
@@ -4026,26 +4024,26 @@ class Coordinator(Plugin):
         self, messages: List[Dict[str, Any]], turn: TurnContext, max_solutions: int = 3,
     ) -> str:
         """多方案比较 — 对重要问题生成多个方案，选最优。
-        
+
         对于复杂决策类问题，让 Agent 生成多个解决方案，然后比较各个方案的优缺点，
         最后选择最优方案。
-        
+
         返回最优方案的描述。
         """
         complexity = getattr(turn, "estimated_complexity", 0.0)
         if complexity < 0.7:
             return ""  # 不太复杂的问题不需要多方案比较
-        
+
         provider = (turn.model or "").split("/")[0] if turn.model and "/" in (turn.model or "") else "openai"
         circuit = get_circuit_manager().get(f"llm:{provider}")
         llm_backoff_strategy = llm_backoff()
         rate_limiter = get_rate_limiter()
-        
+
         await rate_limiter.acquire(provider)
-        
+
         zh = self._is_zh()
         user_question = (turn.input_text or "")[:500]
-        
+
         if zh:
             comparison_prompt = (
                 f"[多方案比较]\n"
@@ -4074,12 +4072,12 @@ class Coordinator(Plugin):
                 "Best Solution: [solution number]\n"
                 "Reason: [explain why this solution was chosen]"
             )
-        
+
         messages.append({"role": "user", "content": comparison_prompt, "_internal": True})
-        
+
         if self._llm is None:
             return ""
-        
+
         async def _do_comparison_call():
             return await self._llm.chat_completion(
                 messages=messages,
@@ -4087,20 +4085,20 @@ class Coordinator(Plugin):
                 max_tokens=2000,
                 temperature=0.7,
             )
-        
+
         try:
             resp = await circuit.acall(
                 lambda: llm_backoff_strategy.retry(_do_comparison_call),
             )
             comparison_text = resp.get("text", "") or ""
-            
+
             if comparison_text:
                 turn.meta["multi_solution_comparison"] = comparison_text
                 self._emit_progress(turn, "已完成多方案比较", "comparison")
                 logger.debug("multi_solution_comparison: completed")
-            
+
             return comparison_text
-            
+
         except Exception as exc:
             logger.debug("multi_solution_comparison failed: %s", exc)
             return ""
@@ -4195,7 +4193,7 @@ class Coordinator(Plugin):
             coros = [_run_one(tc, name, args) for _, tc, name, args, _ in tc_info]
             results = await asyncio.gather(*coros, return_exceptions=True)
 
-            for idx, (_, tc, name, args, tc_id) in enumerate(tc_info):
+            for idx, (_, _tc, name, _args, tc_id) in enumerate(tc_info):
                 result = results[idx]
                 if isinstance(result, Exception):
                     result = ToolResult(
@@ -4278,7 +4276,7 @@ class Coordinator(Plugin):
             coros = [_run_one(tc, name, args) for _, tc, name, args, _ in tc_info]
             results = await asyncio.gather(*coros, return_exceptions=True)
 
-            for idx, (_, tc, name, args, tc_id) in enumerate(tc_info):
+            for idx, (_, _tc, name, _args, tc_id) in enumerate(tc_info):
                 result = results[idx]
                 if isinstance(result, Exception):
                     result = ToolResult(
@@ -5047,7 +5045,6 @@ class Coordinator(Plugin):
 
         try:
             metacog = self._get_metacognition()
-            skills_used = turn.meta.get("skills_used", [])
 
             # 优先用 LLM 做真正的置信度评估（之前 evaluate_with_llm 定义了
             # 但从未被调用，一直用纯正则匹配统计关键词——容易被 LLM 的

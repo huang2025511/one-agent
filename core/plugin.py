@@ -13,7 +13,6 @@ Enhanced with:
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import logging
 from pathlib import Path

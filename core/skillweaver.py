@@ -259,11 +259,11 @@ Output only JSON, nothing else."""
 
 class SkillIndex:
     """FAISS-based semantic skill index.
-    
+
     Replaces keyword-based pick_relevant() with embedding search.
     Token reduction: from ~884,000 (all skill descriptions) to ~1,160 (top-K candidates).
     """
-    
+
     def __init__(self, embedding_model: str = "all-MiniLM-L6-v2"):
         self._model_name = embedding_model
         self._model = None
@@ -273,7 +273,7 @@ class SkillIndex:
         # 优化：id → 下标 的 dict 索引，get_skill_description 从 O(n) 降为 O(1)
         self._desc_index: Dict[str, str] = {}
         self._built = False
-        
+
     def _lazy_load(self):
         """Lazy load embedding model to avoid startup cost."""
         if self._model is None:
@@ -287,83 +287,83 @@ class SkillIndex:
                 )
                 return False
         return True
-    
+
     def build(self, skills: Dict[str, Any]) -> bool:
         """Build FAISS index from skill registry.
-        
+
         Args:
             skills: Dict of skill_id -> Skill object
-            
+
         Returns:
             True if index built successfully
         """
         if not self._lazy_load():
             return False
-            
+
         try:
             import faiss
             import numpy as np
         except ImportError:
             logger.warning("faiss not installed. Run: pip install faiss-cpu")
             return False
-        
+
         self._skill_ids = list(skills.keys())
         self._skill_descriptions = [
             f"{s.title} {s.description}"
             for s in skills.values()
         ]
-        self._desc_index = dict(zip(self._skill_ids, self._skill_descriptions))
+        self._desc_index = dict(zip(self._skill_ids, self._skill_descriptions, strict=False))
 
         if not self._skill_ids:
             logger.warning("SkillIndex: no skills to index")
             return False
-        
+
         # Encode all skill descriptions (2209 skills ~15 seconds per paper)
         logger.info("SkillIndex: encoding %d skills...", len(self._skill_ids))
         start = time.time()
         embeddings = self._model.encode(self._skill_descriptions, show_progress_bar=False)
         embeddings = np.array(embeddings).astype('float32')
-        
+
         # Build FAISS index (inner product for cosine similarity)
         self._index = faiss.IndexFlatIP(embeddings.shape[1])
         self._index.add(embeddings)
-        
+
         self._built = True
         logger.info(
             "SkillIndex: built index for %d skills in %.2fs",
             len(self._skill_ids), time.time() - start
         )
         return True
-    
+
     def retrieve(self, query: str, top_k: int = 5) -> List[Tuple[str, float]]:
         """Semantic retrieval of top-K skills for a query.
-        
+
         Args:
             query: Subtask description or user query
             top_k: Number of candidates to retrieve
-            
+
         Returns:
             List of (skill_id, score) tuples
         """
         if not self._built or not self._lazy_load():
             return []
-        
+
         import numpy as np
-        
+
         # Encode query
         query_vec = self._model.encode([query], show_progress_bar=False)
         query_vec = np.array(query_vec).astype('float32')
-        
+
         # Search
         scores, indices = self._index.search(query_vec, top_k)
-        
+
         results = []
         for i, idx in enumerate(indices[0]):
             if 0 <= idx < len(self._skill_ids):
                 results.append((self._skill_ids[idx], float(scores[0][i])))
-        
+
         return results
-    
+
     def get_skill_description(self, skill_id: str) -> str:
         """Get the description for a skill. O(1) via dict index."""
         return self._desc_index.get(skill_id, "")
@@ -375,10 +375,10 @@ class SkillIndex:
 
 class SkillWeaverRouter:
     """Compositional skill routing with SAD feedback loop.
-    
+
     Three-phase pipeline:
         Decompose → Retrieve → Compose
-        
+
     SAD feedback loop runs between Decompose and Retrieve:
         1. LLM generates subtask descriptions
         2. Retrieve top-K candidates for each subtask
@@ -386,7 +386,7 @@ class SkillWeaverRouter:
         4. LLM rewrites subtask using tool vocabulary
         5. Iterate until aligned or max_iterations
     """
-    
+
     def __init__(
         self,
         llm_provider,
@@ -402,7 +402,7 @@ class SkillWeaverRouter:
         self._top_k = top_k_candidates
         self._initialized = False
         self._build_lock = threading.Lock()
-        
+
     def initialize(self) -> bool:
         """Build semantic index from current skill registry.
 
@@ -454,39 +454,39 @@ class SkillWeaverRouter:
         if not self._initialized:
             self.initialize()
         return self._index.retrieve(query, top_k)
-    
+
     async def route(self, query: str, zh: bool = True) -> DAGWorkflow:
         """Main entry point: decompose → retrieve → compose with SAD loop.
-        
+
         Args:
             query: User input text
             zh: Use Chinese prompts
-            
+
         Returns:
             DAGWorkflow ready for execution
         """
         if not self._initialized:
             await self.initialize_async()
-        
+
         # Phase 1: Decompose
         subtasks = await self._decompose(query, zh)
         if not subtasks:
             return DAGWorkflow()
-        
+
         # SAD Feedback Loop
         subtasks = await self._sad_feedback_loop(subtasks, zh)
-        
+
         # Phase 2: Retrieve (already done in SAD loop)
-        
+
         # Phase 3: Compose
         workflow = await self._compose(subtasks, zh)
-        
+
         return workflow
-    
+
     async def _decompose(self, query: str, zh: bool) -> List[SubTask]:
         """Phase 1: LLM decomposes query into atomic subtasks."""
         prompt = (DECOMPOSE_PROMPT_ZH if zh else DECOMPOSE_PROMPT_EN).format(query=query)
-        
+
         try:
             resp = await self._llm.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
@@ -494,7 +494,7 @@ class SkillWeaverRouter:
                 max_tokens=500,
                 tools=None,
             )
-            
+
             text = resp.get("text", "")
             data = json.loads(_extract_json_block(text))
             subtasks = []
@@ -506,35 +506,35 @@ class SkillWeaverRouter:
                     dependencies=item.get("dependencies", []),
                 ))
             return subtasks
-            
+
         except Exception as exc:
             logger.error("SkillWeaver decompose failed: %s", exc)
             return []
-    
+
     async def _sad_feedback_loop(self, subtasks: List[SubTask], zh: bool) -> List[SubTask]:
         """SAD: iterate until subtask vocabulary aligns with tool library."""
         for iteration in range(self._max_sad_iter):
             all_aligned = True
-            
+
             for subtask in subtasks:
                 # Retrieve candidates
                 candidates = self._index.retrieve(subtask.description, self._top_k)
-                
+
                 if not candidates:
                     continue
-                
+
                 # Get candidate descriptions
                 candidate_descs = []
-                for skill_id, score in candidates[:3]:  # Top-3
+                for skill_id, _score in candidates[:3]:  # Top-3
                     desc = self._index.get_skill_description(skill_id)
                     candidate_descs.append(f"- {skill_id}: {desc[:100]}")
-                
+
                 # Reinject and rewrite
                 prompt = (SAD_REINJECT_PROMPT_ZH if zh else SAD_REINJECT_PROMPT_EN).format(
                     original=subtask.description,
                     candidates="\n".join(candidate_descs),
                 )
-                
+
                 try:
                     resp = await self._llm.chat_completion(
                         messages=[{"role": "user", "content": prompt}],
@@ -542,7 +542,7 @@ class SkillWeaverRouter:
                         max_tokens=200,
                         tools=None,
                     )
-                    
+
                     rewritten = resp.get("text", "").strip()
                     # 修复：候选技能必须无条件记录 — 之前只在描述被改写时
                     # 才写入 candidate_skills，描述未变时 _compose 拿到的
@@ -554,13 +554,13 @@ class SkillWeaverRouter:
 
                 except Exception as exc:
                     logger.debug("SAD rewrite failed: %s", exc)
-            
+
             if all_aligned:
                 logger.debug("SAD: all subtasks aligned after %d iterations", iteration + 1)
                 break
-        
+
         return subtasks
-    
+
     async def _compose(self, subtasks: List[SubTask], zh: bool) -> DAGWorkflow:
         """Phase 3: Compose DAG workflow from aligned subtasks."""
         # Build subtask list string
@@ -570,16 +570,16 @@ class SkillWeaverRouter:
             subtask_list.append(
                 f"- {st.id}: {st.description} (candidates: {', '.join(candidates)})"
             )
-        
+
         # Get available tools
         skills_dict = getattr(self._skills, '_skills', {})
         tool_list = [f"- {sid}: {s.description[:80]}" for sid, s in skills_dict.items()][:20]
-        
+
         prompt = (COMPOSE_PROMPT_ZH if zh else COMPOSE_PROMPT_EN).format(
             subtasks="\n".join(subtask_list),
             tools="\n".join(tool_list),
         )
-        
+
         try:
             resp = await self._llm.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
@@ -587,7 +587,7 @@ class SkillWeaverRouter:
                 max_tokens=800,
                 tools=None,
             )
-            
+
             text = resp.get("text", "")
             data = json.loads(_extract_json_block(text))
 
@@ -606,23 +606,23 @@ class SkillWeaverRouter:
             for e in data.get("edges", []):
                 if isinstance(e, (list, tuple)) and len(e) == 2:
                     edges.append((str(e[0]), str(e[1])))
-            
+
             # Find entry points (nodes with no dependencies)
             all_deps = set()
             for node in nodes:
                 all_deps.update(node.dependencies)
             entry_points = [n.subtask_id for n in nodes if n.subtask_id not in all_deps]
-            
+
             return DAGWorkflow(
                 nodes=nodes,
                 edges=edges,
                 entry_points=entry_points,
             )
-            
+
         except Exception as exc:
             logger.error("SkillWeaver compose failed: %s", exc)
             return DAGWorkflow()
-    
+
     async def execute_workflow(
         self,
         workflow: DAGWorkflow,
@@ -745,10 +745,10 @@ class SkillWeaverRouter:
 
 def create_skillweaver_router(llm_provider, skill_manager) -> SkillWeaverRouter:
     """Factory function to create a SkillWeaverRouter.
-    
+
     Usage in coordinator:
         from core.skillweaver import create_skillweaver_router
-        
+
         router = create_skillweaver_router(self._llm, self._skills)
         workflow = await router.route(turn.input_text)
         result = await router.execute_workflow(workflow)

@@ -107,6 +107,7 @@ def _generate_ascii_qrcode(data: str) -> str:
     """
     try:
         import io
+
         import qrcode
 
         qr = qrcode.QRCode(

@@ -189,7 +189,7 @@ class AgentMesh:
             for t in tasks
         ))
 
-        for agent_task, result in zip(tasks, results):
+        for agent_task, result in zip(tasks, results, strict=False):
             agent_task.result = result
             # _execute_agent 失败时返回 "[<role> 执行失败: ...]" 文本，据此标记状态
             if result.startswith(f"[{agent_task.role.value} 执行失败"):

@@ -240,7 +240,7 @@ _MINIMAL_CONFIG = """\
 # One-Agent 默认配置 — 首次运行自动生成
 agent:
   name: One-Agent
-  version: 2.0.0
+  version: 2.2.0
   data_dir: ./data
   log_level: INFO
   language: zh
@@ -313,7 +313,7 @@ def setup_if_needed(force: bool = False) -> bool:
 def register_setup_endpoints(app) -> None:
     """Mount /setup endpoints on a FastAPI app for Web-based configuration."""
     try:
-        from fastapi import Request
+        from fastapi import Request  # noqa: F401 — 依赖探测
         from fastapi.responses import JSONResponse
     except ImportError:
         return

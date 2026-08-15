@@ -2,12 +2,10 @@
 
 每个测试对应一个具体修复，确保语义正确。
 """
-import asyncio
 import os
 import sys
-import tempfile
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -107,8 +105,8 @@ class TestModelCostDescUnknown:
         assert result == "未知", f"未登记模型应返回'未知'，实际: {result}"
 
     def test_free_model_still_returns_free(self):
-        from skills import _model_cost_desc
         from models.tiers import MODEL_COST
+        from skills import _model_cost_desc
         # 找一个明确 cost=0 的模型
         free_model = next((k for k, v in MODEL_COST.items() if v == 0), None)
         if free_model:
@@ -183,7 +181,6 @@ class TestCompressContextPreservesSystemPrompt:
     @pytest.mark.asyncio
     async def test_original_system_prompt_preserved(self):
         from core.coordinator import Coordinator
-        from core.context import TurnContext
 
         coord = Coordinator()
         coord._llm = None  # 跳过真实 LLM 调用
@@ -233,7 +230,6 @@ class TestMultiAgentPhaseKeyError:
     @pytest.mark.asyncio
     async def test_missing_total_tokens_no_keyerror(self):
         from core.coordinator import Coordinator
-        from core.context import TurnContext
 
         coord = Coordinator()
         coord._llm = MagicMock()
@@ -283,7 +279,7 @@ class TestMultiAgentPhaseKeyError:
 class TestEventHandlerErrorsMessages:
     @pytest.mark.asyncio
     async def test_error_message_contains_exception(self):
-        from core.events import EventBus, Event
+        from core.events import Event, EventBus
 
         bus = EventBus()
 

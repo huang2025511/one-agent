@@ -10,14 +10,12 @@ Provides:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 

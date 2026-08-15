@@ -235,7 +235,6 @@ class ChartGenerator:
 
         for row in range(height, -1, -1):
             line = ""
-            val_at_row = min_val + (row / height) * val_range
             for col in range(len(data)):
                 scaled = (data[col] - min_val) / val_range * height
                 if abs(scaled - row) < 0.5:

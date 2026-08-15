@@ -30,10 +30,15 @@ import asyncio
 import logging
 import time
 import uuid
-from pathlib import Path
 from typing import Optional
 
 from core.plugin import Plugin
+
+# v2.1.0：版本号统一从 one_agent.__version__ 读取。
+try:
+    from one_agent import __version__ as _AGENT_VERSION
+except Exception:  # pragma: no cover
+    _AGENT_VERSION = "2.2.0"
 
 # 修复 ForwardRef 隐患（同 api/__init__.py 的 bug）：
 # 文件有 `from __future__ import annotations`，所有类型注解会变成字符串
@@ -195,8 +200,8 @@ class WebGateway(Plugin):
             return
         try:
             import uvicorn  # type: ignore
-            from fastapi import FastAPI, Request  # type: ignore
-            from fastapi.responses import HTMLResponse, JSONResponse  # type: ignore
+            from fastapi import FastAPI, Request  # type: ignore  # noqa: F401 — 依赖探测
+            from fastapi.responses import JSONResponse  # type: ignore
         except Exception:
             logger.warning("fastapi/uvicorn not installed — web UI disabled")
             return
@@ -255,11 +260,16 @@ class WebGateway(Plugin):
             provided = request.headers.get("X-API-Key", "")
             return bool(provided) and _hmac.compare_digest(provided, gw._api_key)
 
-        ui_html = Path(__file__).with_name("index.html")
-        if ui_html.exists():
-            @app.get("/", response_class=HTMLResponse)
-            async def root():
-                return ui_html.read_text(encoding="utf-8")
+        # v2.1.0：内嵌的 index.html 单页 UI 已移除（commit 删除），
+        # REST API (/api/chat) 是网关标准入口；如需自定义页面，扩展
+        # FastAPI app 自行挂载即可。
+        @app.get("/", response_class=JSONResponse)
+        async def root():
+            return {
+                "name": "One-Agent API",
+                "version": _AGENT_VERSION,
+                "endpoints": ["/api/chat", "/api/status", "/api/health", "/docs"],
+            }
 
         @app.post("/api/chat")
         async def api_chat(body: dict, request: Request):

@@ -560,7 +560,7 @@ class SkillManager(Plugin):
             try:
                 from one_agent import __version__ as VERSION
             except (ImportError, AttributeError):
-                VERSION = "2.0.0"
+                VERSION = "2.2.0"
             return (
                 f"🤖 One-Agent 版本信息：\n"
                 f"  版本: {VERSION}\n"
@@ -1637,9 +1637,9 @@ class SkillManager(Plugin):
             # ---------- SSRF 防护 ----------
             # V67：用 ipaddress 模块覆盖所有私网/保留/回环/链路本地地址，
             # 支持 IPv4-mapped IPv6（::ffff:127.0.0.1）绕过检测。
-            from urllib.parse import urlparse as _urlparse
             import ipaddress as _ipaddress
             import socket as _socket
+            from urllib.parse import urlparse as _urlparse
 
             _BLOCKED_HOSTNAMES = {"localhost", "ip6-localhost", "ip6-loopback"}
 
@@ -1699,6 +1699,7 @@ class SkillManager(Plugin):
 
             import html as _htmlmod
             import re as _re2
+
             import httpx as _httpx2
 
             headers = {
@@ -1756,7 +1757,6 @@ class SkillManager(Plugin):
                 b"BM": "BMP",
                 b"Rar!\x1a\x07": "RAR",
                 b"7z\xbc\xaf\x27\x1c": "7Z",
-                b"\x25\x50\x44\x46": "PDF",  # %PDF 备用
             }
             binary_kind = ""
             if is_binary_by_ct:
@@ -2461,8 +2461,9 @@ class SkillManager(Plugin):
 
         # Round 8: 工作流引擎 — 自动注册为 skill
         async def _workflow_run_handler(args, llm=None, **kw):
-            from core.workflow_engine import get_workflow_engine
             import json as _json
+
+            from core.workflow_engine import get_workflow_engine
             if isinstance(args, str):
                 args = {"input": args}
             wf_text = args.get("input", "")
@@ -2891,7 +2892,7 @@ async def _show_models(llm, input_text: str) -> str:
             models = [m for m in models if _model_cost_desc(m) == "免费"]
 
         lines.append(f"{info['icon']} {info['name']} — {info['desc']}")
-        lines.append(f"   复杂度阈值见 config/default_config.yaml → router.task_complexity_thresholds")
+        lines.append("   复杂度阈值见 config/default_config.yaml → router.task_complexity_thresholds")
 
         if not models:
             lines.append("   （暂无模型）")
@@ -2948,8 +2949,8 @@ def _try_natural_language_fetch(llm, text: str):
     if not any(v in t for v in _NL_FETCH_VERBS):
         return None
 
-    # 2) 最好提到"模型"（宽松：动词+provider 也算，避免"商汤拉一下"被漏掉）
-    has_model_noun = any(n in t for n in _NL_MODEL_NOUNS)
+    # 2) 提到"模型"是加分项但非必需（宽松：动词+provider 也算，
+    #    避免"商汤拉一下"被漏掉）
 
     # 3) 识别 provider：用 resolver 的别名表
     from models.resolver import _PROVIDER_ALIASES, _extract_provider_hint
@@ -2983,9 +2984,6 @@ async def _fetch_models_with_existing_key(
 
     与 _add_models 的区别：不需要用户在消息里带 key，直接复用 llm._api_keys。
     """
-    import asyncio as _aio
-    import time as _time
-
     api_key = llm._api_keys.get(provider, "")
     if not api_key:
         return (
@@ -3097,8 +3095,8 @@ async def _add_models(llm, input_text: str) -> str:
       /添加模型 myprovider key:xxx url:https://... — 手动指定 base_url
       /添加模型 someai key:xxx                    — 未知 provider，自动探测+搜索
     """
-    import re as _re
     import asyncio as _aio
+    import re as _re
     import time as _time
 
     text = input_text.strip()
@@ -3350,8 +3348,9 @@ async def _web_search_provider_api(provider: str, api_key: str = "") -> str:
     OpenAI 兼容 provider 的 /models 端点都需要认证，不带 key 会全部
     返回 401/403，导致 _web_search_provider_api 永远返回空串。
     """
-    import httpx
     import re as _re
+
+    import httpx
 
     # 探测端点时统一带 Authorization 头（若 api_key 非空）
     auth_headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}

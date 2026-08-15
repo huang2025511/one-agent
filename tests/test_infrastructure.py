@@ -1,8 +1,6 @@
 """Tests for infrastructure features: task scheduler, context compressor, streaming, webhooks."""
 
 import asyncio
-import json
-import tempfile
 import time
 
 
@@ -192,7 +190,7 @@ class TestContextCompressor:
 
     def test_tiered_compressor(self):
         """Test tier-based compressor selection."""
-        from core.context_compressor import TieredCompressor, ContextCompressor
+        from core.context_compressor import ContextCompressor, TieredCompressor
 
         compressor = TieredCompressor.for_tier("trivial")
         assert isinstance(compressor, ContextCompressor)
@@ -206,7 +204,7 @@ class TestStreaming:
 
     def test_buffer_basic(self):
         """Test streaming buffer."""
-        from core.streaming import StreamingBuffer, StreamChunk
+        from core.streaming import StreamingBuffer
 
         buffer = StreamingBuffer(min_chunk_size=5, max_chunk_size=20)
 
@@ -296,7 +294,7 @@ class TestWebhookTrigger:
 
     def test_register_webhook(self):
         """Test registering a webhook."""
-        from core.webhook_trigger import WebhookTrigger, Webhook
+        from core.webhook_trigger import Webhook, WebhookTrigger
 
         trigger = WebhookTrigger()
 
@@ -309,7 +307,7 @@ class TestWebhookTrigger:
 
     def test_unregister_webhook(self):
         """Test unregistering a webhook."""
-        from core.webhook_trigger import WebhookTrigger, Webhook
+        from core.webhook_trigger import Webhook, WebhookTrigger
 
         trigger = WebhookTrigger()
 
@@ -322,7 +320,7 @@ class TestWebhookTrigger:
 
     def test_list_webhooks(self):
         """Test listing webhooks."""
-        from core.webhook_trigger import WebhookTrigger, Webhook
+        from core.webhook_trigger import Webhook, WebhookTrigger
 
         trigger = WebhookTrigger()
 
@@ -343,7 +341,7 @@ class TestWebhookTrigger:
         trigger = WebhookTrigger()
 
         # Should allow up to 10 requests per minute
-        for i in range(10):
+        for _i in range(10):
             assert trigger._check_rate_limit("test-hook", 10) is True
 
         # 11th should be rate limited
@@ -375,7 +373,7 @@ class TestWebhookTrigger:
 
     def test_stats(self):
         """Test webhook statistics."""
-        from core.webhook_trigger import WebhookTrigger, Webhook
+        from core.webhook_trigger import Webhook, WebhookTrigger
 
         trigger = WebhookTrigger()
 
@@ -400,7 +398,7 @@ class TestWebhookTrigger:
 
     def test_create_generic_webhook(self):
         """Test creating generic webhook."""
-        from core.webhook_trigger import create_generic_webhook, WebhookAuth
+        from core.webhook_trigger import WebhookAuth, create_generic_webhook
 
         webhook = create_generic_webhook(
             name="my-webhook",

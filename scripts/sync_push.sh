@@ -28,22 +28,24 @@ if ! git diff-index --quiet HEAD --; then
     exit 1
 fi
 
-# 3. 检查 gitee remote
-if ! git remote get-url gitee &>/dev/null; then
-    echo "[!] 未找到 gitee 远程仓库，正在添加..."
-    git remote add gitee https://gitee.com/huang20260511/one-agent.git
+# 3. 检查 origin (Gitee) remote
+# v2.1.0 修复：实际 remote 名称为 origin=Gitee、github=GitHub，
+# 旧脚本假设 gitee/orient 错误，会自动添加→代码推到错地方。
+if ! git remote get-url origin &>/dev/null; then
+    echo "[!] 未找到 origin (Gitee) 远程仓库，正在添加..."
+    git remote add origin https://gitee.com/huang20260511/one-agent.git
 fi
 
-# 4. 检查 origin (GitHub) remote
-if ! git remote get-url origin &>/dev/null; then
-    echo "[!] 未找到 origin (GitHub) 远程仓库，正在添加..."
-    git remote add origin https://github.com/huang2025511/one-agent.git
+# 4. 检查 github (GitHub) remote
+if ! git remote get-url github &>/dev/null; then
+    echo "[!] 未找到 github (GitHub) 远程仓库，正在添加..."
+    git remote add github https://github.com/huang2025511/one-agent.git
 fi
 
 # 5. 推送到 Gitee（主仓库，必须成功）
 echo ""
 echo "[1/2] 推送到 Gitee (主仓库)..."
-if git push gitee main; then
+if git push origin main; then
     echo "[✓] Gitee 推送成功"
 else
     echo "[✗] Gitee 推送失败！"
@@ -54,7 +56,7 @@ fi
 # 6. 推送到 GitHub（备份仓库，失败不阻断但会告警）
 echo ""
 echo "[2/2] 推送到 GitHub (备份/APK构建)..."
-if git push origin main; then
+if git push github main; then
     echo "[✓] GitHub 推送成功"
 else
     echo "[!] GitHub 推送失败（非致命，Gitee 已更新）"

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ class DialogSummarizer:
             )
 
         parts.append("最近的对话内容：\n")
-        for i, msg in enumerate(history[-self._summary_interval:]):
+        for _i, msg in enumerate(history[-self._summary_interval:]):
             parts.append(f"[用户] {msg.get('input', '')[:300]}")
             if msg.get("reply"):
                 parts.append(f"[助手] {msg['reply'][:300]}")
@@ -178,7 +178,7 @@ class DialogSummarizer:
             )
 
         parts.append("Recent conversation:\n")
-        for i, msg in enumerate(history[-self._summary_interval:]):
+        for _i, msg in enumerate(history[-self._summary_interval:]):
             parts.append(f"[User] {msg.get('input', '')[:300]}")
             if msg.get("reply"):
                 parts.append(f"[Assistant] {msg['reply'][:300]}")

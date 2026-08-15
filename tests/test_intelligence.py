@@ -1,12 +1,9 @@
 """Tests for intelligent features: user profile, suggestions, sentiment."""
 
-import pytest
-import tempfile
-import os
 
-from memory.user_profile import UserProfileStore
 from core.sentiment import SentimentAnalyzer
 from core.suggestions import SuggestionEngine
+from memory.user_profile import UserProfileStore
 
 
 class TestUserProfile:

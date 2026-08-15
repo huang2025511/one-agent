@@ -9,10 +9,8 @@ Provides:
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +120,7 @@ class AdvancedRAG:
             return results[:top_k]
 
         # Sort by score descending
-        scored_results = list(zip(results, scored))
+        scored_results = list(zip(results, scored, strict=False))
         scored_results.sort(key=lambda x: x[1], reverse=True)
 
         return [r for r, _ in scored_results[:top_k]]
@@ -228,7 +226,7 @@ class AdvancedRAG:
                 tools=None,
             )
             text = (resp.get("text") or "").strip()
-            variants = [l.strip() for l in text.split("\n") if l.strip()]
+            variants = [ln.strip() for ln in text.split("\n") if ln.strip()]
             return [query] + variants[:n_variants]
         except Exception:
             return [query]

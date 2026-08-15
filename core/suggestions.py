@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from memory.user_profile import get_profile_store
 
@@ -199,10 +199,6 @@ class SuggestionEngine:
     def _suggest_from_profile(self) -> List[Dict[str, Any]]:
         """Generate suggestions based on user profile."""
         suggestions = []
-
-        # Suggest frequently used skills that haven't been used recently
-        top_skills = self._profile.get_top_skills(5)
-        recent_topics = self._profile.get_recent_topics(24)
 
         # If user has a preferred language, suggest switching if different
         lang = self._profile.get_preference("language")

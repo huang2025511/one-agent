@@ -11,8 +11,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -23,7 +21,7 @@ class TestAlertManagerLifecycle:
 
     def test_alert_manager_import(self):
         """AlertManager imports successfully."""
-        from alerting import AlertManager, AlertRule, AlertEvent
+        from alerting import AlertEvent, AlertManager, AlertRule
         assert AlertManager is not None
         assert AlertRule is not None
         assert AlertEvent is not None

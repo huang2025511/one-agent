@@ -407,7 +407,7 @@ class WeComGateway(BaseMessagingGateway):
         """启动回调 HTTP 服务器接收企业微信消息推送。"""
         try:
             import uvicorn
-            from fastapi import FastAPI, Request, Response
+            from fastapi import FastAPI, Request, Response  # noqa: F401 — 依赖探测
         except ImportError:
             logger.warning("fastapi not installed — wecom callback disabled")
             return
@@ -951,7 +951,7 @@ class FeishuGateway(BaseMessagingGateway):
     async def _start_callback_server(self) -> None:
         try:
             import uvicorn
-            from fastapi import FastAPI, Request
+            from fastapi import FastAPI, Request  # noqa: F401 — 依赖探测
         except ImportError:
             logger.warning("fastapi not installed — feishu callback disabled")
             return

@@ -20,10 +20,11 @@ os.environ.setdefault("ONE_AGENT_CONFIG", "config/test_config.yaml")
 # 存 {data_dir}/one_agent.db。测试会话把数据目录指向临时目录，
 # 隔离统一库等所有落盘产物，避免写脏开发环境的 data/。
 import tempfile
+
 _TEST_DATA_DIR = tempfile.mkdtemp(prefix="one-agent-test-data-")
 os.environ["ONE_AGENT_DATA_DIR"] = _TEST_DATA_DIR
 
-from one_agent import OneAgentApp
+from one_agent import OneAgentApp  # noqa: E402 — 必须在设置 ONE_AGENT_CONFIG/DATA_DIR 之后导入
 
 
 def _run_app_in_thread(app_instance, ready_event):

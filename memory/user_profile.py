@@ -17,7 +17,6 @@ import json
 import logging
 import sqlite3
 import time
-from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.hub import database_path

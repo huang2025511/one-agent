@@ -1,7 +1,7 @@
 agent:
   name: One-Agent
   description: One-Agent - 自然语言智能体
-  version: 2.0.0
+  version: 2.2.0
   data_dir: ./data
   log_level: DEBUG
   timezone: Asia/Shanghai
@@ -118,7 +118,16 @@ execution:
 scheduler:
   enabled: true
   user_jobs_file: ''
-  builtin_jobs: []
+  # v2.2.0 数据库维护：每日自动备份统一库（zip 含 one_agent.db，
+  # 可选加密），轮换保留 N 份。备份存放在 {data_dir}/backups/。
+  db_maintenance:
+    enabled: true
+    keep_backups: 7          # 轮换保留份数
+    encrypt_backups: true    # 设置 ONE_AGENT_DB_KEY 时自动加密备份
+  builtin_jobs:
+  - name: db_backup
+    cron: "30 4 * * *"       # 每天 04:30 备份
+    enabled: true
 security:
   system_executor_password: ''
   password_cache_minutes: 15

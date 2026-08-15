@@ -12,8 +12,6 @@ import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 
 # ============================================================
 # P3: 跨会话成功策略记忆
@@ -237,16 +235,18 @@ class TestReflectionMechanism:
         """工具结果充分时不应触发调整提示。"""
         # 验证反思逻辑的存在：通过检查 coordinator 代码中是否有 reflection_triggered
         # 完整的集成测试需要 LLM mock，这里验证关键路径
-        from core.coordinator import Coordinator
         # 确认 coordinator 有反思相关的逻辑（通过源码检查）
         import inspect
+
+        from core.coordinator import Coordinator
         source = inspect.getsource(Coordinator._tool_loop)
         assert "reflection" in source.lower() or "INSUFFICIENT" in source or "SUFFICIENT" in source
 
     def test_reflection_evaluates_insufficient_results(self):
         """工具结果不足时应触发调整提示。"""
-        from core.coordinator import Coordinator
         import inspect
+
+        from core.coordinator import Coordinator
         source = inspect.getsource(Coordinator._tool_loop)
         assert "INSUFFICIENT" in source or "不足" in source
 

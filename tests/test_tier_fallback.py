@@ -5,8 +5,9 @@
 2. 相邻下层模型（降级）
 3. 跳过已标记 key 失效的 provider
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.tiers import MODEL_TIERS

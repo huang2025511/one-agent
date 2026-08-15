@@ -10,7 +10,6 @@
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -22,7 +21,6 @@ sys.path.insert(0, str(ROOT))
 # 刻意不用 test_ 前缀，避免 pytest 收集后因"无断言/返回值未用"产生警告
 def check_plan_pattern_detection():
     """测试计划检测模式是否正确匹配且不误判"""
-    import re
 
     # V60 精确化后的中文模式
     zh_patterns = [

@@ -89,7 +89,7 @@ class BatchProcessor:
             return items
 
         # Try newline-separated
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
         if len(lines) >= 2:
             # Check if comma-separated within single line
             if len(lines) == 1 and "," in lines[0]:

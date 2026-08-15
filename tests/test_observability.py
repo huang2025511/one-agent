@@ -1,10 +1,6 @@
 """Tests for observability and ops features: Prometheus, health, tracing, backup."""
 
-import json
 import sqlite3
-import tempfile
-import time
-from pathlib import Path
 
 
 class TestPrometheusMetrics:
@@ -70,7 +66,7 @@ class TestPrometheusMetrics:
 
     def test_format_prometheus_output(self):
         """Test Prometheus format output."""
-        from monitor.prometheus import Counter, get_metrics_registry
+        from monitor.prometheus import get_metrics_registry
 
         reg = get_metrics_registry()
         reg.clear()
@@ -89,7 +85,7 @@ class TestHealthCheck:
 
     def test_liveness_check(self):
         """Test basic liveness check."""
-        from monitor.health import get_health_checker, HealthStatus
+        from monitor.health import HealthStatus, get_health_checker
 
         checker = get_health_checker()
         result = checker.check_liveness()
@@ -101,7 +97,7 @@ class TestHealthCheck:
 
     def test_component_registration(self):
         """Test registering custom health checks."""
-        from monitor.health import HealthChecker, ComponentCheck, HealthStatus
+        from monitor.health import ComponentCheck, HealthChecker, HealthStatus
 
         checker = HealthChecker()
         checker.register_check("custom", lambda: ComponentCheck(
@@ -218,9 +214,9 @@ class TestDistributedTracing:
         tracer.clear()
 
         # Create spans using context manager
-        with tracer.start_as_current_span("parent-span") as p:
+        with tracer.start_as_current_span("parent-span"):
             pass
-        with tracer.start_as_current_span("child-span") as c:
+        with tracer.start_as_current_span("child-span"):
             pass
 
         # Get a trace ID
@@ -264,7 +260,6 @@ class TestBackupExport:
 
         # v2.1.0：会话建在统一库 one_agent.db（列名 id/title/...）
         db_path = tmp_path / "one_agent.db"
-        import sqlite3
         conn = sqlite3.connect(str(db_path))
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (

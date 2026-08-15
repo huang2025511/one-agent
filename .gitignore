@@ -34,11 +34,9 @@ ENV/
 .DS_Store
 
 # Data / state (local user data — never commit)
-data/memory/*.sqlite
-data/memory/skills/*.md
-data/memory/skills/_index.json
-data/workspace/
-data/logs/
+# v2.1.0 统一数据库：data/ 整目录运行时产生，绝不提交
+# 旧 .gitignore 漏写此行被绕过 → one_agent.db 等敏感数据有被误提交风险
+data/
 
 # env
 .env
@@ -55,8 +53,6 @@ coverage.xml
 
 # Node (in case MCP tools get installed)
 node_modules/
-test-report.log
-data/
 
 # 修复 #1（安全）：签名密钥不应提交到仓库。
 # 注意：one-agent-release.keystore 已在历史中，需通过轮换密钥彻底解决。

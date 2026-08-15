@@ -20,10 +20,8 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import time
 import urllib.parse
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -470,7 +468,7 @@ class TestWeComGateway:
         recomputed = hashlib.sha1("".join(sorted([token, timestamp, nonce, echostr])).encode()).hexdigest()
         assert expected == recomputed
         # 顺序错了应该不匹配（验证 sort 必要性）
-        wrong = hashlib.sha1(f"{token}{timestamp}{nonce}{echostr}".encode()).hexdigest()
+        hashlib.sha1(f"{token}{timestamp}{nonce}{echostr}".encode()).hexdigest()
         # 不保证 wrong != expected，但绝大多数情况下不同
         # 这里只验证算法可复现即可
 
@@ -953,8 +951,8 @@ class TestWeChatPersonalGateway:
     @pytest.mark.asyncio
     async def test_setup_disabled_does_not_connect(self, monkeypatch, tmp_path):
         """enabled=False 时 setup 不应调 _connect。"""
-        from gateways.wechat_personal import WeChatPersonalGateway
         import gateways.wechat_personal as wp
+        from gateways.wechat_personal import WeChatPersonalGateway
         # 隔离 DATA_DIR，避免扫到真实环境凭据
         monkeypatch.setattr(wp, "DATA_DIR", tmp_path / "wx")
         gw = WeChatPersonalGateway()
@@ -1055,7 +1053,8 @@ class TestWeChatPersonalHelpers:
     def test_save_and_load_sync_buf_roundtrip(self, monkeypatch, tmp_path):
         import gateways.wechat_personal as wp
         from gateways.wechat_personal import (
-            _load_sync_buf, _save_sync_buf,
+            _load_sync_buf,
+            _save_sync_buf,
         )
         monkeypatch.setattr(wp, "DATA_DIR", tmp_path / "wx")
         tmp_path.joinpath("wx").mkdir(parents=True)
@@ -1072,8 +1071,8 @@ class TestWeChatPersonalHelpers:
     def test_save_credentials_writes_kv(self, monkeypatch, tmp_path):
         """v2.1.0：凭据写入 hub kv（wechat.account.<id>），不再落盘 JSON。"""
         import gateways.wechat_personal as wp
-        from gateways.wechat_personal import _save_credentials
         from core.hub import get_hub
+        from gateways.wechat_personal import _save_credentials
         monkeypatch.setattr(wp, "DATA_DIR", tmp_path / "wx")
         _save_credentials("acc1", token="tok-123", base_url="http://b", user_id="u1")
         data = get_hub().kv_get("wechat.account.acc1")
@@ -1096,7 +1095,6 @@ class TestWeChatPersonalHelpers:
         用 _sanitize_chat_id(account_id) 作文件名，反向提取无损），
         迁移后目录改名 .migrated 保留兜底。
         """
-        import json
         import gateways.wechat_personal as wp
         from gateways.wechat_personal import WeChatPersonalGateway
         accounts_dir = tmp_path / "wx"

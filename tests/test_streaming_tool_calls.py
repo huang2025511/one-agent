@@ -1,5 +1,4 @@
 """Test streaming tool_calls accumulation logic (mirrors models/__init__.py)."""
-import json
 
 
 def accumulate_tool_calls(chunks):

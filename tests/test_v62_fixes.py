@@ -5,12 +5,14 @@
 2. 配置文件 retries 值正确
 3. LLM 失败时错误信息推送逻辑
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.coordinator_helpers import parse_markdown_tool_calls, parse_xml_tool_tags
 import yaml
+
+from core.coordinator_helpers import parse_markdown_tool_calls, parse_xml_tool_tags
 
 
 def test_markdown_block_tool_call():
@@ -150,7 +152,7 @@ def test_retries_config():
     config_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
     for cfg_name in ("default_config.yaml", "prod_config.yaml"):
         cfg_path = os.path.join(config_dir, cfg_name)
-        with open(cfg_path, "r") as f:
+        with open(cfg_path) as f:
             cfg = yaml.safe_load(f)
         retries = cfg.get("llm", {}).get("retries", 0)
         assert retries == 3, f"{cfg_name}: expected retries=3, got {retries}"

@@ -22,7 +22,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -275,7 +275,6 @@ class SimpleTracer:
         lines.append("")
 
         # Build tree
-        span_by_id = {s.span_id: s for s in spans}
         roots = [s for s in spans if not s.parent_id]
 
         def format_span(span: Span, indent: int = 0) -> List[str]:
@@ -382,14 +381,14 @@ def create_otlp_exporter(
     """
     try:
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor  # noqa: F401 — 依赖探测
 
-        exporter = OTLPSpanExporter(endpoint=endpoint)
-        processor = BatchSpanProcessor(exporter)
+        exporter = OTLPSpanExporter(endpoint=endpoint)  # noqa: F841 — 集成占位
 
         def export_spans(spans: List[Span]) -> None:
             # OTLP 集成未完成：需要把内部 Span 转换为 OTel Span 并提交给
-            # processor。当前实现仅记录日志，避免静默丢弃造成"已导出"错觉。
+            # BatchSpanProcessor。当前实现仅记录日志，避免静默丢弃造成
+            # "已导出"错觉。
             logger.warning(
                 "OTLP export not fully implemented: %d spans dropped", len(spans)
             )
@@ -410,7 +409,7 @@ def create_jaeger_exporter(
     Returns an exporter that sends spans to a Jaeger agent.
     """
     try:
-        from jaeger_client import JaegerTracer
+        import jaeger_client  # noqa: F401 — 可用性探测
 
         # Jaeger 集成未完成：需要完整客户端初始化 + Span 转换。
         def export_to_jaeger(spans: List[Span]) -> None:

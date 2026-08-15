@@ -9,10 +9,7 @@
 import asyncio
 import logging
 import os
-import shutil
 import sys
-import tempfile
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -132,7 +129,7 @@ class TestAppBoots:
     @pytest.mark.asyncio
     async def test_app_starts_and_plugins_ready(self, running_app):
         app = running_app
-        print(f"\n[检测1] 验证关键插件就绪")
+        print("\n[检测1] 验证关键插件就绪")
         # 关键插件不应为 None
         assert app.llm is not None
         assert app.router is not None
@@ -168,7 +165,7 @@ class TestRealChatTurn:
     async def test_direct_llm_call(self, running_app):
         """直接调 app.llm.chat_completion，绕过 coordinator，诊断 LLM 是否工作。"""
         app = running_app
-        print(f"\n[检测2-A] 直接调 app.llm.chat_completion")
+        print("\n[检测2-A] 直接调 app.llm.chat_completion")
         # 诊断 setup 后的状态
         print(f"[检测2-A] _provider_base_urls: {app.llm._provider_base_urls}")
         print(f"[检测2-A] _api_keys keys: {list(app.llm._api_keys.keys())}")
@@ -196,7 +193,7 @@ class TestRealChatTurn:
                 print(f"[检测2-A] error: {resp['error']}")
             assert resp.get("text"), f"应返回文本: {resp}"
         except asyncio.TimeoutError:
-            print(f"[检测2-A⚠️] LLM 直接调用 60s 超时")
+            print("[检测2-A⚠️] LLM 直接调用 60s 超时")
             raise
 
     @pytest.mark.asyncio
@@ -204,6 +201,7 @@ class TestRealChatTurn:
         """发起一次最小 chat，验证完整 turn 流程不抛异常。"""
         app = running_app
         import time as _time
+
         from core.context import TurnContext
         t0 = _time.monotonic()
         print(f"\n[检测2-B] 真实 chat turn（经 coordinator） t={0:.2f}s".format(0))
@@ -242,11 +240,11 @@ class TestRealChatTurn:
         print(f"[检测2-B] final t={_time.monotonic()-t0:.2f}s metrics={bus._metrics}")
         print(f"[检测2-B] result={turn.result!r}, error={turn.error!r}")
         if turn.result:
-            print(f"[检测2-B✓] chat 成功")
+            print("[检测2-B✓] chat 成功")
         elif turn.error:
             print(f"[检测2-B⚠️] chat 失败: {turn.error}")
         else:
-            print(f"[检测2-B⚠️] turn 未完成（router 未 dispatch）")
+            print("[检测2-B⚠️] turn 未完成（router 未 dispatch）")
         # 断言：要么有结果，要么是显式 error（不应静默未完成）
         assert turn.result or turn.error, \
             f"turn 应有结果或 error，不应静默未完成。metrics={bus._metrics}"
@@ -262,7 +260,7 @@ class TestSystemExecSkills:
         app = running_app
         skills = app.skills
         sys_skill = skills.get("system.run") or skills.get("system")
-        print(f"\n[检测3-A] SAFE 命令执行")
+        print("\n[检测3-A] SAFE 命令执行")
         if sys_skill is None:
             # 找其他名字
             for s in skills._skills.values():
@@ -285,7 +283,7 @@ class TestSystemExecSkills:
                 sys_skill = s
                 break
         assert sys_skill is not None
-        print(f"\n[检测3-B] DANGEROUS 命令应被拒绝")
+        print("\n[检测3-B] DANGEROUS 命令应被拒绝")
         # rm -rf 是 DANGEROUS
         result = await sys_skill.handler({"command": "rm -rf /tmp/nonexistent"})
         print(f"[检测3-B] 结果: {result[:100]}")
@@ -304,7 +302,7 @@ class TestMemoryPersistence:
         """保存笔记 skill + 查询长期记忆。"""
         app = running_app
         skills = app.skills
-        print(f"\n[检测4] 记忆持久化")
+        print("\n[检测4] 记忆持久化")
         # 找记忆相关 skill
         save_skill = None
         search_skill = None
@@ -338,16 +336,15 @@ class TestRouterTierDispatch:
         """router 应对不同复杂度输入选择不同 tier。
         通过 publish user_message 走完整 router pipeline，验证 estimated_complexity
         被设置、tier 被选择。"""
-        from core.context import TurnContext
         app = running_app
         router = app.router
-        print(f"\n[检测5] router 复杂度分类（经 bus pipeline）")
+        print("\n[检测5] router 复杂度分类（经 bus pipeline）")
         # 直接调内部 _classify（同步），快速验证不同输入
         cases = [
             ("你好", "trivial"),
             ("解释一下量子计算的基本原理，包括波粒二象性、叠加态、纠缠等核心概念", "complex_or_higher"),
         ]
-        for text, expected_tier in cases:
+        for text, _expected_tier in cases:
             complexity = router._classify(text)
             tier = router._tier_for_complexity(complexity)
             print(f"[检测5] '{text[:25]}' → complexity={complexity:.2f} tier={tier}")
@@ -368,7 +365,7 @@ class TestSchedulerMarketplace:
         """scheduler 应能添加 cron 任务。"""
         app = running_app
         sched = app.scheduler
-        print(f"\n[检测6-A] scheduler 添加 cron")
+        print("\n[检测6-A] scheduler 添加 cron")
         called = []
         def cb():
             called.append(1)
@@ -386,7 +383,7 @@ class TestSchedulerMarketplace:
         """marketplace 应能列出。"""
         app = running_app
         mp = app.marketplace
-        print(f"\n[检测6-B] marketplace 列出")
+        print("\n[检测6-B] marketplace 列出")
         try:
             result = await mp.list_skills() if hasattr(mp, "list_skills") else []
             print(f"[检测6-B✓] marketplace skills: {len(result) if result else 0}")
@@ -403,7 +400,7 @@ class TestRuntimeLogCapture:
         """跑一个 turn，收集所有 WARNING+/ERROR 日志。"""
         import logging
         app = running_app
-        print(f"\n[检测7] 收集运行时 warning/error")
+        print("\n[检测7] 收集运行时 warning/error")
         with caplog.at_level(logging.WARNING):
             try:
                 result = await asyncio.wait_for(
@@ -412,7 +409,7 @@ class TestRuntimeLogCapture:
                 )
                 print(f"[检测7] chat 结果: {result[:60]!r}")
             except asyncio.TimeoutError:
-                print(f"[检测7⚠️] chat timeout")
+                print("[检测7⚠️] chat timeout")
 
         # 收集 WARNING 及以上
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -433,7 +430,7 @@ class TestRuntimeLogCapture:
                             and "wechat_personal" not in r.message.lower()
                             and "dingtalk" not in r.message.lower()]
         if unexpected_errors:
-            print(f"[检测7⚠️] 非预期 ERROR:")
+            print("[检测7⚠️] 非预期 ERROR:")
             for r in unexpected_errors:
                 print(f"   🚨 [{r.levelname}] {r.name}: {r.message[:200]}")
 

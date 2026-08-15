@@ -333,7 +333,7 @@ class EmbeddingStore(BaseSQLiteStore):
                 self._cache_matrix = None
                 self._cache_norms_np = None
             # Maintain legacy alias for any code that inspects _vector_cache
-            self._vector_cache = list(zip(ids, vecs)) if ids else None
+            self._vector_cache = list(zip(ids, vecs, strict=False)) if ids else None
 
     def delete(self, memory_id: str):
         """Delete embedding for a memory item.

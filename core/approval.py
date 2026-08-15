@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 import uuid
 from typing import Any, Callable, Dict, Optional
@@ -52,8 +53,6 @@ class ApprovalRequest:
             "status": "pending" if self._approved is None else ("approved" if self._approved else "denied"),
         }
 
-
-import threading
 
 class ApprovalManager:
     """Manages pending approval requests.

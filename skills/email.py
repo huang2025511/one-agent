@@ -12,14 +12,12 @@ from __future__ import annotations
 
 import asyncio
 import email
-import email.mime.text
 import email.mime.multipart
+import email.mime.text
 import imaplib
 import logging
 import smtplib
-import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -157,7 +155,6 @@ class EmailSkill:
             # Handle different response formats
             if isinstance(raw_data[0], tuple):
                 raw_email = raw_data[0][1]
-                flags_raw = raw_data[0][0] if len(raw_data) > 0 else b""
             else:
                 # When there are multiple parts
                 for part in raw_data:
@@ -283,7 +280,6 @@ class EmailSkill:
             parsed = email.message_from_bytes(msg_data[0][1])
             original_subject = str(parsed.get("Subject", ""))
             original_from = str(parsed.get("From", ""))
-            original_message_id = str(parsed.get("Message-ID", ""))
 
             # Extract reply-to address
             reply_to = original_from

@@ -358,7 +358,6 @@ async def stream_to_terminal(
     chunk_size: int = 20,
 ) -> str:
     """Stream response to terminal with typewriter effect."""
-    import sys
 
     full_response = []
 
@@ -384,7 +383,6 @@ async def stream_with_progress(
     progress_callback: Optional[Callable] = None,
 ) -> str:
     """Stream with progress updates."""
-    import sys
 
     full_response = []
     last_progress_update = time.time()

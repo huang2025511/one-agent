@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ class ContextCompressor:
                 current_size += msg_size
 
         # Add high-importance messages if space allowing
-        for score, idx, msg in scored:
+        for _score, _idx, msg in scored:
             if msg in compressed_conv:
                 continue
             msg_size = self._content_size([msg])
@@ -239,7 +239,6 @@ class ContextCompressor:
     def _generate_summary_zh(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Generate Chinese summary."""
         user_msgs = [m for m in messages if m.get("role") == "user"]
-        assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
 
         summary_parts = ["【之前对话摘要】"]
 

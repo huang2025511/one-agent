@@ -128,8 +128,9 @@ class RecommendationMixin:
         """
         import os
         import tempfile
-        import yaml
         from pathlib import Path
+
+        import yaml
 
         # 写盘前脱敏：递归遍历 cfg，把展开的密钥还原为占位符或 null
         sanitized = self._sanitize_for_persist(cfg)
@@ -173,7 +174,6 @@ class RecommendationMixin:
         3. ${VAR} 占位符保留（本来就是占位符，无需处理）。
         4. dict/list 递归。
         """
-        import os
         if isinstance(cfg, dict):
             out = {}
             for k, v in cfg.items():

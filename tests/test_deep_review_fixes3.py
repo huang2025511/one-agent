@@ -11,8 +11,7 @@
 import asyncio
 import os
 import sys
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -154,8 +153,8 @@ class TestSaveConfigToConfigStore:
         monkeypatch.setenv("ONE_AGENT_CONFIG", str(config_path))
         monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(tmp_path / "data"))
 
-        from skills import _save_config
         from one_agent import FullConfig
+        from skills import _save_config
 
         # 传完整合法配置（ConfigStore 会做 FullConfig 校验）
         _save_config(FullConfig().model_dump())
@@ -167,8 +166,8 @@ class TestSaveConfigToConfigStore:
         """非法配置被拒绝，配置库保留原值。"""
         monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(tmp_path / "data"))
         from core.config_store import close_config_store, get_config_store
-        from skills import _save_config
         from one_agent import FullConfig
+        from skills import _save_config
 
         # 先写入合法配置
         good = FullConfig().model_dump()
@@ -189,9 +188,9 @@ class TestSaveConfigToConfigStore:
         """配置库含明文密钥，文件权限必须 0600。"""
         import stat
         monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(tmp_path / "data"))
-        from core.config_store import close_config_store, get_config_store
-        from skills import _save_config
+        from core.config_store import close_config_store
         from one_agent import FullConfig
+        from skills import _save_config
 
         _save_config(FullConfig().model_dump())
         db = tmp_path / "data" / "one_agent.db"
@@ -215,6 +214,7 @@ class TestRestartHandlerGracefulStop:
         - 应使用 loop.create_task 调度 async 清理
         """
         import inspect
+
         from skills import SkillManager
 
         # restart_handler 在 _seed_core_skills 中作为闭包定义
@@ -358,7 +358,7 @@ class TestSetApiKeyPassesKeyToResolve:
         # 更稳妥：检查 ensure_future_calls 不为空
         assert len(ensure_future_calls) > 0, "ensure_future 应被调用（调 resolve）"
         # 验证 coroutine 的参数（cr_frame 上的 locals）
-        coro = ensure_future_calls[0]
+        ensure_future_calls[0]
         # coroutine 对象可以通过 cr_frame.f_locals 拿到参数（在 Python 3.12+ 可能受限）
         # 这里改用更简单的方式：重新调用 fake_resolve 验证签名兼容
         # 实际上，关键修复是 set_api_key 调用 resolve(provider, api_key=key)
@@ -376,6 +376,7 @@ class TestWebSearchProviderApiAuthHeader:
     def test_signature_accepts_api_key(self):
         """_web_search_provider_api 签名应支持 api_key 参数。"""
         import inspect
+
         from skills import _web_search_provider_api
 
         sig = inspect.signature(_web_search_provider_api)
@@ -385,6 +386,7 @@ class TestWebSearchProviderApiAuthHeader:
     def test_search_provider_url_passes_api_key(self):
         """_search_provider_url 应把 api_key 透传给 _web_search_provider_api。"""
         import inspect
+
         from skills import _search_provider_url
 
         src = inspect.getsource(_search_provider_url)

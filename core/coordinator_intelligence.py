@@ -5,12 +5,11 @@ user patterns, generates suggestions, and extracts topics.
 Extracted as Phase 5 of the Coordinator refactoring (P0-1).
 """
 from __future__ import annotations
+
 import asyncio
 import logging
 import re
 from typing import Any, Dict, List
-
-from .context import TurnContext
 
 logger = logging.getLogger(__name__)
 

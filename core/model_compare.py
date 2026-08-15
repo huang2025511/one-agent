@@ -259,8 +259,8 @@ class ModelComparer:
     def format_comparison(self, result: CompareResult) -> str:
         """Format a CompareResult for display."""
         lines = [
-            f"模型对比结果",
-            f"─────────────────────",
+            "模型对比结果",
+            "─────────────────────",
             f"问题: {result.question[:100]}",
             "",
             f"模型 A: {result.model_a.model}",

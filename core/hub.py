@@ -177,8 +177,6 @@ def _migrate_one(conn: sqlite3.Connection, legacy_path: Path, store: Optional[st
                   {r["name"] for r in objs
                    if r["type"] == "table" and "CREATE VIRTUAL" in r["sql"].upper()}
                   for s in ("data", "idx", "content", "docsize", "config")}
-        vtabs = {r["name"] for r in objs
-                 if r["type"] == "table" and "CREATE VIRTUAL" in r["sql"].upper()}
         copied = 0
         for r in objs:
             if r["type"] != "table":
@@ -242,11 +240,51 @@ def _retire_legacy(path: Path) -> None:
         logger.warning("legacy file rename failed: %s", exc)
 
 
+def _inspect_legacy(legacy_path: Path) -> Dict[str, Any]:
+    """只读检查旧库（dry-run 用）：表数 / 总行数，不产生任何写入。"""
+    import sqlite3 as _sq
+
+    uri = f"file:{legacy_path}?mode=ro"
+    conn = _sq.connect(uri, uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'").fetchall()
+        total = 0
+        for r in rows:
+            try:
+                total += conn.execute(
+                    f'SELECT count(*) FROM "{r[0]}"').fetchone()[0]
+            except _sq.Error:
+                pass
+        return {"tables": len(rows), "rows": total}
+    finally:
+        conn.close()
+
+
 def migrate_legacy(data_dir: Optional[str] = None,
-                   conn: Optional[sqlite3.Connection] = None) -> List[str]:
-    """把旧版分散库全部迁入统一库。幂等，返回迁移报告（文件列表）。"""
+                   conn: Optional[sqlite3.Connection] = None,
+                   dry_run: bool = False) -> List[str]:
+    """把旧版分散库全部迁入统一库。幂等，返回迁移报告（文件列表）。
+
+    dry_run=True 时只读检查、不写入不改名，报告形如
+    ``"memory/sessions.db (6 tables, 323 rows)"``。
+    """
     dd = Path(data_dir or resolve_data_dir())
     target = database_path(str(dd))
+    report: List[str] = []
+    if dry_run:
+        for rel, _store in _LEGACY_DBS:
+            legacy = dd / rel
+            if not legacy.exists():
+                continue
+            try:
+                info = _inspect_legacy(legacy)
+                report.append(f"{rel} ({info['tables']} tables, {info['rows']} rows)")
+            except sqlite3.Error as exc:
+                report.append(f"{rel} (inspect failed: {exc})")
+        return report
+
     own = conn is None
     if own:
         conn = create_sqlite_connection(target)
@@ -254,7 +292,6 @@ def migrate_legacy(data_dir: Optional[str] = None,
             os.chmod(target, 0o600)
         except OSError:
             pass
-    report: List[str] = []
     try:
         ensure_core_tables(conn)
         for rel, store in _LEGACY_DBS:

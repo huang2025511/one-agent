@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
@@ -344,7 +343,6 @@ class EvalHarness:
             name: benchmark name
             parallel: max parallel evaluations
         """
-        import uuid
 
         # Phase 1: get answers (sequential or parallel)
         answers: List[str] = []
@@ -363,7 +361,7 @@ class EvalHarness:
             async with sem:
                 return await self.evaluate(llm, q, a, judge_model)
 
-        tasks = [evaluate_one(q, a) for q, a in zip(questions, answers)]
+        tasks = [evaluate_one(q, a) for q, a in zip(questions, answers, strict=False)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid_results = [r for r in results if isinstance(r, EvalResult)]

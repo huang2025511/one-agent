@@ -1,10 +1,11 @@
 """测试第 7 轮全项目审计的 3 个核心修复。"""
 
 import asyncio
+
 import pytest
 
 from core.context_compressor import ContextCompressor
-from core.skillweaver import SkillWeaverRouter, SkillNode, DAGWorkflow
+from core.skillweaver import DAGWorkflow, SkillNode, SkillWeaverRouter
 
 
 # ============================================================

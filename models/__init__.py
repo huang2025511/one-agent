@@ -22,14 +22,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 
-from core.plugin import Plugin
 from core.hub import database_path, resolve_data_dir
+from core.plugin import Plugin
 from models.cache import LLMCache
-from models.semantic_cache import SemanticCache
 from models.cost_tracker import CostTracker
-from models.tiers import MODEL_TIERS, MODEL_COST
 from models.recommend import RecommendationMixin
-
+from models.semantic_cache import SemanticCache
+from models.tiers import MODEL_COST, MODEL_TIERS
 
 logger = logging.getLogger(__name__)
 

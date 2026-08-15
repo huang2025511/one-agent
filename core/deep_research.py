@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from core.backoff import search_backoff
 
@@ -162,16 +162,16 @@ class DeepResearcher:
     ) -> List[str]:
         """Use LLM to decompose a complex question into sub-questions."""
         prompt = (
-            "你是一个研究助手。请将以下复杂问题拆解成 {n} 个具体的子问题，"
+            f"你是一个研究助手。请将以下复杂问题拆解成 {min(depth + 2, self.MAX_SUB_QUESTIONS)} 个具体的子问题，"
             "每个子问题应该独立可研究、能通过搜索找到答案。\n\n"
             "要求：\n"
             "- 子问题要具体，不要过于宽泛\n"
             "- 按逻辑顺序排列（从背景到细节）\n"
             "- 每个子问题一行，以数字+句号开头\n"
             '- 不要包含"搜索"、"查找"等动作词\n\n'
-            "【原始问题】\n{question}\n\n"
+            f"【原始问题】\n{question[:2000]}\n\n"
             "子问题列表："
-        ).format(n=min(depth + 2, self.MAX_SUB_QUESTIONS), question=question[:2000])
+        )
 
         try:
             resp = await self._llm.chat_completion(
@@ -191,7 +191,7 @@ class DeepResearcher:
         items = re.findall(r"\d+[\.\)、]\s*(.+)", text)
         if len(items) < 2:
             # Fallback: split by newlines
-            items = [l.strip() for l in text.split("\n") if l.strip() and len(l.strip()) > 5]
+            items = [ln.strip() for ln in text.split("\n") if ln.strip() and len(ln.strip()) > 5]
 
         return items[:self.MAX_SUB_QUESTIONS] if items else [question]
 
@@ -230,7 +230,7 @@ class DeepResearcher:
 
         # Fetch full text for top-N most relevant sources
         if all_sources:
-            self._emit_progress("fetch", f"正在抓取详细内容...")
+            self._emit_progress("fetch", "正在抓取详细内容...")
             await self._enrich_sources_with_fulltext(all_sources)
 
         # Answer the sub-question based on sources

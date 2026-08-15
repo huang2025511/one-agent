@@ -11,7 +11,6 @@ async tasks.
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 import threading
 import time
