@@ -15,9 +15,10 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from core.db import create_sqlite_connection
+from core.hub import database_path
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +39,12 @@ class CostTracker:
 
     def __init__(
         self,
-        db_path: str = "data/memory/costs.db",
+        db_path: Optional[str] = None,
         daily_budget: float = 1.0,
         monthly_budget: float = 20.0,
     ) -> None:
-        self._conn = create_sqlite_connection(db_path)
+        # 默认惰性解析统一库路径（ONE_AGENT_DATA_DIR 感知），勿在模块导入时求值
+        self._conn = create_sqlite_connection(db_path or database_path())
         # RLock 允许嵌套获取（check_budget 在锁内调用 daily_cost/monthly_cost）
         self._lock = threading.RLock()
         self._daily_budget = daily_budget

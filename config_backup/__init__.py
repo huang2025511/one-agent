@@ -5,6 +5,10 @@ Provides:
   - Version history with timestamps
   - Atomic restore operations
   - Backup rotation (keep last N versions)
+
+v2.1.0 数据统一：备份内容不再写 config/backups/*.yaml，改存统一库
+{data_dir}/one_agent.db 的 config_backups 表（core.hub.Hub.backup_*）。
+旧目录下存量 *.yaml 首次初始化时一次性导入并改名 backups.migrated 兜底。
 """
 
 from __future__ import annotations
@@ -12,45 +16,92 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 
+from core.hub import get_hub
+
 logger = logging.getLogger(__name__)
 
 
 class ConfigBackupManager:
-    """Manages configuration backups with versioning and rotation."""
+    """Manages configuration backups with versioning and rotation.
+
+    Backups are stored in the unified database (config_backups table)
+    via :class:`core.hub.Hub`. Public method signatures stay compatible
+    with the historical file-based implementation.
+    """
 
     def __init__(self, config_path: str, backup_dir: Optional[str] = None) -> None:
         self._config_path = Path(config_path)
+        # 旧版文件备份目录 — 仅用于一次性迁移检测，新备份不再写盘
         self._backup_dir = Path(backup_dir or self._config_path.parent / "backups")
-        self._backup_dir.mkdir(parents=True, exist_ok=True)
         self._max_backups = 10  # Keep last 10 versions
-        self._index_file = self._backup_dir / "backup_index.json"
-        self._index = self._load_index()
+        self._hub = get_hub()
+        self._migrate_legacy_backups()
 
-    def _load_index(self) -> List[Dict[str, Any]]:
-        """Load backup index metadata."""
-        if self._index_file.exists():
+    # ------------------------------------------------------------- legacy 迁移
+
+    def _migrate_legacy_backups(self) -> None:
+        """一次性迁移：config/backups/*.yaml → 统一库 config_backups 表。
+
+        仅当目录存在 *.yaml 且表中无任何备份时执行；全部导入成功后把
+        目录改名为 backups.migrated 保留兜底。
+        """
+        if not self._backup_dir.is_dir():
+            return
+        yaml_files = sorted(self._backup_dir.glob("*.yaml"))
+        if not yaml_files:
+            return
+        if self._hub.backup_list():
+            return  # 表中已有备份，避免重复导入
+
+        reasons = self._load_legacy_reasons()
+        for p in yaml_files:
+            reason = reasons.get(p.name, self._reason_from_filename(p.name))
             try:
-                with open(self._index_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                self._hub.backup_put(
+                    p.name, p.read_text(encoding="utf-8"), reason=reason)
             except Exception as exc:
-                logger.warning("failed to load backup index: %s", exc)
-        return []
+                logger.warning(
+                    "legacy config backup import failed for %s (left in place): %s",
+                    p.name, exc)
+                return
 
-    def _save_index(self) -> None:
-        """Save backup index metadata."""
         try:
-            with open(self._index_file, "w", encoding="utf-8") as f:
-                json.dump(self._index, f, indent=2, ensure_ascii=False)
+            self._backup_dir.rename(
+                self._backup_dir.with_name(self._backup_dir.name + ".migrated"))
+            logger.info(
+                "migrated %d legacy config backups into unified db, "
+                "dir renamed to %s.migrated", len(yaml_files), self._backup_dir.name)
+        except OSError as exc:
+            logger.warning("legacy backup dir rename failed: %s", exc)
+
+    def _load_legacy_reasons(self) -> Dict[str, str]:
+        """读取旧版 backup_index.json 的 filename → reason 映射（尽力而为）。"""
+        index_file = self._backup_dir / "backup_index.json"
+        if not index_file.exists():
+            return {}
+        try:
+            with open(index_file, "r", encoding="utf-8") as f:
+                entries = json.load(f)
+            return {e["filename"]: e.get("reason", "") for e in entries
+                    if isinstance(e, dict) and e.get("filename")}
         except Exception as exc:
-            logger.warning("failed to save backup index: %s", exc)
+            logger.warning("failed to load legacy backup index: %s", exc)
+            return {}
+
+    @staticmethod
+    def _reason_from_filename(name: str) -> str:
+        """从 config_YYYYmmdd_HHMMSS_{reason}.yaml 文件名解析 reason。"""
+        stem = name[:-5] if name.endswith(".yaml") else name
+        parts = stem.split("_")
+        return "_".join(parts[3:]) if len(parts) > 3 else "migrated"
+
+    # ------------------------------------------------------------- 备份 CRUD
 
     def create_backup(self, reason: str = "manual") -> Optional[str]:
         """Create a backup of the current config.
@@ -66,28 +117,12 @@ class ConfigBackupManager:
             return None
 
         try:
-            # Generate timestamped filename
+            content = self._config_path.read_text(encoding="utf-8")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_name = f"config_{timestamp}_{reason}.yaml"
-            backup_path = self._backup_dir / backup_name
 
-            # Copy config to backup location
-            shutil.copy2(self._config_path, backup_path)
-
-            # Update index
-            self._index.append({
-                "filename": backup_name,
-                "timestamp": time.time(),
-                "datetime": datetime.now().isoformat(),
-                "reason": reason,
-                "size_bytes": backup_path.stat().st_size,
-            })
-
-            # Rotate old backups
+            self._hub.backup_put(backup_name, content, reason=reason)
             self._rotate_backups()
-
-            # Save index
-            self._save_index()
 
             logger.info("config backup created: %s (reason=%s)", backup_name, reason)
             return backup_name
@@ -105,23 +140,24 @@ class ConfigBackupManager:
         Returns:
             True if successful, False otherwise
         """
-        if not self._index:
+        backups = self.list_backups()
+        if not backups:
             logger.warning("no backups available")
             return False
 
-        # Find backup to restore
         if backup_name is None:
             # Use most recent
-            backup_entry = self._index[-1]
+            backup_entry = backups[-1]
         else:
-            backup_entry = next((b for b in self._index if b["filename"] == backup_name), None)
+            backup_entry = next(
+                (b for b in backups if b["filename"] == backup_name), None)
             if backup_entry is None:
                 logger.error("backup not found: %s", backup_name)
                 return False
 
-        backup_path = self._backup_dir / backup_entry["filename"]
-        if not backup_path.exists():
-            logger.error("backup file missing: %s", backup_path)
+        row = self._hub.backup_get(backup_entry["filename"])
+        if row is None:
+            logger.error("backup missing in unified db: %s", backup_entry["filename"])
             return False
 
         try:
@@ -130,7 +166,7 @@ class ConfigBackupManager:
 
             # Atomic restore: write to temp file, then rename
             temp_path = self._config_path.with_suffix(".yaml.tmp")
-            shutil.copy2(backup_path, temp_path)
+            temp_path.write_text(row["content"], encoding="utf-8")
             os.replace(temp_path, self._config_path)
 
             logger.info("config restored from backup: %s", backup_entry["filename"])
@@ -143,36 +179,31 @@ class ConfigBackupManager:
             if temp_path.exists():
                 try:
                     temp_path.unlink()
-                except Exception as exc:
-                    logger.debug("ignored non-critical error: %s", exc)
+                except Exception as unlink_exc:
+                    logger.debug("ignored non-critical error: %s", unlink_exc)
             return False
 
     def list_backups(self) -> List[Dict[str, Any]]:
-        """List all available backups."""
+        """List all available backups (oldest first, latest last)."""
+        rows = self._hub.backup_list()  # created_at DESC
         return [
             {
-                "filename": b["filename"],
-                "timestamp": b["timestamp"],
-                "datetime": b["datetime"],
-                "reason": b["reason"],
-                "size_bytes": b["size_bytes"],
+                "filename": r["name"],
+                "timestamp": r["created_at"],
+                "datetime": datetime.fromtimestamp(r["created_at"]).isoformat(),
+                "reason": r["reason"] or "",
+                "size_bytes": r["size_bytes"] or 0,
             }
-            for b in self._index
+            for r in reversed(rows)
         ]
 
     def delete_backup(self, backup_name: str) -> bool:
         """Delete a specific backup."""
-        backup_entry = next((b for b in self._index if b["filename"] == backup_name), None)
-        if backup_entry is None:
+        if self._hub.backup_get(backup_name) is None:
             logger.warning("backup not found: %s", backup_name)
             return False
-
-        backup_path = self._backup_dir / backup_name
         try:
-            if backup_path.exists():
-                backup_path.unlink()
-            self._index = [b for b in self._index if b["filename"] != backup_name]
-            self._save_index()
+            self._hub.backup_delete(backup_name)
             logger.info("backup deleted: %s", backup_name)
             return True
         except Exception as exc:
@@ -181,34 +212,22 @@ class ConfigBackupManager:
 
     def _rotate_backups(self) -> None:
         """Remove old backups to maintain max_backups limit."""
-        if len(self._index) <= self._max_backups:
-            return
-
-        # Sort by timestamp (oldest first)
-        sorted_backups = sorted(self._index, key=lambda b: b["timestamp"])
-        to_remove = sorted_backups[:len(sorted_backups) - self._max_backups]
-
-        for backup in to_remove:
-            backup_path = self._backup_dir / backup["filename"]
+        rows = self._hub.backup_list()  # created_at DESC — newest first
+        for row in rows[self._max_backups:]:
             try:
-                if backup_path.exists():
-                    backup_path.unlink()
-                logger.debug("rotated old backup: %s", backup["filename"])
+                self._hub.backup_delete(row["name"])
+                logger.debug("rotated old backup: %s", row["name"])
             except Exception as exc:
-                logger.warning("failed to rotate backup %s: %s", backup["filename"], exc)
-
-        # Update index
-        self._index = [b for b in self._index if b not in to_remove]
+                logger.warning("failed to rotate backup %s: %s", row["name"], exc)
 
     def get_backup_content(self, backup_name: str) -> Optional[Dict[str, Any]]:
-        """Read and parse a backup file."""
-        backup_path = self._backup_dir / backup_name
-        if not backup_path.exists():
+        """Read and parse a backup from the unified database."""
+        row = self._hub.backup_get(backup_name)
+        if row is None:
             return None
 
         try:
-            with open(backup_path, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+            return yaml.safe_load(row["content"]) or {}
         except Exception as exc:
             logger.exception("failed to read backup %s: %s", backup_name, exc)
             return None

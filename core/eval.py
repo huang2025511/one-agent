@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from core.db import create_sqlite_connection
+from core.hub import database_path
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,9 @@ class EvalHarness:
     and persists results for tracking improvement over time.
     """
 
-    def __init__(self, db_path: str = "data/memory/eval_results.db"):
-        self._conn = create_sqlite_connection(db_path)
+    def __init__(self, db_path: Optional[str] = None):
+        # 默认惰性解析统一库路径（ONE_AGENT_DATA_DIR 感知），勿在模块导入时求值
+        self._conn = create_sqlite_connection(db_path or database_path())
         self._write_lock = threading.Lock()
         self._migrate()
 

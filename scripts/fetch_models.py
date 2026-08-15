@@ -13,14 +13,58 @@ from typing import Dict, List
 logger = logging.getLogger(__name__)
 
 # Custom providers storage
-CUSTOM_PROVIDERS_FILE = Path.home() / ".one-agent" / "custom_providers.json"
+# v2.1.0 数据统一：自定义 provider 存统一库 kv（key "llm.custom_providers"），
+# 复制 one_agent.db 即带走。旧版 ~/.one-agent/custom_providers.json 首次
+# 读取时自动迁移；core.hub 不可用时（脚本独立分发等场景）降级为
+# {data_dir}/custom_providers.json 文件模式。
+_LEGACY_PROVIDERS_FILE = Path.home() / ".one-agent" / "custom_providers.json"
+_KV_KEY = "llm.custom_providers"
+
+
+def _fallback_file() -> Path:
+    import os
+    return Path(os.environ.get("ONE_AGENT_DATA_DIR", "./data")) / "custom_providers.json"
+
+
+def _get_hub():
+    try:
+        root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(root))
+        from core.hub import get_hub
+        return get_hub()
+    except Exception as exc:
+        logger.debug("hub unavailable, falling back to file storage: %s", exc)
+        return None
 
 
 def load_custom_providers() -> Dict[str, dict]:
-    """Load custom providers from file."""
-    if CUSTOM_PROVIDERS_FILE.exists():
+    """Load custom providers (unified db kv first, legacy file migrated once)."""
+    hub = _get_hub()
+    if hub is not None:
         try:
-            with open(CUSTOM_PROVIDERS_FILE) as f:
+            data = hub.kv_get(_KV_KEY)
+            if isinstance(data, dict) and data:
+                return data
+            # 首次迁移：旧 home 文件 → kv，成功后旧文件改名 .migrated
+            if _LEGACY_PROVIDERS_FILE.exists():
+                try:
+                    with open(_LEGACY_PROVIDERS_FILE) as f:
+                        legacy = json.load(f)
+                    if isinstance(legacy, dict) and legacy:
+                        hub.kv_set(_KV_KEY, legacy)
+                        _LEGACY_PROVIDERS_FILE.rename(
+                            _LEGACY_PROVIDERS_FILE.with_name(
+                                _LEGACY_PROVIDERS_FILE.name + ".migrated"))
+                        return legacy
+                except Exception as exc:
+                    logger.debug("legacy providers migration skipped: %s", exc)
+            return {}
+        except Exception as exc:
+            logger.debug("kv read failed, using file fallback: %s", exc)
+    path = _fallback_file()
+    if path.exists():
+        try:
+            with open(path) as f:
                 return json.load(f)
         except Exception as exc:
             logger.debug("ignored non-critical error: %s", exc)
@@ -28,8 +72,7 @@ def load_custom_providers() -> Dict[str, dict]:
 
 
 def save_custom_provider(name: str, base_url: str, api_key: str = None) -> None:
-    """Save a custom provider to file."""
-    CUSTOM_PROVIDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    """Save a custom provider (kv first, file fallback)."""
     providers = load_custom_providers()
 
     # Generate a unique key
@@ -40,7 +83,16 @@ def save_custom_provider(name: str, base_url: str, api_key: str = None) -> None:
         "api_key": api_key,
     }
 
-    with open(CUSTOM_PROVIDERS_FILE, "w") as f:
+    hub = _get_hub()
+    if hub is not None:
+        try:
+            hub.kv_set(_KV_KEY, providers)
+            return
+        except Exception as exc:
+            logger.debug("kv write failed, using file fallback: %s", exc)
+    path = _fallback_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
         json.dump(providers, f, indent=2)
 
 

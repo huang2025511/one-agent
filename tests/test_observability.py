@@ -255,30 +255,30 @@ class TestBackupExport:
         assert isinstance(data, dict)
 
     def test_export_import_roundtrip(self, tmp_path):
-        """Test export and import roundtrip."""
+        """Test export and import roundtrip (v2.1.0 统一库)."""
         from core.backup_export import DataExporter, DataImporter, DataType, ExportFormat
 
         # Create test directories
         export_dir = tmp_path / "export"
         export_dir.mkdir()
 
-        # Create test memory DB
-        memory_dir = tmp_path / "memory"
-        memory_dir.mkdir(parents=True)
-
-        db_path = memory_dir / "sessions.db"
+        # v2.1.0：会话建在统一库 one_agent.db（列名 id/title/...）
+        db_path = tmp_path / "one_agent.db"
         import sqlite3
         conn = sqlite3.connect(str(db_path))
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
-                session_id TEXT PRIMARY KEY,
+                id TEXT PRIMARY KEY,
+                title TEXT,
                 created_at REAL,
                 updated_at REAL,
-                message_count INTEGER DEFAULT 0
+                message_count INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                status TEXT
             )
         """)
         conn.execute(
-            "INSERT INTO sessions VALUES ('export-test', 1234567890, 1234567890, 3)"
+            "INSERT INTO sessions VALUES ('export-test', 't', 1234567890, 1234567890, 3, 0, 'active')"
         )
         conn.commit()
         conn.close()
@@ -303,30 +303,17 @@ class TestBackupExport:
         assert result.success is True
         assert result.size_bytes > 0
         assert "sessions" in result.items_exported
+        assert "database" in result.items_exported, "zip 应附统一库原文件"
 
-        # Import to a new location
+        # Import to a new location（空库：导入器自动建表）
         import_dir = tmp_path / "import"
         import_dir.mkdir()
-
-        # Create empty sessions DB
-        new_db = import_dir / "memory" / "sessions.db"
-        new_db.parent.mkdir(parents=True)
-        conn = sqlite3.connect(str(new_db))
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id TEXT PRIMARY KEY,
-                created_at REAL,
-                updated_at REAL,
-                message_count INTEGER DEFAULT 0
-            )
-        """)
-        conn.commit()
-        conn.close()
 
         importer = DataImporter(data_dir=str(import_dir))
         import_result = importer.import_from_file(result.file_path, merge=True)
 
         assert import_result.success is True
+        assert import_result.items_imported.get("sessions") == 1
 
     def test_export_result_dataclass(self):
         """Test ExportResult dataclass."""

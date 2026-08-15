@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from core.db import create_sqlite_connection
+from core.hub import database_path
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,9 @@ class Task:
 class TaskStore:
     """SQLite-backed task persistence."""
 
-    def __init__(self, db_path: str = "data/memory/tasks.db") -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        # 默认惰性解析统一库路径（ONE_AGENT_DATA_DIR 感知），勿在模块导入时求值
+        db_path = db_path or database_path()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = create_sqlite_connection(db_path)
         self._write_lock = threading.RLock()
@@ -233,10 +236,10 @@ class AsyncTaskScheduler:
 
     def __init__(
         self,
-        db_path: str = "data/memory/tasks.db",
+        db_path: Optional[str] = None,
         max_concurrent: int = 5,
     ) -> None:
-        self._store = TaskStore(db_path)
+        self._store = TaskStore(db_path or database_path())
         self._max_concurrent = max_concurrent
         self._running_tasks: Dict[str, asyncio.Task] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent)

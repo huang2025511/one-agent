@@ -63,7 +63,11 @@ class FailureCase:
 class SelfImprover:
     """Records failures, analyzes patterns, and generates improvements."""
 
-    def __init__(self, db_path: str = "data/memory/improvements.db"):
+    def __init__(self, db_path: Optional[str] = None):
+        # v2.1.0 数据统一：自改进数据进统一库 one_agent.db（惰性解析）
+        if db_path is None:
+            from core.hub import database_path
+            db_path = database_path()
         self._conn = create_sqlite_connection(db_path)
         # Serialize writes (see audit_log.py for rationale).
         self._write_lock = threading.Lock()

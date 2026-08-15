@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, field_validator
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 from core.context import AgentContext  # noqa: E402
 from core.plugin import PluginManager  # noqa: E402
@@ -74,7 +74,8 @@ class LLMConfig(BaseModel):
     default_max_tokens: int = Field(default=2048, ge=1)
     timeout: int = Field(default=60, ge=5)
     retries: int = Field(default=3, ge=1, le=10)
-    cost_tracking: Dict[str, Any] = Field(default_factory=lambda: {"daily_budget": 1.0, "monthly_budget": 20.0, "db_path": "data/memory/costs.db"})
+    # v2.1.0：db_path 已移除 — 成本记录进统一库 one_agent.db（cost_log 表）
+    cost_tracking: Dict[str, Any] = Field(default_factory=lambda: {"daily_budget": 1.0, "monthly_budget": 20.0})
 
 
 class RouterConfig(BaseModel):
@@ -248,6 +249,34 @@ def load_config(path: str) -> FullConfig:
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
 
+    # 配置库覆盖层（v2.1.0 数据统一）：{data_dir}/one_agent.db 优先于
+    # YAML。YAML 仅在首次启动时被 seed_from_config 导入 DB，此后运行时
+    # 修改只落 DB —— 迁移环境只需复制 one_agent.db 一个文件。
+    # path 位于项目 config/ 之外的 yaml（单测自建文件）不叠加：完全接管。
+    try:
+        from core.config_store import (
+            config_db_path, get_config_store, overlay_enabled, resolve_data_dir,
+        )
+        if overlay_enabled(path):
+            _dd = resolve_data_dir(raw)
+            # 旧版分散库（config.db、memory/*.db）一次性自动迁入统一库。
+            # 必须先于 overlay：旧 config.db 的 settings 要先进 one_agent.db
+            # 才能参与覆盖。
+            from core.hub import migrate_legacy
+            try:
+                _report = migrate_legacy(_dd)
+                if _report:
+                    logger.info("legacy stores migrated into unified db: %s", _report)
+            except Exception as exc:
+                logger.warning("legacy migration failed (continuing): %s", exc)
+            _db = config_db_path(_dd)
+            if _db.exists():
+                snap = get_config_store(str(_db)).snapshot()
+                if snap:
+                    raw = _deep_merge_dict(raw, snap)
+    except Exception as exc:
+        logger.warning("config db overlay failed, falling back to yaml only: %s", exc)
+
     expanded = _expand_env(raw)
 
     # Try Fernet decryption if key is set
@@ -273,7 +302,10 @@ def load_config(path: str) -> FullConfig:
 
 def setup_logging(config) -> None:
     """Configure logging with file rotation and structured format."""
-    log_dir = Path(config.agent.data_dir) / "logs"
+    # v2.1.0：日志目录同样走统一解析（ONE_AGENT_DATA_DIR 优先）
+    from core.hub import resolve_data_dir
+    log_dir = Path(resolve_data_dir(
+        {"agent": {"data_dir": config.agent.data_dir}})) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     fmt = "%(asctime)s | %(levelname)7s | %(name)-30s | %(message)s"
@@ -360,7 +392,27 @@ class OneAgentApp:
         self.config = load_config(config_path)
         setup_logging(self.config)  # type: ignore[arg-type]
 
+        # 首次启动：把 YAML 配置种子导入统一库的 settings 表（此后 YAML
+        # 只读，运行时修改全部落 {data_dir}/one_agent.db，
+        # 迁移环境 = 复制 one_agent.db 一个文件）。
+        # config_path 位于项目 config/ 之外（单测自建 yaml）时不种子。
+        try:
+            from core.config_store import overlay_enabled, seed_from_config
+            if overlay_enabled(str(config_path)) and seed_from_config(self.config):
+                logger.info("config db seeded from %s (yaml is now read-only seed)",
+                            config_path)
+        except Exception as exc:
+            logger.warning("config db seed skipped: %s", exc)
+
         self.bus = EventBus()
+
+        # v2.1.0 修复：统一数据目录在此一次解析（ONE_AGENT_DATA_DIR >
+        # agent.data_dir > ./data）。此前各存储点直接用
+        # config.agent.data_dir，会绕过环境变量 —— 与 hub 无参调用
+        # （走环境变量）指向两个不同的库文件，造成数据分裂。
+        from core.hub import resolve_data_dir
+        self.data_dir = resolve_data_dir(
+            {"agent": {"data_dir": self.config.agent.data_dir}})
 
         self.llm = LLMProvider()
         self.router = SmartRouter()
@@ -386,8 +438,13 @@ class OneAgentApp:
         self._alert_manager = AlertManager()
 
         # Initialize approval manager for human-in-the-loop
+        # v2.1.0：审批记录持久化到统一库 one_agent.db（approvals 表），
+        # 重启后待办不丢（DB 故障时自动降级纯内存，不影响审批功能）
         from core.approval import ApprovalManager
-        self._approval_manager = ApprovalManager()
+        from core.hub import database_path
+        self._approval_manager = ApprovalManager(
+            db_path=database_path(self.data_dir),
+        )
 
         self._pm = PluginManager()
         for p in (
@@ -447,56 +504,45 @@ class OneAgentApp:
             logger.warning("singleton pre-warm failed (non-fatal): %s", exc)
 
         # 检查重启标记 — 如果刚重启过，记录时间供系统提示词使用
-        import json as _json
+        # v2.1.0：标记存统一库 kv（skills/restart_handler 写入 kv key
+        # "restart_marker"），不再落 restart_marker.json 文件
         import time as _time
-        from pathlib import Path as _Path
-        restart_marker = _Path(self.config.agent.data_dir) / "restart_marker.json"
-        if restart_marker.exists():
-            # 用 try/finally 确保 marker 文件被清理，即使 marker_data 不是 dict
-            # （如 JSON 解析出 list/str/int）导致 .get() 抛 AttributeError，
-            # 也要 unlink 而非永久残留。原代码 unlink 在 try 内被异常跳过。
-            try:
-                marker_data = _json.loads(restart_marker.read_text(encoding="utf-8"))
-                if isinstance(marker_data, dict):
-                    restart_ts = marker_data.get("timestamp", 0)
-                    if _time.time() - restart_ts < 120:  # 2 分钟内的重启
-                        self._recent_restart = restart_ts
-                        logger.info("detected recent restart at %s", restart_ts)
-                else:
-                    logger.warning(
-                        "restart_marker.json 内容不是 dict：%s，已忽略",
-                        type(marker_data).__name__,
-                    )
-            except Exception as exc:
-                logger.warning("读取 restart_marker.json 失败: %s", exc, exc_info=True)
-            finally:
-                try:
-                    restart_marker.unlink()
-                except OSError as unlink_exc:
-                    logger.debug("删除 restart_marker.json 失败: %s", unlink_exc)
+        try:
+            from core.hub import get_hub
+            marker_data = get_hub().kv_get("restart_marker")
+            if isinstance(marker_data, dict):
+                restart_ts = marker_data.get("timestamp", 0)
+                if _time.time() - restart_ts < 120:  # 2 分钟内的重启
+                    self._recent_restart = restart_ts
+                    logger.info("detected recent restart at %s", restart_ts)
+                get_hub().kv_delete("restart_marker")
+            elif marker_data is not None:
+                logger.warning("restart_marker 内容不是 dict：%s，已忽略",
+                               type(marker_data).__name__)
+        except Exception as exc:
+            logger.warning("读取重启标记失败: %s", exc, exc_info=True)
 
         self.ctx = AgentContext(
             config=self.config.model_dump(),
             bus=self.bus,
-            data_dir=self.config.agent.data_dir,
+            data_dir=self.data_dir,
         )
         # 传递重启标记给上下文
         self.ctx.recent_restart = self._recent_restart
         # Create session store for persistence across restarts
-        from pathlib import Path as _Path
-        session_db_path = str(_Path(self.config.agent.data_dir) / "memory" / "sessions.db")
-        session_store = SessionStore(session_db_path)
+        # v2.1.0：会话/聊天记录进统一库 one_agent.db（sessions/messages 表）
+        from core.hub import database_path
+        session_store = SessionStore(database_path(self.data_dir))
         self.ctx.session_store = session_store
 
         # Initialize self-improver for learning from failures
         from core.self_improve import SelfImprover
-        improvements_db = str(_Path(self.config.agent.data_dir) / "memory" / "improvements.db")
-        self.ctx.self_improver = SelfImprover(improvements_db)
-        logger.info("self-improver initialized at %s", improvements_db)
+        self.ctx.self_improver = SelfImprover(database_path(self.data_dir))
+        logger.info("self-improver initialized at %s", database_path(self.data_dir))
 
         # Initialize skill marketplace
         from marketplace import Marketplace
-        marketplace_dir = str(_Path(self.config.agent.data_dir) / "marketplace")
+        marketplace_dir = str(Path(self.data_dir) / "marketplace")
         self.ctx.marketplace = Marketplace(marketplace_dir)
         # 保留 MarketplacePlugin 引用（用于公开社区市场拉取）
         self.ctx.marketplace_plugin = self.marketplace
@@ -805,6 +851,13 @@ class OneAgentApp:
             logger.warning("webhook trigger close failed: %s", exc)
         await self._pm.stop_all()
         await self.bus.stop()
+        # v2.1.0 统一库收尾：WAL checkpoint 截断，保证此后直接复制
+        # one_agent.db 单文件即完整（无需 -wal/-shm 伴随文件）
+        try:
+            from core.hub import close_hub
+            close_hub()
+        except Exception:
+            logger.debug("hub close failed", exc_info=True)
 
 
 # ============================================================

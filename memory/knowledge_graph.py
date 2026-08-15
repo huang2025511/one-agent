@@ -20,7 +20,11 @@ STOPWORDS = {"一个", "这个", "那个", "我们", "他们", "什么", "可以
 class KnowledgeGraph(BaseSQLiteStore):
     """Lightweight entity-relationship graph on SQLite."""
 
-    def __init__(self, db_path: str = "data/memory/kg.db"):
+    def __init__(self, db_path: Optional[str] = None):
+        # v2.1.0 数据统一：知识图谱进统一库 one_agent.db（惰性解析）
+        if db_path is None:
+            from core.hub import database_path
+            db_path = database_path()
         super().__init__(db_path)
 
     def _init_db(self):

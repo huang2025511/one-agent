@@ -343,11 +343,19 @@ class LongTermMemory(BaseSQLiteStore):
 
 # ---------- tier 3: procedural memory (auto-generated skills) --------------
 class ProceduralMemory:
-    """Reusable SKILL.md documents — Hermes-style self-growth."""
+    """Reusable SKILL.md documents — Hermes-style self-growth.
+
+    v2.1.0：技能文档以统一库为事实源（stored_files 包 "procedural"），
+    磁盘目录 {data_dir}/memory/skills 是运行时物化缓存 —— 复制
+    one_agent.db 即带走全部自生成技能。
+    """
+
+    _PACKAGE = "procedural"
 
     def __init__(self, directory: str) -> None:
         self._dir = Path(directory)
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._sync_with_hub()
         self._index_path = self._dir / "_index.json"
         self._index: Dict[str, Any] = self._load_index()
         # Batch-write hint: only persist to disk after this many dirty
@@ -358,6 +366,21 @@ class ProceduralMemory:
         # lookup() runs on the event loop thread. Without a lock, concurrent
         # dict mutation during iteration raises RuntimeError.
         self._lock = threading.Lock()
+
+    def _sync_with_hub(self) -> None:
+        """DB ↔ 磁盘双向同步：先物化（DB→磁盘），DB 为空且磁盘有文件时
+        首次采集（磁盘→DB，旧版数据入库）。任何 DB 故障静默降级为纯
+        磁盘模式，不影响功能。
+        """
+        try:
+            from core.hub import get_hub
+            hub = get_hub()
+            hub.materialize(self._PACKAGE, self._dir)
+            if not hub.files_get(self._PACKAGE):
+                if any(self._dir.glob("*.md")):
+                    hub.capture_dir(self._PACKAGE, self._dir)
+        except Exception as exc:
+            logger.debug("procedural memory hub sync skipped: %s", exc)
 
     def _load_index(self) -> Dict[str, Any]:
         if self._index_path.exists():
@@ -372,6 +395,13 @@ class ProceduralMemory:
         safe = re.sub(r"[^A-Za-z0-9_-]", "_", name).strip("_") or "skill"
         path = self._dir / f"{safe}.md"
         path.write_text(body, encoding="utf-8")
+        # v2.1.0：写磁盘后立即整包同步进统一库（目录小，代价可忽略；
+        # 崩溃安全 —— 不等 threshold flush）
+        try:
+            from core.hub import get_hub
+            get_hub().capture_dir(self._PACKAGE, self._dir)
+        except Exception as exc:
+            logger.debug("procedural memory hub capture failed: %s", exc)
         # 性能优化：预计算 triggers 的小写形式, lookup 时直接用, 避免每次重新 lower
         # 之前 lookup 每个 skill 每个 trigger 都 t.lower(), 重复计算
         triggers_lower = [t.lower() for t in triggers if t]
@@ -449,6 +479,12 @@ class ProceduralMemory:
             to_persist["skills"][skill_id] = clean_meta
         self._index_path.write_text(json.dumps(to_persist, indent=2), encoding="utf-8")
         self._dirty_count = 0
+        # v2.1.0：索引落盘后同步进统一库（uses 计数等元数据变化）
+        try:
+            from core.hub import get_hub
+            get_hub().capture_dir(self._PACKAGE, self._dir)
+        except Exception as exc:
+            logger.debug("procedural memory hub capture failed: %s", exc)
 
 
 # ---------- public plugin --------------------------------------------------
@@ -482,21 +518,23 @@ class MemoryPlugin(Plugin):
         data_dir = ctx.config.get("agent", {}).get("data_dir", "./data")
 
         mem_cfg = cfg.get("long_term", {}) or {}
+        # v2.1.0 数据统一：长期记忆/图谱/角色/向量全部进统一库
+        # one_agent.db（memory、entities、relations、roles、embeddings 表）
+        from core.hub import database_path
+        unified_db = database_path(data_dir)
         self._long = LongTermMemory(
-            path=os.path.join(data_dir, "memory/longterm.sqlite"),
+            path=unified_db,
             decay_enabled=mem_cfg.get("decay_enabled", True),
         )
         self._procedural = ProceduralMemory(os.path.join(data_dir, "memory/skills"))
-        self._kg = KnowledgeGraph(os.path.join(data_dir, "memory/kg.db"))
-        self._roles = RoleStore(os.path.join(data_dir, "memory/roles.db"))
+        self._kg = KnowledgeGraph(unified_db)
+        self._roles = RoleStore(unified_db)
 
         # Initialize embedding store for semantic search
         self._hybrid_search = mem_cfg.get("hybrid_search", True)
         if self._hybrid_search:
             try:
-                self._embeddings = EmbeddingStore(
-                    db_path=os.path.join(data_dir, "memory/embeddings.db")
-                )
+                self._embeddings = EmbeddingStore(db_path=unified_db)
                 logger.info("Embedding store initialized for hybrid search")
             except (OSError, RuntimeError, ValueError) as exc:
                 logger.error("failed to initialize embedding store: %s", exc, exc_info=True)

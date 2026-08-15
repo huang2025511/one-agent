@@ -1,5 +1,23 @@
 """Chat gateways — CLI, web UI, and messaging re-exports.
 
+统一消息契约（v2.1.0 接口统一）：
+    所有网关（CLI/Web/REST/Telegram/企微/钉钉/飞书/Discord/Slack/个人微信）
+    共享同一条消息管线，无一例外：
+
+        入口  bus.publish({"type": "user_message", "turn": TurnContext, ...})
+        出口  bus.publish({"type": "turn_completed", "turn": ...})
+
+    - 直接型网关（CLI/Web/REST）：bind_callback(OneAgentApp.chat)，
+      app.chat 内部构造 TurnContext 并发布 user_message —— 与事件型
+      网关走完全相同的路径
+    - 事件型网关（六个 IM + 个人微信）：自行构造 TurnContext 发布
+      user_message，订阅 turn_completed 后回发平台；BaseMessagingGateway
+      提供公共的等待/回发/后台任务管理
+
+    即：新增网关只需实现「平台消息 → TurnContext → user_message」和
+    「turn_completed → 平台回复」两端，其余（路由/记忆/持久化/审批）
+    全部由管线自动处理；聊天记录统一落 one_agent.db（sessions/messages）。
+
 CLIGateway and WebGateway live here directly.  Messaging gateways
 (Telegram, WeCom, DingTalk, Feishu, Discord, Slack) are imported lazily
 via ``__getattr__`` so that ``import gateways`` does not pull in httpx

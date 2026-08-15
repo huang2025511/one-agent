@@ -27,7 +27,6 @@ llm:
     enabled: false
     daily_budget: 1.0
     monthly_budget: 20.0
-    db_path: data/memory/costs.db
 router:
   enabled: true
   task_complexity_thresholds:

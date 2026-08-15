@@ -24,7 +24,12 @@ class SessionStore(BaseSQLiteStore):
     # AUTOINCREMENT to TEXT PRIMARY KEY (P0-3 fix).
     SCHEMA_VERSION = 2
 
-    def __init__(self, db_path: str = "data/memory/sessions.db") -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        # v2.1.0 数据统一：会话/聊天记录进统一库 one_agent.db
+        # （惰性解析，ONE_AGENT_DATA_DIR 环境变量在构造时生效）
+        if db_path is None:
+            from core.hub import database_path
+            db_path = database_path()
         super().__init__(db_path)
 
     def _init_db(self) -> None:

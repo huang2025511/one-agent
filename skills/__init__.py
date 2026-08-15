@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from core.events import Event
 from core.exceptions import InputValidationError  # noqa: F401
+from core.hub import database_path, get_hub
 from core.plugin import Plugin
 from memory.knowledge_graph import make_graph_search_handler  # noqa: F401
 from multimodal import make_image_handler, make_transcribe_handler
@@ -181,6 +182,7 @@ class SkillManager(Plugin):
         self._community_dir: Optional[str] = None
         self._marketplace_dir: Optional[str] = None
         self._procedural_dir: Optional[str] = None
+        self._data_dir: str = "./data"
         self._mcp_servers: List[Dict[str, Any]] = []
         self._max_loaded_per_turn = 6
         self._system_executor = None
@@ -190,6 +192,7 @@ class SkillManager(Plugin):
         await super().setup(ctx)
         cfg = ctx.config.get("skills", {}) or {}
         data_dir = ctx.config.get("agent", {}).get("data_dir", "./data")
+        self._data_dir = data_dir
         self._builtin_dir = cfg.get("builtin_skills_dir") or os.path.join(data_dir, "skills/builtin")
         self._user_dir = cfg.get("user_skills_dir") or os.path.join(data_dir, "skills/user")
         self._community_dir = cfg.get("community_skills_dir") or os.path.join(data_dir, "skills/community")
@@ -200,6 +203,9 @@ class SkillManager(Plugin):
         for d in (self._builtin_dir, self._user_dir, self._community_dir,
                   self._marketplace_dir, self._procedural_dir):
             Path(d).mkdir(parents=True, exist_ok=True)
+        # 技能目录 ↔ 统一库同步：先物化 DB → 磁盘，再采集磁盘 → DB
+        # （必须在扫描前执行，DB-only 的技能要先落盘才能被扫描注册）
+        self._sync_skill_dirs_with_hub()
         self._seed_builtins()
         self._scan_directory(self._builtin_dir)
         self._scan_directory(self._user_dir)
@@ -213,6 +219,40 @@ class SkillManager(Plugin):
         self._ctx_ref = ctx
         self.bus.subscribe("cron", self._on_cron)
         logger.info("skills loaded: %d", len(self._skills))
+
+    # ------------------------------------------------------ hub sync
+    def _sync_skill_dirs_with_hub(self) -> None:
+        """技能目录 ↔ 统一库（{data_dir}/one_agent.db）双向同步。
+
+        builtin 随代码分发，不入库。user/community/marketplace 三个目录：
+          1. materialize：DB → 磁盘（DB 是单一事实源，磁盘只是运行时缓存，
+             handler.py 必须落盘才能被 import；内容一致不重写）
+          2. capture_dir：磁盘 → DB（首次启动把存量技能入库；整包替换）
+
+        顺序固定为先物化再采集，保证 DB 永远是磁盘的超集 —— 复制
+        one_agent.db 到新环境即可完整还原全部技能。
+        """
+        try:
+            hub = get_hub(self._data_dir)
+        except Exception as exc:
+            logger.warning("skill hub unavailable, skip sync: %s", exc)
+            return
+        for kind, d in (("user", self._user_dir),
+                        ("community", self._community_dir),
+                        ("marketplace", self._marketplace_dir)):
+            if not d:
+                continue
+            root = Path(d)
+            if not root.is_dir():
+                continue
+            package = f"skills/{kind}"
+            try:
+                hub.materialize(package, root)
+                if hub.capture_dir(package, root) == 0 and not any(root.iterdir()):
+                    # 目录为空时显式清空该包，避免已卸载技能在 DB 残留
+                    hub.files_put(package, {})
+            except Exception as exc:
+                logger.warning("sync skills/%s with hub failed: %s", kind, exc)
 
     # ---------------------------------------------------------- public
     def all_skill_ids(self) -> List[str]:
@@ -578,7 +618,7 @@ class SkillManager(Plugin):
                 if not self._ctx_ref:
                     return "❌ 无法访问会话存储"
                 from memory.session_store import SessionStore
-                store = SessionStore(self._ctx_ref.config.get("agent", {}).get("data_dir", "./data") + "/memory/sessions.db")
+                store = SessionStore(database_path(self._ctx_ref.config.get("agent", {}).get("data_dir", "./data")))
                 session = store.get_session(sid)
                 if not session:
                     return "📜 当前会话暂无历史记录"
@@ -608,7 +648,7 @@ class SkillManager(Plugin):
                 if not self._ctx_ref:
                     return "❌ 无法访问会话存储"
                 from memory.session_store import SessionStore
-                store = SessionStore(self._ctx_ref.config.get("agent", {}).get("data_dir", "./data") + "/memory/sessions.db")
+                store = SessionStore(database_path(self._ctx_ref.config.get("agent", {}).get("data_dir", "./data")))
                 store.delete_session(sid)
                 return "✅ 已清空当前对话历史"
             except Exception as exc:
@@ -639,20 +679,14 @@ class SkillManager(Plugin):
 
             import os
             import sys
-            import json
             import time as _time
-            from pathlib import Path
 
-            data_dir = os.environ.get("ONE_AGENT_DATA_DIR", "./data")
-            marker = Path(data_dir) / "restart_marker.json"
-
-            # 写入重启标记，供新进程启动时读取
+            # 写入重启标记（统一库 kv），供新进程启动时读取
             try:
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_text(json.dumps({
+                get_hub().kv_set("restart_marker", {
                     "timestamp": _time.time(),
                     "message": "重启完成，新版本已生效",
-                }, ensure_ascii=False), encoding="utf-8")
+                })
             except Exception as exc:
                 logger.debug("ignored non-critical error: %s", exc)
 
@@ -2759,176 +2793,35 @@ def _process_settings_command(input_text: str, config: dict, bus=None) -> str:
 
 
 def _save_config(config: dict, bus=None) -> None:
-    """将配置写回 YAML 文件（原子写入，带文件锁）。
+    """将配置持久化到统一库的 settings 表（{data_dir}/one_agent.db）。
 
-    安全修复：
-    1. 写盘前调用 `_sanitize_config_for_persist` 脱敏——内存中的 config
-       来自 ctx.config，已把 ${VAR} 展开为明文、enc:xxx 解密为明文 API key。
-       直接 dump 会把明文密钥永久固化到配置文件。脱敏把敏感字段的值
-       还原为 ${ENV_VAR} 占位符（若能匹配环境变量）或 null。
-    2. 临时文件清理改为 try/finally + temp_path 预初始化为 None，避免
-       yaml.YAMLError 抛出时 temp_path 未定义导致临时文件残留磁盘
-       （原 except OSError 不捕获 YAMLError）。
+    v2.1.0 数据统一：不再写 YAML 文件。
+    - YAML 仅在首次启动时被 seed 成配置库，之后只读
+    - 所有运行时修改（本函数 / PUT /api/config / config set 技能）只写 DB
+    - 环境迁移 = 复制 one_agent.db 一个文件
+
+    注意：不再调用 _sanitize_config_for_persist 脱敏。旧方案把明文密钥
+    还原成 ${VAR} 占位符写 YAML，若环境变量缺失则重启后密钥直接丢失；
+    配置库位于数据目录内（文件权限 0600），与聊天记录同级敏感度，
+    存明文是设计意图。SQLite 单事务写入天然原子，无需文件锁。
     """
-    import tempfile
-
-    import yaml
-    config_path = os.environ.get("ONE_AGENT_CONFIG", "config/default_config.yaml")
-    lock_path = config_path + ".lock"
-
-    # 写盘前脱敏，避免明文密钥落盘
-    sanitized = _sanitize_config_for_persist(config)
-
-    # Cross-platform file locking
-    lock_fd = None
-    use_fcntl = False
     try:
-        import fcntl
-        use_fcntl = True
-    except ImportError:
-        # Windows: use msvcrt or skip locking
-        try:
-            import msvcrt
-        except ImportError:
-            logger.warning("File locking not available on this platform")
-
-    temp_path: str | None = None  # 预初始化，确保 finally 中可访问
-    try:
-        # Acquire file lock to prevent race conditions
-        lock_fd = open(lock_path, "w")
-        try:
-            if use_fcntl:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            else:
-                # Windows: try msvcrt locking
-                try:
-                    import msvcrt
-                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
-                except (ImportError, OSError):
-                    pass  # Skip locking if not available
-
-            # Write to temp file first, then atomically rename
-            dir_name = os.path.dirname(config_path) or "."
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                suffix=".yaml",
-                dir=dir_name,
-                delete=False,
-            ) as f:
-                yaml.dump(sanitized, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-                temp_path = f.name
-            # Atomic rename
-            os.replace(temp_path, config_path)
-            temp_path = None  # 已成功 rename，无需清理
-            # Publish config_changed event
-            if bus is not None:
-                try:
-                    bus.publish({"type": "config_changed"})
-                except Exception:
-                    pass
-        finally:
-            if use_fcntl and lock_fd:
-                try:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                except Exception as exc:
-                    logger.debug("ignored non-critical error: %s", exc)
-            elif lock_fd:
-                try:
-                    import msvcrt
-                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-                except (ImportError, OSError):
-                    pass
-            if lock_fd:
-                lock_fd.close()
-            try:
-                os.unlink(lock_path)
-            except OSError as exc:
-                logger.error("failed to unlink lock file %s: %s", lock_path, exc, exc_info=True)
+        from core.config_store import save_config_dict
+        save_config_dict(config)
+    except ValueError as exc:
+        # pydantic 校验失败：拒绝写入，保留库中原配置
+        logger.error("保存配置被拒绝（校验失败）: %s", exc)
+        return
     except Exception as exc:
-        # 改为 except Exception 而非 OSError，捕获 yaml.YAMLError 等所有异常
         logger.error("保存配置失败: %s", exc, exc_info=True)
-    finally:
-        # 兜底清理临时文件（无论成功失败）
-        if temp_path is not None:
-            try:
-                os.unlink(temp_path)
-            except OSError as exc2:
-                logger.error("failed to clean up temp file %s: %s", temp_path, exc2, exc_info=True)
+        return
 
-
-# 敏感键名集合（与 models/recommend.py 保持一致）
-_CONFIG_SENSITIVE_KEYS = {
-    "api_key", "api_keys", "apikey", "secret", "secret_key",
-    "token", "access_token", "refresh_token",
-    "private_key", "client_secret",
-}
-
-
-def _sanitize_config_for_persist(cfg, _seen=None):
-    """递归脱敏 config dict，把展开的密钥还原为 ${ENV_VAR} 或 null。
-
-    与 models/recommend.py 的 _sanitize_for_persist 等价——独立实现以
-    避免循环依赖（skills 在某些场景下先于 models 加载）。
-    """
-    import os
-    if _seen is None:
-        _seen = set()
-    if id(cfg) in _seen:
-        return cfg  # 防止循环引用
-    _seen.add(id(cfg))
-    if isinstance(cfg, dict):
-        out = {}
-        for k, v in cfg.items():
-            key_lower = str(k).lower()
-            if key_lower in _CONFIG_SENSITIVE_KEYS:
-                out[k] = _redact_config_value(v, _seen)
-            else:
-                out[k] = _sanitize_config_for_persist(v, _seen)
-        return out
-    if isinstance(cfg, list):
-        return [_sanitize_config_for_persist(item, _seen) for item in cfg]
-    return cfg
-
-
-def _redact_config_value(value, _seen):
-    """把单个敏感值还原为 ${ENV_VAR} 或 null。"""
-    import os
-    if isinstance(value, dict):
-        return {k: _redact_config_value(v, _seen) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact_config_value(item, _seen) for item in value]
-    if not isinstance(value, str):
-        return value
-    # enc: 加密内容保留（本身可安全落盘）
-    if value.startswith("enc:"):
-        return value
-    # ${VAR} 占位符保留
-    if value.startswith("${") and value.endswith("}"):
-        return value
-    # 空值保留
-    if not value:
-        return value
-    # 尝试在 env 中找到与 value 相等的变量名
-    for env_name, env_val in os.environ.items():
-        if env_val == value and _is_safe_env_name(env_name):
-            return f"${{{env_name}}}"
-    # 找不到对应 env var：写 null，避免明文落盘
-    return None
-
-
-def _is_safe_env_name(name: str) -> bool:
-    """只把可识别的密钥类 env var 还原为占位符。
-
-    防止把普通 env var（如 PATH=/usr/bin）误还原为 ${PATH}。
-    """
-    upper = name.upper()
-    return any(
-        kw in upper for kw in (
-            "API_KEY", "APIKEY", "SECRET", "TOKEN", "PASSWORD",
-            "PRIVATE_KEY", "CLIENT_SECRET", "ACCESS_TOKEN",
-        )
-    )
+    # 配置变更事件（热重载订阅方据此刷新）
+    if bus is not None:
+        try:
+            bus.publish({"type": "config_changed"})
+        except Exception:
+            pass
 
 
 # ============================================================

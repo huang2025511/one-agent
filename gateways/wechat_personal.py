@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.events import Event
+from core.hub import get_hub
 from core.plugin import Plugin
 
 logger = logging.getLogger(__name__)
@@ -71,11 +72,59 @@ EP_SEND_MSG = "ilink/bot/sendmessage"
 
 MSG_TYPE_TEXT = 1
 
-DATA_DIR = Path.home() / ".one-agent" / "weixin" / "accounts"
+
+def _resolve_data_dir(legacy: Optional[Path] = None) -> Path:
+    """凭据目录：{ONE_AGENT_DATA_DIR}/gateways/weixin/accounts。
+
+    v1.0.110 数据目录统一：旧版存在 ~/.one-agent/weixin/accounts（data
+    目录之外，迁移环境会被遗漏）。首次加载时自动搬迁旧目录到新位置，
+    搬迁失败则继续用旧目录（降级而非报错）。legacy 参数仅供测试注入。
+
+    v2.1.0 数据库统一后，该目录仅作为「旧数据来源 + 一次性迁移源」：
+    运行时凭据/游标读写全部走 hub kv（见 _ensure_migrated），不再落盘。
+    """
+    base = os.environ.get("ONE_AGENT_DATA_DIR", "./data")
+    new_dir = Path(base) / "gateways" / "weixin" / "accounts"
+    if legacy is None:
+        legacy = Path.home() / ".one-agent" / "weixin" / "accounts"
+    if legacy.exists() and not new_dir.exists():
+        try:
+            import shutil
+            new_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy), str(new_dir))
+            logger.info("wechat credentials migrated: %s -> %s", legacy, new_dir)
+        except Exception as exc:
+            logger.warning("wechat credential migration failed, using legacy dir: %s", exc)
+            return legacy
+    return new_dir
+
+
+# 仅用于旧数据迁移（一次性把 accounts/*.json 迁入 hub kv）与迁移失败时的
+# 降级文件读写，不再是运行时凭据存储。
+DATA_DIR = _resolve_data_dir()
 
 
 def _sanitize_chat_id(chat_id: str) -> str:
     return "".join(c if c.isalnum() or c in "@.-_" else "_" for c in chat_id)
+
+
+# ============================================================
+# 凭据/游标存储 — hub kv（{data_dir}/one_agent.db）
+#   wechat.account.<account_id> → 凭据 dict（原 JSON 文件完整内容）
+#   wechat.sync.<account_id>    → 同步游标 str
+# ============================================================
+
+_ACCOUNT_PREFIX = "wechat.account."
+_SYNC_PREFIX = "wechat.sync."
+_SYNC_SUFFIX = ".sync.json"
+
+
+def _account_key(account_id: str) -> str:
+    return f"{_ACCOUNT_PREFIX}{account_id}"
+
+
+def _sync_key(account_id: str) -> str:
+    return f"{_SYNC_PREFIX}{account_id}"
 
 
 def _account_path(account_id: str) -> Path:
@@ -85,21 +134,103 @@ def _account_path(account_id: str) -> Path:
 
 def _sync_path(account_id: str) -> Path:
     safe = _sanitize_chat_id(account_id)
-    return DATA_DIR / f"{safe}.sync.json"
+    return DATA_DIR / f"{safe}{_SYNC_SUFFIX}"
 
 
-def _load_sync_buf(account_id: str) -> str:
+def _parse_saved_at(saved_at: str) -> float:
+    try:
+        return time.mktime(time.strptime(saved_at, "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return 0.0
+
+
+def _migrate_files_to_kv(directory: Path) -> bool:
+    """旧 JSON 凭据文件一次性迁入 hub kv，成功后目录改名 .migrated 保留兜底。
+
+    迁移失败（kv 不可写/文件不可读）返回 False，调用方降级继续读文件，
+    行为不劣于迁移前。损坏的单个 JSON 文件跳过（与旧扫描行为一致）。
+    """
+    try:
+        json_files = sorted(directory.glob("*.json"))
+        if not json_files:
+            return False
+        hub = get_hub()
+        # kv 已有账号数据（前次迁移/新登录已写入）则不动目录
+        if hub.kv_keys(_ACCOUNT_PREFIX):
+            return False
+        for path in json_files:
+            raw = path.read_text(encoding="utf-8").strip()
+            if not raw:
+                continue
+            if path.name.endswith(_SYNC_SUFFIX):
+                hub.kv_set(_sync_key(path.name[: -len(_SYNC_SUFFIX)]), raw)
+                continue
+            try:
+                data = json.loads(raw)
+            except ValueError as exc:
+                logger.warning("wechat_personal: skip corrupt credential file %s: %s",
+                               path.name, exc)
+                continue
+            if not isinstance(data, dict):
+                continue
+            # 旧版凭据文件可能缺 account_id 字段：从文件名推断
+            # （_save_credentials 用 _sanitize_chat_id(account_id) 作文件名，
+            # sanitized 后 alnum/@.-_ 都保留，常见 account_id 反向提取无损）。
+            if not data.get("account_id"):
+                data["account_id"] = path.stem
+            hub.kv_set(_account_key(str(data["account_id"])), data)
+        directory.rename(directory.with_name(directory.name + ".migrated"))
+        logger.info("wechat_personal: migrated %d credential file(s) %s -> hub kv",
+                    len(json_files), directory)
+        return True
+    except Exception as exc:
+        logger.warning("wechat_personal: kv migration failed, fallback to file storage: %s", exc)
+        return False
+
+
+# 已尝试过一次性迁移的目录（进程内幂等；DATA_DIR 变化时重新检查）
+_migrated_for: Optional[Path] = None
+
+
+def _ensure_migrated() -> None:
+    """首次访问凭据/游标时把旧 JSON 文件一次性迁入 hub kv（幂等）。"""
+    global _migrated_for
+    directory = Path(DATA_DIR)
+    if _migrated_for == directory:
+        return
+    _migrated_for = directory
+    if directory.is_dir():
+        _migrate_files_to_kv(directory)
+
+
+def _read_sync_file(account_id: str) -> str:
+    """降级路径：迁移失败时从旧文件读游标。"""
     path = _sync_path(account_id)
-    if path.exists():
-        try:
+    try:
+        if path.exists():
             return path.read_text(encoding="utf-8").strip()
-        except Exception as exc:
-            logger.warning("wechat_personal: failed to load sync_buf: %s", exc)
-            return ""
+    except Exception as exc:
+        logger.warning("wechat_personal: failed to load sync_buf from file: %s", exc)
     return ""
 
 
+def _load_sync_buf(account_id: str) -> str:
+    _ensure_migrated()
+    try:
+        val = get_hub().kv_get(_sync_key(account_id))
+        if val is not None:
+            return val if isinstance(val, str) else str(val)
+    except Exception as exc:
+        logger.warning("wechat_personal: failed to load sync_buf from kv: %s", exc)
+    return _read_sync_file(account_id)
+
+
 def _save_sync_buf(account_id: str, sync_buf: str) -> None:
+    try:
+        get_hub().kv_set(_sync_key(account_id), sync_buf)
+        return
+    except Exception as exc:
+        logger.warning("wechat_personal: failed to save sync_buf to kv: %s", exc)
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         _sync_path(account_id).write_text(sync_buf, encoding="utf-8")
@@ -108,21 +239,103 @@ def _save_sync_buf(account_id: str, sync_buf: str) -> None:
 
 
 def _save_credentials(account_id: str, token: str, base_url: str, user_id: str = "") -> None:
+    data = {
+        "account_id": account_id,
+        "token": token,
+        "base_url": base_url,
+        "user_id": user_id,
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        get_hub().kv_set(_account_key(account_id), data)
+        return
+    except Exception as exc:
+        logger.warning("wechat_personal: failed to save credentials to kv: %s", exc)
+    # 降级：写旧 JSON 文件（不能比迁移前更差）
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        data = {
-            "account_id": account_id,
-            "token": token,
-            "base_url": base_url,
-            "user_id": user_id,
-            "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
         path = _account_path(account_id)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        import os
         os.chmod(path, 0o600)
     except Exception as exc:
         logger.warning("wechat_personal: failed to save credentials: %s", exc)
+
+
+def _delete_account(account_id: str) -> None:
+    """删除账号凭据 + 同步游标（token 过期 errcode=-14 时调用）。"""
+    try:
+        hub = get_hub()
+        for key in (_account_key(account_id), _sync_key(account_id),
+                    _account_key(_sanitize_chat_id(account_id)),
+                    _sync_key(_sanitize_chat_id(account_id))):
+            hub.kv_delete(key)
+        logger.info("wechat_personal: removed expired credentials for %s", account_id[:8])
+    except Exception as exc:
+        logger.warning("wechat_personal: failed to delete credentials from kv: %s", exc)
+    # 兜底：清理可能残留的旧文件（迁移失败降级模式下凭据仍在文件里）
+    for path in (_account_path(account_id), _sync_path(account_id)):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _find_best_account_kv() -> Optional[Dict[str, Any]]:
+    """从 hub kv 列出账号（wechat.account.*），挑 saved_at 最新且有 token 的。"""
+    try:
+        hub = get_hub()
+        keys = hub.kv_keys(_ACCOUNT_PREFIX)
+    except Exception as exc:
+        logger.warning("wechat_personal: hub kv unavailable, fallback to files: %s", exc)
+        return None
+    best: Optional[Dict[str, Any]] = None
+    best_time = 0.0
+    for key in keys:
+        try:
+            data = hub.kv_get(key)
+        except Exception:
+            continue
+        if not isinstance(data, dict) or not data.get("token"):
+            continue
+        if not data.get("account_id"):
+            data["account_id"] = key[len(_ACCOUNT_PREFIX):]
+        ts = _parse_saved_at(str(data.get("saved_at", "")))
+        if ts > best_time:
+            best_time = ts
+            best = data
+    if best is not None:
+        logger.info("wechat_personal: found %d account(s) in hub kv, best=%s",
+                    len(keys), best.get("account_id", "")[:8])
+    return best
+
+
+def _scan_account_files() -> Optional[Dict[str, Any]]:
+    """降级路径：扫描目录下旧 JSON 凭据文件，挑 saved_at 最新且有 token 的。"""
+    if not DATA_DIR.exists():
+        return None
+    best: Optional[Dict[str, Any]] = None
+    best_time = 0.0
+    for path in DATA_DIR.glob("*.json"):
+        if path.name.endswith(_SYNC_SUFFIX):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
+            # 旧版本凭据文件可能没有 account_id 字段（或为空字符串），
+            # 从文件名推断（见 _migrate_files_to_kv 同样处理）。
+            if not data.get("account_id"):
+                data["account_id"] = path.stem
+            if not data.get("token"):
+                continue
+            ts = _parse_saved_at(str(data.get("saved_at", "")))
+            if ts > best_time:
+                best_time = ts
+                best = data
+        except Exception as exc:
+            logger.warning("wechat_personal: error reading %s: %s", path.name, exc)
+            continue
+    return best
 
 
 async def _api_post(
@@ -318,47 +531,15 @@ class WeChatPersonalGateway(Plugin):
         self.bus.subscribe("bot_send_message", self._on_bot_send_message)
 
     def _find_saved_account(self) -> Optional[Dict[str, Any]]:
-        logger.info("wechat_personal: _find_saved_account, dir=%s, exists=%s", DATA_DIR, DATA_DIR.exists())
-        if not DATA_DIR.exists():
-            return None
-        best: Optional[Dict[str, Any]] = None
-        best_time = 0.0
-        files_found = []
-        for path in DATA_DIR.glob("*.json"):
-            files_found.append(str(path))
-            if path.name.endswith(".sync.json"):
-                logger.info("wechat_personal: found sync file %s, skipping", path.name)
-                continue
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                # 修复：旧版本保存的凭据文件可能没有 account_id 字段
-                # （或为空字符串），导致 _connect() 因 self._account_id 为空
-                # 而静默跳过，微信网关不工作。从文件名推断 account_id
-                # （_save_credentials 用 _sanitize_chat_id(account_id) 作
-                # 文件名，sanitized 后 alnum/@.-_ 都保留，对于常见 account_id
-                # 如 "c147268ca92c@im.bot" 反向提取无损）。
-                if not data.get("account_id"):
-                    data["account_id"] = path.stem
-                saved_at = data.get("saved_at", "")
-                has_token = bool(data.get("token", ""))
-                logger.info("wechat_personal: found account file %s, has_token=%s, saved_at=%s",
-                           path.name, has_token, saved_at)
-                if not data.get("token"):
-                    continue
-                ts = 0.0
-                try:
-                    ts = time.mktime(time.strptime(saved_at, "%Y-%m-%dT%H:%M:%SZ"))
-                except Exception as exc:
-                    logger.debug("wechat_personal: failed to parse saved_at: %s, error: %s", saved_at, exc)
-                    ts = 0.0
-                if ts > best_time:
-                    best_time = ts
-                    best = data
-            except Exception as exc:
-                logger.warning("wechat_personal: error reading %s: %s", path.name, exc)
-                continue
-        logger.info("wechat_personal: _find_saved_account done, files_found=%s, best=%s",
-                   files_found, best is not None)
+        """列出已存账号，挑 saved_at 最新且有 token 的一个。
+
+        v2.1.0：凭据存 hub kv（wechat.account.*）；kv 不可用或为空且
+        迁移失败遗留文件时降级扫描目录（行为与迁移前一致）。
+        """
+        _ensure_migrated()
+        best = _find_best_account_kv()
+        if best is None:
+            best = _scan_account_files()
         return best
 
     async def stop(self) -> None:
@@ -574,18 +755,10 @@ class WeChatPersonalGateway(Plugin):
                 await self._session.close()
             self._session = None
             # 修复：如果 _connect 失败是因为 token 过期（errcode=-14），
-            # 删除本地凭据文件，避免下次启动又尝试用过期 token 连接
-            # （导致用户每次启动都看到 ERROR 但没机会重新扫码）。
+            # 删除本地凭据（v2.1.0 起存 hub kv），避免下次启动又尝试用过期
+            # token 连接（导致用户每次启动都看到 ERROR 但没机会重新扫码）。
             if "-14" in str(exc) and self._account_id:
-                from pathlib import Path as _Path
-                for fname in (f"{self._account_id}.json", f"{self._account_id}.sync.json"):
-                    fpath = _Path(DATA_DIR) / fname
-                    if fpath.exists():
-                        try:
-                            fpath.unlink()
-                            logger.info("wechat_personal: removed expired credentials file %s", fname)
-                        except OSError:
-                            pass
+                _delete_account(self._account_id)
 
     async def _connect_from_session(self, session: "aiohttp.ClientSession") -> None:
         self._session = session
@@ -646,11 +819,8 @@ class WeChatPersonalGateway(Plugin):
                 if errcode == -14:
                     logger.warning("wechat_personal: session expired (errcode=-14), clearing credentials "
                                    "and disconnecting — user must re-login with /微信")
-                    # 先保存凭据文件路径（在清空 _account_id 之前）
+                    # 先保存 account_id（在清空 _account_id 之前）
                     saved_account = self._account_id
-                    from pathlib import Path as _Path
-                    cred_file = _Path(DATA_DIR) / f"{saved_account}.json" if saved_account else None
-                    sync_file = _Path(DATA_DIR) / f"{saved_account}.sync.json" if saved_account else None
                     self._running = False
                     self._token = ""
                     self._account_id = ""
@@ -661,14 +831,9 @@ class WeChatPersonalGateway(Plugin):
                         await self._session.close()
                     self._session = None
                     self._poll_task = None
-                    # 删除过期的凭据文件，避免下次启动又尝试连接
-                    for fpath in (cred_file, sync_file):
-                        if fpath and fpath.exists():
-                            try:
-                                fpath.unlink()
-                                logger.info("wechat_personal: removed expired file %s", fpath.name)
-                            except OSError:
-                                pass
+                    # 删除过期的凭据（v2.1.0 起存 hub kv），避免下次启动又尝试连接
+                    if saved_account:
+                        _delete_account(saved_account)
                     break
                 if ret not in (0, None):
                     logger.warning("wechat_personal: get_updates ret=%s errcode=%s", ret, errcode)

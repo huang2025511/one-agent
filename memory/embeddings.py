@@ -66,13 +66,18 @@ class EmbeddingStore(BaseSQLiteStore):
     """Vector store for semantic memory search."""
 
     def __init__(
-        self, db_path: str = "data/memory/embeddings.db",
+        self,
+        db_path: Optional[str] = None,
     ):
         """Initialize embedding store.
 
         Args:
             db_path: Path to SQLite database for vector storage
+                （v2.1.0 默认统一库 one_agent.db，惰性解析）
         """
+        if db_path is None:
+            from core.hub import database_path
+            db_path = database_path()
         self._model = None
         self._model_loaded = False
         # In-memory vector cache as parallel arrays for fast cosine search.

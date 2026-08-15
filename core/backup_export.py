@@ -78,7 +78,8 @@ class DataExporter:
 
     def __init__(self, data_dir: str = "data") -> None:
         self._data_dir = Path(data_dir)
-        self._memory_dir = self._data_dir / "memory"
+        # v2.1.0 数据统一：所有业务表都在统一库
+        self._db_path = self._data_dir / "one_agent.db"
 
     def export_all(
         self,
@@ -166,6 +167,17 @@ class DataExporter:
     ) -> ExportResult:
         """Export to ZIP format."""
         with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            # v2.1.0：附上统一库原文件（checkpoint 后拷入），此 zip 本身
+            # 即可直接用于部署新环境
+            if self._db_path.exists():
+                try:
+                    from core.hub import get_hub
+                    get_hub(str(self._data_dir)).checkpoint()
+                except Exception as exc:
+                    logger.debug("pre-export checkpoint failed: %s", exc)
+                zf.write(self._db_path, arcname="one_agent.db")
+                items_exported["database"] = 1
+
             # Export sessions
             sessions = self._export_sessions_to_json()
             if sessions:
@@ -219,14 +231,15 @@ class DataExporter:
         import gzip
 
         with tarfile.open(output_path, "w:gz") as tf:
-            # Add all files from data directory
-            for db_file in self._memory_dir.glob("*.db"):
-                tf.add(db_file, arcname=f"memory/{db_file.name}")
-
-            if include_config:
-                config_file = Path("config/default_config.yaml")
-                if config_file.exists():
-                    tf.add(config_file, arcname="config/default_config.yaml")
+            # v2.1.0：附上统一库原文件（checkpoint 后拷入）
+            if self._db_path.exists():
+                try:
+                    from core.hub import get_hub
+                    get_hub(str(self._data_dir)).checkpoint()
+                except Exception as exc:
+                    logger.debug("pre-export checkpoint failed: %s", exc)
+                tf.add(self._db_path, arcname="one_agent.db")
+                items_exported["database"] = 1
 
             # Add JSON exports
             sessions = self._export_sessions_to_json()
@@ -284,22 +297,19 @@ class DataExporter:
         return data.get("session_count", 0)
 
     def _export_sessions_to_json(self) -> Dict[str, Any]:
-        """Export sessions as JSON dict."""
-        db_path = self._memory_dir / "sessions.db"
-        if not db_path.exists():
+        """Export sessions as JSON dict（统一库，列名与实际 schema 对齐）."""
+        if not self._db_path.exists():
             return {}
 
         conn = None
         try:
-            conn = create_sqlite_connection(str(db_path))
-
-            # Get sessions
+            conn = create_sqlite_connection(str(self._db_path))
             cur = conn.execute(
-                "SELECT session_id, created_at, updated_at, message_count "
+                "SELECT id AS session_id, title, created_at, updated_at, "
+                "message_count, total_tokens, status "
                 "FROM sessions ORDER BY updated_at DESC LIMIT 1000"
             )
             sessions = [dict(row) for row in cur.fetchall()]
-
             return {
                 "session_count": len(sessions),
                 "sessions": sessions,
@@ -319,20 +329,20 @@ class DataExporter:
         return data.get("total_entries", 0)
 
     def _export_memory_to_json(self) -> Dict[str, Any]:
-        """Export memory as JSON dict."""
-        db_path = self._memory_dir / "embeddings.db"
-        if not db_path.exists():
+        """Export memory as JSON dict（统一库 FTS memory 表）."""
+        if not self._db_path.exists():
             return {}
 
         conn = None
         try:
-            conn = create_sqlite_connection(str(db_path))
-
+            conn = create_sqlite_connection(str(self._db_path))
+            # memory 是 FTS5 虚拟表（content/source/tags/timestamp）；
+            # 按 rowid 倒序取最近条目
             cur = conn.execute(
-                "SELECT text, created_at FROM embeddings ORDER BY created_at DESC LIMIT 5000"
+                "SELECT content AS text, source, tags, timestamp AS created_at "
+                "FROM memory ORDER BY rowid DESC LIMIT 5000"
             )
             entries = [dict(row) for row in cur.fetchall()]
-
             return {
                 "total_entries": len(entries),
                 "entries": entries,
@@ -352,23 +362,22 @@ class DataExporter:
         return data.get("entity_count", 0)
 
     def _export_kg_to_json(self) -> Dict[str, Any]:
-        """Export knowledge graph as JSON dict."""
-        db_path = self._memory_dir / "kg.db"
-        if not db_path.exists():
+        """Export knowledge graph as JSON dict（统一库，JOIN 解析关系端点名）."""
+        if not self._db_path.exists():
             return {}
 
         conn = None
         try:
-            conn = create_sqlite_connection(str(db_path))
-
-            # Get entities
-            cur = conn.execute("SELECT name, entity_type, created_at FROM entities LIMIT 5000")
+            conn = create_sqlite_connection(str(self._db_path))
+            cur = conn.execute(
+                "SELECT name, type AS entity_type, created_at FROM entities LIMIT 5000")
             entities = [dict(row) for row in cur.fetchall()]
 
-            # Get relations
             cur = conn.execute(
-                "SELECT subject_name, predicate, object_name FROM relations LIMIT 10000"
-            )
+                "SELECT s.name AS subject_name, r.predicate, o.name AS object_name "
+                "FROM relations r "
+                "JOIN entities s ON s.id = r.subject_id "
+                "JOIN entities o ON o.id = r.object_id LIMIT 10000")
             relations = [dict(row) for row in cur.fetchall()]
 
             return {
@@ -392,17 +401,11 @@ class DataExporter:
         return 1
 
     def _export_config_to_json(self) -> Dict[str, Any]:
-        """Export config as JSON dict."""
-        import yaml
-
-        config_path = Path("config/default_config.yaml")
-        if not config_path.exists():
-            return {}
-
+        """Export config as JSON dict（统一库 settings 表快照）."""
         try:
-            with open(config_path, encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-            return config or {}
+            from core.config_store import get_config_store
+            snap = get_config_store(str(self._db_path)).snapshot()
+            return snap or {}
         except Exception as exc:
             logger.warning("Failed to export config: %s", exc)
             return {}
@@ -421,7 +424,8 @@ class DataImporter:
 
     def __init__(self, data_dir: str = "data") -> None:
         self._data_dir = Path(data_dir)
-        self._memory_dir = self._data_dir / "memory"
+        # v2.1.0 数据统一：所有业务表都在统一库
+        self._db_path = self._data_dir / "one_agent.db"
 
     def import_from_file(
         self,
@@ -496,33 +500,29 @@ class DataImporter:
         return items_imported
 
     def _import_sessions(self, data: Dict, merge: bool) -> int:
-        """Import sessions into database."""
+        """Import sessions into the unified database."""
         if not data.get("sessions"):
             return 0
 
-        db_path = self._memory_dir / "sessions.db"
-        if not db_path.exists():
-            return 0
+        self._ensure_tables("sessions")
 
         count = 0
         conn = None
         try:
-            conn = create_sqlite_connection(str(db_path))
+            conn = create_sqlite_connection(str(self._db_path))
             for session in data["sessions"]:
-                if merge:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO sessions(session_id, created_at, updated_at, message_count) "
-                        "VALUES (?, ?, ?, ?)",
-                        (session["session_id"], session["created_at"], session["updated_at"],
-                         session.get("message_count", 0)),
-                    )
-                else:
-                    conn.execute(
-                        "INSERT INTO sessions(session_id, created_at, updated_at, message_count) "
-                        "VALUES (?, ?, ?, ?)",
-                        (session["session_id"], session["created_at"], session["updated_at"],
-                         session.get("message_count", 0)),
-                    )
+                # v2.1.0：sessions 表主键列为 id（旧导出文件里叫 session_id）
+                conn.execute(
+                    "INSERT OR IGNORE INTO sessions"
+                    "(id, title, created_at, updated_at, message_count, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (session.get("session_id") or session.get("id"),
+                     session.get("title", ""),
+                     session.get("created_at", 0),
+                     session.get("updated_at", 0),
+                     session.get("message_count", 0),
+                     session.get("status", "active")),
+                )
                 count += 1
             conn.commit()
         except Exception as exc:
@@ -534,22 +534,22 @@ class DataImporter:
         return count
 
     def _import_memory(self, data: Dict, merge: bool) -> int:
-        """Import memory into database."""
+        """Import memory into the unified database (FTS memory 表)."""
         if not data.get("entries"):
             return 0
 
-        db_path = self._memory_dir / "embeddings.db"
-        if not db_path.exists():
-            return 0
+        self._ensure_tables("memory")
 
         count = 0
         conn = None
         try:
-            conn = create_sqlite_connection(str(db_path))
+            conn = create_sqlite_connection(str(self._db_path))
             for entry in data["entries"]:
                 conn.execute(
-                    "INSERT OR IGNORE INTO embeddings(text, created_at) VALUES (?, ?)",
-                    (entry["text"], entry["created_at"]),
+                    "INSERT INTO memory(content, source, tags, timestamp) "
+                    "VALUES (?, ?, ?, ?)",
+                    (entry.get("text", ""), entry.get("source", "import"),
+                     entry.get("tags", ""), entry.get("created_at", 0)),
                 )
                 count += 1
             conn.commit()
@@ -562,24 +562,40 @@ class DataImporter:
         return count
 
     def _import_kg(self, data: Dict, merge: bool) -> int:
-        """Import knowledge graph into database."""
+        """Import knowledge graph into the unified database."""
         if not data.get("entities"):
             return 0
 
-        db_path = self._memory_dir / "kg.db"
-        if not db_path.exists():
-            return 0
+        self._ensure_tables("kg")
 
         count = 0
         conn = None
         try:
-            conn = create_sqlite_connection(str(db_path))
+            conn = create_sqlite_connection(str(self._db_path))
+            # name → id 映射（含本次新导入的实体），供 relations 解析
+            name_to_id = {}
             for entity in data["entities"]:
-                conn.execute(
-                    "INSERT OR IGNORE INTO entities(name, entity_type, created_at) VALUES (?, ?, ?)",
-                    (entity["name"], entity.get("entity_type", ""), entity["created_at"]),
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO entities(name, type, created_at) "
+                    "VALUES (?, ?, ?)",
+                    (entity["name"], entity.get("entity_type", "unknown"),
+                     entity.get("created_at", 0)),
                 )
+                row = conn.execute(
+                    "SELECT id FROM entities WHERE name = ?", (entity["name"],)).fetchone()
+                if row:
+                    name_to_id[entity["name"]] = row["id"]
                 count += 1
+            for rel in data.get("relations", []):
+                s_id = name_to_id.get(rel.get("subject_name"))
+                o_id = name_to_id.get(rel.get("object_name"))
+                if s_id is None or o_id is None:
+                    continue
+                conn.execute(
+                    "INSERT INTO relations(subject_id, predicate, object_id, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (s_id, rel.get("predicate", ""), o_id, 0),
+                )
             conn.commit()
         except Exception as exc:
             logger.warning("Failed to import knowledge graph: %s", exc)
@@ -589,21 +605,39 @@ class DataImporter:
 
         return count
 
-    def _import_config(self, data: Dict, merge: bool) -> int:
-        """Import config into YAML file."""
-        import yaml
+    def _ensure_tables(self, kind: str) -> None:
+        """导入前确保目标表结构就位（新环境空库可直接导入）。
 
-        config_path = Path("config/default_config.yaml")
+        利用各 store 的构造即建表特性；任何失败仅记录（后续 SQL 会
+        以 warning 失败并跳过，不会中断整个导入）。
+        """
+        db = str(self._db_path)
         try:
-            if merge:
-                # Load existing and merge
-                with open(config_path, encoding="utf-8") as f:
-                    existing = yaml.safe_load(f) or {}
-                existing.update(data)
-                data = existing
+            if kind == "sessions":
+                from memory.session_store import SessionStore
+                store = SessionStore(db)
+                getattr(store, "close", lambda: None)()
+            elif kind == "memory":
+                from memory import LongTermMemory
+                LongTermMemory(path=db)
+            elif kind == "kg":
+                from memory.knowledge_graph import KnowledgeGraph
+                KnowledgeGraph(db)
+        except Exception as exc:
+            logger.debug("ensure %s tables failed: %s", kind, exc)
 
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(data, f, default_flow_style=False, allow_unicode=True)
+    def _import_config(self, data: Dict, merge: bool) -> int:
+        """Import config into the unified database (settings 表).
+
+        v2.1.0：不再写 YAML 文件 —— 配置的事实源是统一库。
+        """
+        try:
+            from core.config_store import get_config_store
+            store = get_config_store(str(self._db_path))
+            if merge:
+                store.apply_updates(data)
+            else:
+                store.apply_full(data)
             return 1
         except Exception as exc:
             logger.warning("Failed to import config: %s", exc)

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.db import create_sqlite_connection
+from core.hub import database_path
 
 logger = logging.getLogger(__name__)
 
@@ -131,19 +132,30 @@ class HealthChecker:
 
 # ===================================================== Built-in health checks
 
-def _check_database(db_path: str = "data/memory/sessions.db") -> ComponentCheck:
-    """Check if SQLite database is accessible."""
+def _table_count(conn: sqlite3.Connection, table: str) -> int:
+    """统计统一库中某表行数；表不存在（对应模块尚未初始化）返回 0。"""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if not row or not row[0]:
+        return 0
+    return int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+
+
+def _check_database(db_path: Optional[str] = None) -> ComponentCheck:
+    """Check if the unified SQLite database is accessible."""
+    path = db_path or database_path()
     try:
-        if not Path(db_path).exists():
+        if not Path(path).exists():
             return ComponentCheck(
                 name="database",
                 status=HealthStatus.UNHEALTHY,
-                message=f"Database not found: {db_path}",
+                message=f"Database not found: {path}",
             )
 
-        conn = create_sqlite_connection(db_path, busy_timeout_ms=1000)
-        cur = conn.execute("SELECT COUNT(*) FROM sessions")
-        count = cur.fetchone()[0]
+        conn = create_sqlite_connection(path, busy_timeout_ms=1000)
+        count = _table_count(conn, "sessions")
         conn.close()
 
         return ComponentCheck(
@@ -161,25 +173,16 @@ def _check_database(db_path: str = "data/memory/sessions.db") -> ComponentCheck:
 
 
 def _check_memory() -> ComponentCheck:
-    """Check if memory stores are accessible."""
+    """Check memory stores (kg/embeddings tables) in the unified database."""
     try:
-        # Check if memory DB exists and has data
-        kg_path = Path("data/memory/kg.db")
-        emb_path = Path("data/memory/embeddings.db")
-
         kg_count = 0
         emb_count = 0
 
-        if kg_path.exists():
-            conn = create_sqlite_connection(str(kg_path), busy_timeout_ms=1000)
-            cur = conn.execute("SELECT COUNT(*) FROM entities")
-            kg_count = cur.fetchone()[0]
-            conn.close()
-
-        if emb_path.exists():
-            conn = create_sqlite_connection(str(emb_path), busy_timeout_ms=1000)
-            cur = conn.execute("SELECT COUNT(*) FROM embeddings")
-            emb_count = cur.fetchone()[0]
+        db_path = database_path()
+        if Path(db_path).exists():
+            conn = create_sqlite_connection(db_path, busy_timeout_ms=1000)
+            kg_count = _table_count(conn, "entities")
+            emb_count = _table_count(conn, "embeddings")
             conn.close()
 
         return ComponentCheck(

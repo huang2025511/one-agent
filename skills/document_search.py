@@ -13,9 +13,10 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from core.db import create_sqlite_connection
+from core.hub import database_path
 from core.security import is_path_within_any
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,9 @@ logger = logging.getLogger(__name__)
 class DocumentStore:
     """SQLite FTS5 backed document store for RAG."""
 
-    def __init__(self, db_path: str = "data/memory/docs.db"):
-        self._conn = create_sqlite_connection(db_path)
+    def __init__(self, db_path: Optional[str] = None):
+        # 默认惰性解析统一库路径（ONE_AGENT_DATA_DIR 感知），勿在模块导入时求值
+        self._conn = create_sqlite_connection(db_path or database_path())
         # Thread-safe access: ingest_file runs in a thread pool via
         # run_in_executor while search/list run on the event loop thread.
         self._write_lock = threading.Lock()

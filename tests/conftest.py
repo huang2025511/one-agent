@@ -16,6 +16,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 # 设置 env 后，load 和 save 都走 test_config.yaml，default_config.yaml 不受影响。
 os.environ.setdefault("ONE_AGENT_CONFIG", "config/test_config.yaml")
 
+# v2.1.0 数据统一：所有系统状态（配置/会话/记忆/审批/凭据/技能包）
+# 存 {data_dir}/one_agent.db。测试会话把数据目录指向临时目录，
+# 隔离统一库等所有落盘产物，避免写脏开发环境的 data/。
+import tempfile
+_TEST_DATA_DIR = tempfile.mkdtemp(prefix="one-agent-test-data-")
+os.environ["ONE_AGENT_DATA_DIR"] = _TEST_DATA_DIR
+
 from one_agent import OneAgentApp
 
 

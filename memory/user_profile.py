@@ -20,6 +20,8 @@ import time
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.hub import database_path
+
 from .base_store import BaseSQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -35,8 +37,9 @@ class UserProfileStore(BaseSQLiteStore):
         - patterns: interaction patterns (time of day, session length)
     """
 
-    def __init__(self, db_path: str = "data/memory/user_profile.db") -> None:
-        super().__init__(db_path)
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        # 默认惰性解析统一库路径（ONE_AGENT_DATA_DIR 感知），勿在模块导入时求值
+        super().__init__(db_path or database_path())
         # In-memory cache for fast access
         self._cache: Dict[str, Any] = {}
         self._load_cache()

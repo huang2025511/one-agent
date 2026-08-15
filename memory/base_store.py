@@ -38,16 +38,20 @@ class BaseSQLiteStore:
     the same connection concurrently.
 
     Schema versioning (P2-1 fix): subclasses set ``SCHEMA_VERSION`` and
-    implement :meth:`_migrate` for version-specific migrations. The base
-    class reads ``PRAGMA user_version`` before ``_init_db`` and passes
-    the old version so subclasses can run conditional migrations.
+    implement :meth:`_migrate` for version-specific migrations.
+
+    v2.1.0 共库改造：多个 store 共享同一 one_agent.db 时，PRAGMA
+    user_version（每库文件仅一值）无法区分 store，版本改记于
+    schema_versions(store, version) 表。打开旧版独立库文件（无版本表
+    记录且 user_version > 0）时自动继承 user_version，行为不变。
     """
 
     #: Current schema version. Subclasses override this.
     SCHEMA_VERSION: int = 1
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, store_key: Optional[str] = None) -> None:
         self.db_path = db_path
+        self.store_key = store_key or type(self).__name__
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = sqlite3.connect(
             db_path, check_same_thread=False
@@ -60,14 +64,15 @@ class BaseSQLiteStore:
         # Uses RLock (reentrant) because some write methods call other
         # write methods (e.g. KnowledgeGraph.add_relation calls add_entity).
         self._write_lock = threading.RLock()
-        # P2-1: read existing schema version before init
-        cur = self._conn.execute("PRAGMA user_version")
-        self._old_schema_version: int = cur.fetchone()[0]
+        # P2-1: read existing schema version before init（v2.1.0 起按
+        # store 名记录，兼容继承旧独立库的 user_version）
+        from core.hub import get_store_schema_version, set_store_schema_version
+        self._old_schema_version: int = get_store_schema_version(
+            self._conn, self.store_key)
         self._init_db()
         # P2-1: bump version after successful init/migration
         if self._old_schema_version < self.SCHEMA_VERSION:
-            self._conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
-            self._conn.commit()
+            set_store_schema_version(self._conn, self.store_key, self.SCHEMA_VERSION)
 
     def _init_db(self) -> None:  # pragma: no cover - abstract
         """Initialize schema. Override in subclasses."""

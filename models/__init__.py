@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import sqlite3
 import time
@@ -24,6 +23,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import httpx
 
 from core.plugin import Plugin
+from core.hub import database_path, resolve_data_dir
 from models.cache import LLMCache
 from models.semantic_cache import SemanticCache
 from models.cost_tracker import CostTracker
@@ -303,17 +303,13 @@ class LLMProvider(RecommendationMixin, Plugin):
                 self._semantic_cache = None
 
         # Cost tracking
-        # 修复 bug：之前 db_path 默认 "data/memory/costs.db"（相对 CWD），
-        # 与 config 的 data_dir 无关 → 多个 app 实例共享同一个 DB（包括
-        # 跨测试、跨用户运行），导致：
-        #   1. 测试间 budget 状态互相污染（前次跑的 cost 累积到下次）
-        #   2. 用户重启 app 后 budget 状态依然存在（一次超预算就永久锁死）
-        # 修复：默认放到 {data_dir}/memory/costs.db，与其它持久化数据共用
-        # data_dir；只有当用户显式指定 db_path 时才用绝对路径覆盖。
+        # v2.1.0 数据统一：cost_log 收拢进统一库 {data_dir}/one_agent.db，
+        # 不再有独立的 memory/costs.db。配置 cost_tracking.db_path 显式
+        # 指定时仍优先（向后兼容）；否则按 ONE_AGENT_DATA_DIR 环境变量 >
+        # agent.data_dir > ./data 的顺序解析统一库路径。
         cost_cfg = (ctx.config.get("llm") or {}).get("cost_tracking") or {}
         if cost_cfg and cost_cfg.get("enabled", True):
-            data_dir = ctx.config.get("agent", {}).get("data_dir", "./data")
-            db_path = cost_cfg.get("db_path") or os.path.join(data_dir, "memory", "costs.db")
+            db_path = cost_cfg.get("db_path") or database_path(resolve_data_dir(ctx.config))
             self._cost_tracker = CostTracker(
                 db_path=db_path,
                 daily_budget=cost_cfg.get("daily_budget", 1.0),

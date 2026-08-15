@@ -11,8 +11,9 @@
 - 不真发网络请求，用 unittest.mock.patch / AsyncMock 替换 httpx
 - fail-closed 路径用配置缺值触发，断言不订阅事件 / 不起后台任务
 - 签名 / 解密算法以纯函数式重算验证（与产品代码独立同源）
-- WeChatPersonalGateway._find_saved_account 扫 ~/.one-agent，用 monkeypatch
-  改 DATA_DIR 为 tmp_path 避免污染环境
+- WeChatPersonalGateway 凭据/游标存 hub kv（v2.1.0 数据库统一）：
+  用 monkeypatch 改 DATA_DIR 为 tmp_path 隔离旧文件迁移源，并按用例
+  隔离 ONE_AGENT_DATA_DIR + close_hub() 避免跨用例 kv 串扰
 """
 import asyncio
 import base64
@@ -927,6 +928,14 @@ class TestSlackGateway:
 # WeChatPersonalGateway
 # ============================================================
 class TestWeChatPersonalGateway:
+    @pytest.fixture(autouse=True)
+    def _isolated_wechat_kv(self, tmp_path, monkeypatch):
+        """凭据/游标已迁 hub kv：每用例独立数据目录（独立 kv 库），结束关闭 hub 单例。"""
+        monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(tmp_path / "wx-data"))
+        yield
+        from core.hub import close_hub
+        close_hub()
+
     def test_default_attributes(self):
         from gateways.wechat_personal import WeChatPersonalGateway
         gw = WeChatPersonalGateway()
@@ -999,6 +1008,14 @@ class TestWeChatPersonalGateway:
 class TestWeChatPersonalHelpers:
     """wechat_personal.py 模块级 helper 函数。"""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_wechat_kv(self, tmp_path, monkeypatch):
+        """凭据/游标已迁 hub kv：每用例独立数据目录（独立 kv 库），结束关闭 hub 单例。"""
+        monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(tmp_path / "wx-data"))
+        yield
+        from core.hub import close_hub
+        close_hub()
+
     def test_sanitize_chat_id_keeps_alnum_at_dash_dot_underscore(self):
         from gateways.wechat_personal import _sanitize_chat_id
         # 合法字符保留（alnum + @.-_）
@@ -1052,36 +1069,39 @@ class TestWeChatPersonalHelpers:
         monkeypatch.setattr(wp, "DATA_DIR", tmp_path / "wx")
         assert _load_sync_buf("nonexistent") == ""
 
-    def test_save_credentials_writes_json(self, monkeypatch, tmp_path):
+    def test_save_credentials_writes_kv(self, monkeypatch, tmp_path):
+        """v2.1.0：凭据写入 hub kv（wechat.account.<id>），不再落盘 JSON。"""
         import gateways.wechat_personal as wp
-        from gateways.wechat_personal import (
-            _account_path, _save_credentials,
-        )
+        from gateways.wechat_personal import _save_credentials
+        from core.hub import get_hub
         monkeypatch.setattr(wp, "DATA_DIR", tmp_path / "wx")
         _save_credentials("acc1", token="tok-123", base_url="http://b", user_id="u1")
-        import json
-        data = json.loads(_account_path("acc1").read_text(encoding="utf-8"))
+        data = get_hub().kv_get("wechat.account.acc1")
+        assert data is not None
         assert data["token"] == "tok-123"
         assert data["base_url"] == "http://b"
         assert data["user_id"] == "u1"
+        assert data["account_id"] == "acc1"
         assert "saved_at" in data
+        # 不再写 JSON 文件
+        assert not (tmp_path / "wx" / "acc1.json").exists()
 
     def test_find_saved_account_infers_account_id_from_filename(
         self, monkeypatch, tmp_path
     ):
         """旧版本保存的凭据文件可能缺 account_id 字段。
 
-        _find_saved_account 应从文件名推断 account_id（_save_credentials
-        用 _sanitize_chat_id(account_id) 作文件名，反向提取无损）。
-        这修复了「saved 凭据 account_id 为空 → _connect 静默跳过 →
-        微信网关不工作」的 bug。
+        v2.1.0：首次 _find_saved_account 触发旧 JSON 文件 → hub kv 的
+        一次性迁移，account_id 缺失时从文件名推断（_save_credentials
+        用 _sanitize_chat_id(account_id) 作文件名，反向提取无损），
+        迁移后目录改名 .migrated 保留兜底。
         """
         import json
         import gateways.wechat_personal as wp
         from gateways.wechat_personal import WeChatPersonalGateway
-        monkeypatch.setattr(wp, "DATA_DIR", tmp_path / "wx")
         accounts_dir = tmp_path / "wx"
         accounts_dir.mkdir(parents=True)
+        monkeypatch.setattr(wp, "DATA_DIR", accounts_dir)
         # 模拟旧版本保存的凭据：文件名含 account_id 但 JSON 内容缺该字段
         legacy_file = accounts_dir / "c147268ca92c@im.bot.json"
         legacy_file.write_text(json.dumps({
@@ -1097,6 +1117,12 @@ class TestWeChatPersonalHelpers:
         # account_id 应从文件名推断
         assert result["account_id"] == "c147268ca92c@im.bot"
         assert result["token"] == "legacy-token-abc"
+        # 旧文件已一次性迁入 kv，目录改名保留兜底
+        from core.hub import get_hub
+        kv_acc = get_hub().kv_get("wechat.account.c147268ca92c@im.bot")
+        assert kv_acc is not None and kv_acc["token"] == "legacy-token-abc"
+        assert not accounts_dir.exists()
+        assert (tmp_path / "wx.migrated" / "c147268ca92c@im.bot.json").exists()
 
     @pytest.mark.asyncio
     async def test_connect_logs_warning_when_account_id_empty(self, monkeypatch, tmp_path):

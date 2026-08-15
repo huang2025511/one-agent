@@ -81,6 +81,9 @@ def isolated_config(tmp_path, monkeypatch):
     }
     config_file.write_text(yaml.safe_dump(cfg), encoding="utf-8")
     monkeypatch.setenv("ONE_AGENT_CONFIG", str(config_file))
+    # v2.1.0：隔离统一库（one_agent.db）到本测试自己的 data 目录，
+    # 避免 session 级 ONE_AGENT_DATA_DIR（conftest）让多实例共享库。
+    monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(data_dir))
     return config_file, data_dir, cfg
 
 

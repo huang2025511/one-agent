@@ -659,26 +659,21 @@ class RESTAPIGateway(Plugin):
                 updates = body.get("config") or body  # accept both {config:{...}} and direct dict
                 _deep_merge(config_dict, updates)
 
-                # Validate through Pydantic if available
-                if hasattr(raw_config, "model_validate"):
-                    try:
-                        raw_config.model_validate(config_dict)
-                    except Exception as e:
-                        raise HTTPException(400, f"Config validation failed: {e}")
+                # 持久化到 SQLite 配置库（v1.0.110 配置统一）：
+                # 替代 YAML 写盘。ConfigStore.apply_updates 内部会先过
+                # pydantic 校验，非法配置整体拒绝、库中保留原值。
+                # 注意：此处写入的是明文密钥（config_dict 来自 load_config
+                # 的解密结果）——配置库文件 0600、位于数据目录内，与旧
+                # YAML 脱敏写回（重启后密钥退化 ${VAR}）相比是修复而非退化。
+                try:
+                    from core.config_store import save_config_dict
+                    save_config_dict(config_dict)
+                except ValueError as e:
+                    raise HTTPException(400, f"Config validation failed: {e}")
+                except Exception as e:
+                    raise HTTPException(500, f"Failed to persist config: {e}")
 
-                # Save to file
-                import yaml
-
-                with open(config_path, "w", encoding="utf-8") as f:
-                    yaml.dump(
-                        config_dict,
-                        f,
-                        default_flow_style=False,
-                        allow_unicode=True,
-                        sort_keys=False,
-                    )
-
-                # Hot reload runtime config
+                # Hot reload runtime config（load_config 自动叠加配置库）
                 new_config = load_config(config_path)
                 _ctx.config = (
                     new_config.model_dump()
@@ -993,7 +988,9 @@ class RESTAPIGateway(Plugin):
             auth(x_api_key)
             from pathlib import Path
             import re as _re
-            data_dir = (_ctx.config.get("agent", {}).get("data_dir", "./data")) if _ctx else "./data"
+            # v2.1.0：走统一数据目录解析（ONE_AGENT_DATA_DIR > agent.data_dir > ./data）
+            from core.hub import resolve_data_dir
+            data_dir = resolve_data_dir(_ctx.config) if _ctx else "./data"
             log_path = Path(data_dir) / "logs" / "one_agent.log"
             if not log_path.exists():
                 return {"lines": [], "total": 0, "filtered": 0}
@@ -1952,13 +1949,15 @@ class RESTAPIGateway(Plugin):
 
             # Security: restrict target_dir to prevent path traversal
             if not target_dir:
-                target_dir = os.path.join(_ctx.config.get("agent", {}).get("data_dir", "./data"), "skills", "marketplace")
+                from core.hub import resolve_data_dir
+                target_dir = os.path.join(resolve_data_dir(_ctx.config), "skills", "marketplace")
             else:
                 # Validate path is within allowed directory (strict containment
                 # via Path.relative_to — startswith can be bypassed by sibling
                 # dirs like /data/skills_evil).
+                from core.hub import resolve_data_dir as _rdd
                 allowed_base = os.path.realpath(os.path.join(
-                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "skills"))
+                    _rdd(_ctx.config), "skills"))
                 if not is_path_within(target_dir, allowed_base):
                     raise HTTPException(403, "target_dir must be within skills directory")
 
@@ -1985,7 +1984,9 @@ class RESTAPIGateway(Plugin):
             from pathlib import Path as _Path
             import shutil as _shutil
 
-            data_dir = _ctx.config.get("agent", {}).get("data_dir", "./data") if _ctx else "./data"
+            # v2.1.0：走统一数据目录解析（ONE_AGENT_DATA_DIR > agent.data_dir > ./data）
+            from core.hub import resolve_data_dir
+            data_dir = resolve_data_dir(_ctx.config) if _ctx else "./data"
             allowed_base = os.path.realpath(os.path.join(data_dir, "skills"))
 
             # 校验并解析目标目录
@@ -2380,8 +2381,9 @@ class RESTAPIGateway(Plugin):
                 # Security: restrict path to data/documents directory only
                 # Use Path.relative_to() for strict containment (startswith can be bypassed
                 # e.g. "/data/skills_evil" starts with "/data/skills")
+                from core.hub import resolve_data_dir as _rdd
                 allowed_base = os.path.realpath(os.path.join(
-                    _ctx.config.get("agent", {}).get("data_dir", "./data"), "documents"))
+                    _rdd(_ctx.config), "documents"))
                 path_real = Path(os.path.realpath(path))
                 if not is_path_within(path_real, allowed_base):
                     raise HTTPException(403, "path must be within data/documents directory")
@@ -2704,7 +2706,9 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(503, "Context not initialized")
 
             body = body or {}
-            data_dir = _ctx.config.get("agent", {}).get("data_dir", "./data")
+            # v2.1.0：走统一数据目录解析（ONE_AGENT_DATA_DIR > agent.data_dir > ./data）
+            from core.hub import resolve_data_dir
+            data_dir = resolve_data_dir(_ctx.config)
             format_str = str(body.get("format", "zip")).lower()
             try:
                 fmt = ExportFormat(format_str)
@@ -2762,7 +2766,9 @@ class RESTAPIGateway(Plugin):
                 raise HTTPException(400, "file_path is required")
 
             merge = bool(body.get("merge", True))
-            data_dir = _ctx.config.get("agent", {}).get("data_dir", "./data")
+            # v2.1.0：走统一数据目录解析（ONE_AGENT_DATA_DIR > agent.data_dir > ./data）
+            from core.hub import resolve_data_dir
+            data_dir = resolve_data_dir(_ctx.config)
             try:
                 importer = DataImporter(data_dir=data_dir)
                 result = importer.import_from_file(file_path=file_path, merge=merge)

@@ -17,11 +17,11 @@ import time
 from typing import Any, Dict, List, Optional
 
 from core.db import create_sqlite_connection
+from core.hub import database_path
 
 logger = logging.getLogger(__name__)
 
 # Audit log configuration
-AUDIT_LOG_PATH = "data/memory/audit.db"
 AUDIT_RETENTION_DAYS = 30
 AUDIT_MAX_ENTRIES = 100000  # Auto-rotate when exceeded
 ROTATION_CHECK_EVERY = 100  # Only check rotation every N writes (perf)
@@ -40,7 +40,9 @@ class AuditLog:
     Provides query API for dashboards and compliance.
     """
 
-    def __init__(self, db_path: str = AUDIT_LOG_PATH) -> None:
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        # 默认惰性解析统一库路径（ONE_AGENT_DATA_DIR 感知），勿在模块导入时求值
+        db_path = db_path or database_path()
         self._conn = create_sqlite_connection(db_path)
         # Serialize writes: check_same_thread=False allows cross-thread access
         # but SQLite connections are not safe for concurrent writes from

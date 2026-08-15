@@ -139,72 +139,67 @@ class TestDumpConfigSanitization:
 
 
 # ============================================================
-# Bug 2: skills/_save_config 临时文件清理（YAMLError 路径）
+# Bug 2/3（v1.0.110 重写）：_save_config 改为写 SQLite 配置库后，
+# 原"YAML 临时文件清理"与"密钥脱敏写盘"两个行为已随 YAML 写盘一并
+# 移除。这里改为验证新架构的等价保证：
+#   - 写配置不触碰任何 YAML 文件（不再有临时文件/锁文件）
+#   - 配置库文件权限 0600（敏感值明文存储的边界保护）
+#   - 非法配置被 pydantic 拒绝且库中保留原值
 # ============================================================
-class TestSaveConfigTempFileCleanup:
-    def test_temp_file_cleaned_on_yaml_error(self, monkeypatch, tmp_path):
-        """yaml.dump 抛 YAMLError 时临时文件应被清理。"""
-        import yaml as _yaml
-        # 模拟 yaml.dump 抛 YAMLError
-        from yaml.error import YAMLError
-
+class TestSaveConfigToConfigStore:
+    def test_save_does_not_touch_yaml(self, monkeypatch, tmp_path):
+        """保存配置不得创建/修改任何 yaml 或 lock 文件。"""
         config_path = tmp_path / "config.yaml"
         config_path.write_text("existing: config\n", encoding="utf-8")
         monkeypatch.setenv("ONE_AGENT_CONFIG", str(config_path))
-
-        # 保存原 yaml.dump，注入错误版本
-        orig_dump = _yaml.dump
-        files_created = []
-
-        def tracking_dump(*args, **kwargs):
-            # 记录临时文件路径
-            f = args[0] if args else kwargs.get("stream")
-            try:
-                name = getattr(f, "name", None)
-                if name:
-                    files_created.append(name)
-            except Exception:
-                pass
-            raise YAMLError("simulated yaml error")
-
-        monkeypatch.setattr(_yaml, "dump", tracking_dump)
-        try:
-            from skills import _save_config
-            # 不应抛出（_save_config 内部 except Exception 捕获）
-            _save_config({"test": "data"})
-        finally:
-            monkeypatch.setattr(_yaml, "dump", orig_dump)
-
-        # 关键断言：所有临时文件都应被清理
-        leftover = [f for f in files_created if os.path.exists(f)]
-        assert not leftover, f"yaml.YAMLError 后临时文件应被清理，残留：{leftover}"
-
-
-# ============================================================
-# Bug 3: skills/_save_config 密钥脱敏
-# ============================================================
-class TestSkillsSaveConfigSanitization:
-    def test_plaintext_key_not_written_to_disk(self, monkeypatch, tmp_path):
-        """写盘的 YAML 文件不应包含明文 API key。"""
-        config_path = tmp_path / "config.yaml"
-        monkeypatch.setenv("ONE_AGENT_CONFIG", str(config_path))
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-secret-do-not-leak")
+        monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(tmp_path / "data"))
 
         from skills import _save_config
-        cfg = {
-            "llm": {
-                "api_keys": {"openai": "sk-secret-do-not-leak"},
-                "primary_model": "gpt-4o",
-            },
-        }
-        _save_config(cfg)
+        from one_agent import FullConfig
 
-        # 读取写盘的内容
-        written = config_path.read_text(encoding="utf-8")
-        assert "sk-secret-do-not-leak" not in written, \
-            f"明文密钥不应落盘，写入内容：{written}"
-        assert "${OPENAI_API_KEY}" in written, \
-            f"应还原为占位符，写入内容：{written}"
+        # 传完整合法配置（ConfigStore 会做 FullConfig 校验）
+        _save_config(FullConfig().model_dump())
+
+        assert config_path.read_text(encoding="utf-8") == "existing: config\n"
+        assert not list(tmp_path.glob("*.lock")), "不应再产生 YAML 锁文件"
+
+    def test_invalid_config_rejected_db_keeps_old(self, monkeypatch, tmp_path):
+        """非法配置被拒绝，配置库保留原值。"""
+        monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(tmp_path / "data"))
+        from core.config_store import close_config_store, get_config_store
+        from skills import _save_config
+        from one_agent import FullConfig
+
+        # 先写入合法配置
+        good = FullConfig().model_dump()
+        _save_config(good)
+
+        db_path = str(tmp_path / "data" / "one_agent.db")
+        # 再尝试写入非法配置（retries 负数）
+        bad = dict(good)
+        bad["llm"] = {**good["llm"], "retries": -5}
+        _save_config(bad)  # 内部捕获 ValueError，静默拒绝
+
+        snap = get_config_store(db_path).snapshot()
+        assert snap["llm"]["retries"] == good["llm"]["retries"], \
+            "非法写入应被拒绝，库中保留原值"
+        close_config_store(db_path)
+
+    def test_config_db_file_mode_0600(self, monkeypatch, tmp_path):
+        """配置库含明文密钥，文件权限必须 0600。"""
+        import stat
+        monkeypatch.setenv("ONE_AGENT_DATA_DIR", str(tmp_path / "data"))
+        from core.config_store import close_config_store, get_config_store
+        from skills import _save_config
+        from one_agent import FullConfig
+
+        _save_config(FullConfig().model_dump())
+        db = tmp_path / "data" / "one_agent.db"
+        assert db.exists()
+        assert stat.S_IMODE(db.stat().st_mode) == 0o600
+        close_config_store(str(db))
+        from core.hub import close_hub
+        close_hub(str(db))
 
 
 # ============================================================
