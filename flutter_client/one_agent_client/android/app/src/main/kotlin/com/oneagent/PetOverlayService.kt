@@ -86,6 +86,10 @@ class PetOverlayService : Service() {
     // 当前 SSE 聊天连接（新请求到达时断开旧连接，防止泄漏与事件串流）
     @Volatile private var chatConn: HttpURLConnection? = null
 
+    // 聊天代际：每次新请求递增。旧线程断连生效前可能读到缓冲中的陈旧 SSE
+    // 块，用代际判断丢弃，避免旧回复的事件混入新请求的气泡
+    @Volatile private var chatGen = 0L
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -515,6 +519,7 @@ class PetOverlayService : Service() {
             // 串扰防护：新请求到达时断开上一条未完成的 SSE 连接，
             // 避免两条流并发向同一个气泡推送事件
             try { chatConn?.disconnect() } catch (_: Exception) {}
+            val gen = ++chatGen
             val url = URL("$cleanBase/api/chat/stream")
             conn = url.openConnection() as HttpURLConnection
             chatConn = conn
@@ -541,10 +546,12 @@ class PetOverlayService : Service() {
                 val sb = StringBuilder()
                 var line: String?
                 while (br.readLine().also { line = it } != null) {
+                    // 已被新请求接管：丢弃所有陈旧数据，退出循环
+                    if (chatGen != gen) break
                     val l = line!!
                     if (l.isEmpty()) {
                         if (sb.isNotEmpty()) {
-                            handleSseBlock(sb.toString())
+                            if (chatGen == gen) handleSseBlock(sb.toString())
                             sb.setLength(0)
                         }
                     } else if (l.startsWith("data:")) {
@@ -552,11 +559,17 @@ class PetOverlayService : Service() {
                         sb.append(l.removePrefix("data:").trimStart())
                     }
                 }
-                if (sb.isNotEmpty()) handleSseBlock(sb.toString())
+                if (sb.isNotEmpty() && chatGen == gen) handleSseBlock(sb.toString())
             }
         } catch (e: Exception) {
-            Log.e(TAG, "chat error: $e")
-            pushEvent("""{"error":"连接失败: ${e.message}","done":true}""")
+            // 被新请求接管而断开的连接：readLine 抛异常属预期，静默退出，
+            // 不向 WebView 推送"连接失败"（否则会污染新请求的气泡）
+            if (conn != null && chatConn !== conn) {
+                Log.d(TAG, "chat superseded, ignore error: $e")
+            } else {
+                Log.e(TAG, "chat error: $e")
+                pushEvent("""{"error":"连接失败: ${e.message}","done":true}""")
+            }
         } finally {
             // 仅当 chatConn 仍是本次连接时才清理（新请求已接管时不动新连接）
             if (chatConn != null && chatConn === conn) {

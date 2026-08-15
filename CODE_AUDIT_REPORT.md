@@ -36,6 +36,24 @@
 
 ---
 
+## 2026-08-15 第二轮全栈审计（v1.0.107+8105 / app-v8105）
+
+**范围**: 复查上轮修复 + 深挖遗漏项。子代理报告 50+ 项疑似问题，逐项人工核实后确认 3 项真实问题（其余为误报，如 chat_provider 流管理、messaging 连接、resolver 参数、DragLayout 手势均无问题）。
+
+### 逻辑错误（已修复）
+1. **SSE 被接管后污染新气泡**（`PetOverlayService.kt`）— 新请求断开旧连接后，旧线程 readLine 抛异常，catch 块向 WebView 推送"连接失败"错误事件，混入新请求的气泡。修复：`chatConn !== conn` 时静默退出。
+2. **陈旧 SSE 块串流**（同上）— 断连生效前旧线程可能读到缓冲中的陈旧数据块并推送。修复：引入 `chatGen` 代际计数器，读取循环与块处理均校验代际，不匹配即丢弃。
+
+### 死代码清理（已修复）
+3. **`_execute_with_retry` 死方法**（`memory/base_store.py`）— 定义但全项目无调用（类已有 busy_timeout + 写锁兜底），连同 3 个重试常量一并删除。
+4. **`ApiConstants`/`PrefKeys` 死常量**（`constants.dart`）— API 层全部硬编码路径，20+ 个端点常量、`defaultWebUrl`、`streamTimeout`、`AppThemeMode`、`themeMode`/`language`/`lastSessionId` 键均无引用，全部删除。
+
+### 验证
+- pytest 全量 **524 passed**；py_compile 通过。
+- Kotlin/Dart：无本地 SDK，由 GitHub Actions 构建 APK（tag app-v8105）。
+
+---
+
 
 ## 执行摘要
 

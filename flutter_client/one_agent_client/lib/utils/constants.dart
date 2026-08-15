@@ -9,51 +9,15 @@ class ApiConstants {
   /// 真机使用时请在设置中改为服务器的实际 IP 或域名
   static const String defaultBaseUrl = 'http://127.0.0.1:18792';
 
-  /// 默认 Web UI 地址
-  static const String defaultWebUrl = 'http://127.0.0.1:18791';
-
   /// API 超时（秒）
   static const int connectTimeout = 10;
   static const int receiveTimeout = 60;
   static const int sendTimeout = 30;
 
-  /// SSE 流式超时（秒）
-  static const int streamTimeout = 180;
+  // ── API 端点（仅保留实际被引用的；其余端点在 api/ 层直接硬编码路径）──
 
-  // ── API 端点 ──────────────────────────────────────────────
-
-  static const String chat = '/api/chat';
   static const String chatStream = '/api/chat/stream';
-  static const String sessions = '/api/sessions';
-  static const String memorySearch = '/api/memory/search';
-  static const String memoryAdd = '/api/memory/add';
-  static const String memoryPage = '/api/memory/page';
-  static const String skills = '/api/skills';
-  static const String marketplace = '/api/marketplace';
-  static const String marketplaceInstall = '/api/marketplace/install';
-  static const String stats = '/api/stats';
-  static const String metrics = '/api/metrics';
   static const String health = '/api/health';
-  static const String config = '/api/config';
-  static const String cacheClear = '/api/cache/clear';
-
-  /// 审批
-  static const String approvalsPending = '/api/approvals/pending';
-  // 修复：补全审批 approve/deny 端点路径
-  static const String approvalsApprove = '/api/approvals'; // 基础路径，使用时拼接 /{id}/approve
-  static const String approvalsDeny = '/api/approvals'; // 基础路径，使用时拼接 /{id}/deny
-
-  /// MCP
-  static const String mcpTools = '/api/mcp/tools';
-  // 修复：移除不存在的 mcpStatus 端点（服务端无此路由）
-
-  /// 成本
-  static const String costsDaily = '/api/costs/daily';
-  static const String costsMonthly = '/api/costs/monthly';
-  static const String costsBudget = '/api/costs/budget';
-
-  /// 审计
-  static const String audit = '/api/audit';
 }
 
 /// SharedPreferences 键名
@@ -62,11 +26,5 @@ class PrefKeys {
 
   static const String baseUrl = 'base_url';
   static const String apiKey = 'api_key';
-  static const String themeMode = 'theme_mode';
-  static const String language = 'language';
-  static const String lastSessionId = 'last_session_id';
   static const String fontScale = 'font_scale';
 }
-
-/// 主题模式
-enum AppThemeMode { system, light, dark }
