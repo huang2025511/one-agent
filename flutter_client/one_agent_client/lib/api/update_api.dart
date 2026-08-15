@@ -33,6 +33,8 @@ class ReleaseInfo {
 class UpdateApi {
   static const String _ghRepo = 'huang2025511/one-agent';
   static const String _giteeRepo = 'huang20260511/one-agent';
+  /// Gitee 个人访问令牌 — 绕过匿名 API 限流（429），与 CI 使用同一 token
+  static const String _giteeToken = 'de4eaf21cffbd8b3b9c3522de99b879b';
 
   /// 获取最新 Release
   /// 国内用户优先从 Gitee API 获取（更快更稳定），失败时回退到 GitHub API
@@ -130,6 +132,10 @@ class UpdateApi {
   /// 而非真正最新的。之前它返回过 v2085 旧版，导致客户端比较
   /// 4089 >= 2085 → 误判"已是最新"，只能走强制更新。
   /// 现改为拉取 releases 列表，取【版本号最大且带 APK】的那个。
+  ///
+  /// 关键修复 2：匿名调用 Gitee API 限流极严（返回 429 HTML），
+  /// 客户端检测更新会被限流后回退 GitHub（国内超时）→ 永远检测失败。
+  /// 携带 access_token 可绕过匿名限流（个人自用项目，token 已用于 CI）。
   static Future<ReleaseInfo?> _fetchFromGitee() async {
     final dio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 15),
@@ -140,6 +146,7 @@ class UpdateApi {
       final resp = await dio.get(
         'https://gitee.com/api/v5/repos/$_giteeRepo/releases',
         queryParameters: {
+          'access_token': _giteeToken,
           'per_page': 50,
           'direction': 'desc',
           'sort': 'created_at',
