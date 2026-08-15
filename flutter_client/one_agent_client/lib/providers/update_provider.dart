@@ -137,6 +137,8 @@ class UpdateNotifier extends StateNotifier<UpdateState> {
   Future<void> downloadAndInstall() async {
     final release = state.latestRelease;
     if (release == null) return;
+    // 并发防护：下载进行中重复点击直接忽略，避免双写同一临时文件
+    if (state.isDownloading) return;
 
     state = state.copyWith(
       isDownloading: true,

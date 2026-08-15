@@ -131,19 +131,30 @@ class Live2DModelNotifier extends StateNotifier<Live2DModelState> {
       final rootDir = Directory(modelRoot);
       if (rootDir.existsSync()) rootDir.deleteSync(recursive: true);
 
-      // 解压
+      // 解压（含 Zip Slip 防护：拒绝绝对路径与 ../ 路径穿越条目）
+      final rootPath = Directory(modelRoot).absolute.path;
       String? model3JsonPath;
       for (final file in archive) {
-        final path = '$modelRoot/${file.name}';
+        // 规范化条目名：反斜杠转正斜杠（Windows 打包的 zip）
+        var entryName = file.name.replaceAll('\\', '/');
+        // 拒绝绝对路径与 .. 穿越
+        if (entryName.startsWith('/') || entryName.split('/').contains('..')) {
+          throw Exception('zip 包含非法路径条目: ${file.name}');
+        }
+        if (entryName.isEmpty) continue;
+        final outFile = File('$modelRoot/$entryName');
+        // 双重校验：解析后的绝对路径必须仍在模型目录内
+        if (!outFile.absolute.path.startsWith('$rootPath/')) {
+          throw Exception('zip 路径越界: ${file.name}');
+        }
         if (file.isFile) {
-          final outFile = File(path);
           await outFile.parent.create(recursive: true);
           await outFile.writeAsBytes(file.content as List<int>);
-          if (file.name.toLowerCase().endsWith('.model3.json')) {
-            model3JsonPath = file.name;
+          if (entryName.toLowerCase().endsWith('.model3.json')) {
+            model3JsonPath = entryName;
           }
         } else {
-          await Directory(path).create(recursive: true);
+          await outFile.create(recursive: true);
         }
       }
 
@@ -171,7 +182,12 @@ class Live2DModelNotifier extends StateNotifier<Live2DModelState> {
         modelFileName: fileName,
       );
 
-      final newModels = [...state.models, model];
+      // 重复导入同名模型时替换旧条目（旧目录已在上方删除重建），
+      // 避免列表里出现两个同名模型
+      final newModels = [
+        ...state.models.where((m) => m.name != modelName),
+        model,
+      ];
       state = state.copyWith(
         models: newModels,
         currentIndex: newModels.length - 1, // 自动选中新导入的

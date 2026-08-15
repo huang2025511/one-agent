@@ -16117,10 +16117,26 @@ var __pow = Math.pow,
   // ── 聊天事件（由原生 SSE 转发）──────────────────────────
   var replyText = '';   // 当前回复的累积文本
   var inReply = false;  // 是否已进入正文阶段（用于和 thinking 阶段区分）
+  var errored = false;  // 本轮流式中已出错（done 到达时不再切完成态 UI）
+  // 回复收尾：计算阅读时间、打完成标记、定时收起
+  function finishReply() {
+    talking = false; inReply = false;
+    lastInteract = Date.now();
+    // 按回复长度动态计算阅读时间：基础 12s + 每字 0.2s，上限 90s。
+    var ms = Math.min(12000 + replyText.length * 200, 90000);
+    bubble.classList.add('done'); // 尾部显示"✓ 点击收起"
+    bubble.scrollTop = bubble.scrollHeight;
+    if (bubbleTimer) { clearTimeout(bubbleTimer); }
+    bubbleTimer = setTimeout(bubbleHideNow, ms);
+    if (window.PetBridge) {
+      PetBridge.log('回复完成: ' + replyText.length + ' 字，显示 ' + Math.round(ms / 1000) + 's');
+    }
+  }
   window.onChatEvent = function (jsonStr) {
     var ev;
     try { ev = JSON.parse(jsonStr); } catch (e) { return; }
     if (ev.status === 'heartbeat') return;
+    if (ev.session_id) sessionId = ev.session_id;
     if (ev.status === 'thinking') {
       // 只显示简短状态，不展示推理过程内容（正文到达时替换为回复）。
       // 关键修复：正文开始后服务端还会推 phase=plan 的完整思考事件，
@@ -16130,7 +16146,7 @@ var __pow = Math.pow,
     }
     if (ev.error) {
       showBubble('出错了: ' + ev.error, false);
-      talking = false; inReply = false;
+      talking = false; inReply = false; errored = true;
       return;
     }
     // 内容事件：兼容 content / text / delta 三种字段名（与 Flutter 端一致）
@@ -16141,6 +16157,7 @@ var __pow = Math.pow,
       // 开头，回复全部被裁掉，看起来像"只有思考没有回复"。
       if (!inReply) {
         inReply = true;
+        errored = false; // 正文到达，重新进入正常收尾流程
         replyText = '';
         lastInteract = Date.now();
         setMood('happy', 60);
@@ -16151,22 +16168,16 @@ var __pow = Math.pow,
       bubble.classList.remove('done'); // 流式中，撤下完成标记
       showBubble(replyText, true);
       talking = true;
+      // 关键修复：服务端可能把最后一截正文和 done 合并在同一事件发送
+      // （content+done）。之前 content 分支直接 return，done 永远不会
+      // 处理 → talking 一直为 true、无完成标记、无自动收起定时器。
+      if (ev.done) finishReply();
       return;
     }
     if (ev.done) {
-      if (ev.session_id) sessionId = ev.session_id;
-      talking = false; inReply = false;
-      lastInteract = Date.now();
-      // 按回复长度动态计算阅读时间：基础 8s + 每字 0.15s，上限 60s。
-      // 之前固定 6 秒，长回复来不及读就消失了。
-      var ms = Math.min(12000 + replyText.length * 200, 90000);
-      bubble.classList.add('done'); // 尾部显示"✓ 点击收起"
-      bubble.scrollTop = bubble.scrollHeight;
-      if (bubbleTimer) { clearTimeout(bubbleTimer); }
-      bubbleTimer = setTimeout(bubbleHideNow, ms);
-      if (window.PetBridge) {
-        PetBridge.log('回复完成: ' + replyText.length + ' 字，显示 ' + Math.round(ms / 1000) + 's');
-      }
+      // 错误后紧跟的 done：只复位标记，不把错误气泡切到"完成"UI
+      if (errored) { errored = false; talking = false; inReply = false; return; }
+      finishReply();
     }
   };
 

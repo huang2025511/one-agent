@@ -559,7 +559,7 @@ class Coordinator(Plugin):
         - "现在几点/当前时间" → now skill
         - "算一下 X" / 纯算式 → calc skill
         - "记一下 X/保存笔记" → save_note skill
-        - "执行命令 X/运行 X" → system_run skill（需密码，仅简单只读命令直通）
+        - "执行命令 X/运行 X" → system_run skill（仅安全只读命令直通）
 
         设计原因：弱模型（如 flash-lite）不支持 tool calling，自然语言请求
         会被路由到这些模型 → 无法触发 skill → 只能打官腔。直通调度绕过这个限制。
@@ -682,13 +682,20 @@ class Coordinator(Plugin):
         for p in sys_patterns:
             if t.startswith(p):
                 cmd = text[len(p):].strip(" ，,。.`")
-                # 只对安全只读命令直通，避免危险操作
+                # 安全限制 1：包含 shell 元字符（; | && ` $( 等）的一律不直通。
+                # 之前仅按前缀白名单判断，"cat x; rm -rf /" 这类以安全命令
+                # 开头的注入命令会被直接放行执行。
+                if any(m in cmd for m in (";", "|", "&&", "||", "`", "$(", "${", ">", "<", "\n")):
+                    break
+                # 安全限制 2：只对安全只读命令直通，避免危险操作
                 safe_starts = ("ls", "cat", "echo", "date", "whoami", "pwd",
                                "df", "du", "free", "uptime", "uname", "head",
                                "tail", "wc", "find", "grep", "git status",
                                "git log", "git diff")
                 if cmd and any(cmd.lower().startswith(s) for s in safe_starts):
-                    return "system_run", {"input": cmd}, f"正在执行：{cmd[:30]}..."
+                    # 关键修复：system_run skill 的参数名是 command（不是 input），
+                    # 之前传 {"input": cmd} 导致 handler 拿到空命令、只返回用法提示
+                    return "system_run", {"command": cmd}, f"正在执行：{cmd[:30]}..."
 
         return None, None, None
 

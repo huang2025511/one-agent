@@ -6,6 +6,37 @@
 
 ---
 
+## 2026-08-15 全栈审计修复（v1.0.106+8104 / app-v8104）
+
+**范围**: 服务端 Python + Flutter 客户端 + Android 原生 + Live2D Web 页面，共 97 项问题分级，本轮修复全部高危项：
+
+### 安全漏洞（已修复）
+1. **Zip Slip 路径穿越**（`live2d_model_provider.dart`）— 导入模型 zip 时条目名未校验，恶意 zip 可写任意路径。修复：拒绝绝对路径/`..` 条目 + 输出路径前缀双重校验。
+2. **命令直通白名单注入**（`core/coordinator.py`）— "执行命令 cat x; rm -rf /" 以安全前缀开头即被放行直通执行。修复：含 `;` `|` `&&` `` ` `` `$(` `>` `<` 等元字符一律不直通。
+3. **SSE 连接泄漏**（`PetOverlayService.kt`）— 聊天连接从不 disconnect，连续发消息累积 socket。修复：新请求断开旧连接 + finally 释放 + onDestroy 清理。
+
+### 逻辑错误（已修复）
+4. **直通参数名错误**（`core/coordinator.py`）— 直通调度传 `{"input": cmd}`，而 system_run skill 期望 `command` 参数 → 拿到空命令只返回用法提示，直通功能从未生效。
+5. **whisper 转写路径错误**（`multimodal/__init__.py`）— whisper 按参数写 `/tmp/<名>.txt`，代码却去音频同目录找 → 转写永远"失败"。修复：读正确路径并清理临时文件。
+6. **content+done 合并事件丢失收尾**（`live2d_web/index.html`）— 最后一截正文与 done 同事件发送时 content 分支提前 return，done 永不处理 → talking 卡死、无完成标记、无自动收起。修复：content 分支内联处理 done。
+7. **error→done 状态污染**（同上）— 出错后紧跟的 done 会把错误气泡切成"✓ 点击收起"完成态。修复：errored 标记隔离。
+8. **重复导入模型产生重复条目**（`live2d_model_provider.dart`）— 同名 zip 重复导入列表翻倍。修复：替换旧条目。
+9. **密码策略文案矛盾**（`skills/__init__.py`）— 帮助里仍写 `--password`/`/unlock`/`/lock`，实际已弃用无密码。修复：文案统一。
+
+### 资源/健壮性（已修复）
+10. **审批幽灵待办**（`core/approval.py`）— wait() 超时后请求永久留在 _pending，内存泄漏 + UI 待办越积越多。修复：TTL 300s 自动过期并 deny。
+11. **下载并发双写**（`update_provider.dart`）— 下载中重复点击双写同一临时文件。修复：isDownloading 守卫。
+12. **onDestroy 后派发任务**（`PetOverlayService.kt`）— 待执行 post 在服务销毁后仍触达已销毁 WebView。修复：removeCallbacksAndMessages(null)。
+13. **SSE 事件串扰**（同上）— 两条并发聊天流向同一气泡交叉推送。修复：单连接管理。
+
+### 验证
+- Python：py_compile 全部通过；pytest unit_tests + v60 + v62 共 **135 passed**；直通注入阻断/参数名/审批 TTL 功能断言通过。
+- Web：index.html 内联 JS node --check 通过。
+- Flutter/Kotlin：无本地 SDK，由 GitHub Actions 构建 APK（tag app-v8104）。
+
+---
+
+
 ## 执行摘要
 
 本次审计对 One-Agent 项目进行了全面的深度代码审查，共扫描 47 个 Python 文件。审计发现多个不同严重程度的问题，主要集中在以下几个方面：

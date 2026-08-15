@@ -445,10 +445,20 @@ def make_transcribe_handler():
                 timeout=120,
             )
             if result.returncode == 0:
-                out_path = os.path.splitext(path)[0] + ".txt"
+                # 关键修复：whisper 按参数把转写写到 /tmp/<basename>.txt，
+                # 之前却去音频文件同目录找 <name>.txt → 永远读不到结果。
+                base_no_ext = os.path.splitext(os.path.basename(path))[0]
+                out_path = os.path.join("/tmp", base_no_ext + ".txt")
                 if os.path.exists(out_path):
-                    with open(out_path, encoding="utf-8") as f:
-                        return f.read().strip()
+                    try:
+                        with open(out_path, encoding="utf-8") as f:
+                            return f.read().strip()
+                    finally:
+                        try:
+                            os.remove(out_path)  # 读完清理临时转写文件
+                        except OSError:
+                            pass
+                return "[whisper 未产出转写文件]"
             return f"[whisper 失败: {result.stderr[:200]}]"
         except FileNotFoundError:
             return "[whisper 未安装。请运行: pip install openai-whisper]"

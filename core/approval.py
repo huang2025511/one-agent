@@ -59,6 +59,10 @@ class ApprovalManager:
     """Manages pending approval requests."""
 
     _MAX_HISTORY = 1000
+    # 待审批 TTL：超过该时长未处理的请求自动过期清理。
+    # 之前 wait() 超时后请求仍永久留在 _pending 里（幽灵审批），
+    # 既泄漏内存又让 UI 待办列表越积越长。
+    _TTL_SECONDS = 300.0
 
     def __init__(self):
         self._pending: Dict[str, ApprovalRequest] = {}
@@ -66,11 +70,22 @@ class ApprovalManager:
         self._on_approval_needed: Optional[Callable] = None
         self._lock = threading.Lock()
 
+    def _purge_expired(self) -> None:
+        """调用方需持有 self._lock。过期请求置为 deny 以唤醒残留等待者。"""
+        now = time.time()
+        expired = [rid for rid, r in self._pending.items()
+                   if now - r.created_at > self._TTL_SECONDS]
+        for rid in expired:
+            r = self._pending.pop(rid)
+            if r._approved is None:
+                r.deny()
+
     def request_approval(self, operation: str, details: str,
                         risk_level: str = "medium") -> ApprovalRequest:
         """Create a new approval request."""
         req = ApprovalRequest(operation, details, risk_level=risk_level)
         with self._lock:
+            self._purge_expired()
             self._pending[req.id] = req
 
         if self._on_approval_needed:
@@ -81,6 +96,7 @@ class ApprovalManager:
     def get_pending(self) -> list:
         """List all pending requests."""
         with self._lock:
+            self._purge_expired()
             return [r.to_dict() for r in self._pending.values()]
 
     def approve(self, request_id: str) -> bool:

@@ -83,6 +83,9 @@ class PetOverlayService : Service() {
 
     private var webDir: File? = null
 
+    // 当前 SSE 聊天连接（新请求到达时断开旧连接，防止泄漏与事件串流）
+    @Volatile private var chatConn: HttpURLConnection? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -129,6 +132,12 @@ class PetOverlayService : Service() {
 
     override fun onDestroy() {
         instance = null
+        // 清除所有待执行任务（如 loadModel/showOverlay 的 post），
+        // 防止 onDestroy 后仍向已销毁的 WebView 派发操作
+        mainHandler.removeCallbacksAndMessages(null)
+        // 断开进行中的 SSE 连接，释放线程与socket
+        try { chatConn?.disconnect() } catch (_: Exception) {}
+        chatConn = null
         try {
             overlayView?.let { wm.removeView(it) }
         } catch (e: Exception) {
@@ -501,9 +510,14 @@ class PetOverlayService : Service() {
             pushEvent("""{"error":"未配置服务器地址，请在设置中填写","done":true}""")
             return
         }
+        var conn: HttpURLConnection? = null
         try {
+            // 串扰防护：新请求到达时断开上一条未完成的 SSE 连接，
+            // 避免两条流并发向同一个气泡推送事件
+            try { chatConn?.disconnect() } catch (_: Exception) {}
             val url = URL("$cleanBase/api/chat/stream")
-            val conn = url.openConnection() as HttpURLConnection
+            conn = url.openConnection() as HttpURLConnection
+            chatConn = conn
             conn.requestMethod = "POST"
             conn.connectTimeout = 15000
             conn.readTimeout = 120000
@@ -543,6 +557,12 @@ class PetOverlayService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "chat error: $e")
             pushEvent("""{"error":"连接失败: ${e.message}","done":true}""")
+        } finally {
+            // 仅当 chatConn 仍是本次连接时才清理（新请求已接管时不动新连接）
+            if (chatConn != null && chatConn === conn) {
+                try { chatConn?.disconnect() } catch (_: Exception) {}
+                chatConn = null
+            }
         }
     }
 
