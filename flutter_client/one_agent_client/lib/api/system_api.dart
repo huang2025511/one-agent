@@ -56,6 +56,55 @@ class SystemApi {
     }
   }
 
+  // ── 统一数据库维护（v2.2.0 /api/db/*）─────────────────────
+
+  /// 统一库统计：大小 / 表行数 / schema 版本 / 待迁移旧库 / 备份概要
+  static Future<Map<String, dynamic>?> getDbStats() async {
+    try {
+      final resp = await ApiClient.dio.get('/api/db/stats');
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 统一库完整性检查（PRAGMA quick_check）
+  static Future<Map<String, dynamic>?> getDbCheck() async {
+    try {
+      final resp = await ApiClient.dio.get('/api/db/check');
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 备份列表（新→旧）
+  static Future<List<Map<String, dynamic>>> getDbBackups() async {
+    try {
+      final resp = await ApiClient.dio.get('/api/db/backups');
+      final data = resp.data;
+      if (data is Map<String, dynamic> && data['backups'] is List) {
+        return (data['backups'] as List)
+            .whereType<Map<String, dynamic>>()
+            .toList();
+      }
+      return [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 立即执行一次备份（含可选加密与轮换）
+  static Future<Map<String, dynamic>?> triggerDbBackup({int keep = 7}) async {
+    try {
+      final resp =
+          await ApiClient.dio.post('/api/db/backup', queryParameters: {'keep': keep});
+      return resp.data as Map<String, dynamic>?;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 清除缓存
   static Future<bool> clearCache() async {
     try {

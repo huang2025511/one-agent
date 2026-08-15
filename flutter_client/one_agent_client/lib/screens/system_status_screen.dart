@@ -132,6 +132,8 @@ class _SystemStatusScreenState extends ConsumerState<SystemStatusScreen> {
         _CostCard(costs: state.costs),
         const SizedBox(height: 16),
         _HealthCard(health: state.health),
+        const SizedBox(height: 16),
+        const _DbCard(),
       ],
     );
   }
@@ -902,6 +904,462 @@ class _HealthCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 统一数据库卡片（v2.2.0 /api/db/*）— 统计 / 完整性 / 备份
+// ═══════════════════════════════════════════════════════════════════
+
+class _DbCard extends StatefulWidget {
+  const _DbCard();
+
+  @override
+  State<_DbCard> createState() => _DbCardState();
+}
+
+class _DbCardState extends State<_DbCard> {
+  Map<String, dynamic>? _stats;
+  Map<String, dynamic>? _check;
+  List<Map<String, dynamic>> _backups = [];
+  bool _loading = true;
+  bool _backingUp = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final stats = await SystemApi.getDbStats();
+    final check = await SystemApi.getDbCheck();
+    final backups = await SystemApi.getDbBackups();
+    if (!mounted) return;
+    setState(() {
+      _stats = stats;
+      _check = check;
+      _backups = backups;
+      _loading = false;
+    });
+  }
+
+  Future<void> _backupNow() async {
+    setState(() => _backingUp = true);
+    final result = await SystemApi.triggerDbBackup();
+    if (!mounted) return;
+    setState(() => _backingUp = false);
+    final messenger = ScaffoldMessenger.of(context);
+    if (result != null && result['ok'] == true) {
+      final encrypted = result['encrypted'] == true;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('备份完成${encrypted ? '（已加密）' : ''}'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      await _load();
+    } else {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('备份失败：服务器不支持或权限不足'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  String _fmtBytes(num? bytes) {
+    if (bytes == null) return '-';
+    const units = ['B', 'KiB', 'MiB', 'GiB'];
+    var v = bytes.toDouble();
+    var i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return v >= 100 || i == 0
+        ? '${v.toStringAsFixed(0)} ${units[i]}'
+        : '${v.toStringAsFixed(1)} ${units[i]}';
+  }
+
+  String _fmtTime(num? ts) {
+    if (ts == null || ts <= 0) return '-';
+    final dt = DateTime.fromMillisecondsSinceEpoch((ts * 1000).round());
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inMinutes < 1) return '刚刚';
+    if (diff.inHours < 1) return '${diff.inMinutes} 分钟前';
+    if (diff.inDays < 1) return '${diff.inHours} 小时前';
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-'
+        '${dt.day.toString().padLeft(2, '0')} '
+        '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  void _showTablesSheet() {
+    final tables = <String, dynamic>{};
+    final raw = _stats?['tables'];
+    if (raw is Map<String, dynamic>) tables.addAll(raw);
+    final sortedKeys = tables.keys.toList()..sort();
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.7,
+        builder: (_, controller) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                '统一库表明细（${sortedKeys.length} 张表）',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                controller: controller,
+                itemCount: sortedKeys.length,
+                itemBuilder: (_, i) {
+                  final name = sortedKeys[i];
+                  final rows = tables[name];
+                  return ListTile(
+                    dense: true,
+                    leading: Icon(
+                      Icons.table_chart_outlined,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.secondary,
+                    ),
+                    title: Text(name,
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+                    trailing: Text(rows == -1 ? 'n/a' : '$rows 行'),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showBackupsSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.7,
+        builder: (_, controller) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                '备份历史（${_backups.length} 份，新→旧）',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            Expanded(
+              child: _backups.isEmpty
+                  ? const Center(child: Text('暂无备份'))
+                  : ListView.builder(
+                      controller: controller,
+                      itemCount: _backups.length,
+                      itemBuilder: (_, i) {
+                        final b = _backups[i];
+                        final file = '${b['file'] ?? '-'}';
+                        final enc = file.endsWith('.enc');
+                        return ListTile(
+                          dense: true,
+                          leading: Icon(
+                            enc ? Icons.lock : Icons.archive_outlined,
+                            size: 18,
+                            color: enc ? Colors.orange : null,
+                          ),
+                          title: Text(file,
+                              style: const TextStyle(
+                                  fontFamily: 'monospace', fontSize: 12)),
+                          subtitle: Text(
+                            '${_fmtTime(b['created_at'] as num?)} · '
+                            '${_fmtBytes(b['size_bytes'] as num?)}',
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    if (_loading) {
+      return const Card(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+
+    if (_stats == null) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('统一数据库',
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Text(
+                '无法获取数据库统计（服务器版本 < 2.2.0 或权限不足）',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.outline),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final sizeBytes = _stats!['size_bytes'] as num?;
+    final walBytes = _stats!['wal_bytes'] as num? ?? 0;
+    final tableCount = _stats!['table_count'] as num? ?? 0;
+    final legacyPending = _stats!['legacy_pending'] as num? ?? 0;
+    final encrypted = _stats!['encrypted'] == true;
+    final backupsInfo = _stats!['backups'];
+    final backupCount =
+        backupsInfo is Map<String, dynamic> ? backupsInfo['count'] as num? ?? 0 : 0;
+    final latest = backupsInfo is Map<String, dynamic>
+        ? backupsInfo['latest'] as Map<String, dynamic>?
+        : null;
+    final checkOk = _check?['ok'] == true;
+    final messageRows =
+        ((_stats!['tables'] as Map<String, dynamic>?)?['messages'] as num?) ?? 0;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.storage,
+                    size: 20, color: theme.colorScheme.secondary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '统一数据库',
+                    style: theme.textTheme.titleSmall
+                        ?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                // 完整性 + 加密状态标签
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: (checkOk ? Colors.green : Colors.orange)
+                        .withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        checkOk ? Icons.check_circle : Icons.warning,
+                        size: 12,
+                        color: checkOk ? Colors.green : Colors.orange,
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        checkOk ? '完整' : '待检查',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: checkOk ? Colors.green : Colors.orange,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 6),
+                if (encrypted)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.lock, size: 12, color: Colors.orange),
+                        SizedBox(width: 4),
+                        Text(
+                          '加密',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: Colors.orange,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _DbMetric(
+                    label: '库大小',
+                    value: _fmtBytes(sizeBytes),
+                    sub: 'WAL ${_fmtBytes(walBytes)}',
+                    icon: Icons.database,
+                  ),
+                ),
+                Expanded(
+                  child: _DbMetric(
+                    label: '数据表',
+                    value: '$tableCount',
+                    sub: '消息 $messageRows 条',
+                    icon: Icons.table_chart_outlined,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _DbMetric(
+                    label: '自动备份',
+                    value: '$backupCount 份',
+                    sub: latest != null
+                        ? '最新 ${_fmtTime(latest['created_at'] as num?)}'
+                        : '暂无',
+                    icon: Icons.backup_outlined,
+                  ),
+                ),
+                Expanded(
+                  child: _DbMetric(
+                    label: '待迁移旧库',
+                    value: '$legacyPending',
+                    sub: legacyPending > 0 ? '运行 migrate 合入' : '已全部合入',
+                    icon: Icons.merge_type,
+                    valueColor:
+                        legacyPending > 0 ? Colors.orange : Colors.green,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _backingUp ? null : _backupNow,
+                    icon: _backingUp
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child:
+                                CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.backup, size: 16),
+                    label: Text(_backingUp ? '备份中…' : '立即备份'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _showTablesSheet,
+                    icon: const Icon(Icons.table_chart, size: 16),
+                    label: const Text('表明细'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _showBackupsSheet,
+                    icon: const Icon(Icons.history, size: 16),
+                    label: const Text('备份历史'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DbMetric extends StatelessWidget {
+  final String label;
+  final String value;
+  final String? sub;
+  final IconData icon;
+  final Color? valueColor;
+
+  const _DbMetric({
+    required this.label,
+    required this.value,
+    this.sub,
+    required this.icon,
+    this.valueColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: theme.colorScheme.secondary),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label,
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.outline)),
+              Text(
+                value,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                  color: valueColor,
+                ),
+              ),
+              if (sub != null)
+                Text(sub!,
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.outline)),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

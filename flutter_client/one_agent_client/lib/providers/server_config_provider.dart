@@ -290,6 +290,84 @@ class ServerConfigNotifier extends StateNotifier<ServerConfigState> {
   String get restHost => _getString(['rest', 'host'], '127.0.0.1');
   int get restPort => _getInt(['rest', 'port'], 18792);
   int get rateLimitPerMinute => _getInt(['rest', 'rate_limit_per_minute'], 60);
+  int get maxChatBytes => _getInt(['rest', 'max_chat_bytes'], 512 * 1024);
+
+  // ════════════════════════════════════════════════════════════
+  //  消息通道（gateways）— 各通道开关与凭据状态
+  // ════════════════════════════════════════════════════════════
+  /// 通道是否启用（name = wechat_personal/telegram/wecom/dingtalk/
+  /// feishu/discord/slack/web）
+  bool gatewayEnabled(String name) => _getBool(['gateways', name, 'enabled'], false);
+
+  /// 通道凭据是否已配置（enabled 之外的关键字段非空）
+  bool gatewayConfigured(String name) {
+    final section = _get(['gateways', name], null);
+    if (section is! Map<String, dynamic>) return false;
+    const credFields = {
+      'telegram': ['bot_token'],
+      'wecom': ['corp_id', 'agent_id', 'secret'],
+      'dingtalk': ['client_id', 'client_secret'],
+      'feishu': ['app_id', 'app_secret'],
+      'discord': ['bot_token'],
+      'slack': ['bot_token', 'signing_secret'],
+      'wechat_personal': [],
+      'web': [],
+    };
+    final fields = credFields[name] ?? const <String>[];
+    if (fields.isEmpty) return true;
+    return fields.every((f) {
+      final v = section[f];
+      return v is String && v.isNotEmpty;
+    });
+  }
+
+  String gatewayCredHint(String name) {
+    final section = _get(['gateways', name], null);
+    if (section is! Map<String, dynamic>) return '';
+    const hints = {
+      'telegram': 'bot_token',
+      'discord': 'bot_token',
+      'slack': 'bot_token + signing_secret',
+      'wecom': 'corp_id + agent_id + secret',
+      'dingtalk': 'client_id + client_secret',
+      'feishu': 'app_id + app_secret',
+      'wechat_personal': '扫码登录凭据',
+      'web': '',
+    };
+    final hint = hints[name] ?? '';
+    if (hint.isEmpty) return '';
+    return gatewayConfigured(name) ? '$hint 已配置' : '需配置 $hint';
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  调度器与数据库维护（scheduler）
+  // ════════════════════════════════════════════════════════════
+  bool get schedulerEnabled => _getBool(['scheduler', 'enabled'], true);
+  bool get dbMaintenanceEnabled =>
+      _getBool(['scheduler', 'db_maintenance', 'enabled'], true);
+  int get keepBackups =>
+      _getInt(['scheduler', 'db_maintenance', 'keep_backups'], 7);
+  bool get encryptBackups =>
+      _getBool(['scheduler', 'db_maintenance', 'encrypt_backups'], true);
+  String get dbBackupCron {
+    final jobs = _get(['scheduler', 'builtin_jobs'], null);
+    if (jobs is List && jobs.isNotEmpty) {
+      final first = jobs.first;
+      if (first is Map<String, dynamic>) {
+        return '${first['cron'] ?? ''}';
+      }
+    }
+    return '';
+  }
+
+  // ════════════════════════════════════════════════════════════
+  //  技能与市场
+  // ════════════════════════════════════════════════════════════
+  bool get skillsEnabled => _getBool(['skills', 'enabled'], true);
+  bool get skillsAutoDiscover => _getBool(['skills', 'auto_discover'], true);
+  bool get marketplaceEnabled => _getBool(['marketplace', 'enabled'], true);
+  String get marketplaceRegistryUrl =>
+      _getString(['marketplace', 'registry_url'], '');
 
   // ════════════════════════════════════════════════════════════
   //  监控配置

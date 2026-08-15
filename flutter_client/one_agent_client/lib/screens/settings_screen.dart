@@ -36,7 +36,10 @@ class SettingsScreen extends ConsumerWidget {
         ],
       ),
       body: isConnected
-          ? const _UnifiedSettingsView()
+          ? DefaultTabController(
+              length: 6,
+              child: const _UnifiedSettingsView(),
+            )
           : const _ConnectionSetupView(),
     );
   }
@@ -245,36 +248,81 @@ class _UnifiedSettingsViewState extends ConsumerState<_UnifiedSettingsView> {
       );
     }
 
+    // v2.2.0 设置分类：6 个 Tab 替代原来 11 个 section 的长列表滚动。
+    // 服务端配置（前 5 个 Tab）+ 客户端本地设置（最后 1 个 Tab）。
+    const tabs = [
+      Tab(icon: Icon(Icons.psychology, size: 18), text: '模型路由'),
+      Tab(icon: Icon(Icons.smart_toy, size: 18), text: '智能体'),
+      Tab(icon: Icon(Icons.forum, size: 18), text: '消息通道'),
+      Tab(icon: Icon(Icons.security, size: 18), text: '安全成本'),
+      Tab(icon: Icon(Icons.settings_suggest, size: 18), text: '系统运维'),
+      Tab(icon: Icon(Icons.phone_android, size: 18), text: '客户端'),
+    ];
+
+    Widget tabView(List<Widget> sections) {
+      return RefreshIndicator(
+        onRefresh: () => notifier.loadConfig(),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+          children: [
+            for (final s in sections) ...[s, const SizedBox(height: 16)],
+          ],
+        ),
+      );
+    }
+
     return Stack(
       children: [
-        RefreshIndicator(
-          onRefresh: () => notifier.loadConfig(),
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
-            children: [
-              _ModelRoutingSection(notifier: notifier, state: cfgState),
-              const SizedBox(height: 16),
-              _AgentSection(notifier: notifier),
-              const SizedBox(height: 16),
-              _MemorySection(notifier: notifier),
-              const SizedBox(height: 16),
-              _ExecutionSection(notifier: notifier),
-              const SizedBox(height: 16),
-              _CostSection(notifier: notifier),
-              const SizedBox(height: 16),
-              _SecuritySection(notifier: notifier),
-              const SizedBox(height: 16),
-              _AdvancedSection(notifier: notifier),
-              const SizedBox(height: 16),
-              _ConnectionInfoSection(ref: ref),
-              const SizedBox(height: 16),
-              const _AppearanceSection(),
-              const SizedBox(height: 16),
-              const _PetSection(),
-              const SizedBox(height: 16),
-              const _AboutSection(),
-            ],
-          ),
+        Column(
+          children: [
+            TabBar(
+              isScrollable: true,
+              tabAlignment: TabAlignment.start,
+              tabs: tabs,
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  // ── 1. 模型路由：LLM 供应商 / 分级路由 ──
+                  tabView([
+                    _ModelRoutingSection(notifier: notifier, state: cfgState),
+                  ]),
+                  // ── 2. 智能体：Agent / 记忆 / 技能 / 执行环境 ──
+                  tabView([
+                    _AgentSection(notifier: notifier),
+                    _MemorySection(notifier: notifier),
+                    _SkillsSection(notifier: notifier),
+                    _ExecutionSection(notifier: notifier),
+                  ]),
+                  // ── 3. 消息通道：微信 / Telegram / 企业微信 / 钉钉 /
+                  //       飞书 / Discord / Slack / Web ──
+                  tabView([
+                    _GatewaysSection(notifier: notifier),
+                  ]),
+                  // ── 4. 安全成本 ──
+                  tabView([
+                    _CostSection(notifier: notifier),
+                    _SecuritySection(notifier: notifier),
+                  ]),
+                  // ── 5. 系统运维：调度器与数据库维护 / REST / 监控 /
+                  //       缓存 / 市场 ──
+                  tabView([
+                    _DbMaintenanceSection(notifier: notifier),
+                    _ServerOpsSection(notifier: notifier),
+                    _MarketplaceSection(notifier: notifier),
+                  ]),
+                  // ── 6. 客户端本地设置 ──
+                  tabView([
+                    _ConnectionInfoSection(ref: ref),
+                    const _AppearanceSection(),
+                    const _PetSection(),
+                    const _AboutSection(),
+                  ]),
+                ],
+              ),
+            ),
+          ],
         ),
         if (cfgState.isSaving)
           Positioned(
@@ -2094,28 +2142,158 @@ class _SecuritySection extends StatelessWidget {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  高级设置分区（REST / 监控 / 缓存）
+//  技能系统分区（skills）— 原「高级」拆分归类到各 Tab
 // ════════════════════════════════════════════════════════════════
-class _AdvancedSection extends StatelessWidget {
+class _SkillsSection extends StatelessWidget {
   final ServerConfigNotifier notifier;
-  const _AdvancedSection({required this.notifier});
+  const _SkillsSection({required this.notifier});
 
   @override
   Widget build(BuildContext context) {
     return _SettingsSection(
-      icon: Icons.tune,
-      title: '高级',
+      icon: Icons.extension,
+      title: '技能系统',
       children: [
-        // LLM 缓存
         _SwitchTile(
-          title: 'LLM 响应缓存',
-          subtitle: 'TTL ${notifier.llmCacheTtl}s · 最大 ${notifier.llmCacheMaxSize} 条',
-          value: notifier.llmCacheEnabled,
+          title: '启用技能系统',
+          subtitle: '关闭后 agent 不再加载任何技能',
+          value: notifier.skillsEnabled,
           onChanged: (v) => notifier.updateConfig({
-            'llm_cache': {'enabled': v}
-          }).then((ok) => _showResult(context, ok, notifier, 'LLM 缓存')),
+            'skills': {'enabled': v}
+          }).then((ok) => _showResult(context, ok, notifier, '技能系统')),
         ),
-        // REST API
+        _SwitchTile(
+          title: '自动发现技能',
+          subtitle: '自动扫描 search_paths 下的新技能',
+          value: notifier.skillsAutoDiscover,
+          onChanged: (v) => notifier.updateConfig({
+            'skills': {'auto_discover': v}
+          }).then((ok) => _showResult(context, ok, notifier, '自动发现')),
+        ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  消息通道分区（gateways）— 8 个通道的启用开关 + 凭据状态
+// ════════════════════════════════════════════════════════════════
+class _GatewaysSection extends StatelessWidget {
+  final ServerConfigNotifier notifier;
+  const _GatewaysSection({required this.notifier});
+
+  static const _channels = [
+    ('wechat_personal', '微信（个人号）'),
+    ('telegram', 'Telegram'),
+    ('wecom', '企业微信'),
+    ('dingtalk', '钉钉'),
+    ('feishu', '飞书'),
+    ('discord', 'Discord'),
+    ('slack', 'Slack'),
+    ('web', 'Web 网关'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return _SettingsSection(
+      icon: Icons.forum,
+      title: '消息通道',
+      children: [
+        for (final (name, label) in _channels)
+          _SwitchTile(
+            title: label,
+            subtitle: notifier.gatewayCredHint(name).isEmpty
+                ? (name == 'wechat_personal' ? '扫码登录后启用' : null)
+                : notifier.gatewayCredHint(name),
+            value: notifier.gatewayEnabled(name),
+            onChanged: (v) => notifier.updateConfig({
+              'gateways': {
+                name: {'enabled': v}
+              }
+            }).then((ok) => _showResult(context, ok, notifier, label)),
+          ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  调度器与数据库维护分区（scheduler.db_maintenance）
+// ════════════════════════════════════════════════════════════════
+class _DbMaintenanceSection extends StatelessWidget {
+  final ServerConfigNotifier notifier;
+  const _DbMaintenanceSection({required this.notifier});
+
+  @override
+  Widget build(BuildContext context) {
+    final cron = notifier.dbBackupCron;
+    return _SettingsSection(
+      icon: Icons.schedule,
+      title: '调度与备份',
+      children: [
+        _SwitchTile(
+          title: '任务调度器',
+          subtitle: '定时任务与内置作业',
+          value: notifier.schedulerEnabled,
+          onChanged: (v) => notifier.updateConfig({
+            'scheduler': {'enabled': v}
+          }).then((ok) => _showResult(context, ok, notifier, '调度器')),
+        ),
+        _SwitchTile(
+          title: '数据库自动维护',
+          subtitle: cron.isEmpty ? '统一库每日自动备份' : '备份计划: $cron',
+          value: notifier.dbMaintenanceEnabled,
+          onChanged: (v) => notifier.updateConfig({
+            'scheduler': {
+              'db_maintenance': {'enabled': v}
+            }
+          }).then((ok) => _showResult(context, ok, notifier, '数据库维护')),
+        ),
+        _NavTile(
+          title: '备份保留份数',
+          value: '${notifier.keepBackups} 份',
+          leading: Icons.layers,
+          onTap: () => _showNumberEditDialog(
+            context,
+            title: '备份保留份数',
+            initial: notifier.keepBackups,
+            min: 1,
+            max: 90,
+            onSubmit: (v) => notifier.updateConfig({
+              'scheduler': {
+                'db_maintenance': {'keep_backups': v}
+              }
+            }),
+          ),
+        ),
+        _SwitchTile(
+          title: '备份加密',
+          subtitle: '设置 ONE_AGENT_DB_KEY 后备份自动加密',
+          value: notifier.encryptBackups,
+          onChanged: (v) => notifier.updateConfig({
+            'scheduler': {
+              'db_maintenance': {'encrypt_backups': v}
+            }
+          }).then((ok) => _showResult(context, ok, notifier, '备份加密')),
+        ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  服务运维分区（REST / 监控 / LLM 缓存 / 超时重试）
+// ════════════════════════════════════════════════════════════════
+class _ServerOpsSection extends StatelessWidget {
+  final ServerConfigNotifier notifier;
+  const _ServerOpsSection({required this.notifier});
+
+  @override
+  Widget build(BuildContext context) {
+    return _SettingsSection(
+      icon: Icons.settings_suggest,
+      title: '服务运维',
+      children: [
         _NavTile(
           title: 'REST API',
           value: '${notifier.restHost}:${notifier.restPort}',
@@ -2131,7 +2309,21 @@ class _AdvancedSection extends StatelessWidget {
             ],
           ),
         ),
-        // 监控
+        _NavTile(
+          title: 'API 限流',
+          value: '${notifier.rateLimitPerMinute}/分钟',
+          leading: Icons.speed,
+          onTap: () => _showNumberEditDialog(
+            context,
+            title: '限流（次/分钟）',
+            initial: notifier.rateLimitPerMinute,
+            min: 1,
+            max: 10000,
+            onSubmit: (v) => notifier.updateConfig({
+              'rest': {'rate_limit_per_minute': v}
+            }),
+          ),
+        ),
         _SwitchTile(
           title: 'Prometheus 监控',
           subtitle: '端口 ${notifier.monitoringPort}',
@@ -2140,7 +2332,30 @@ class _AdvancedSection extends StatelessWidget {
             'monitoring': {'enabled': v}
           }).then((ok) => _showResult(context, ok, notifier, '监控')),
         ),
-        // LLM 超时与重试
+        _SwitchTile(
+          title: 'LLM 响应缓存',
+          subtitle:
+              'TTL ${notifier.llmCacheTtl}s · 最大 ${notifier.llmCacheMaxSize} 条',
+          value: notifier.llmCacheEnabled,
+          onChanged: (v) => notifier.updateConfig({
+            'llm_cache': {'enabled': v}
+          }).then((ok) => _showResult(context, ok, notifier, 'LLM 缓存')),
+        ),
+        _NavTile(
+          title: '缓存 TTL',
+          value: '${notifier.llmCacheTtl}s',
+          leading: Icons.timer,
+          onTap: () => _showNumberEditDialog(
+            context,
+            title: '缓存 TTL（秒）',
+            initial: notifier.llmCacheTtl,
+            min: 0,
+            max: 86400,
+            onSubmit: (v) => notifier.updateConfig({
+              'llm_cache': {'ttl_seconds': v}
+            }),
+          ),
+        ),
         _NavTile(
           title: 'LLM 超时',
           value: '${notifier.llmTimeout}s',
@@ -2167,6 +2382,48 @@ class _AdvancedSection extends StatelessWidget {
             max: 10,
             onSubmit: (v) => notifier.updateConfig({
               'llm': {'retries': v}
+            }),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  技能市场分区（marketplace）
+// ════════════════════════════════════════════════════════════════
+class _MarketplaceSection extends StatelessWidget {
+  final ServerConfigNotifier notifier;
+  const _MarketplaceSection({required this.notifier});
+
+  @override
+  Widget build(BuildContext context) {
+    return _SettingsSection(
+      icon: Icons.storefront,
+      title: '技能市场',
+      children: [
+        _SwitchTile(
+          title: '启用技能市场',
+          subtitle: '浏览和安装社区技能包',
+          value: notifier.marketplaceEnabled,
+          onChanged: (v) => notifier.updateConfig({
+            'marketplace': {'enabled': v}
+          }).then((ok) => _showResult(context, ok, notifier, '技能市场')),
+        ),
+        _NavTile(
+          title: '市场源',
+          value: notifier.marketplaceRegistryUrl.isEmpty
+              ? '默认源'
+              : notifier.marketplaceRegistryUrl,
+          leading: Icons.dns_outlined,
+          onTap: () => _showTextEditDialog(
+            context,
+            title: '市场源 URL',
+            label: '留空使用内置默认源',
+            initial: notifier.marketplaceRegistryUrl,
+            onSubmit: (v) => notifier.updateConfig({
+              'marketplace': {'registry_url': v}
             }),
           ),
         ),
