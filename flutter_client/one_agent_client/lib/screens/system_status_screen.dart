@@ -1367,7 +1367,7 @@ class _DbCardState extends State<_DbCard> {
                     label: '库大小',
                     value: _fmtBytes(sizeBytes),
                     sub: 'WAL ${_fmtBytes(walBytes)}',
-                    icon: Icons.database,
+                    icon: Icons.storage,
                   ),
                 ),
                 Expanded(
