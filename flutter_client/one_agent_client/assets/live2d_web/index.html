@@ -11,42 +11,43 @@
     -webkit-user-select: none; user-select: none;
   }
   #glcanvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
-  /* 气泡 */
+  /* 气泡：尺寸单位全部用 em，随窗口（宠物大小）等比缩放；
+     宽度由内容自适应撑开，仅在超长时收窄滚动 */
   #bubble {
-    position: absolute; left: 50%; top: 6px; transform: translateX(-50%);
-    max-width: 82%; padding: 6px 10px; display: none;
-    background: rgba(255,255,255,0.94); border-radius: 12px;
+    position: absolute; left: 50%; top: 0.5em; transform: translateX(-50%);
+    max-width: 85%; padding: 0.5em 0.85em; display: none;
+    background: rgba(255,255,255,0.94); border-radius: 1em;
     box-shadow: 0 2px 8px rgba(0,0,0,0.18);
-    font-size: 12px; line-height: 1.4; color: #333;
-    max-height: 55%; overflow-y: auto;
+    font-size: 1em; line-height: 1.45; color: #333;
+    max-height: 62%; overflow-y: auto;
     -webkit-user-select: text; user-select: text;
-    word-break: break-all;
+    word-break: break-word; white-space: pre-wrap;
   }
   /* 回复完成态：尾部显示"点击收起"提示 */
   #bubble.done::after {
     content: '✓ 点击收起';
     display: block;
     text-align: right;
-    font-size: 10px;
+    font-size: 0.85em;
     color: #10b981;
-    margin-top: 3px;
+    margin-top: 0.25em;
     -webkit-user-select: none; user-select: none;
   }
   /* 底部操作条（默认隐藏，点击宠物切换） */
   #bar {
     position: absolute; left: 0; right: 0; bottom: 0;
-    display: none; align-items: center; gap: 6px;
-    padding: 6px 8px;
+    display: none; align-items: center; gap: 0.5em;
+    padding: 0.5em 0.6em;
   }
   #input {
-    flex: 1; border: none; outline: none; border-radius: 16px;
-    padding: 7px 12px; font-size: 12px;
+    flex: 1; border: none; outline: none; border-radius: 1.3em;
+    padding: 0.55em 0.95em; font-size: 1em;
     background: rgba(255,255,255,0.94); color: #333;
     -webkit-user-select: text; user-select: text;
   }
   .rbtn {
-    width: 32px; height: 32px; border: none; border-radius: 50%;
-    color: #fff; font-size: 15px; line-height: 32px; text-align: center;
+    width: 2.7em; height: 2.7em; border: none; border-radius: 50%;
+    color: #fff; font-size: 1.2em; line-height: 2.7em; text-align: center;
     padding: 0; flex: none;
   }
   #send { background: #6366F1; }
@@ -15356,6 +15357,15 @@ var __pow = Math.pow,
   // ── 初始化 PIXI + Live2D ────────────────────────────────
   var pendingModelUrl = null; // app 未就绪时排队的模型 URL
 
+  // UI 等比缩放：悬浮窗尺寸（=宠物大小）变化时，气泡/输入条/按钮
+  // 全部按窗口宽度比例缩放（基准 280px 宽 = 12px 字号），避免
+  // "窗口放大后字变小、窗口缩小后字挤成一团"的比例失调
+  function fitUI() {
+    var s = Math.max(0.7, Math.min(2.4, window.innerWidth / 280));
+    document.body.style.fontSize = Math.round(12 * s) + 'px';
+  }
+  fitUI();
+
   function initPixi() {
     var canvas = document.getElementById('glcanvas');
     // 关键修复：悬浮窗 addView 后立即 loadUrl，本地资源加载极快，
@@ -15407,6 +15417,7 @@ var __pow = Math.pow,
     }
     window.addEventListener('resize', function () {
       if (!app) return;
+      fitUI();
       app.renderer.resize(window.innerWidth, window.innerHeight);
       fitModel();
     });
@@ -15417,14 +15428,15 @@ var __pow = Math.pow,
     // 数值防护：模型 bounds 未就绪时 height 可能为 0，scale 会变 Infinity 导致不渲染
     var mh = model.height || model.internalModel.height || 200;
     var mw = model.width || mh;
-    // 让模型高度约占窗口 78%，水平居中，底部留出操作条
+    // 让模型高度约占窗口 78%，水平居中，底部按比例留出操作条空间
+    // （固定 40px 在小窗时占比过大、宠物被压得看不见，大窗时又太小）
     var targetH = window.innerHeight * 0.78;
     var s = targetH / mh;
     if (!isFinite(s) || s <= 0) s = 1;
     model.scale.set(s);
     var w2 = mh === model.height ? model.width : mw * s;
     model.x = (window.innerWidth - w2) / 2;
-    model.y = window.innerHeight - mh * s - 40;
+    model.y = window.innerHeight - mh * s - window.innerHeight * 0.1;
     // 生命系统基准同步（resize/缩放后保持动画基准正确）
     if (life) {
       life.baseX = model.x; life.baseY = model.y; life.baseScale = s;
@@ -15505,17 +15517,33 @@ var __pow = Math.pow,
   var ACTIONS = {
     jump: {
       dur: 0.95,
-      start: function (L) { launch(L, -520 - Math.random() * 180); },
+      start: function (L) { launch(L, -620 - Math.random() * 180); },
       fn: function (p, t, a) {
         var b = bell(p);
-        a.ParamArmLA = b * 5; a.ParamArmRA = b * 5;
-        a.ParamAngleZ = Math.sin(p * Math.PI * 2) * 3;
+        a.ParamArmLA = b * 6; a.ParamArmRA = b * 6;
+        a.ParamAngleZ = Math.sin(p * Math.PI * 2) * 4;
         a.ParamMouthForm = b * 0.5;
+      }
+    },
+    // 转体跳：空中大幅转身 + 挥臂，最具"大动作"感
+    spinJump: {
+      dur: 1.5,
+      start: function (L) { launch(L, -760); setMood('excited', 25); },
+      fn: function (p, t, a) {
+        var b = bell(p);
+        a.ParamAngleX = sm(p / 0.7) * 26 - sm((p - 0.7) / 0.25) * 26; // 转头回正
+        a.ParamAngleZ = sm(p / 0.7) * 10 - sm((p - 0.7) / 0.25) * 10;
+        a.ParamBodyAngleX = Math.sin(p * Math.PI) * 8;
+        a.ParamArmLA = b * 9; a.ParamArmRA = b * 9;
+        a.ParamArmLB = Math.sin(t * 9) * 5 * b;
+        a.ParamArmRB = -Math.sin(t * 9) * 5 * b;
+        a.ParamMouthOpenY = b * 0.5;
+        a.ParamEyeLSmile = b; a.ParamEyeRSmile = b;
       }
     },
     happyJump: {
       dur: 2.0,
-      start: function (L) { launch(L, -560); setMood('happy', 30); },
+      start: function (L) { launch(L, -660); setMood('happy', 30); },
       fn: function (p, t, a, L, d) {
         if (p > 0.42 && !d.hop2) { d.hop2 = 1; launch(L, -460); }
         var b = bell(p);
@@ -15550,7 +15578,7 @@ var __pow = Math.pow,
         var x = p < 0.4 ? -sm(p / 0.25)
               : p < 0.75 ? -1 + 2 * sm((p - 0.4) / 0.18)
               : 1 - sm((p - 0.75) / 0.2);
-        a.ParamAngleX = x * 20;
+        a.ParamAngleX = x * 24;
         a.ParamEyeBallX = x * 0.85;
         a.ParamAngleY = bell(p) * 4;
         a.ParamAngleZ = Math.sin(t * 2) * 3;
@@ -15714,15 +15742,15 @@ var __pow = Math.pow,
         a.ParamBodyAngleX = b * 7;
         a.ParamBodyAngleZ = Math.sin(t * 3.4 + 1) * 5;
         a.ParamShoulder = 1 + b * 1.3;
-        a.ParamArmLB = 2 + b * 4; a.ParamArmRB = 2 - b * 4;
+        a.ParamArmLB = 2 + b * 4.5; a.ParamArmRB = 2 - b * 4.5;
         a.ParamHandLB = b * 5 + 5; a.ParamHandRB = -b * 5 + 5;
-        a.ParamAngleZ = Math.sin(t * 6.8 + 0.5) * 5;
-        a.ParamAngleY = Math.sin(t * 3.4) * 4;
-        a.ParamAngleX = Math.sin(t * 3.4 + 2) * 8;
+        a.ParamAngleZ = Math.sin(t * 6.8 + 0.5) * 6;
+        a.ParamAngleY = Math.sin(t * 3.4) * 5;
+        a.ParamAngleX = Math.sin(t * 3.4 + 2) * 10;
         a.ParamMouthForm = 0.8;
         a.ParamMouthOpenY = Math.pow(0.5 + 0.5 * b, 2) * 0.4;
         a.ParamEyeLSmile = 0.8; a.ParamEyeRSmile = 0.8;
-        L.bobY = -Math.abs(Math.sin(t * 3.4)) * 10 * fade;
+        L.bobY = -Math.abs(Math.sin(t * 3.4)) * 13 * fade;
       }
     },
     dance2: {   // 弹跳拍手
@@ -15732,16 +15760,16 @@ var __pow = Math.pow,
         var fade = sm((1 - p) / 0.15);
         a.ParamBodyAngleX = h * 5;
         a.ParamBodyAngleZ = Math.sin(t * 4.3 + 1) * 4;
-        a.ParamArmLA = 3 + Math.sin(t * 8.6) * 3;
-        a.ParamArmRA = 3 - Math.sin(t * 8.6) * 3;
+        a.ParamArmLA = 4 + Math.sin(t * 8.6) * 4;
+        a.ParamArmRA = 4 - Math.sin(t * 8.6) * 4;
         a.ParamHandL = Math.sin(t * 8.6) * 8;
         a.ParamHandR = -Math.sin(t * 8.6) * 8;
-        a.ParamAngleY = Math.abs(h) * 3;
-        a.ParamAngleX = h * 10;
+        a.ParamAngleY = Math.abs(h) * 4;
+        a.ParamAngleX = h * 12;
         a.ParamMouthForm = 0.8;
         a.ParamEyeLSmile = 0.9; a.ParamEyeRSmile = 0.9;
         a.ParamShoulder = 1 + Math.sin(t * 8.6);
-        L.bobY = -Math.abs(h) * 12 * fade;
+        L.bobY = -Math.abs(h) * 15 * fade;
       }
     },
     dance3: {   // 扭摆舞（裙摆/头发由物理自动甩动）
@@ -15954,6 +15982,7 @@ var __pow = Math.pow,
   window.petBehaviors = {
     jump: function () { playAction('jump'); },
     happyJump: function () { playAction('happyJump'); },
+    spinJump: function () { playAction('spinJump'); },
     walkTo: function (x) { walkTo(x); },
     lookAround: function () { playAction('lookAround'); },
     dance: function () { playAction('dance' + (1 + Math.floor(Math.random() * 3))); },
@@ -16006,8 +16035,11 @@ var __pow = Math.pow,
       fitModel();
       startLife(m);
       hideBubble();
-      // 打招呼：随机播放一个动作，之后回到 Idle 自动循环
-      playRandomMotion(false);
+      // 开场打招呼：挥手 → 1.8s 后开心跳，让"会动"第一时间被看见
+      playAction('wave');
+      setTimeout(function () {
+        if (model === m && !talking && !inReply) playAction('happyJump');
+      }, 1800);
       if (window.PetBridge) PetBridge.onModelLoaded(true, url);
     }).catch(function (err) {
       // 错误气泡保留 8 秒，方便看清原因
@@ -16034,10 +16066,10 @@ var __pow = Math.pow,
     try { ev = JSON.parse(jsonStr); } catch (e) { return; }
     if (ev.status === 'heartbeat') return;
     if (ev.status === 'thinking') {
-      // thinking 阶段：只显示进度文本（首个正文事件到达时会清掉）。
+      // 只显示简短状态，不展示推理过程内容（正文到达时替换为回复）。
       // 关键修复：正文开始后服务端还会推 phase=plan 的完整思考事件，
       // 若不屏蔽会把已显示的回复整体替换成思考文本（回复"闪没"的根因）
-      if (!inReply) showBubble(ev.content || '思考中...', true);
+      if (!inReply) showBubble('思考中...', true);
       return;
     }
     if (ev.error) {
@@ -16139,9 +16171,9 @@ var __pow = Math.pow,
 
   // 各情绪的大动作权重池
   var MACRO_POOL = {
-    normal: { happyJump: 2, walk: 3, lookAround: 3, dance1: 2, dance2: 1, dance3: 1, stretch: 2, sing: 1, think: 1, wave: 2, cheer: 1, shy: 1, tiltCurious: 2, giggle: 2, sigh: 1, modelMotion: 3, chat: 3 },
-    happy: { happyJump: 3, dance1: 3, dance2: 2, dance3: 2, cheer: 2, sing: 2, wave: 2, giggle: 2, modelMotion: 2, chat: 3 },
-    excited: { happyJump: 3, dance2: 3, dance3: 2, cheer: 3, sing: 2, walk: 1, modelMotion: 2, chat: 2 },
+    normal: { happyJump: 2, spinJump: 1, walk: 3, lookAround: 3, dance1: 2, dance2: 1, dance3: 1, stretch: 2, sing: 1, think: 1, wave: 2, cheer: 1, shy: 1, tiltCurious: 2, giggle: 2, sigh: 1, modelMotion: 3, chat: 3 },
+    happy: { happyJump: 3, spinJump: 2, dance1: 3, dance2: 2, dance3: 2, cheer: 2, sing: 2, wave: 2, giggle: 2, modelMotion: 2, chat: 3 },
+    excited: { happyJump: 3, spinJump: 3, dance2: 3, dance3: 2, cheer: 3, sing: 2, walk: 1, modelMotion: 2, chat: 2 },
     curious: { tiltCurious: 3, lookAround: 3, think: 2, walk: 2, modelMotion: 2, chat: 2 },
     sleepy: { yawn: 4, stretch: 2, sigh: 2, lookAround: 1, modelMotion: 2, chat: 3 },
     bored: { sigh: 3, walk: 3, think: 2, giggle: 1, stretch: 1, modelMotion: 2, chat: 3 }
@@ -16190,6 +16222,18 @@ var __pow = Math.pow,
       return;
     }
     playAction(pick);
+    // 连招：舞曲/跳跃类动作结束后 55% 概率再接一个大动作，节奏感强、
+    // 一眼就能看出"它在表演"而不是只轻轻晃一下
+    if (/^dance|^happyJump|^cheer|^jump$/.test(pick)) {
+      if (Math.random() < 0.55) {
+        var comboPool = ['dance1', 'dance2', 'dance3', 'happyJump', 'cheer', 'spinJump'];
+        setTimeout(function () {
+          if (model && !talking && !inReply) {
+            playAction(comboPool[Math.floor(Math.random() * comboPool.length)]);
+          }
+        }, 2600 + Math.random() * 1200);
+      }
+    }
   }
 
   function doMicro() {
@@ -16220,7 +16264,7 @@ var __pow = Math.pow,
       setTimeout(function () { doMicro(); microLoop(); }, 3000 + Math.random() * 4000);
     })();
     (function macroLoop() {
-      setTimeout(function () { doMacro(); macroLoop(); }, 9000 + Math.random() * 13000);
+      setTimeout(function () { doMacro(); macroLoop(); }, 6000 + Math.random() * 8000);
     })();
     (function moodLoop() {
       setTimeout(function () {
